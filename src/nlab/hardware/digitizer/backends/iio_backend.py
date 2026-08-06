@@ -55,13 +55,32 @@ _DAC_DEVICE_NAME = "vdpp_afe_dac"
 _DMA_CLOSE_DRAIN_SECONDS = 0.050
 _DMA_CLOSE_JOIN_SECONDS = 1.0
 # Matches the reference stub's DMA_CLOSE_RELEASE_SECONDS /
-# DMA_CLOSE_RELEASE_POLL_SECONDS. The stock Xilinx DMA terminate path polls
-# for HALTED for about one second; with a network context iiod can
-# acknowledge buffer destruction before that target-side cleanup becomes
-# visible through sysfs, so _wait_for_dma_release() polls for this long
-# rather than trusting the buffer object being gone.
-_DMA_CLOSE_RELEASE_SECONDS = 1.25
+# DMA_CLOSE_RELEASE_POLL_SECONDS -- 3 seconds per user-api.md's cleanup
+# sequence ("wait, for at most 3 seconds, until both dma_buffer_active=0
+# and dma_enable=0"), not the 1.25 s an earlier revision of that same
+# reference used. The stock Xilinx DMA terminate path polls for HALTED for
+# about one second; with a network context iiod can acknowledge buffer
+# destruction before that target-side cleanup becomes visible through
+# sysfs, so _wait_for_dma_release() polls for this long rather than
+# trusting the buffer object being gone.
+_DMA_CLOSE_RELEASE_SECONDS = 3.0
 _DMA_CLOSE_RELEASE_POLL_SECONDS = 0.050
+
+# Per scope-architecture.md: "Before viewer-only operation transitions to
+# DMA, the reference API writes enable=0, waits 1 ms and passively verifies
+# that both DMA ownership gates are zero." Distinct from
+# _DMA_CLOSE_RELEASE_SECONDS above -- this one covers the viewer-only FSM
+# path specifically, whose worst-case frame is far under 1 ms and cannot be
+# extended by AXI backpressure (no AXI receiver in viewer-only mode), not
+# the up-to-3s post-buffer-destruction teardown.
+_VIEWER_TO_DMA_SETTLE_SECONDS = 0.001
+
+# How long to wait for _start_reader_then_enable()'s background reader
+# thread to confirm it has entered its blocking refill() call before
+# giving up on writing enable=1 at all. Reusing _DMA_CLOSE_JOIN_SECONDS's
+# value (thread-start confirmation, same order of magnitude) rather than
+# inventing an unrelated number.
+_DMA_FIRST_REFILL_ENTER_SECONDS = _DMA_CLOSE_JOIN_SECONDS
 
 # vdpp-scope.c's trigger_mode is a plain integer register (0..4), not a
 # string attribute like the previous driver. Confirmed from the driver
@@ -138,6 +157,42 @@ class IIODigitizerBackend(DigitizerBackend):
         # per-frame pending queue needed on the client side.
         self._dma_buf: iio.Buffer | None = None
         self._dma_buf_frame_samples: int | None = None
+
+        # Set by _refill_dma_buffer() on a genuine EIO (not the expected -9
+        # a close-time Buffer.cancel() produces) -- see its docstring and
+        # acknowledge_dma_recovery()/dma_fault_is_latched().
+        self._dma_fault_latched = False
+
+        # A single IIO network context is not safe for concurrent use from
+        # multiple threads. Confirmed live, twice, independently: this is
+        # a *different* problem from the "never write dma_enable directly"
+        # bug the driver author's architecture doc identifies -- that bug
+        # is real and fixed (see set_dma_enable()'s docstring), but fixing
+        # it and then reverting to a single context (on the theory that it
+        # was the *only* problem) reintroduced this one. The GUI
+        # deliberately restarts the viewer-refresh timer alongside every
+        # DMA session (ScopeController._on_dma_ready() -- "DMA running":
+        # raw DMA and viewer both active is a documented, supported
+        # state), which runs viewer polling on a QThreadPool worker thread
+        # concurrently with the DMA worker thread. The single-threaded
+        # reference implementation this backend is modeled on never
+        # exercises that combination, so its own single-context design
+        # doesn't cover it. Two independent connections, one used only by
+        # DMA-buffer-lifecycle code (_create_dma_buffer(),
+        # _start_reader_then_enable(), _drain_for_close(),
+        # _close_dma_buffer(), _wait_for_dma_release(), and their internal
+        # enable/dma_enable/dma_buffer_active/frame_samples reads via the
+        # _dma_* helpers below) and one used by everything reachable from
+        # the GUI thread (self._scope, unchanged), means neither thread's
+        # traffic can corrupt the other's, regardless of how the dma_enable
+        # ownership rules are enforced on top of that.
+        self._dma_ctx = iio.Context(uri)
+        dma_scopes = [d for d in self._dma_ctx.devices if d.name == _SCOPE_DEVICE_NAME]
+        self._dma_scope = dma_scopes[channel]
+        dma_chan = self._dma_scope.find_channel("voltage0")
+        if dma_chan is None:
+            raise RuntimeError(f"{_SCOPE_DEVICE_NAME} has no voltage0 channel")
+        dma_chan.enabled = True
 
         log.info("IIO backend: connected ch%d (%s) to %s", channel, _SCOPE_DEVICE_NAME, uri)
 
@@ -230,6 +285,10 @@ class IIODigitizerBackend(DigitizerBackend):
                 "IIO backend ch%d: DMA close-drain refill failed: %s",
                 self._ch, errors[0],
             )
+        log.debug(
+            "IIO backend ch%d: DMA close-drain consumed %d frame(s)",
+            self._ch, len(drained),
+        )
         return len(drained)
 
     def _close_dma_buffer(self) -> None:
@@ -250,9 +309,10 @@ class IIODigitizerBackend(DigitizerBackend):
         # drop the buffer reference (which is what actually owns clearing
         # dma_enable board-side), then wait -- never write -- for that to
         # become visible.
+        log.debug("IIO backend ch%d: closing DMA buffer", self._ch)
         try:
-            if self.get_enable():
-                self.set_enable(False)
+            if self._dma_get_enable():
+                self._dma_set_enable(False)
         except OSError:
             pass
 
@@ -270,12 +330,19 @@ class IIODigitizerBackend(DigitizerBackend):
         try:
             self._wait_for_dma_release()
         except RuntimeError:
-            log.warning(
+            # Confirmed live (twice): this specific timeout has correlated
+            # exactly with genuine xilinx-vdma channel faults in dmesg
+            # ("has errors", not just the expected bounded "Cannot stop
+            # channel"), not merely a slow-but-fine teardown -- ERROR, not
+            # WARNING, so it doesn't blend into routine hiccups.
+            log.error(
                 "IIO backend ch%d: DMA buffer close did not release the "
                 "hardware gate in time -- may indicate a genuine channel "
                 "fault (check dmesg for xilinx-vdma errors), not something "
                 "a client-side retry can fix", self._ch, exc_info=True,
             )
+        else:
+            log.debug("IIO backend ch%d: DMA gate released after close", self._ch)
 
     def _wait_for_dma_release(self) -> None:
         """Wait for target-side buffer destruction to release the DMA gate.
@@ -292,8 +359,8 @@ class IIODigitizerBackend(DigitizerBackend):
         """
         deadline = time.monotonic() + _DMA_CLOSE_RELEASE_SECONDS
         while True:
-            active = int(self._attr_get("dma_buffer_active")) != 0
-            if not active and not self.get_dma_enable():
+            active = int(self._dma_attr_get("dma_buffer_active")) != 0
+            if not active and not self._dma_get_dma_enable():
                 return
             if time.monotonic() >= deadline:
                 raise RuntimeError(
@@ -312,11 +379,76 @@ class IIODigitizerBackend(DigitizerBackend):
         """
         self._close_dma_buffer()
 
+    def dma_fault_is_latched(self) -> bool:
+        """Extension method (not part of ScopeBackend), matching
+        user-api.md's naming: whether a genuine EIO from a normal capture
+        refill() has blocked automatic DMA rearm -- see
+        _refill_dma_buffer()'s docstring. Call acknowledge_dma_recovery()
+        to clear it.
+        """
+        return self._dma_fault_latched
+
+    def acknowledge_dma_recovery(self) -> None:
+        """Extension method (not part of ScopeBackend), matching
+        user-api.md's naming and contract: "keeps enable=0, passively
+        waits for both driver-owned gates to become zero and only then
+        permits a new arm. It never writes dma_enable. This is a
+        userspace lifecycle check, not proof of internal AXI DMA health."
+
+        Requires the faulted buffer to already be closed (it is, by the
+        time _refill_dma_buffer() raises -- see its docstring) and
+        acquisition stopped; raises if either still holds the gate, since
+        this method does not do that cleanup itself.
+        """
+        if self._dma_buf is not None:
+            raise RuntimeError(
+                "cannot acknowledge DMA recovery while a capture buffer "
+                "is still open -- call close_dma_capture() first"
+            )
+        if self._dma_get_enable():
+            raise RuntimeError(
+                "cannot acknowledge DMA recovery while acquisition is "
+                "running -- call set_enable(False) first"
+            )
+        self._wait_for_dma_release()
+        self._dma_fault_latched = False
+        log.info(
+            "IIO backend ch%d: DMA fault acknowledged, rearm permitted",
+            self._ch,
+        )
+
     def _attr_get(self, name: str) -> str:
         return self._scope.attrs[name].value
 
     def _attr_set(self, name: str, value: str) -> None:
         self._scope.attrs[name].value = value
+
+    # DMA-context attribute helpers -- see __init__'s comment on
+    # self._dma_scope/self._dma_ctx. Used exclusively by the DMA-buffer
+    # lifecycle (_create_dma_buffer(), _start_reader_then_enable(),
+    # _close_dma_buffer(), _wait_for_dma_release(), _refill_dma_buffer()),
+    # which only ever runs on the DMA worker thread, so these never
+    # contend with the GUI thread's self._scope/_attr_get()/_attr_set()
+    # calls. No _dma_set_dma_enable() -- dma_enable is never written on
+    # either context; see set_dma_enable()'s docstring.
+
+    def _dma_attr_get(self, name: str) -> str:
+        return self._dma_scope.attrs[name].value
+
+    def _dma_attr_set(self, name: str, value: str) -> None:
+        self._dma_scope.attrs[name].value = value
+
+    def _dma_get_enable(self) -> bool:
+        return bool(int(self._dma_attr_get("enable")))
+
+    def _dma_set_enable(self, val: bool) -> None:
+        self._dma_attr_set("enable", "1" if val else "0")
+
+    def _dma_get_dma_enable(self) -> bool:
+        return bool(int(self._dma_attr_get("dma_enable")))
+
+    def _dma_get_frame_samples(self) -> int:
+        return int(self._dma_attr_get("frame_samples"))
 
     # ------------------------------------------------------------------
     # ScopeBackend
@@ -745,19 +877,60 @@ class IIODigitizerBackend(DigitizerBackend):
         what would otherwise be a fatal, capture-ending error into a
         one-frame hiccup. If recreating doesn't help either, the second
         attempt's exception propagates rather than looping forever.
-        """
-        n = self.get_frame_samples()
-        if self._dma_buf is None or self._dma_buf_frame_samples != n:
-            self._create_dma_buffer(n)
 
-        def refill(b: iio.Buffer) -> int:
-            return iio._buffer_refill(b._buffer)
+        A genuine EIO (errno 5) is handled differently from both cases
+        above: per user-api.md, "An EIO returned by a normal capture
+        refill() latches a fault in the Python backend. Cleanup is
+        attempted exactly once, automatic rearm is blocked, and a second
+        close-drain error does not replace the original EIO." This is
+        distinct from the expected errno -9 (EBADF) a close-time
+        Buffer.cancel() produces when it interrupts _drain_for_close()'s
+        blocked refill -- that one is normal cancellation noise, not a
+        session fault, and _drain_for_close() already only treats a
+        refill failure as an error when it happens before stop.is_set().
+
+        The first refill() after any (re)arm goes through
+        _start_reader_then_enable() instead of a plain refill -- see its
+        docstring for why writing enable=1 before the reader is listening
+        was itself a bug, not a race worth retrying through.
+        """
+        if self._dma_fault_latched:
+            log.warning(
+                "IIO backend ch%d: capture attempted while a DMA fault is "
+                "still latched -- call acknowledge_dma_recovery() first",
+                self._ch,
+            )
+            raise RuntimeError(
+                "DMA fault is latched from a previous session -- call "
+                "acknowledge_dma_recovery() before capturing again"
+            )
+
+        n = self._dma_get_frame_samples()
+        first = self._dma_buf is None or self._dma_buf_frame_samples != n
+        if first:
+            self._create_dma_buffer(n)
 
         buf = self._dma_buf
         assert buf is not None
         try:
-            nbytes = self._retry_errno(lambda: refill(buf), (22,))  # type: ignore[arg-type]
+            nbytes = self._refill_once(buf, first)
         except OSError as e:
+            if e.errno == 5:
+                self._dma_fault_latched = True
+                log.error(
+                    "IIO backend ch%d: DMA session fault (EIO) during "
+                    "refill -- latching, automatic rearm blocked until "
+                    "acknowledge_dma_recovery() succeeds", self._ch,
+                )
+                try:
+                    self._close_dma_buffer()
+                except Exception:
+                    log.warning(
+                        "IIO backend ch%d: cleanup after a latched DMA "
+                        "fault raised its own error -- the original EIO "
+                        "still takes precedence", self._ch, exc_info=True,
+                    )
+                raise
             if e.errno != 22:
                 raise
             log.warning(
@@ -768,32 +941,143 @@ class IIODigitizerBackend(DigitizerBackend):
             self._create_dma_buffer(n)
             buf = self._dma_buf
             assert buf is not None
-            nbytes = self._retry_errno(lambda: refill(buf), (22,))  # type: ignore[arg-type]
+            nbytes = self._refill_once(buf, True)
 
         start = iio._buffer_start(buf._buffer)
         return ctypes.string_at(start, nbytes)
 
-    def _create_dma_buffer(self, n: int) -> None:
-        """Close any existing buffer, open a fresh one sized for n
-        samples, and arm acquisition if it isn't already -- shared by
-        _refill_dma_buffer()'s normal path and its EINVAL recovery path.
-
-        Matches the reference stub's arm_capture()/start_capture(): no
-        polling wait for dma_enable and no retry around set_enable(True).
-        Earlier revisions of this method needed both, but only because
-        _close_dma_buffer() used to return immediately after writing
-        enable/dma_enable directly, without confirming the driver had
-        actually finished tearing down the previous buffer -- the very
-        thing _wait_for_dma_release() now blocks on before returning. With
-        that guarantee in place, a freshly created buffer's DMA_ENABLE is
-        already up by the time this call returns, the same way it is in
-        the reference implementation.
+    def _refill_once(self, buf: iio.Buffer, first: bool) -> int:
+        """Refill *buf* once. *first* selects _start_reader_then_enable()
+        (buffer was just (re)armed, enable is not known to be 1 yet) vs a
+        plain retry-tolerant refill (steady-state reuse of an already-
+        running buffer) -- see _refill_dma_buffer()'s and
+        _start_reader_then_enable()'s docstrings.
         """
+        if first:
+            return self._start_reader_then_enable(buf)
+        return self._retry_errno(  # type: ignore[return-value]
+            lambda: iio._buffer_refill(buf._buffer), (22,)
+        )
+
+    def _start_reader_then_enable(self, buf: iio.Buffer) -> int:
+        """Issue the first blocking refill() on a freshly armed buffer
+        *before* writing enable=1, per user-api.md's "Running a
+        measurement" step 6: "start the blocking reader, then write
+        enable=1."
+
+        Every earlier revision of this backend (and, before this fix, this
+        one) did it the other way around: _create_dma_buffer() wrote
+        enable=1 itself, and only afterward did the caller issue the first
+        refill(). That ordering is exactly the "started too early" fault
+        vdpp-scope.c's own preenable() comment describes: creating the
+        IIO buffer queues a DMA descriptor, but nothing tells the DMA
+        engine to actually start processing it
+        (dma_async_issue_pending()) until refill() is called. Writing
+        enable=1 first opens a window where a trigger can fire and the
+        core starts streaming before the engine is listening for it --
+        confirmed live as the cause of a "just armed, first refill faults
+        immediately" failure that left no trace in dmesg (unlike the
+        confirmed hardware-fault cases this session also hit), meaning it
+        was a client-side ordering bug, not a channel fault, all along.
+
+        A background thread issues the blocking refill() first; once it
+        has confirmed entering that call (an Event, not just thread
+        start -- matching _drain_for_close()'s existing pattern, with the
+        same small, accepted residual race between "thread scheduled" and
+        "the C call actually dispatched"), only then does this method
+        write enable=1. The reader thread's result or exception is joined
+        back here.
+        """
+        entered = threading.Event()
+        result: list[int] = []
+        errors: list[BaseException] = []
+
+        def reader() -> None:
+            entered.set()
+            try:
+                result.append(iio._buffer_refill(buf._buffer))
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(
+            target=reader,
+            name=f"vdpp-scope-ch{self._ch}-dma-first-refill",
+            daemon=True,
+        )
+        thread.start()
+        if not entered.wait(_DMA_FIRST_REFILL_ENTER_SECONDS):
+            raise RuntimeError(
+                "DMA reader thread did not start within "
+                f"{_DMA_FIRST_REFILL_ENTER_SECONDS:.2f} seconds -- refusing "
+                "to write enable=1 with no confirmed listener"
+            )
+
+        if not self._dma_get_enable():
+            self._dma_set_enable(True)
+
+        thread.join()
+        if errors:
+            raise errors[0]
+        return result[0]
+
+    def _create_dma_buffer(self, n: int) -> None:
+        """Close any existing buffer and open a fresh one sized for n
+        samples -- shared by _refill_dma_buffer()'s normal path and its
+        EINVAL/EIO recovery paths. Does not touch enable itself; see
+        _start_reader_then_enable()'s docstring for why that write moved
+        out of here and into the caller, ordered after the first refill()
+        has already started.
+
+        Per scope-architecture.md, transitioning from viewer-only into DMA
+        needs its own settle step, distinct from _wait_for_dma_release()'s
+        (much longer) post-buffer-destruction wait: write enable=0, wait
+        1 ms, then passively verify both DMA ownership gates already read
+        zero. The v121 FSM has no M_IDLE status, but the longest
+        viewer-only frame completes far sooner than 1 ms and (unlike a DMA
+        frame) can't be extended by AXI backpressure, since viewer-only
+        mode has no AXI receiver.
+        """
+        if self._dma_fault_latched:
+            # Reachable defense-in-depth: _refill_dma_buffer() already
+            # checks this before ever calling here, so in practice this
+            # path is not hit through the normal call chain. Not logged
+            # separately -- see _refill_dma_buffer()'s own check for the
+            # one that actually fires.
+            raise RuntimeError(
+                "DMA fault is latched from a previous session -- call "
+                "acknowledge_dma_recovery() before arming a new capture"
+            )
+
         self._close_dma_buffer()
-        self._dma_buf = iio.Buffer(self._scope, n, False)
+
+        if self._dma_get_enable():
+            self._dma_set_enable(False)
+        time.sleep(_VIEWER_TO_DMA_SETTLE_SECONDS)
+        if self._dma_get_dma_enable() or int(self._dma_attr_get("dma_buffer_active")):
+            # Confirmed live: this exact condition has produced a genuine
+            # xilinx-vdma channel fault (dmesg "has errors", not just a
+            # bounded "Cannot stop channel") when ignored -- ERROR, since
+            # it means the settle check this method exists for just caught
+            # a real problem, not routine timing noise.
+            log.error(
+                "IIO backend ch%d: dma_enable/dma_buffer_active did not "
+                "read back as zero %.0f ms after stopping acquisition -- "
+                "refusing to arm DMA", self._ch,
+                _VIEWER_TO_DMA_SETTLE_SECONDS * 1000,
+            )
+            raise RuntimeError(
+                "cannot arm DMA capture: dma_enable/dma_buffer_active did "
+                "not read back as zero after stopping acquisition -- the "
+                "scope may still be finishing a viewer-only frame, or a "
+                "prior session was not fully torn down"
+            )
+
+        self._dma_buf = iio.Buffer(self._dma_scope, n, False)
         self._dma_buf_frame_samples = n
-        if not self.get_enable():
-            self.set_enable(True)
+        log.debug(
+            "IIO backend ch%d: DMA buffer armed, frame_samples=%d",
+            self._ch, n,
+        )
 
     def capture_to_file(
         self, path: str, duration_s: float | None = None, max_frames: int | None = None,

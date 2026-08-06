@@ -187,6 +187,21 @@ class Scope:
         """Read one captured frame. Returns int16 array of shape (n_samples,)."""
         return self._b.read_frame()
 
+    # ---- DMA fault recovery ----
+    # Extension methods, only meaningful for backends that latch a fault on
+    # a genuine DMA session error (currently the IIO backend -- see
+    # IIODigitizerBackend._refill_dma_buffer()'s docstring). Backends
+    # without this concept (e.g. the gRPC backend) are no-ops here rather
+    # than an AttributeError, so callers don't need an isinstance check.
+
+    def dma_fault_is_latched(self) -> bool:
+        return bool(getattr(self._b, "dma_fault_is_latched", lambda: False)())
+
+    def acknowledge_dma_recovery(self) -> None:
+        ack = getattr(self._b, "acknowledge_dma_recovery", None)
+        if ack is not None:
+            ack()
+
     # ---- GUI helpers ----
 
     def get_settings(self) -> list[ScopeSettingEntry]:

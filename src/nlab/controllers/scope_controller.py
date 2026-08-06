@@ -529,8 +529,34 @@ class ScopeController(QWidget):
     def _on_dma_finished(self) -> None:
         self._dma_worker = None
         self._dma_thread = None
-        self.ui.lblRecordingStatus.setText("Stopped")
         log.info("Scope DMA: worker finished")
+
+        if self._scope.dma_fault_is_latched():
+            # A genuine EIO during the just-finished session latched a
+            # fault (see IIODigitizerBackend._refill_dma_buffer()'s
+            # docstring) -- automatic DMA rearm is now blocked until this
+            # is cleared. acknowledge_dma_recovery() is purely a passive
+            # readback check (never writes dma_enable), so attempting it
+            # right away is safe: either the fault was transient and this
+            # clears it, or the channel is genuinely wedged and it raises
+            # again, in which case a board restart is needed regardless.
+            try:
+                self._scope.acknowledge_dma_recovery()
+            except RuntimeError:
+                log.error(
+                    "Scope ch%d: DMA fault did not clear -- board restart "
+                    "likely required", self._channel, exc_info=True,
+                )
+                self.ui.lblRecordingStatus.setText(
+                    "DMA fault -- restart the board, then reconnect"
+                )
+                return
+            log.info("Scope ch%d: DMA fault cleared, DMA capture is usable again",
+                      self._channel)
+            self.ui.lblRecordingStatus.setText("Stopped (recovered from DMA fault)")
+            return
+
+        self.ui.lblRecordingStatus.setText("Stopped")
 
     def stop_dma_sync(self) -> None:
         """Blocking stop for use during application shutdown/reconnect only.
