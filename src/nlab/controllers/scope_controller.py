@@ -199,9 +199,13 @@ class ScopeController(QWidget):
             lambda v: self._scope.set_dac_value(v),
         )
 
-        self.ui.spinPretrigger.editingFinished.connect(lambda: self._scope.set_pretrigger_samples(self.ui.spinPretrigger.value()))
+        self.ui.spinPretrigger.editingFinished.connect(
+            lambda: self._scope.set_pretrigger_samples(self.ui.spinPretrigger.value())
+        )
         self.ui.spinFrameSamples.editingFinished.connect(self._on_frame_samples_changed)
-        self.ui.comboTriggerMode.currentIndexChanged.connect(lambda i: self._scope.set_trigger_mode(TriggerMode(i)))
+        self.ui.comboTriggerMode.currentIndexChanged.connect(
+            lambda i: self._scope.set_trigger_mode(TriggerMode(i))
+        )
         self.ui.cbDmaEnable.toggled.connect(lambda v: self._scope.set_dma_enable(v))
         self.ui.btnStart.clicked.connect(self._on_start)
         self.ui.btnStop.clicked.connect(self._on_stop)
@@ -240,6 +244,13 @@ class ScopeController(QWidget):
     # ------------------------------------------------------------------
 
     def _on_start(self) -> None:
+        if self._dma_worker is not None or self._dma_thread is not None:
+            log.warning(
+                "Scope ch%d: refusing to start while the previous DMA "
+                "worker is still closing",
+                self._channel,
+            )
+            return
         self.ui.btnStart.setChecked(True)
         self.ui.btnStart.setEnabled(False)
         self.ui.btnStop.setChecked(False)
@@ -301,17 +312,13 @@ class ScopeController(QWidget):
 
     def _on_dma_ready(self) -> None:
         if isinstance(self._scope_dma, IIOScopeDmaStreamer):
-            # No separate arm step here: the worker's first read_dma_frame()
-            # call creates the DMA buffer, and vdpp-scope.c's postenable()
-            # sets ENABLE/DMA_ENABLE itself as part of enabling that buffer.
-            # Calling scope.start() (set_enable) here would be redundant at
-            # best -- and racy at worst, since this signal is delivered
-            # asynchronously (queued, cross-thread) relative to the worker
-            # thread already running read_dma_frame(): if the buffer opens
-            # first, scope.start() would hit enable_store()'s own -EBUSY
-            # guard (st->running already true).
-            log.debug("Scope ch%d IIO DMA [3/4]: buffer arms the hardware itself, "
-                      "not calling scope.start()", self._channel)
+            # The backend's first read starts the blocking refill and then
+            # writes enable=1 in that order. The queued ready signal is only
+            # a UI transition; a second start write here would race it.
+            log.debug(
+                "Scope ch%d IIO DMA [3/4]: backend reader owns ordered start",
+                self._channel,
+            )
         else:
             log.debug("Scope ch%d DMA [3/6]: ZMQ socket ready, DMA already enabled via checkbox",
                       self._channel)
@@ -333,16 +340,24 @@ class ScopeController(QWidget):
         if self._dma_worker is not None:
             log.debug("Scope ch%d: stopping with DMA", self._channel)
             if isinstance(self._scope_dma, IIOScopeDmaStreamer):
-                # scope.stop() (set_enable(False)) would hit the same
-                # -EBUSY guard while the DMA buffer is still open -- the
-                # worker's stream_to_file() closes the buffer itself in its
-                # finally block, which is what actually clears
-                # ENABLE/DMA_ENABLE for this streamer type.
+                # Current vdpp_scope explicitly accepts enable=0 while a
+                # buffer is armed. Stop new triggers first, then have the
+                # worker cancel any blocked refill and close the buffer.
+                self._scope.stop()
                 self._dma_worker.stop()
             else:
                 self._scope.stop()
                 self._dma_worker.stop()
-            self._set_controls_enabled(True)
+            self._acquiring = False
+            self.ui.btnStart.setChecked(False)
+            self.ui.btnStart.setEnabled(False)
+            self.ui.btnStop.setEnabled(False)
+            self.ui.btnAcquireFrame.setEnabled(False)
+            self.ui.cbDmaEnable.setEnabled(False)
+            self.ui.btnDmaFile.setEnabled(False)
+            self.ui.lblRecordingStatus.setText("Stopping...")
+            log.info("Scope ch%d: DMA stop requested; waiting for teardown", self._channel)
+            return
         else:
             self._scope.stop()
 
@@ -386,7 +401,9 @@ class ScopeController(QWidget):
             self._raw_curve.setData(x_time, y_voltage)
         else:
             self._rasterize_frame(y_voltage)
-            self._persistence_img.setImage(self._persistence_buffer, autoLevels=False, levels=(0, 1))
+            self._persistence_img.setImage(
+                self._persistence_buffer, autoLevels=False, levels=(0, 1)
+            )
 
     def _on_frame_samples_changed(self) -> None:
         value = self.ui.spinFrameSamples.value()
@@ -407,13 +424,19 @@ class ScopeController(QWidget):
             self._raw_curve.setData(time_arr, frame)
         else:
             self._rasterize_frame(frame)
-            self._persistence_img.setImage(self._persistence_buffer, autoLevels=False, levels=(0, 1))
+            self._persistence_img.setImage(
+                self._persistence_buffer, autoLevels=False, levels=(0, 1)
+            )
 
     def _rasterize_frame(self, frame: np.ndarray) -> None:
         self._persistence_buffer *= self.persistence
         n_samples = len(frame)
         x_float = np.linspace(0, self._display_nx - 1, n_samples)
-        y_float = (frame.astype(np.float32) - self._Y_MIN) / (self._Y_MAX - self._Y_MIN) * (self._display_ny - 1)
+        y_float = (
+            (frame.astype(np.float32) - self._Y_MIN)
+            / (self._Y_MAX - self._Y_MIN)
+            * (self._display_ny - 1)
+        )
         y_float = np.clip(y_float, 0, self._display_ny - 1)
 
         for i in range(n_samples - 1):
@@ -531,6 +554,14 @@ class ScopeController(QWidget):
         self._dma_thread = None
         log.info("Scope DMA: worker finished")
 
+        self._set_controls_enabled(True)
+        self.ui.btnStart.setChecked(False)
+        self.ui.btnStart.setEnabled(True)
+        self.ui.btnStop.setEnabled(False)
+        self.ui.btnAcquireFrame.setEnabled(True)
+        self.ui.cbDmaEnable.setEnabled(True)
+        self.ui.btnDmaFile.setEnabled(True)
+
         if self._scope.dma_fault_is_latched():
             # A genuine EIO during the just-finished session latched a
             # fault (see IIODigitizerBackend._refill_dma_buffer()'s
@@ -581,15 +612,21 @@ class ScopeController(QWidget):
         """
         worker = self._dma_worker
         thread = self._dma_thread
+        self._ensure_disarmed()
         if worker is not None:
             worker.stop()
         if thread is not None:
-            if not thread.wait(3000):
-                log.warning("Scope DMA thread did not stop in time, terminating")
-                thread.terminate()
-                thread.wait()
-        self._dma_thread = None
-        self._dma_worker = None
+            if not thread.wait(5000):
+                # QThread.terminate() can bypass stream_to_file()'s finally
+                # block and strand the native IIO buffer. Leave the worker
+                # alive to complete its cancellation cleanup instead.
+                log.error(
+                    "Scope DMA thread did not stop within 5 seconds; "
+                    "leaving it alive rather than bypassing buffer cleanup"
+                )
+            else:
+                self._dma_thread = None
+                self._dma_worker = None
 
         self._ensure_disarmed()
 

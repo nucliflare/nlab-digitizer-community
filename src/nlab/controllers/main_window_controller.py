@@ -133,13 +133,19 @@ class MainWindowController:
         mca_docks: list[QDockWidget] = []
         psu_docks: list[QDockWidget] = []
 
-        # TEMPORARY: IIODigitizerBackend's MCABackend is fully unimplemented
-        # (every method raises NotImplementedError) -- MCAController.__init__
-        # writes default settings to the backend immediately, so constructing
-        # it against an IIO device would crash on startup. Skip MCA entirely
-        # for this backend until MCA support lands; scope-only testing in the
-        # meantime. Remove this guard once MCA is wired up on the IIO side.
-        build_mca = self._backend != "iio"
+        # IIODigitizerBackend now implements MCABackend against
+        # vdpp-pulse-processor.c/vdpp-input-filter.c (see iio_backend.py's
+        # module docstring for the few methods that still raise
+        # NotImplementedError -- none of them are on MCAController's
+        # unconditional default-hydration path, so construction is safe).
+        # Only skip MCA docks if this channel's firmware genuinely lacks
+        # the pulse-processor/input-filter devices (older/scope-only
+        # builds) -- MCAController.__init__ would otherwise crash on the
+        # RuntimeError those methods raise instead. Digitizer.mca_available()
+        # asks the backend rather than special-casing "iio" by name here,
+        # so this doesn't need updating if another backend gains the same
+        # per-device variability later.
+        build_mca = all(device.mca_available() for device in self._devices)
 
         for idx, device in enumerate(self._devices):
             ch = self._display_channel(idx)
@@ -171,7 +177,8 @@ class MainWindowController:
         self._window.ui.mainTabs.setTabEnabled(mca_tab_index, build_mca)
         self._window.ui.tabMCA.setToolTip(
             "" if build_mca else
-            "MCA is temporarily disabled: the IIO backend does not implement it yet."
+            "MCA is disabled: no pulse-processor/input-filter device found "
+            "for one or more connected channels (older or scope-only firmware)."
         )
 
     def _build_external_docks(self) -> None:

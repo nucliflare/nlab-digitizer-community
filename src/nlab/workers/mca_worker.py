@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import logging
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 from PySide6.QtCore import QTimer, Signal, Slot
@@ -51,6 +50,11 @@ class MCAWorker(BaseWorker):
         self._interval_ms = interval_ms
         self._timer: QTimer | None = None
         self._seen_running = False
+        self._last_histogram: np.ndarray = np.empty(0, dtype=np.uint32)
+        self._last_debug1: np.ndarray = np.empty(0, dtype=np.int16)
+        self._last_debug2: np.ndarray = np.empty(0, dtype=np.int16)
+        self._histogram_read_failing = False
+        self._waveform_read_failing = False
 
     def run(self) -> None:
         self._timer = QTimer()
@@ -71,25 +75,97 @@ class MCAWorker(BaseWorker):
             self._timer = None
         self.finished.emit()
 
+    @staticmethod
+    def _stat(fn) -> int:
+        """Some backends don't implement every statistic (e.g. the IIO
+        backend's get_events_lost() -- vdpp-pulse-processor.c has no
+        matching register). Without this, one missing stat would raise
+        NotImplementedError here and abort the whole tick's readback
+        (histogram/waveforms included), not just that one field.
+        """
+        try:
+            return fn()
+        except NotImplementedError:
+            return 0
+
+    def _acquire_histogram(self) -> np.ndarray:
+        """Fall back to the last successful histogram on transport errors.
+
+        The current vdpp-pulse-processor.c allows informational live
+        snapshots while bins are changing and a stable snapshot after
+        enable=0. RuntimeError is still expected on the deployed board
+        tested so far because its histogram_data binary attribute is not
+        discoverable through remote iiod at all.
+
+        Specifically, confirmed live against a real board,
+        IIODigitizerBackend.read_histogram() currently raises RuntimeError
+        on *every* call, not just while running -- the histogram_data
+        bin_attribute isn't discoverable at all over the IIO network
+        transport on this board's firmware+iiod build (see that method's
+        docstring). Same fallback applies; logged once on entry/exit
+        rather than every tick, since this is expected to be a standing
+        condition, not per-call transient noise.
+        """
+        try:
+            self._last_histogram = self._mca.acquire_spectrum()
+            if self._histogram_read_failing:
+                log.info("MCA: histogram reads recovered")
+                self._histogram_read_failing = False
+        except OSError as e:
+            if e.errno != 16:  # not EBUSY
+                raise
+        except RuntimeError:
+            if not self._histogram_read_failing:
+                log.warning(
+                    "MCA: histogram reads are failing, falling back to the "
+                    "last-known spectrum until this recovers", exc_info=True,
+                )
+                self._histogram_read_failing = True
+        return self._last_histogram
+
+    def _acquire_waveforms(self) -> tuple[np.ndarray, np.ndarray]:
+        """Same fallback reasoning as _acquire_histogram() -- see its
+        docstring. debug_data has no EBUSY-while-running guard in the
+        driver, but confirmed live it has the *same* bin_attribute
+        discovery gap as histogram_data, so IIODigitizerBackend.
+        read_waveform_banks() currently also raises RuntimeError on every
+        call. Falls back to the last-known waveform banks (empty arrays
+        until the first successful read) so statistics/measurement-state
+        polling keeps working even while this is failing.
+        """
+        try:
+            self._last_debug1, self._last_debug2 = self._mca.acquire_waveforms()
+            if self._waveform_read_failing:
+                log.info("MCA: waveform reads recovered")
+                self._waveform_read_failing = False
+        except (OSError, RuntimeError):
+            if not self._waveform_read_failing:
+                log.warning(
+                    "MCA: waveform reads are failing, falling back to the "
+                    "last-known waveforms until this recovers", exc_info=True,
+                )
+                self._waveform_read_failing = True
+        return self._last_debug1, self._last_debug2
+
     def _tick(self) -> None:
         try:
-            histogram = self._mca.acquire_spectrum()
-            debug1, debug2 = self._mca.acquire_waveforms()
+            histogram = self._acquire_histogram()
+            debug1, debug2 = self._acquire_waveforms()
             stats = self._mca.statistics
 
             rb = MCAReadback(
                 histogram=histogram,
                 debug1=debug1,
                 debug2=debug2,
-                count_rate=stats.get_count_rate(),
-                pulse_deadtime=stats.get_pulse_deadtime(),
-                events_lost=stats.get_events_lost(),
-                elapsed_time=stats.get_elapsed_time(),
-                pulse_overrange=stats.get_pulse_overrange(),
-                pulse_pileup=stats.get_pulse_pileup(),
-                energy_overrange=stats.get_energy_overrange(),
-                energy_estimation_error=stats.get_energy_estimation_error(),
-                throughput_error=stats.get_throughput_error(),
+                count_rate=self._stat(stats.get_count_rate),
+                pulse_deadtime=self._stat(stats.get_pulse_deadtime),
+                events_lost=self._stat(stats.get_events_lost),
+                elapsed_time=self._stat(stats.get_elapsed_time),
+                pulse_overrange=self._stat(stats.get_pulse_overrange),
+                pulse_pileup=self._stat(stats.get_pulse_pileup),
+                energy_overrange=self._stat(stats.get_energy_overrange),
+                energy_estimation_error=self._stat(stats.get_energy_estimation_error),
+                throughput_error=self._stat(stats.get_throughput_error),
             )
         except Exception:
             log.exception("MCA readback failed")

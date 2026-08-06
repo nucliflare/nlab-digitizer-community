@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -10,11 +11,11 @@ import pyqtgraph as pg
 from PySide6.QtCore import QSettings, QThread
 from PySide6.QtWidgets import QFileDialog, QSlider, QSpinBox, QWidget
 
-from nlab.hardware.digitizer.dma import McaDmaStreamer
+from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaDmaStreamer
 from nlab.hardware.digitizer.mca import MCA_PARAMETER_SPECS, MCAParam, MultiChannelAnalyzer
 from nlab.ui.ui_mca_view import Ui_MCAView
 from nlab.views.plot_viewbox import ModifierZoomViewBox
-from nlab.workers.dma_workers import McaDmaWorker
+from nlab.workers.dma_workers import IIOMcaDmaWorker, McaDmaWorker
 from nlab.workers.mca_worker import MCAReadback, MCAWorker
 
 log = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ class MCAController(QWidget):
     def __init__(
         self,
         mca: MultiChannelAnalyzer,
-        mca_dma: McaDmaStreamer | None = None,
+        mca_dma: McaDmaStreamer | IIOMcaDmaStreamer | None = None,
         channel: int = 1,
         parent: QWidget | None = None,
     ) -> None:
@@ -53,11 +54,11 @@ class MCAController(QWidget):
         self._worker: MCAWorker | None = None
         self._worker_thread: QThread | None = None
 
-        self._dma_worker: McaDmaWorker | None = None
+        self._dma_worker: McaDmaWorker | IIOMcaDmaWorker | None = None
         self._dma_thread: QThread | None = None
         self._dma_filepath: Path | None = None
         self._dma_counter = 0
-        self._event_buffer: list = []
+        self._event_buffer: list[np.ndarray] = []
         self._event_lock = threading.Lock()
 
         self._last_histogram: np.ndarray | None = None
@@ -374,26 +375,79 @@ class MCAController(QWidget):
     # Signal wiring
     # ------------------------------------------------------------------
 
+    def _apply_hardware_setting(self, write: Callable[[], None]) -> None:
+        """Apply a setting immediately, preserving a polling measurement.
+
+        IIO MCA fields are immutable while enabled. Unlike list-mode DMA,
+        an ordinary histogram/viewer acquisition can be briefly stopped and
+        restarted safely. MultiChannelAnalyzer owns the synchronization that
+        prevents MCAWorker from treating the short stop as time-limit
+        completion. DMA controls remain disabled because an armed list-mode
+        buffer requires its full stop/drain/close lifecycle.
+        """
+        if self._dma_worker is not None:
+            log.warning(
+                "MCA ch%d: ignored configuration write while DMA is active",
+                self._channel,
+            )
+            return
+        if self._worker is None:
+            write()
+            return
+
+        log.debug("MCA ch%d: pausing acquisition for live reconfiguration", self._channel)
+        restarted = self._mca.reconfigure_while_running(write)
+        if restarted:
+            # A fresh enable starts a new accumulation. Do not present the
+            # previous run's spectrum/elapsed time as belonging to it while
+            # the polling worker waits for its next readback.
+            self._last_histogram = None
+            self._last_elapsed_s = 0.0
+            self._hist_curve.setData([], [])
+
     def _connect_signals(self) -> None:
         self.ui.comboPulsePolarity.currentIndexChanged.connect(
-            lambda i: (log.debug("MCA ch%d: polarity=%d", self._channel, i), self._mca.set_pulse_polarity(i))
-        )
-        self.ui.comboBaseline.currentIndexChanged.connect(lambda i: (log.debug("MCA ch%d: baseline=%d", self._channel, i), self._mca.set_baseline_window(i)))
-        self.ui.comboDebug1.currentIndexChanged.connect(lambda i: (log.debug("MCA ch%d: debug1_source=%d", self._channel, i), self._mca.set_mem1_sig_select(i)))
-        self.ui.comboDebug2.currentIndexChanged.connect(lambda i: (log.debug("MCA ch%d: debug2_source=%d", self._channel, i), self._mca.set_mem2_sig_select(i)))
-        self.ui.spinPileupWindow.editingFinished.connect(
-            lambda: (
-                log.debug("MCA ch%d: pileup_window=%d", self._channel, self.ui.spinPileupWindow.value()),
-                self._mca.set_pileup_window(self.ui.spinPileupWindow.value()),
+            lambda i: (
+                log.debug("MCA ch%d: polarity=%d", self._channel, i),
+                self._apply_hardware_setting(lambda: self._mca.set_pulse_polarity(i)),
             )
         )
-        self.ui.comboBinning.currentIndexChanged.connect(lambda i: (log.debug("MCA ch%d: energy_bin=%d", self._channel, i), self._mca.set_energy_bin(i)))
-        self.ui.cbExtTrigger.toggled.connect(lambda v: (log.debug("MCA ch%d: ext_trig=%s", self._channel, v), self._mca.set_ext_trig_enable(v)))
+        self.ui.comboBaseline.currentIndexChanged.connect(
+            lambda i: self._apply_hardware_setting(
+                lambda: self._mca.set_baseline_window(i)
+            )
+        )
+        self.ui.comboDebug1.currentIndexChanged.connect(
+            lambda i: self._apply_hardware_setting(
+                lambda: self._mca.set_mem1_sig_select(i)
+            )
+        )
+        self.ui.comboDebug2.currentIndexChanged.connect(
+            lambda i: self._apply_hardware_setting(
+                lambda: self._mca.set_mem2_sig_select(i)
+            )
+        )
+        self.ui.spinPileupWindow.editingFinished.connect(
+            lambda: self._apply_hardware_setting(
+                lambda: self._mca.set_pileup_window(
+                    self.ui.spinPileupWindow.value()
+                )
+            )
+        )
+        self.ui.comboBinning.currentIndexChanged.connect(
+            lambda i: self._apply_hardware_setting(
+                lambda: self._mca.set_energy_bin(i)
+            )
+        )
+        self.ui.cbExtTrigger.toggled.connect(
+            lambda value: self._apply_hardware_setting(
+                lambda: self._mca.set_ext_trig_enable(value)
+            )
+        )
 
         self.ui.spinTimeLimit.editingFinished.connect(
-            lambda: (
-                log.debug("MCA ch%d: time_limit=%d s", self._channel, self.ui.spinTimeLimit.value()),
-                self._mca.set_time_limit(self.ui.spinTimeLimit.value()),
+            lambda: self._apply_hardware_setting(
+                lambda: self._mca.set_time_limit(self.ui.spinTimeLimit.value())
             )
         )
         self.ui.btnStart.clicked.connect(self._on_start)
@@ -404,40 +458,166 @@ class MCAController(QWidget):
         self.ui.btnDmaFile.clicked.connect(self._on_dma_file)
         self.ui.spinRefreshRate.valueChanged.connect(self._on_refresh_rate_changed)
 
-        self._wire_slider_spinbox(self.ui.sliderTriggerLevel, self.ui.spinTriggerLevel, lambda v: self._mca.set_trigger_level(v))
-        self._wire_slider_spinbox(self.ui.sliderFrameSamples, self.ui.spinFrameSamples, lambda v: self._mca.set_frame_samples(v))
-        self._wire_slider_spinbox(self.ui.sliderPretrigger, self.ui.spinPretrigger, lambda v: self._mca.set_pretrigger_samples(v))
-        self.ui.comboTriggerSource.currentIndexChanged.connect(lambda i: self._mca.set_trg_source(i))
-        self.ui.spinEdgeDetCoeff.editingFinished.connect(lambda: self._mca.set_edge_det_coeff(int(self.ui.spinEdgeDetCoeff.value())))
+        self._wire_slider_spinbox(
+            self.ui.sliderTriggerLevel,
+            self.ui.spinTriggerLevel,
+            lambda v: self._mca.set_trigger_level(v),
+        )
+        self._wire_slider_spinbox(
+            self.ui.sliderFrameSamples,
+            self.ui.spinFrameSamples,
+            lambda v: self._mca.set_frame_samples(v),
+        )
+        self._wire_slider_spinbox(
+            self.ui.sliderPretrigger,
+            self.ui.spinPretrigger,
+            lambda v: self._mca.set_pretrigger_samples(v),
+        )
+        self.ui.comboTriggerSource.currentIndexChanged.connect(
+            lambda i: self._apply_hardware_setting(lambda: self._mca.set_trg_source(i))
+        )
+        self.ui.spinEdgeDetCoeff.editingFinished.connect(
+            lambda: self._apply_hardware_setting(
+                lambda: self._mca.set_edge_det_coeff(
+                    int(self.ui.spinEdgeDetCoeff.value())
+                )
+            )
+        )
 
-        self.ui.comboLpPreset.currentIndexChanged.connect(lambda i: self._mca.filters.lp.set_preset(i))
+        self.ui.comboLpPreset.currentIndexChanged.connect(
+            lambda i: self._apply_hardware_setting(
+                lambda: self._mca.filters.lp.set_preset(i)
+            )
+        )
 
-        self._wire_slider_spinbox(self.ui.sliderCrrc2Cdelay, self.ui.spinCrrc2Cdelay, lambda v: self._mca.filters.crrc2.set_Cdelay(v))
-        self._wire_slider_spinbox(self.ui.sliderCrrc2Fdelay, self.ui.spinCrrc2Fdelay, lambda v: self._mca.filters.crrc2.set_Fdelay(v))
-        self._wire_slider_spinbox(self.ui.sliderCrrc2Pzc, self.ui.spinCrrc2Pzc, lambda v: self._mca.filters.crrc2.set_pzc_coeff(v))
+        self._wire_slider_spinbox(
+            self.ui.sliderCrrc2Cdelay,
+            self.ui.spinCrrc2Cdelay,
+            lambda v: self._mca.filters.crrc2.set_Cdelay(v),
+        )
+        self._wire_slider_spinbox(
+            self.ui.sliderCrrc2Fdelay,
+            self.ui.spinCrrc2Fdelay,
+            lambda v: self._mca.filters.crrc2.set_Fdelay(v),
+        )
+        self._wire_slider_spinbox(
+            self.ui.sliderCrrc2Pzc,
+            self.ui.spinCrrc2Pzc,
+            lambda v: self._mca.filters.crrc2.set_pzc_coeff(v),
+        )
 
-        self.ui.cbCfdEnable.toggled.connect(lambda v: self._mca.filters.cfd.set_enable(v))
-        self.ui.spinCfdFactor.editingFinished.connect(lambda: self._mca.filters.cfd.set_factor(self.ui.spinCfdFactor.value()))
-        self._wire_slider_spinbox(self.ui.sliderCfdDelay, self.ui.spinCfdDelay, lambda v: self._mca.filters.cfd.set_delay(v))
-        self.ui.spinCfdTwLow.editingFinished.connect(lambda: self._mca.filters.cfd.set_time_window_low(self.ui.spinCfdTwLow.value()))
-        self.ui.spinCfdTwHigh.editingFinished.connect(lambda: self._mca.filters.cfd.set_time_window_high(self.ui.spinCfdTwHigh.value()))
+        self.ui.cbCfdEnable.toggled.connect(
+            lambda value: self._apply_hardware_setting(
+                lambda: self._mca.filters.cfd.set_enable(value)
+            )
+        )
+        self.ui.spinCfdFactor.editingFinished.connect(
+            lambda: self._apply_hardware_setting(
+                lambda: self._mca.filters.cfd.set_factor(
+                    self.ui.spinCfdFactor.value()
+                )
+            )
+        )
+        self._wire_slider_spinbox(
+            self.ui.sliderCfdDelay,
+            self.ui.spinCfdDelay,
+            lambda v: self._mca.filters.cfd.set_delay(v),
+        )
+        self.ui.spinCfdTwLow.editingFinished.connect(
+            lambda: self._apply_hardware_setting(
+                lambda: self._mca.filters.cfd.set_time_window_low(
+                    self.ui.spinCfdTwLow.value()
+                )
+            )
+        )
+        self.ui.spinCfdTwHigh.editingFinished.connect(
+            lambda: self._apply_hardware_setting(
+                lambda: self._mca.filters.cfd.set_time_window_high(
+                    self.ui.spinCfdTwHigh.value()
+                )
+            )
+        )
 
-        self.ui.cbTrapezEnable.toggled.connect(lambda v: self._mca.filters.trapezoid.set_enable(v))
-        self._wire_slider_spinbox(self.ui.sliderTrapR, self.ui.spinTrapR, lambda v: self._mca.filters.trapezoid.set_R(v))
-        self._wire_slider_spinbox(self.ui.sliderTrapM, self.ui.spinTrapM, lambda v: self._mca.filters.trapezoid.set_M(v))
-        self.ui.spinTrapT.editingFinished.connect(lambda: self._mca.filters.trapezoid.set_T(int(self.ui.spinTrapT.value())))
-        self._wire_slider_spinbox(self.ui.sliderTrapE, self.ui.spinTrapE, lambda v: self._mca.filters.trapezoid.set_E(v))
-        self.ui.comboTrapFt.currentIndexChanged.connect(lambda i: self._mca.filters.trapezoid.set_FT(i))
+        self.ui.cbTrapezEnable.toggled.connect(
+            lambda value: self._apply_hardware_setting(
+                lambda: self._mca.filters.trapezoid.set_enable(value)
+            )
+        )
+        self._wire_slider_spinbox(
+            self.ui.sliderTrapR,
+            self.ui.spinTrapR,
+            lambda v: self._mca.filters.trapezoid.set_R(v),
+        )
+        self._wire_slider_spinbox(
+            self.ui.sliderTrapM,
+            self.ui.spinTrapM,
+            lambda v: self._mca.filters.trapezoid.set_M(v),
+        )
+        self.ui.spinTrapT.editingFinished.connect(
+            lambda: self._apply_hardware_setting(
+                lambda: self._mca.filters.trapezoid.set_T(
+                    int(self.ui.spinTrapT.value())
+                )
+            )
+        )
+        self._wire_slider_spinbox(
+            self.ui.sliderTrapE,
+            self.ui.spinTrapE,
+            lambda v: self._mca.filters.trapezoid.set_E(v),
+        )
+        self.ui.comboTrapFt.currentIndexChanged.connect(
+            lambda i: self._apply_hardware_setting(
+                lambda: self._mca.filters.trapezoid.set_FT(i)
+            )
+        )
 
-        self.ui.cbCcEnable.toggled.connect(lambda v: self._mca.filters.charge_comparison.set_enable(v))
-        self.ui.spinCcTime.editingFinished.connect(lambda: self._mca.filters.charge_comparison.set_time(self.ui.spinCcTime.value()))
-        self.ui.cbPsdZcEnable.toggled.connect(lambda v: self._mca.filters.psd_zc.set_enable(v))
-        self.ui.comboPsdZcMode.currentIndexChanged.connect(lambda i: self._mca.filters.psd_zc.set_mode(i))
-        self.ui.spinPsdZcLow.editingFinished.connect(lambda: self._mca.filters.psd_zc.set_time_window_low(self.ui.spinPsdZcLow.value()))
-        self.ui.spinPsdZcHigh.editingFinished.connect(lambda: self._mca.filters.psd_zc.set_time_window_high(self.ui.spinPsdZcHigh.value()))
+        self.ui.cbCcEnable.toggled.connect(
+            lambda value: self._apply_hardware_setting(
+                lambda: self._mca.filters.charge_comparison.set_enable(value)
+            )
+        )
+        self.ui.spinCcTime.editingFinished.connect(
+            lambda: self._apply_hardware_setting(
+                lambda: self._mca.filters.charge_comparison.set_time(
+                    self.ui.spinCcTime.value()
+                )
+            )
+        )
+        self.ui.cbPsdZcEnable.toggled.connect(
+            lambda value: self._apply_hardware_setting(
+                lambda: self._mca.filters.psd_zc.set_enable(value)
+            )
+        )
+        self.ui.comboPsdZcMode.currentIndexChanged.connect(
+            lambda i: self._apply_hardware_setting(
+                lambda: self._mca.filters.psd_zc.set_mode(i)
+            )
+        )
+        self.ui.spinPsdZcLow.editingFinished.connect(
+            lambda: self._apply_hardware_setting(
+                lambda: self._mca.filters.psd_zc.set_time_window_low(
+                    self.ui.spinPsdZcLow.value()
+                )
+            )
+        )
+        self.ui.spinPsdZcHigh.editingFinished.connect(
+            lambda: self._apply_hardware_setting(
+                lambda: self._mca.filters.psd_zc.set_time_window_high(
+                    self.ui.spinPsdZcHigh.value()
+                )
+            )
+        )
 
-        self.ui.spinTempCoeff.editingFinished.connect(lambda: self._mca.set_temp_coeff(self.ui.spinTempCoeff.value()))
-        self.ui.spinTempOffset.editingFinished.connect(lambda: self._mca.set_temp_offset(self.ui.spinTempOffset.value()))
+        self.ui.spinTempCoeff.editingFinished.connect(
+            lambda: self._apply_hardware_setting(
+                lambda: self._mca.set_temp_coeff(self.ui.spinTempCoeff.value())
+            )
+        )
+        self.ui.spinTempOffset.editingFinished.connect(
+            lambda: self._apply_hardware_setting(
+                lambda: self._mca.set_temp_offset(self.ui.spinTempOffset.value())
+            )
+        )
 
     def _wire_slider_spinbox(
         self,
@@ -453,8 +633,16 @@ class MCAController(QWidget):
             slider.blockSignals(False)
 
         spinbox.valueChanged.connect(on_spin_changed)
-        spinbox.editingFinished.connect(lambda: set_fn(spinbox.value()))  # type: ignore[operator]
-        slider.sliderReleased.connect(lambda: set_fn(spinbox.value()))  # type: ignore[operator]
+        spinbox.editingFinished.connect(
+            lambda: self._apply_hardware_setting(
+                lambda: set_fn(spinbox.value())  # type: ignore[operator]
+            )
+        )
+        slider.sliderReleased.connect(
+            lambda: self._apply_hardware_setting(
+                lambda: set_fn(spinbox.value())  # type: ignore[operator]
+            )
+        )
 
     # ------------------------------------------------------------------
     # Measurement Start / Stop / Clear
@@ -466,7 +654,6 @@ class MCAController(QWidget):
         self.ui.btnStop.setChecked(False)
         self.ui.cbDmaEnable.setEnabled(False)
         self.ui.btnDmaFile.setEnabled(False)
-
         if self.ui.cbDmaEnable.isChecked() and self._mca_dma is not None:
             self._start_with_dma()
         else:
@@ -477,7 +664,11 @@ class MCAController(QWidget):
         self._mca.start()
         self.ui.btnStop.setEnabled(True)
         self._start_worker()
-        log.info("MCA ch%d: measurement started (time_limit=%d s)", self._channel, self.ui.spinTimeLimit.value())
+        log.info(
+            "MCA ch%d: measurement started (time_limit=%d s)",
+            self._channel,
+            self.ui.spinTimeLimit.value(),
+        )
 
     def _on_stop(self) -> None:
         self.ui.btnStop.setChecked(True)
@@ -485,9 +676,17 @@ class MCAController(QWidget):
         if self._dma_worker is not None:
             log.debug("MCA ch%d: stopping with DMA", self._channel)
             self._stop_worker()
-            self._mca.stop()
-            self._mca.set_dma_enable(False)
-            if self._dma_worker is not None:
+            if isinstance(self._mca_dma, IIOMcaDmaStreamer):
+                # Set the worker's stop flag first so it cannot begin a new
+                # steady-state refill after the final block. Then stop the
+                # pulse processor; either the in-flight refill receives the
+                # padded final frame or streamer's close path performs the
+                # same stop and one-second inactivity drain.
+                self._dma_worker.stop()
+                self._mca.stop()
+            else:
+                self._mca.stop()
+                self._mca.set_dma_enable(False)
                 self._dma_worker.stop()
             self._set_controls_enabled(True)
         else:
@@ -508,7 +707,8 @@ class MCAController(QWidget):
         """
         log.info("MCA ch%d: measurement completed by hardware (time limit)", self._channel)
         if self._dma_worker is not None:
-            self._mca.set_dma_enable(False)
+            if not isinstance(self._mca_dma, IIOMcaDmaStreamer):
+                self._mca.set_dma_enable(False)
             self._dma_worker.stop()
             self._set_controls_enabled(True)
         self.ui.btnStart.setChecked(False)
@@ -626,11 +826,23 @@ class MCAController(QWidget):
         self._event_buffer.clear()
         log.debug("MCA ch%d DMA [1/6]: creating worker, file=%s", self._channel, filepath)
 
-        self._dma_worker = McaDmaWorker(
-            streamer=self._mca_dma,
-            filepath=filepath,
-            event_buffer=(self._event_buffer, self._event_lock),
-        )
+        if isinstance(self._mca_dma, IIOMcaDmaStreamer):
+            # Pulse-processor fields are immutable while list_buffer_active
+            # is set, so apply the duration before the worker's first read
+            # creates/arms the lm_frame buffer.
+            self._mca.set_time_limit(self.ui.spinTimeLimit.value())
+            self._dma_worker = IIOMcaDmaWorker(
+                streamer=self._mca_dma,
+                filepath=filepath,
+                event_buffer=(self._event_buffer, self._event_lock),
+            )
+        else:
+            assert isinstance(self._mca_dma, McaDmaStreamer)
+            self._dma_worker = McaDmaWorker(
+                streamer=self._mca_dma,
+                filepath=filepath,
+                event_buffer=(self._event_buffer, self._event_lock),
+            )
         self._dma_thread = QThread(self)
         self._dma_worker.moveToThread(self._dma_thread)
 
@@ -651,13 +863,23 @@ class MCAController(QWidget):
         log.info("MCA DMA: worker started, waiting for socket ready, file=%s", filepath)
 
     def _on_dma_ready(self) -> None:
-        log.debug("MCA ch%d DMA [3/6]: ZMQ socket ready, DMA already enabled via checkbox",
-                  self._channel)
-        log.debug("MCA ch%d DMA [4/6]: calling mca.start() -> set_global_enable(True) "
-                  "(HW fires list_start_irq -> server sends StreamSTART)", self._channel)
-        self._mca.set_time_limit(self.ui.spinTimeLimit.value())
-        self._mca.start()
-        log.debug("MCA ch%d DMA [5/6]: measurement started (time_limit=%d s), starting gRPC polling worker",
+        if isinstance(self._mca_dma, IIOMcaDmaStreamer):
+            # The worker is about to call read_mca_dma_frame(); that method
+            # arms all scan elements, enters the first blocking refill, and
+            # only then writes enable=1. A queued GUI-thread mca.start()
+            # here would race and violate that required ordering.
+            log.debug(
+                "MCA ch%d IIO DMA: worker ready; backend owns ordered arm/start",
+                self._channel,
+            )
+        else:
+            log.debug("MCA ch%d DMA [3/6]: ZMQ socket ready, DMA already enabled via checkbox",
+                      self._channel)
+            log.debug("MCA ch%d DMA [4/6]: calling mca.start() -> set_global_enable(True) "
+                      "(HW fires list_start_irq -> server sends StreamSTART)", self._channel)
+            self._mca.set_time_limit(self.ui.spinTimeLimit.value())
+            self._mca.start()
+        log.debug("MCA ch%d DMA: starting polling worker (time_limit=%d s)",
                   self._channel, self.ui.spinTimeLimit.value())
         self._start_worker()
         self.ui.btnStop.setEnabled(True)
@@ -665,7 +887,8 @@ class MCAController(QWidget):
         log.info("MCA ch%d: DMA + measurement started (socket was ready)", self._channel)
 
     def _on_dma_progress(self, event_count: int) -> None:
-        self.ui.lblDmaStatus.setText(f"Recording: {event_count} events")
+        unit = "records" if isinstance(self._mca_dma, IIOMcaDmaStreamer) else "events"
+        self.ui.lblDmaStatus.setText(f"Recording: {event_count} {unit}")
 
     def _on_dma_error(self, message: str) -> None:
         log.error("MCA DMA error: %s", message)
@@ -693,6 +916,16 @@ class MCAController(QWidget):
         thread = self._dma_thread
         if worker is not None:
             worker.stop()
+            if isinstance(self._mca_dma, IIOMcaDmaStreamer):
+                # Unblock a possibly empty partial frame so the worker can
+                # receive the final padded block and run its drain/close.
+                try:
+                    self._mca.stop()
+                except Exception:
+                    log.warning(
+                        "MCA ch%d: failed to stop before IIO DMA shutdown",
+                        self._channel, exc_info=True,
+                    )
         if thread is not None:
             if not thread.wait(3000):
                 log.warning("MCA DMA thread did not stop in time, terminating")

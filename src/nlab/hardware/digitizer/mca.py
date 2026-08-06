@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from enum import IntEnum
-from typing import TypedDict, Union
+from typing import TypedDict
 
 import numpy as np
 
@@ -409,6 +411,11 @@ class MultiChannelAnalyzer:
 
     def __init__(self, backend: MCABackend) -> None:
         self._b = backend
+        # Serializes the short stop/write/restart sequence used for live
+        # configuration with MCAWorker's measurement-completion poll. Without
+        # this, the worker can observe the intentional enable=0 interval and
+        # incorrectly report that the hardware time limit ended the run.
+        self._configuration_lock = threading.RLock()
         self.filters = MCAFilters(backend)
         self.statistics = MCAStatistics(backend)
         self.sync = SyncTrigger(backend)
@@ -473,10 +480,12 @@ class MultiChannelAnalyzer:
     # ---- acquisition control ----
 
     def get_global_enable(self) -> bool:
-        return self._b.get_global_enable()
+        with self._configuration_lock:
+            return self._b.get_global_enable()
 
     def set_global_enable(self, val: bool) -> None:
-        self._b.set_global_enable(val)
+        with self._configuration_lock:
+            self._b.set_global_enable(val)
 
     def get_dma_enable(self) -> bool:
         return self._b.get_dpp_dma_enable()
@@ -514,7 +523,45 @@ class MultiChannelAnalyzer:
         self._b.set_pileup_window(val)
 
     def get_measurement_in_progress(self) -> bool:
-        return self._b.get_measurement_in_progress()
+        with self._configuration_lock:
+            return self._b.get_measurement_in_progress()
+
+    def reconfigure_while_running(self, write: Callable[[], None]) -> bool:
+        """Apply one hardware setting, preserving a polling acquisition.
+
+        vdpp-pulse-processor.c's pp_field_store() returns EBUSY for every
+        configuration field while ``enable`` or ``list_buffer_active`` is
+        set. For a normal histogram/viewer measurement, briefly stop, write,
+        and restart, matching the workaround previously used by the scope
+        backend. The shared lock prevents MCAWorker from mistaking that
+        intentional stop for hardware time-limit completion.
+
+        A list-mode buffer cannot be handled this way: it remains active
+        after enable=0 and its teardown/drain lifecycle belongs to the DMA
+        worker. The GUI disables hardware controls during DMA, and this
+        method rejects any accidental programmatic call in that state.
+
+        Restarting begins a new hardware acquisition, so histogram and
+        elapsed/statistics counters may reset. If the write itself fails,
+        the original acquisition is still restarted before re-raising.
+        """
+        with self._configuration_lock:
+            was_enabled = self._b.get_global_enable()
+            if not was_enabled:
+                write()
+                return False
+            if self._b.get_dpp_dma_enable():
+                raise RuntimeError(
+                    "cannot reconfigure MCA while list-mode DMA is active; "
+                    "stop the DMA measurement first"
+                )
+
+            self._b.set_global_enable(False)
+            try:
+                write()
+            finally:
+                self._b.set_global_enable(True)
+            return True
 
     # ---- temperature compensation ----
 
@@ -563,10 +610,10 @@ class MultiChannelAnalyzer:
     # ---- start / stop ----
 
     def start(self) -> None:
-        self._b.set_global_enable(True)
+        self.set_global_enable(True)
 
     def stop(self) -> None:
-        self._b.set_global_enable(False)
+        self.set_global_enable(False)
 
     # ---- data acquisition ----
 

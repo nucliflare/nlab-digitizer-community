@@ -1,9 +1,8 @@
-"""ZMQ-based DMA streaming for scope waveforms and MCA list-mode events.
+"""DMA streaming for scope waveforms and MCA list-mode events.
 
-These classes manage ZMQ SUB socket connections to the digitizer's
-streaming endpoints.  They are transport-layer components, analogous
-to GrpcIDSBackend -- independent connections instantiated alongside
-the main gRPC backend.
+The legacy streamers manage ZMQ SUB connections to the gRPC Engine. The
+IIO streamers pull complete blocks from IIODigitizerBackend on dedicated
+worker threads.
 """
 
 from __future__ import annotations
@@ -14,13 +13,34 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import BinaryIO, Protocol
 
 import numpy as np
 import zmq
 
-if TYPE_CHECKING:
-    from .backends.iio_backend import IIODigitizerBackend
+
+class _IIOScopeBackend(Protocol):
+    def prepare_dma_capture(self) -> None: ...
+
+    def get_frame_samples(self) -> int: ...
+
+    def read_dma_frame(self) -> tuple[int, np.ndarray]: ...
+
+    def request_dma_stop(self) -> None: ...
+
+    def close_dma_capture(self) -> None: ...
+
+
+class _IIOMcaBackend(Protocol):
+    def read_mca_dma_frame(self) -> np.ndarray: ...
+
+    def mca_dma_measurement_in_progress(self) -> bool: ...
+
+    def close_mca_dma_capture(
+        self,
+        on_frame: Callable[[np.ndarray], None] | None = None,
+    ) -> int: ...
+
 
 log = logging.getLogger(__name__)
 
@@ -31,11 +51,12 @@ STREAM_START = b"StreamSTART\x00"
 STREAM_END = b"StreamEND\x00"
 
 EVENT_STRUCT = struct.Struct("<BBHHHQ")
-EVENT_SIZE = EVENT_STRUCT.size  # 14
+EVENT_SIZE = EVENT_STRUCT.size  # 16 bytes
 
 FILE_HEADER_STRUCT = struct.Struct("<4sHBBdI4x")  # 24 bytes
 FILE_MAGIC = b"NDMA"
 FILE_VERSION = 1
+IIO_LM_FILE_VERSION = 2
 
 # Each raw scope DMA frame is prefixed with a per-frame timestamp: the first
 # 4 int16 slots (8 bytes) are a little-endian uint64, the remaining
@@ -51,10 +72,27 @@ _EVENT_DTYPE = np.dtype([
     ("timestamp", np.uint64),
 ])
 
+# vdpp-lm-frame.c v121: one unchanged 128-bit little-endian scan. This is
+# deliberately separate from _EVENT_DTYPE above: the first four bytes have
+# different field boundaries and semantics even though both records happen
+# to total 16 bytes.
+_LM_EVENT_DTYPE = np.dtype([
+    ("flags", "<u2"),
+    ("cfd_q2", "<u2"),
+    ("charge_energy", "<u2"),
+    ("trapezoid_energy", "<u2"),
+    ("timestamp", "<u8"),
+])
 
-def _write_file_header(f, channel: int, frame_samples: int = 0) -> None:
+
+def _write_file_header(
+    f: BinaryIO,
+    channel: int,
+    frame_samples: int = 0,
+    version: int = FILE_VERSION,
+) -> None:
     header = FILE_HEADER_STRUCT.pack(
-        FILE_MAGIC, FILE_VERSION, channel, 0, time.time(), frame_samples,
+        FILE_MAGIC, version, channel, 0, time.time(), frame_samples,
     )
     f.write(header)
     f.flush()
@@ -176,25 +214,24 @@ class IIOScopeDmaStreamer:
     Not a drop-in replacement for ScopeDmaStreamer: that class is a ZMQ SUB
     client fed by the gRPC Engine's own push-based DMA server, which
     continuously streams frames captured by hardware running free. The IIO
-    scope core has no equivalent continuous-streaming path — it's a
-    one-shot triggered-capture design (confirmed via ewt-scope-iio.c and
-    extensive live testing: reusing a buffer across multiple refills
-    returns corrupted data). This class instead *pulls* frames by looping
-    IIODigitizerBackend.read_dma_frame() — each call does its own full
-    arm/refill/read/destroy cycle — and writes each one to file as it
-    arrives, rather than subscribing to a continuous push.
+    scope core exposes a pull-based IIO buffer rather than the legacy ZMQ
+    push stream. This class arms one buffer for the measurement, repeatedly
+    refills it, and writes each complete frame to file.
 
     Uses the same NDMA file header as ScopeDmaStreamer for tooling
     consistency, but the per-frame record layout is IIO's own (8-byte
-    timestamp header immediately followed by the *full* frame_samples
-    waveform) rather than gRPC's (timestamp overlaid into the first 4
-    samples of the waveform array) — the two hardware frame formats
-    genuinely differ, this doesn't try to force compatibility between them.
+    timestamp header followed by ``frame_samples - 4`` waveform values).
+    The timestamp occupies the first four 16-bit slots of the hardware frame,
+    so each file record remains exactly ``frame_samples * 2`` bytes.
     """
 
-    def __init__(self, backend: "IIODigitizerBackend", channel: int) -> None:
+    def __init__(self, backend: _IIOScopeBackend, channel: int) -> None:
         self._backend = backend
         self._channel = channel
+
+    def request_stop(self) -> None:
+        """Stop the acquisition gate and cancel a blocked backend refill."""
+        self._backend.request_dma_stop()
 
     def stream_to_file(
         self,
@@ -210,13 +247,9 @@ class IIOScopeDmaStreamer:
         written (None = unbounded). *on_ready* is called once, right
         before the first capture attempt -- at that point no DMA buffer
         exists yet (it's created lazily by the first read_dma_frame()
-        call), and that first call is what actually arms the scope (per
-        vdpp-scope.c's postenable(), which sets both ENABLE and DMA_ENABLE
-        when the buffer is enabled). Unlike the gRPC/ZMQ streamers, there
-        is no separate hardware-arm step for a caller to perform in
-        response to on_ready -- calling scope.start() here would be
-        redundant at best and racy at worst (see ScopeController, which
-        skips it for this streamer type).
+        call), and that first call arms DMA, starts its blocking reader and
+        then writes ``enable=1`` in the backend-defined order. There is no
+        separate hardware-arm operation for the controller.
 
         Returns the number of frames actually written — a failed capture
         (e.g. the known xilinx-vdma channel-stop issue, see references/...
@@ -244,7 +277,9 @@ class IIOScopeDmaStreamer:
         leaving the buffer open here would leave the hardware armed after
         the caller thinks the measurement has stopped.
         """
+        self._backend.prepare_dma_capture()
         frame_samples = self._backend.get_frame_samples()
+        expected_waveform_samples = frame_samples - SCOPE_TIMESTAMP_WORDS
         frame_count = 0
         total_bytes = 0
 
@@ -260,7 +295,18 @@ class IIOScopeDmaStreamer:
                     if n_frames is not None and frame_count >= n_frames:
                         break
 
-                    timestamp, samples = self._backend.read_dma_frame()
+                    try:
+                        timestamp, samples = self._backend.read_dma_frame()
+                    except InterruptedError:
+                        if stop_event.is_set():
+                            break
+                        raise
+                    if samples.ndim != 1 or samples.size != expected_waveform_samples:
+                        raise RuntimeError(
+                            "scope DMA returned an incomplete waveform: "
+                            f"{samples.size} samples, expected "
+                            f"{expected_waveform_samples}"
+                        )
                     ts_bytes = struct.pack("<Q", timestamp)
                     payload_bytes = samples.tobytes()
                     f.write(ts_bytes)
@@ -276,6 +322,113 @@ class IIOScopeDmaStreamer:
 
         log.info("IIO scope DMA: finished -- %d frames to %s", frame_count, filepath)
         return frame_count
+
+
+class IIOMcaDmaStreamer:
+    """Pull fixed 16 KiB MCA list-mode blocks from the IIO backend.
+
+    This is not interchangeable with McaDmaStreamer. The IIO driver has no
+    ZMQ sentinels: the first backend read arms all five scan elements,
+    starts a blocking reader, and only then writes pulse_processor.enable=1.
+    Shutdown is likewise backend-owned: enable=0, drain complete blocks for
+    the documented one-second inactivity window, then destroy the buffer.
+    """
+
+    def __init__(self, backend: _IIOMcaBackend, channel: int) -> None:
+        self._backend = backend
+        self._channel = channel
+
+    def stream_events(
+        self,
+        stop_event: threading.Event,
+        filepath: Path | None = None,
+        event_buffer: tuple[list[np.ndarray], threading.Lock] | None = None,
+        on_ready: Callable[[], None] | None = None,
+        on_progress: Callable[[int], None] | None = None,
+    ) -> int:
+        """Read complete 1024-record blocks until stopped.
+
+        Raw IIO records are written unchanged. NDMA version 2 identifies
+        their layout; version 1 remains the legacy gRPC/ZMQ layout. The
+        count includes zero-padded slots in the final complete frame: v121
+        publishes no valid-record count and mca-architecture.md forbids
+        treating zero payloads as an end marker because a real event may
+        also contain zero-valued fields.
+        """
+        total_records = 0
+        frame_count = 0
+        file_handle = None
+
+        if filepath is not None:
+            file_handle = open(filepath, "wb")
+            _write_file_header(
+                file_handle,
+                self._channel,
+                version=IIO_LM_FILE_VERSION,
+            )
+            log.info("IIO MCA DMA: recording to %s", filepath)
+
+        def consume(events: np.ndarray) -> None:
+            nonlocal total_records, frame_count
+            # Assert the backend and transport agree on the v121 ABI. This
+            # catches an accidental legacy-dtype reuse before corrupting a
+            # file or the GUI's shared event buffer.
+            if events.dtype != _LM_EVENT_DTYPE:
+                raise RuntimeError(
+                    f"unexpected IIO MCA event dtype {events.dtype!r}; "
+                    f"expected {_LM_EVENT_DTYPE!r}"
+                )
+            if file_handle is not None:
+                file_handle.write(events.tobytes())
+                file_handle.flush()
+            if event_buffer is not None:
+                buf, lock = event_buffer
+                with lock:
+                    buf.append(events.copy())
+            frame_count += 1
+            total_records += len(events)
+            if on_progress is not None:
+                on_progress(total_records)
+
+        try:
+            if on_ready is not None:
+                on_ready()
+            while not stop_event.is_set():
+                consume(self._backend.read_mca_dma_frame())
+                # Hardware time-limit completion can occur before the GUI
+                # polling worker delivers its queued stop request. Once the
+                # final complete frame has arrived, avoid entering another
+                # refill that could block forever with the producer stopped.
+                if not self._backend.mca_dma_measurement_in_progress():
+                    break
+        finally:
+            # Keep the file/event callback alive while close drains the
+            # final complete blocks; destroying the buffer first would lose
+            # that tail by construction.
+            drained = self._backend.close_mca_dma_capture(on_frame=consume)
+            if file_handle is not None:
+                file_handle.close()
+            log.info(
+                "IIO MCA DMA: finished -- %d records in %d frames "
+                "(%d frame(s) received during close drain)",
+                total_records, frame_count, drained,
+            )
+
+        return total_records
+
+    @staticmethod
+    def parse_events(raw: bytes) -> np.ndarray:
+        if len(raw) % _LM_EVENT_DTYPE.itemsize:
+            raise ValueError(
+                f"IIO list-mode payload is not aligned to "
+                f"{_LM_EVENT_DTYPE.itemsize}-byte records"
+            )
+        return np.frombuffer(raw, dtype=_LM_EVENT_DTYPE)
+
+    @staticmethod
+    def compute_cfd_time(events: np.ndarray) -> np.ndarray:
+        """Convert the Q2 CFD field to its physical legacy value."""
+        return events["cfd_q2"].astype(np.float64) / 4.0
 
 
 class McaDmaStreamer:
@@ -295,7 +448,7 @@ class McaDmaStreamer:
         self,
         stop_event: threading.Event,
         filepath: Path | None = None,
-        event_buffer: tuple[list, threading.Lock] | None = None,
+        event_buffer: tuple[list[np.ndarray], threading.Lock] | None = None,
         on_ready: Callable[[], None] | None = None,
         on_progress: Callable[[int], None] | None = None,
     ) -> int:

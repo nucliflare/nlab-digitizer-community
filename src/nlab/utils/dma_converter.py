@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import logging
-import struct
 from pathlib import Path
 
 import h5py
 import numpy as np
 
 from nlab.hardware.digitizer.dma import (
+    _EVENT_DTYPE,
+    _LM_EVENT_DTYPE,
     FILE_HEADER_STRUCT,
     FILE_MAGIC,
-    EVENT_SIZE,
+    FILE_VERSION,
+    IIO_LM_FILE_VERSION,
     SCOPE_TIMESTAMP_WORDS,
-    _EVENT_DTYPE,
 )
 
 log = logging.getLogger(__name__)
@@ -41,11 +42,19 @@ def convert_listmode(src: Path, dst: Path) -> int:
         header = read_file_header(f)
         raw_data = f.read()
 
-    n_events = len(raw_data) // EVENT_SIZE
-    if len(raw_data) % EVENT_SIZE != 0:
+    if header["version"] == FILE_VERSION:
+        event_dtype = _EVENT_DTYPE
+    elif header["version"] == IIO_LM_FILE_VERSION:
+        event_dtype = _LM_EVENT_DTYPE
+    else:
+        raise ValueError(f"Unsupported MCA list-mode format version: {header['version']}")
+
+    event_size = event_dtype.itemsize
+    n_events = len(raw_data) // event_size
+    if len(raw_data) % event_size != 0:
         log.warning("Listmode file size not aligned to event size, truncating %d trailing bytes",
-                    len(raw_data) % EVENT_SIZE)
-    events = np.frombuffer(raw_data[:n_events * EVENT_SIZE], dtype=_EVENT_DTYPE)
+                    len(raw_data) % event_size)
+    events = np.frombuffer(raw_data[:n_events * event_size], dtype=event_dtype)
 
     with h5py.File(dst, "w") as h5:
         h5.attrs["source_file"] = str(src)
@@ -55,16 +64,42 @@ def convert_listmode(src: Path, dst: Path) -> int:
         h5.attrs["total_events"] = n_events
 
         ds = h5.create_dataset("events", data=events, compression="gzip", compression_opts=4)
-        ds.attrs["fields"] = "marker, zc_offset, zc_estimation, short_energy, energy, timestamp"
         ds.attrs["timestamp_unit"] = "8 ns ticks"
-
-        h5.create_dataset("energy", data=events["energy"], compression="gzip", compression_opts=4)
-        h5.create_dataset("timestamp", data=events["timestamp"], compression="gzip", compression_opts=4)
-
-        psd_zc = events["zc_offset"].astype(np.float64) + (
-            events["zc_estimation"].view(np.int16).astype(np.float64) / 2**14
+        h5.create_dataset(
+            "timestamp", data=events["timestamp"], compression="gzip", compression_opts=4,
         )
-        h5.create_dataset("psd_zc", data=psd_zc, compression="gzip", compression_opts=4)
+
+        if header["version"] == FILE_VERSION:
+            ds.attrs["fields"] = (
+                "marker, zc_offset, zc_estimation, short_energy, energy, timestamp"
+            )
+            h5.create_dataset(
+                "energy", data=events["energy"], compression="gzip", compression_opts=4,
+            )
+            psd_zc = events["zc_offset"].astype(np.float64) + (
+                events["zc_estimation"].view(np.int16).astype(np.float64) / 2**14
+            )
+            h5.create_dataset("psd_zc", data=psd_zc, compression="gzip", compression_opts=4)
+        else:
+            ds.attrs["fields"] = (
+                "flags, cfd_q2, charge_energy, trapezoid_energy, timestamp"
+            )
+            h5.create_dataset(
+                "charge_energy",
+                data=events["charge_energy"],
+                compression="gzip",
+                compression_opts=4,
+            )
+            h5.create_dataset(
+                "trapezoid_energy",
+                data=events["trapezoid_energy"],
+                compression="gzip",
+                compression_opts=4,
+            )
+            cfd_time = events["cfd_q2"].astype(np.float64) / 4.0
+            h5.create_dataset(
+                "cfd_time", data=cfd_time, compression="gzip", compression_opts=4,
+            )
 
     log.info("Converted %d listmode events: %s -> %s", n_events, src, dst)
     return n_events
@@ -76,14 +111,24 @@ def convert_scope(src: Path, dst: Path) -> int:
         header = read_file_header(f)
         raw_data = f.read()
 
-    frame_bytes = header["frame_samples"]
-    if frame_bytes == 0:
+    frame_samples = header["frame_samples"]
+    if frame_samples == 0:
         raise ValueError("Scope file has frame_samples=0 in header, cannot determine frame size")
+    if frame_samples <= SCOPE_TIMESTAMP_WORDS:
+        raise ValueError(
+            "Scope frame is too short to contain its 64-bit timestamp: "
+            f"{frame_samples} samples"
+        )
 
-    n_frames = len(raw_data) // frame_bytes
+    # The NDMA header stores a count of int16 values, not a byte count.
+    frame_bytes = frame_samples * np.dtype("<i2").itemsize
+
     if len(raw_data) % frame_bytes != 0:
-        log.warning("Scope file size not aligned to frame size, truncating %d trailing bytes",
-                    len(raw_data) % frame_bytes)
+        raise ValueError(
+            "Scope payload is not aligned to complete frames: "
+            f"{len(raw_data)} bytes for {frame_bytes}-byte frames"
+        )
+    n_frames = len(raw_data) // frame_bytes
 
     words_per_frame = frame_bytes // 2
     samples_per_frame = words_per_frame - SCOPE_TIMESTAMP_WORDS

@@ -1,7 +1,7 @@
 """Background workers for DMA streaming.
 
-Follow the BaseWorker + QThread pattern.  Because run() blocks in a
-ZMQ poll loop the worker thread's Qt event loop never spins, so
+Follow the BaseWorker + QThread pattern. Because run() blocks in a
+ZMQ poll or IIO refill loop the worker thread's Qt event loop never spins, so
 signal-based stop does NOT work.  Use worker.stop() (direct call to
 threading.Event.set()) instead.
 """
@@ -12,9 +12,15 @@ import logging
 import threading
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import Signal
 
-from nlab.hardware.digitizer.dma import IIOScopeDmaStreamer, McaDmaStreamer, ScopeDmaStreamer
+from nlab.hardware.digitizer.dma import (
+    IIOMcaDmaStreamer,
+    IIOScopeDmaStreamer,
+    McaDmaStreamer,
+    ScopeDmaStreamer,
+)
 from nlab.workers.base_worker import BaseWorker
 
 log = logging.getLogger(__name__)
@@ -118,6 +124,7 @@ class IIOScopeDmaWorker(BaseWorker):
     def stop(self) -> None:
         log.info("IIOScopeDmaWorker: stop requested")
         self._stop_event.set()
+        self._streamer.request_stop()
 
 
 class McaDmaWorker(BaseWorker):
@@ -137,7 +144,7 @@ class McaDmaWorker(BaseWorker):
         self,
         streamer: McaDmaStreamer,
         filepath: Path | None = None,
-        event_buffer: tuple[list, threading.Lock] | None = None,
+        event_buffer: tuple[list[np.ndarray], threading.Lock] | None = None,
     ) -> None:
         super().__init__()
         self._streamer = streamer
@@ -164,4 +171,50 @@ class McaDmaWorker(BaseWorker):
 
     def stop(self) -> None:
         log.info("McaDmaWorker: stop requested")
+        self._stop_event.set()
+
+
+class IIOMcaDmaWorker(BaseWorker):
+    """Streams fixed-frame MCA list-mode records through IIO.
+
+    The backend owns arm/start and stop/drain/close ordering. ``ready`` is
+    retained for UI state and polling-worker startup, but the controller
+    must not call mca.start() in response: the first blocking refill does
+    that only after the reader is present.
+    """
+
+    ready = Signal()
+    progress = Signal(int)
+
+    def __init__(
+        self,
+        streamer: IIOMcaDmaStreamer,
+        filepath: Path | None = None,
+        event_buffer: tuple[list[np.ndarray], threading.Lock] | None = None,
+    ) -> None:
+        super().__init__()
+        self._streamer = streamer
+        self._filepath = filepath
+        self._event_buffer = event_buffer
+        self._stop_event = threading.Event()
+
+    def run(self) -> None:
+        log.info("IIOMcaDmaWorker: starting, file=%s", self._filepath)
+        try:
+            total = self._streamer.stream_events(
+                stop_event=self._stop_event,
+                filepath=self._filepath,
+                event_buffer=self._event_buffer,
+                on_ready=lambda: self.ready.emit(),
+                on_progress=lambda n: self.progress.emit(n),
+            )
+            log.info("IIOMcaDmaWorker: completed, %d records received", total)
+        except Exception:
+            log.exception("IIOMcaDmaWorker: streaming failed")
+            self.error.emit("IIO MCA DMA streaming failed")
+        finally:
+            self.finished.emit()
+
+    def stop(self) -> None:
+        log.info("IIOMcaDmaWorker: stop requested")
         self._stop_event.set()

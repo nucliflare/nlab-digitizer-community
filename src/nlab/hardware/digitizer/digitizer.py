@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from .backends.base import DigitizerBackend, IDSBackend
 from .backends.grpc_backend import GrpcDigitizerBackend
-from .dma import IIOScopeDmaStreamer, McaDmaStreamer, ScopeDmaStreamer
-from .scope import Scope
-from .mca import MultiChannelAnalyzer
+from .dma import IIOMcaDmaStreamer, IIOScopeDmaStreamer, McaDmaStreamer, ScopeDmaStreamer
 from .hv import HVSupply
+from .mca import MultiChannelAnalyzer
+from .scope import Scope
 
 
 class Digitizer:
@@ -40,7 +40,7 @@ class Digitizer:
         backend: DigitizerBackend,
         ids_backend: IDSBackend | None = None,
         scope_dma: ScopeDmaStreamer | IIOScopeDmaStreamer | None = None,
-        mca_dma: McaDmaStreamer | None = None,
+        mca_dma: McaDmaStreamer | IIOMcaDmaStreamer | None = None,
     ) -> None:
         self._backend = backend
         self._ids_backend = ids_backend
@@ -56,6 +56,20 @@ class Digitizer:
         self._backend.close()
         if self._ids_backend is not None:
             self._ids_backend.close()
+
+    def mca_available(self) -> bool:
+        """Whether d.mca's methods are expected to work on this channel.
+
+        True for backends that always implement MCABackend in full (e.g.
+        gRPC). Backends where MCA hardware presence varies per channel
+        (currently only the IIO backend, whose pulse-processor/input-filter
+        devices depend on the firmware build) opt in via an optional
+        mca_hardware_present() extension method; delegating here instead of
+        checking the backend type by name keeps this generic across future
+        backends with the same variability.
+        """
+        check = getattr(self._backend, "mca_hardware_present", None)
+        return check() if check is not None else True
 
     @classmethod
     def from_grpc(
@@ -89,9 +103,18 @@ class Digitizer:
     ) -> Digitizer:
         """Create a Digitizer backed by the on-FPGA IIO device tree.
 
-        No IDS/HV connection yet — d.hv and d.mca_dma are None. d.mca is
-        unusable: the current firmware build has no ewt-pulse-processor
-        device, so every MCABackend method raises NotImplementedError.
+        No IDS/HV connection yet — d.hv is None. When a channel exposes
+        both vdpp_pulse_processor and vdpp_lm_frame, d.mca_dma is an
+        IIOMcaDmaStreamer implementing the fixed 1024-record lifecycle in
+        mca-architecture.md; it remains None on older firmware without
+        lm_frame. d.mca itself is usable: IIODigitizerBackend
+        implements MCABackend against vdpp-pulse-processor.c/
+        vdpp-input-filter.c, except for a handful of methods with no
+        matching hardware register (see iio_backend.py's module docstring)
+        — and only if this channel's firmware actually has those two
+        devices; if not, d.mca's methods raise RuntimeError instead of
+        NotImplementedError, since that's a firmware/device-tree gap on a
+        specific board, not a gap in this backend.
         d.scope_dma is an IIOScopeDmaStreamer (see dma.py) — pulls
         full-resolution frames by looping read_dma_frame() rather than
         subscribing to a continuous push like the gRPC ZMQ streamers, since
@@ -101,4 +124,9 @@ class Digitizer:
 
         backend = IIODigitizerBackend(channel, uri)
         scope_dma = IIOScopeDmaStreamer(backend, channel)
-        return cls(backend, scope_dma=scope_dma)
+        mca_dma = (
+            IIOMcaDmaStreamer(backend, channel)
+            if backend.mca_dma_hardware_present()
+            else None
+        )
+        return cls(backend, scope_dma=scope_dma, mca_dma=mca_dma)
