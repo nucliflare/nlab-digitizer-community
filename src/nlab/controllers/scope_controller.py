@@ -10,7 +10,7 @@ import pyqtgraph as pg
 from PySide6.QtCore import QRectF, QSettings, QThread, QThreadPool, QTimer
 from PySide6.QtWidgets import QFileDialog, QSlider, QSpinBox, QWidget
 
-from nlab.hardware.digitizer.dma import ScopeDmaStreamer
+from nlab.hardware.digitizer.dma import IIOScopeDmaStreamer, ScopeDmaStreamer
 from nlab.hardware.digitizer.scope import (
     ListSpec,
     RangeSpec,
@@ -20,7 +20,7 @@ from nlab.hardware.digitizer.scope import (
 )
 from nlab.ui.ui_scope_view import Ui_ScopeView
 from nlab.views.plot_viewbox import ModifierZoomViewBox
-from nlab.workers.dma_workers import ScopeDmaWorker
+from nlab.workers.dma_workers import IIOScopeDmaWorker, ScopeDmaWorker
 from nlab.workers.scope_worker import ScopeWorker
 
 log = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ class ScopeController(QWidget):
     def __init__(
         self,
         scope: Scope,
-        scope_dma: ScopeDmaStreamer | None = None,
+        scope_dma: ScopeDmaStreamer | IIOScopeDmaStreamer | None = None,
         channel: int = 1,
         parent: QWidget | None = None,
     ) -> None:
@@ -60,7 +60,7 @@ class ScopeController(QWidget):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._request_frame)
 
-        self._dma_worker: ScopeDmaWorker | None = None
+        self._dma_worker: ScopeDmaWorker | IIOScopeDmaWorker | None = None
         self._dma_thread: QThread | None = None
         self._dma_filepath: Path | None = None
         self._dma_counter = 0
@@ -263,15 +263,23 @@ class ScopeController(QWidget):
     def _start_with_dma(self) -> None:
         filepath = self._dma_filepath or self._generate_filepath()
         self._dma_filepath = None
-        frame_samples = self.ui.spinFrameSamples.value()
-        log.debug("Scope ch%d DMA [1/6]: creating worker, file=%s, frame_samples=%d",
-                  self._channel, filepath, frame_samples)
 
-        self._dma_worker = ScopeDmaWorker(
-            streamer=self._scope_dma,
-            filepath=filepath,
-            frame_samples=frame_samples,
-        )
+        if isinstance(self._scope_dma, IIOScopeDmaStreamer):
+            log.debug("Scope ch%d IIO DMA [1/4]: creating worker, file=%s",
+                      self._channel, filepath)
+            self._dma_worker = IIOScopeDmaWorker(
+                streamer=self._scope_dma,
+                filepath=filepath,
+            )
+        else:
+            frame_samples = self.ui.spinFrameSamples.value()
+            log.debug("Scope ch%d DMA [1/6]: creating worker, file=%s, frame_samples=%d",
+                      self._channel, filepath, frame_samples)
+            self._dma_worker = ScopeDmaWorker(
+                streamer=self._scope_dma,
+                filepath=filepath,
+                frame_samples=frame_samples,
+            )
         self._dma_thread = QThread(self)
         self._dma_worker.moveToThread(self._dma_thread)
 
@@ -292,13 +300,24 @@ class ScopeController(QWidget):
         log.info("Scope DMA: worker started, waiting for socket ready, file=%s", filepath)
 
     def _on_dma_ready(self) -> None:
-        log.debug("Scope ch%d DMA [3/6]: ZMQ socket ready, DMA already enabled via checkbox",
-                  self._channel)
-        log.debug("Scope ch%d DMA [4/6]: calling scope.start() -> set_enable(True) "
-                  "(HW fires start_irq -> server sends StreamSTART)", self._channel)
-        self._scope.start()
-        log.debug("Scope ch%d DMA [5/6]: scope started, beginning display polling",
-                  self._channel)
+        if isinstance(self._scope_dma, IIOScopeDmaStreamer):
+            # No separate arm step here: the worker's first read_dma_frame()
+            # call creates the DMA buffer, and vdpp-scope.c's postenable()
+            # sets ENABLE/DMA_ENABLE itself as part of enabling that buffer.
+            # Calling scope.start() (set_enable) here would be redundant at
+            # best -- and racy at worst, since this signal is delivered
+            # asynchronously (queued, cross-thread) relative to the worker
+            # thread already running read_dma_frame(): if the buffer opens
+            # first, scope.start() would hit enable_store()'s own -EBUSY
+            # guard (st->running already true).
+            log.debug("Scope ch%d IIO DMA [3/4]: buffer arms the hardware itself, "
+                      "not calling scope.start()", self._channel)
+        else:
+            log.debug("Scope ch%d DMA [3/6]: ZMQ socket ready, DMA already enabled via checkbox",
+                      self._channel)
+            log.debug("Scope ch%d DMA [4/6]: calling scope.start() -> set_enable(True) "
+                      "(HW fires start_irq -> server sends StreamSTART)", self._channel)
+            self._scope.start()
         interval_ms = 1000 // self.ui.spinRefreshRate.value()
         self._refresh_timer.start(interval_ms)
         self.ui.btnStop.setEnabled(True)
@@ -313,8 +332,15 @@ class ScopeController(QWidget):
 
         if self._dma_worker is not None:
             log.debug("Scope ch%d: stopping with DMA", self._channel)
-            self._scope.stop()
-            if self._dma_worker is not None:
+            if isinstance(self._scope_dma, IIOScopeDmaStreamer):
+                # scope.stop() (set_enable(False)) would hit the same
+                # -EBUSY guard while the DMA buffer is still open -- the
+                # worker's stream_to_file() closes the buffer itself in its
+                # finally block, which is what actually clears
+                # ENABLE/DMA_ENABLE for this streamer type.
+                self._dma_worker.stop()
+            else:
+                self._scope.stop()
                 self._dma_worker.stop()
             self._set_controls_enabled(True)
         else:
@@ -375,7 +401,7 @@ class ScopeController(QWidget):
         raw_frame = self._scope.acquire_frame()
         self._scope.stop()
         value = self.ui.spinFrameSamples.value()
-        frame = raw_frame[: value // 8]
+        frame = raw_frame[: value // 4]
         time_arr = np.arange(0, 8 * len(frame), 8)
         if self._display_mode == DisplayMode.RAW:
             self._raw_curve.setData(time_arr, frame)
@@ -507,7 +533,26 @@ class ScopeController(QWidget):
         log.info("Scope DMA: worker finished")
 
     def stop_dma_sync(self) -> None:
-        """Blocking stop for use during application shutdown only."""
+        """Blocking stop for use during application shutdown/reconnect only.
+
+        Handles both halves of what the UI's own Stop button does: an
+        in-progress DMA worker (if any), and -- regardless of whether DMA
+        was involved -- the hardware ENABLE bit itself. Closing the app
+        (or reconnecting) without clicking Stop first used to leave a
+        plain viewer-only measurement armed indefinitely, since nothing
+        in the shutdown path ever called scope.stop() for that case.
+
+        Confirmed live against the IIO backend as the root cause of a
+        "frozen viewer" that looked like a stuck device or driver bug:
+        ENABLE is a real, persistent hardware register there (not a
+        software flag like the previous driver), so it stays set across
+        the whole app being closed and reopened. Re-arming with the exact
+        same trigger settings on relaunch writes the same value (1) over
+        an already-1 register -- no 0-to-1 transition -- so the core
+        never gets a fresh re-arm pulse, and the on-chip pulse-viewer
+        memory just keeps showing whatever it last captured before the
+        app closed, looking permanently frozen.
+        """
         worker = self._dma_worker
         thread = self._dma_thread
         if worker is not None:
@@ -519,3 +564,28 @@ class ScopeController(QWidget):
                 thread.wait()
         self._dma_thread = None
         self._dma_worker = None
+
+        self._ensure_disarmed()
+
+    def _ensure_disarmed(self) -> None:
+        """Best-effort scope.stop() for shutdown/reconnect -- see
+        stop_dma_sync()'s docstring for why this exists. Retries briefly
+        on the known transient -EBUSY window right after a DMA buffer
+        closes; logs and gives up rather than blocking or crashing
+        shutdown if it never clears.
+        """
+        for attempt in range(10):
+            try:
+                if self._scope.get_enable():
+                    self._scope.stop()
+                return
+            except OSError as e:
+                if getattr(e, "errno", None) != 16 or attempt == 9:
+                    log.warning("Scope ch%d: failed to disarm during shutdown",
+                                self._channel, exc_info=True)
+                    return
+                time.sleep(0.02)
+            except Exception:
+                log.warning("Scope ch%d: failed to disarm during shutdown",
+                            self._channel, exc_info=True)
+                return

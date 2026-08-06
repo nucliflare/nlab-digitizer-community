@@ -30,20 +30,21 @@ class MainWindowController:
     def __init__(
         self,
         window: MainAppWindow,
+        backend: str = "grpc",
         host: str = "",
-        port: int = 50051,
+        port: int = 50050,
         channels: int = 2,
     ) -> None:
         self._window = window
+        self._backend = backend
         self._host = host
         self._port = port
         self._channels = channels
         self._devices: list[Digitizer] = []
 
-        log.info("Connecting to %s:%d, %d channel(s)", host, port, channels)
+        log.info("Connecting via %s to %s:%d, %d channel(s)", backend, host, port, channels)
         for ch in range(1, 1 + self._channels):
-            device = Digitizer.from_grpc(channel=ch, hostname=self._host, port=self._port)
-            self._devices.append(device)
+            self._devices.append(self._connect_channel(ch))
         log.info("All %d device(s) connected", len(self._devices))
 
         self._scope_controllers: list[ScopeController] = []
@@ -64,6 +65,33 @@ class MainWindowController:
         log.info("UI initialized, %d scope / %d MCA / %d PSU / %d external controllers",
                  len(self._scope_controllers), len(self._mca_controllers),
                  len(self._psu_controllers), len(self._external_controllers))
+
+    def _connect_channel(self, ch: int) -> Digitizer:
+        """Connect one channel using the selected backend.
+
+        gRPC channels are 1-based (GrpcDigitizerBackend's own convention,
+        matching hw_def's channel numbering); IIO channels are 0-based
+        (ewt-scope0/ewt-scope1 device names), so ch is shifted down by one
+        for that backend. Either way self._devices stays a plain list in
+        connection order — ch itself is never used as a storage key.
+        """
+        if self._backend == "iio":
+            return Digitizer.from_iio(channel=ch - 1, uri=f"ip:{self._host}:{self._port}")
+        return Digitizer.from_grpc(channel=ch, hostname=self._host, port=self._port)
+
+    def _display_channel(self, idx: int) -> int:
+        """Channel number the way the connected backend's own hardware
+        labels it -- 0-based for IIO (vdpp_scope instance 0/1, matching
+        iio_info's device discovery order), 1-based for gRPC (hw_def's
+        channel numbering, unchanged from before). Used for tab labels,
+        dock object names, and settings filenames so a channel number
+        mentioned anywhere (GUI, logs, saved files, a live debugging
+        session cross-referencing the board) means the same physical
+        channel everywhere -- instead of the GUI always showing one
+        higher than what dmesg/iio_info call it, and needing the
+        ch-1 IIO offset in your head to translate between them.
+        """
+        return idx if self._backend == "iio" else idx + 1
 
     # ------------------------------------------------------------------
     # Dock construction
@@ -105,22 +133,31 @@ class MainWindowController:
         mca_docks: list[QDockWidget] = []
         psu_docks: list[QDockWidget] = []
 
-        for idx, device in enumerate(self._devices):
-            ch_label = f"Ch {idx + 1}"
+        # TEMPORARY: IIODigitizerBackend's MCABackend is fully unimplemented
+        # (every method raises NotImplementedError) -- MCAController.__init__
+        # writes default settings to the backend immediately, so constructing
+        # it against an IIO device would crash on startup. Skip MCA entirely
+        # for this backend until MCA support lands; scope-only testing in the
+        # meantime. Remove this guard once MCA is wired up on the IIO side.
+        build_mca = self._backend != "iio"
 
-            ch = idx + 1
+        for idx, device in enumerate(self._devices):
+            ch = self._display_channel(idx)
+            ch_label = f"Ch {ch}"
+
             scope_ctrl = ScopeController(device.scope, scope_dma=device.scope_dma, channel=ch)
             self._scope_controllers.append(scope_ctrl)
             scope_docks.append(self._make_dock(f"scope_ch{ch}", ch_label, scope_ctrl))
 
-            mca_ctrl = MCAController(device.mca, mca_dma=device.mca_dma, channel=ch)
-            self._mca_controllers.append(mca_ctrl)
-            mca_docks.append(self._make_dock(f"mca_ch{ch}", ch_label, mca_ctrl))
+            if build_mca:
+                mca_ctrl = MCAController(device.mca, mca_dma=device.mca_dma, channel=ch)
+                self._mca_controllers.append(mca_ctrl)
+                mca_docks.append(self._make_dock(f"mca_ch{ch}", ch_label, mca_ctrl))
 
             if device.hv is not None:
                 psu_ctrl = PSUController(device.hv)
                 self._psu_controllers.append(psu_ctrl)
-                psu_docks.append(self._make_dock(f"psu_ch{idx + 1}", ch_label, psu_ctrl))
+                psu_docks.append(self._make_dock(f"psu_ch{ch}", ch_label, psu_ctrl))
 
         self._populate_dock_host(self._scope_dock_host, scope_docks)
         self._populate_dock_host(self._mca_dock_host, mca_docks)
@@ -129,6 +166,13 @@ class MainWindowController:
         self._window.ui.layoutTabScope.addWidget(self._scope_dock_host)
         self._window.ui.layoutTabMCA.addWidget(self._mca_dock_host)
         self._window.ui.layoutTabPSU.addWidget(self._psu_dock_host)
+
+        mca_tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabMCA)
+        self._window.ui.mainTabs.setTabEnabled(mca_tab_index, build_mca)
+        self._window.ui.tabMCA.setToolTip(
+            "" if build_mca else
+            "MCA is temporarily disabled: the IIO backend does not implement it yet."
+        )
 
     def _build_external_docks(self) -> None:
         """Discover Modbus devices on the digitizer host and dock one tab each.
@@ -313,10 +357,10 @@ class MainWindowController:
         self._psu_controllers.clear()
         self._external_controllers.clear()
 
-        log.info("Reconnect: connecting to %s:%d, %d channel(s)", self._host, self._port, self._channels)
+        log.info("Reconnect: connecting via %s to %s:%d, %d channel(s)",
+                 self._backend, self._host, self._port, self._channels)
         for ch in range(1, 1 + self._channels):
-            device = Digitizer.from_grpc(channel=ch, hostname=self._host, port=self._port)
-            self._devices.append(device)
+            self._devices.append(self._connect_channel(ch))
         log.info("Reconnect: all %d device(s) connected", len(self._devices))
 
         self._build_channel_docks()
@@ -330,7 +374,7 @@ class MainWindowController:
         """Save settings for all channels to a single YAML file."""
         from nlab.utils.settings_io import save_settings
         for idx, device in enumerate(self._devices):
-            ch_path = path.with_stem(f"{path.stem}_ch{idx + 1}")
+            ch_path = path.with_stem(f"{path.stem}_ch{self._display_channel(idx)}")
             save_settings(device.scope, device.mca, device.hv, ch_path)
         log.info("All channel settings saved to %s", path.parent)
 
@@ -338,7 +382,7 @@ class MainWindowController:
         """Load settings from YAML and apply to hardware, then refresh UI."""
         from nlab.utils.settings_io import load_settings
         for idx, device in enumerate(self._devices):
-            ch_path = path.with_stem(f"{path.stem}_ch{idx + 1}")
+            ch_path = path.with_stem(f"{path.stem}_ch{self._display_channel(idx)}")
             if ch_path.exists():
                 load_settings(device.scope, device.mca, device.hv, ch_path)
         for ctrl in self._scope_controllers:

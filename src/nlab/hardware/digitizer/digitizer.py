@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .backends.base import DigitizerBackend, IDSBackend
 from .backends.grpc_backend import GrpcDigitizerBackend
-from .dma import McaDmaStreamer, ScopeDmaStreamer
+from .dma import IIOScopeDmaStreamer, McaDmaStreamer, ScopeDmaStreamer
 from .scope import Scope
 from .mca import MultiChannelAnalyzer
 from .hv import HVSupply
@@ -39,7 +39,7 @@ class Digitizer:
         self,
         backend: DigitizerBackend,
         ids_backend: IDSBackend | None = None,
-        scope_dma: ScopeDmaStreamer | None = None,
+        scope_dma: ScopeDmaStreamer | IIOScopeDmaStreamer | None = None,
         mca_dma: McaDmaStreamer | None = None,
     ) -> None:
         self._backend = backend
@@ -81,11 +81,24 @@ class Digitizer:
         mca_dma = McaDmaStreamer(channel, hostname)
         return cls(dpp, ids, scope_dma, mca_dma)
 
-    # @classmethod
-    # def from_iio(
-    #     cls,
-    #     channel: int,
-    #     uri: str = "ip:192.168.10.20",
-    # ) -> Digitizer:
-    #     from .backends.iio_backend import IIODigitizerBackend
-    #     return cls(IIODigitizerBackend(channel, uri))
+    @classmethod
+    def from_iio(
+        cls,
+        channel: int,
+        uri: str = "ip:192.168.10.128:30431",
+    ) -> Digitizer:
+        """Create a Digitizer backed by the on-FPGA IIO device tree.
+
+        No IDS/HV connection yet — d.hv and d.mca_dma are None. d.mca is
+        unusable: the current firmware build has no ewt-pulse-processor
+        device, so every MCABackend method raises NotImplementedError.
+        d.scope_dma is an IIOScopeDmaStreamer (see dma.py) — pulls
+        full-resolution frames by looping read_dma_frame() rather than
+        subscribing to a continuous push like the gRPC ZMQ streamers, since
+        the IIO scope core has no continuous-streaming hardware path.
+        """
+        from .backends.iio_backend import IIODigitizerBackend
+
+        backend = IIODigitizerBackend(channel, uri)
+        scope_dma = IIOScopeDmaStreamer(backend, channel)
+        return cls(backend, scope_dma=scope_dma)

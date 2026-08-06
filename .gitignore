@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.egg-info/
 .eggs/
+*.bin
 dist/
 build/
 measurements/

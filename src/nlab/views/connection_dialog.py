@@ -7,10 +7,17 @@ from nlab.ui.ui_connection_dialog import Ui_ConnectionDialog
 from nlab.utils.windows_icon import apply_taskbar_icon
 
 _MAX_RECENT_IPS = 10
-_DEFAULT_PORT = 50051
 _DEFAULT_CHANNELS = 2
 
+# Backend combo index -> internal key -> default port. gRPC's default here
+# matches Digitizer.from_grpc's own default (50050); IIO's matches the
+# ewt-scope IIO device tree's iiod port (30431).
+_BACKENDS = ("grpc", "iio")
+_DEFAULT_BACKEND = "grpc"
+_BACKEND_DEFAULT_PORTS = {"grpc": 50050, "iio": 30431}
+
 _KEY_RECENT_IPS = "connection/recent_ips"
+_KEY_LAST_BACKEND = "connection/last_backend"
 _KEY_LAST_PORT = "connection/last_port"
 _KEY_LAST_CHANNELS = "connection/last_channels"
 
@@ -30,12 +37,18 @@ class ConnectionDialog(QDialog):
         self._ui.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setText("Connect")
         self._ui.buttonBox.accepted.connect(self._on_accept)
         self._ui.buttonBox.rejected.connect(self.reject)
+        self._ui.comboBackend.currentIndexChanged.connect(self._on_backend_changed)
         apply_taskbar_icon(self)
         self._load_settings()
 
     # ------------------------------------------------------------------
     # Public properties — read after exec() == Accepted
     # ------------------------------------------------------------------
+
+    @property
+    def backend(self) -> str:
+        """Internal backend key: "grpc" or "iio"."""
+        return _BACKENDS[self._ui.comboBackend.currentIndex()]
 
     @property
     def ip(self) -> str:
@@ -53,13 +66,31 @@ class ConnectionDialog(QDialog):
     # Internal
     # ------------------------------------------------------------------
 
+    def _on_backend_changed(self, index: int) -> None:
+        """Snap the port to the newly-selected backend's default.
+
+        Only a live user interaction reaches this (see _load_settings,
+        which blocks signals while restoring the saved index), so this
+        never fights with a restored last-used port on startup.
+        """
+        backend = _BACKENDS[index]
+        self._ui.spinPort.setValue(_BACKEND_DEFAULT_PORTS[backend])
+
     def _load_settings(self) -> None:
         settings = QSettings()
         recent: list[str] = settings.value(_KEY_RECENT_IPS, [], type=list)  # type: ignore[assignment]
         self._ui.comboIp.addItems(recent)
         if recent:
             self._ui.comboIp.setCurrentIndex(0)
-        self._ui.spinPort.setValue(int(settings.value(_KEY_LAST_PORT, _DEFAULT_PORT)))  # type: ignore[arg-type]
+
+        backend = settings.value(_KEY_LAST_BACKEND, _DEFAULT_BACKEND)  # type: ignore[assignment]
+        backend_index = _BACKENDS.index(backend) if backend in _BACKENDS else _BACKENDS.index(_DEFAULT_BACKEND)
+        self._ui.comboBackend.blockSignals(True)
+        self._ui.comboBackend.setCurrentIndex(backend_index)
+        self._ui.comboBackend.blockSignals(False)
+
+        default_port = _BACKEND_DEFAULT_PORTS[_BACKENDS[backend_index]]
+        self._ui.spinPort.setValue(int(settings.value(_KEY_LAST_PORT, default_port)))  # type: ignore[arg-type]
         self._ui.spinChannels.setValue(int(settings.value(_KEY_LAST_CHANNELS, _DEFAULT_CHANNELS)))  # type: ignore[arg-type]
 
     def _save_settings(self) -> None:
@@ -70,6 +101,7 @@ class ConnectionDialog(QDialog):
             recent.remove(ip)
         recent.insert(0, ip)
         settings.setValue(_KEY_RECENT_IPS, recent[:_MAX_RECENT_IPS])
+        settings.setValue(_KEY_LAST_BACKEND, self.backend)
         settings.setValue(_KEY_LAST_PORT, self.port)
         settings.setValue(_KEY_LAST_CHANNELS, self.channels)
 

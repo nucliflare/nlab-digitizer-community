@@ -31,7 +31,7 @@ class ScopeWorker(QRunnable):
         try:
             frame_samples = self._scope.get_frame_samples()
             raw_frame = self._scope.acquire_frame()
-            frame = raw_frame[: int(frame_samples) // 8]
+            frame = raw_frame[: int(frame_samples) // 4]
             raw_time = np.arange(0, 8 * len(frame), 8)
             self.signals.ready.emit([raw_time, frame])
         except Exception:

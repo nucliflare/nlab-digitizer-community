@@ -678,7 +678,17 @@ class MCAController(QWidget):
         log.info("MCA DMA: worker finished")
 
     def stop_dma_sync(self) -> None:
-        """Blocking stop for use during application shutdown only."""
+        """Blocking stop for use during application shutdown/reconnect only.
+
+        Handles both halves of what the UI's own Stop button does (see
+        _on_stop()): an in-progress DMA worker (if any), and -- regardless
+        of whether DMA was involved -- the hardware measurement-enable bit
+        itself, via mca.stop()/set_dma_enable(False). Mirrors the same
+        fix in ScopeController.stop_dma_sync(): closing the app (or
+        reconnecting) without clicking Stop first used to leave a
+        measurement armed indefinitely, since nothing in the shutdown
+        path called mca.stop() for that case.
+        """
         worker = self._dma_worker
         thread = self._dma_thread
         if worker is not None:
@@ -688,8 +698,24 @@ class MCAController(QWidget):
                 log.warning("MCA DMA thread did not stop in time, terminating")
                 thread.terminate()
                 thread.wait()
+        had_dma_worker = worker is not None
         self._dma_thread = None
         self._dma_worker = None
+
+        self._ensure_disarmed(had_dma_worker)
+
+    def _ensure_disarmed(self, had_dma_worker: bool) -> None:
+        """Best-effort mca.stop()/set_dma_enable(False) for shutdown or
+        reconnect -- see stop_dma_sync()'s docstring for why this exists.
+        """
+        try:
+            if self._mca.get_measurement_in_progress():
+                self._mca.stop()
+            if had_dma_worker:
+                self._mca.set_dma_enable(False)
+        except Exception:
+            log.warning("MCA ch%d: failed to disarm during shutdown",
+                        self._channel, exc_info=True)
 
     # ------------------------------------------------------------------
     # Readback handling (gRPC polling)

@@ -25,6 +25,7 @@ dependencies = [
     "h5py>=3.11",
     "pyyaml>=6.0",
     "nlab-modbus",
+    "pylibiio>=0.25",
 ]
 
 [project.optional-dependencies]

@@ -80,8 +80,11 @@ PARAMETER_SPECS: dict[ScopeParam, ParameterSpec] = {
         items=tuple(m.name for m in TriggerMode),
         default=TriggerMode.ANY_BELOW,
     ),
-    # uint16_t (hw_def: MIN–MAX, step 1)
-    ScopeParam.DAC_VALUE: RangeSpec(min_val=0, max_val=1024, step=1, default=512),
+    # 0-1023: confirmed live against vdpp_afe_dac's baseline_available
+    # (min=0, step=1, max=1023) -- 1024 is rejected by the driver with
+    # ERANGE, so the spec must match the hardware's real range, not just
+    # the round-number ceiling the old gRPC-only comment assumed.
+    ScopeParam.DAC_VALUE: RangeSpec(min_val=0, max_val=1023, step=1, default=512),
     ScopeParam.DMA_ENABLED: ListSpec(items=(False, True), default=False),
 }
 

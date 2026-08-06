@@ -14,9 +14,13 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import zmq
+
+if TYPE_CHECKING:
+    from .backends.iio_backend import IIODigitizerBackend
 
 log = logging.getLogger(__name__)
 
@@ -164,6 +168,114 @@ class ScopeDmaStreamer:
             ctx.term()
 
         return total_bytes
+
+
+class IIOScopeDmaStreamer:
+    """Full-resolution DMA-frame-to-file streaming for the IIO backend.
+
+    Not a drop-in replacement for ScopeDmaStreamer: that class is a ZMQ SUB
+    client fed by the gRPC Engine's own push-based DMA server, which
+    continuously streams frames captured by hardware running free. The IIO
+    scope core has no equivalent continuous-streaming path — it's a
+    one-shot triggered-capture design (confirmed via ewt-scope-iio.c and
+    extensive live testing: reusing a buffer across multiple refills
+    returns corrupted data). This class instead *pulls* frames by looping
+    IIODigitizerBackend.read_dma_frame() — each call does its own full
+    arm/refill/read/destroy cycle — and writes each one to file as it
+    arrives, rather than subscribing to a continuous push.
+
+    Uses the same NDMA file header as ScopeDmaStreamer for tooling
+    consistency, but the per-frame record layout is IIO's own (8-byte
+    timestamp header immediately followed by the *full* frame_samples
+    waveform) rather than gRPC's (timestamp overlaid into the first 4
+    samples of the waveform array) — the two hardware frame formats
+    genuinely differ, this doesn't try to force compatibility between them.
+    """
+
+    def __init__(self, backend: "IIODigitizerBackend", channel: int) -> None:
+        self._backend = backend
+        self._channel = channel
+
+    def stream_to_file(
+        self,
+        filepath: Path,
+        stop_event: threading.Event,
+        n_frames: int | None = None,
+        on_ready: Callable[[], None] | None = None,
+        on_progress: Callable[[int], None] | None = None,
+    ) -> int:
+        """Repeatedly capture full-resolution frames and append them to file.
+
+        Runs until *stop_event* is set or *n_frames* frames have been
+        written (None = unbounded). *on_ready* is called once, right
+        before the first capture attempt -- at that point no DMA buffer
+        exists yet (it's created lazily by the first read_dma_frame()
+        call), and that first call is what actually arms the scope (per
+        vdpp-scope.c's postenable(), which sets both ENABLE and DMA_ENABLE
+        when the buffer is enabled). Unlike the gRPC/ZMQ streamers, there
+        is no separate hardware-arm step for a caller to perform in
+        response to on_ready -- calling scope.start() here would be
+        redundant at best and racy at worst (see ScopeController, which
+        skips it for this streamer type).
+
+        Returns the number of frames actually written — a failed capture
+        (e.g. the known xilinx-vdma channel-stop issue, see references/...
+        bug report) stops the loop and propagates the exception rather
+        than silently skipping the frame, since a silently-incomplete file
+        would be worse than a loud failure.
+
+        *on_progress* is called with the total bytes written so far, not
+        a frame count -- matching ScopeDmaStreamer's convention (which
+        passes total_bytes), since ScopeController._on_dma_progress()
+        treats the value as a byte count for its KB/MB display regardless
+        of which streamer is in use. Passing frame_count here instead
+        used to make the GUI display a wildly wrong size (e.g. "20 KB"
+        for what was actually a 56 MB file, since 20,000-ish frames were
+        being read as 20,000-ish bytes).
+
+        Like ScopeDmaStreamer, the one-time file header written by
+        _write_file_header() is not included in the count -- both
+        streamers under-report the true file size by that fixed 24-byte
+        header, consistently, not a new inconsistency introduced here.
+
+        Always closes the DMA capture buffer before returning, success,
+        stop_event, or exception alike -- per vdpp-scope.c's predisable(),
+        that's what clears ENABLE/DMA_ENABLE back down for the DMA case;
+        leaving the buffer open here would leave the hardware armed after
+        the caller thinks the measurement has stopped.
+        """
+        frame_samples = self._backend.get_frame_samples()
+        frame_count = 0
+        total_bytes = 0
+
+        try:
+            with open(filepath, "wb") as f:
+                log.info("IIO scope DMA: recording to %s", filepath)
+                _write_file_header(f, self._channel, frame_samples)
+
+                if on_ready is not None:
+                    on_ready()
+
+                while not stop_event.is_set():
+                    if n_frames is not None and frame_count >= n_frames:
+                        break
+
+                    timestamp, samples = self._backend.read_dma_frame()
+                    ts_bytes = struct.pack("<Q", timestamp)
+                    payload_bytes = samples.tobytes()
+                    f.write(ts_bytes)
+                    f.write(payload_bytes)
+                    f.flush()
+
+                    frame_count += 1
+                    total_bytes += len(ts_bytes) + len(payload_bytes)
+                    if on_progress is not None:
+                        on_progress(total_bytes)
+        finally:
+            self._backend.close_dma_capture()
+
+        log.info("IIO scope DMA: finished -- %d frames to %s", frame_count, filepath)
+        return frame_count
 
 
 class McaDmaStreamer:

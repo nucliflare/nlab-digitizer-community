@@ -51,9 +51,11 @@ def main() -> None:
     if dialog.exec() != ConnectionDialog.DialogCode.Accepted:
         sys.exit(0)
 
-    log.info("Application starting — v%s, host=%s, port=%d, channels=%d",
-             __version__, dialog.ip, dialog.port, dialog.channels)
-    window = MainAppWindow(host=dialog.ip, port=dialog.port, channels=dialog.channels)
+    log.info("Application starting — v%s, backend=%s, host=%s, port=%d, channels=%d",
+             __version__, dialog.backend, dialog.ip, dialog.port, dialog.channels)
+    window = MainAppWindow(
+        backend=dialog.backend, host=dialog.ip, port=dialog.port, channels=dialog.channels,
+    )
 
     window.show()
     # Apply the native taskbar icon after the event loop starts so Qt has

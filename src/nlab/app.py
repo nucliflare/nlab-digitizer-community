@@ -34,7 +34,9 @@ _KEY_LOG_Y = "view/log_y"
 class MainAppWindow(QMainWindow):
     """Top-level application window. Owns the UI and its controller."""
 
-    def __init__(self, host: str = "", port: int = 50051, channels: int = 2) -> None:
+    def __init__(
+        self, backend: str = "grpc", host: str = "", port: int = 50050, channels: int = 2,
+    ) -> None:
         super().__init__()
         self._setup_ui()
         self.setWindowIcon(QIcon(":/icons/ewt.ico"))
@@ -42,8 +44,10 @@ class MainAppWindow(QMainWindow):
         # main.py's post-show callback — calling it before show() targets a
         # provisional HWND that QMainWindow replaces when it first settles its
         # dock layout on the screen, discarding the pre-show WM_SETICON.
-        self.setWindowTitle(f"Nuclear Lab Digitizer — {host}:{port}")
-        self._controller = MainWindowController(self, host=host, port=port, channels=channels)
+        self.setWindowTitle(f"Nuclear Lab Digitizer — {backend}://{host}:{port}")
+        self._controller = MainWindowController(
+            self, backend=backend, host=host, port=port, channels=channels,
+        )
         self._apply_view_state()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
