@@ -102,7 +102,11 @@ class MainWindowController:
         """A QMainWindow used as an embedded dock-area panel."""
         host = QMainWindow()
         host.setWindowFlags(Qt.WindowType.Widget)
-        host.setDockOptions(QMainWindow.DockOption.AllowTabbedDocks | QMainWindow.DockOption.AllowNestedDocks | QMainWindow.DockOption.AnimatedDocks)
+        host.setDockOptions(
+            QMainWindow.DockOption.AllowTabbedDocks
+            | QMainWindow.DockOption.AllowNestedDocks
+            | QMainWindow.DockOption.AnimatedDocks
+        )
         return host
 
     @staticmethod
@@ -110,7 +114,10 @@ class MainWindowController:
         dock = QDockWidget(title)
         dock.setObjectName(obj_name)
         dock.setWidget(widget)
-        dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+        dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
         return dock
 
     @staticmethod
@@ -278,6 +285,21 @@ class MainWindowController:
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    def prepare_for_remote_power_action(self) -> None:
+        """Stop acquisition cleanly before the board is rebooted or powered off.
+
+        Device handles deliberately remain open until reconnect/shutdown. With
+        all polling and DMA threads stopped they cannot issue requests while
+        Dropbear executes the power command, and ``reconnect()`` can dispose of
+        the old handles through its normal teardown path after the board boots.
+        """
+        log.info("Remote board power action: stopping all acquisition workers")
+        self._save_dock_state()
+        for ctrl in self._scope_controllers:
+            ctrl.save_display_settings()
+        self._stop_all_workers()
+        log.info("Remote board power action: acquisition stopped")
 
     def _stop_all_workers(self) -> None:
         """Stop all running timers/workers (blocking). Devices stay open."""

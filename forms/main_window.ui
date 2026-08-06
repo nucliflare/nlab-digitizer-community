@@ -112,6 +112,9 @@
     <property name="title"><string>Developer</string></property>
     <addaction name="actionShowSystemLog"/>
     <addaction name="actionDebugMode"/>
+    <addaction name="separator"/>
+    <addaction name="actionRebootBoard"/>
+    <addaction name="actionShutdownBoard"/>
    </widget>
    <widget class="QMenu" name="menuView">
     <property name="title"><string>View</string></property>
@@ -182,6 +185,12 @@
   <action name="actionDebugMode">
    <property name="checkable"><bool>true</bool></property>
    <property name="text"><string>Debug Mode</string></property>
+  </action>
+  <action name="actionRebootBoard">
+   <property name="text"><string>Reboot Remote Board...</string></property>
+  </action>
+  <action name="actionShutdownBoard">
+   <property name="text"><string>Shut Down Remote Board...</string></property>
   </action>
 
  </widget>

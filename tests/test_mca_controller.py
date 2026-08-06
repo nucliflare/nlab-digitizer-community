@@ -1,11 +1,14 @@
 import threading
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
+import numpy as np
+import pyqtgraph as pg
 import pytest
 
 from nlab.controllers.mca_controller import MCAController
 from nlab.hardware.digitizer.mca import MultiChannelAnalyzer
+from nlab.workers.mca_worker import MCAReadback
 
 
 class _Backend:
@@ -112,3 +115,95 @@ def test_controller_routes_running_write_through_reconfiguration() -> None:
     assert controller._last_histogram is None
     assert controller._last_elapsed_s == 0.0
     histogram_curve.setData.assert_called_once_with([], [])
+
+
+def test_roi_statistics_are_deferred_until_drag_finishes() -> None:
+    update_stats = Mock()
+    controller = SimpleNamespace(
+        _roi_dragging=False,
+        _update_roi_stats=update_stats,
+    )
+
+    MCAController._on_roi_region_changed(controller)
+
+    assert controller._roi_dragging is True
+    update_stats.assert_not_called()
+
+    MCAController._on_roi_change_finished(controller)
+
+    assert controller._roi_dragging is False
+    update_stats.assert_called_once_with()
+
+
+def test_installed_linear_region_item_exposes_connected_signals() -> None:
+    assert hasattr(pg.LinearRegionItem, "sigRegionChanged")
+    assert hasattr(pg.LinearRegionItem, "sigRegionChangeFinished")
+
+
+def test_histogram_readback_skips_roi_statistics_during_drag() -> None:
+    histogram = np.arange(16, dtype=np.uint32)
+    update_stats = Mock()
+    histogram_curve = Mock()
+    controller = SimpleNamespace(
+        _last_histogram=None,
+        _hist_curve=histogram_curve,
+        _roi=SimpleNamespace(isVisible=lambda: True),
+        _roi_dragging=True,
+        _update_roi_stats=update_stats,
+    )
+
+    MCAController._update_histogram(controller, histogram)
+
+    np.testing.assert_array_equal(controller._last_histogram, histogram)
+    histogram_curve.setData.assert_called_once()
+    update_stats.assert_not_called()
+
+
+def _readback(seed: int) -> MCAReadback:
+    values = np.array([seed], dtype=np.int16)
+    return MCAReadback(
+        histogram=np.array([seed], dtype=np.uint32),
+        debug1=values,
+        debug2=values,
+        elapsed_time=seed,
+    )
+
+
+def test_readbacks_are_coalesced_and_gui_render_rate_is_capped() -> None:
+    timer = Mock()
+    timer.isActive.side_effect = [False, True]
+    first = _readback(1)
+    latest = _readback(2)
+    controller = SimpleNamespace(
+        _pending_readback=None,
+        _render_timer=timer,
+        ui=SimpleNamespace(
+            spinRefreshRate=SimpleNamespace(value=lambda: 30),
+        ),
+    )
+
+    MCAController._on_readback(controller, first)
+    MCAController._on_readback(controller, latest)
+
+    assert controller._pending_readback is latest
+    timer.start.assert_called_once_with(66)
+
+
+def test_pending_readback_renders_only_latest_snapshot() -> None:
+    latest = _readback(3)
+    calls = Mock()
+    controller = SimpleNamespace(
+        _pending_readback=latest,
+        _update_debug_plot=calls.debug,
+        _update_statistics=calls.statistics,
+        _update_histogram=calls.histogram,
+    )
+
+    MCAController._render_pending_readback(controller)
+
+    assert controller._pending_readback is None
+    assert calls.mock_calls == [
+        call.debug(latest.debug1, latest.debug2),
+        call.statistics(latest),
+        call.histogram(latest.histogram),
+    ]

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QSettings, QThread
+from PySide6.QtCore import QSettings, QThread, QTimer
 from PySide6.QtWidgets import QFileDialog, QSlider, QSpinBox, QWidget
 
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaDmaStreamer
@@ -32,6 +32,13 @@ _DEBUG_SIGNAL_NAMES = [
 ]
 
 _BINNING_LABELS = ["1", "2", "4", "8", "16", "32", "64", "128", "256", "512"]
+
+# Hardware/network polling can run faster than Qt can repaint the two debug
+# curves plus a 16384-bin histogram. Keep acquisition at the requested rate,
+# but cap presentation so queued readback signals cannot starve mouse/keyboard
+# events in the GUI thread. 15 Hz is still visually continuous and leaves a
+# comfortable event-loop budget on the machine used for the live review.
+_MAX_GUI_RENDER_HZ = 15
 
 
 class MCAController(QWidget):
@@ -63,6 +70,10 @@ class MCAController(QWidget):
 
         self._last_histogram: np.ndarray | None = None
         self._last_elapsed_s: float = 0.0
+        self._pending_readback: MCAReadback | None = None
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._render_pending_readback)
 
         self._populate_combos()
         self._send_defaults()
@@ -271,21 +282,37 @@ class MCAController(QWidget):
 
         self._hist_curve = self._hist_plot.plot(
             pen=pg.mkPen("#1f77b4", width=1),
-            fillLevel=0,
-            fillBrush=pg.mkBrush(31, 119, 180, 60),
             stepMode="center",
         )
 
         self._roi = pg.LinearRegionItem(values=[100, 200], movable=True)
+        self._roi_dragging = False
         self._roi.setZValue(10)
         self._hist_plot.addItem(self._roi)
         self._roi.setVisible(False)
-        self._roi.sigRegionChanged.connect(self._update_roi_stats)
+        # This pyqtgraph version exposes no sigRegionChangeStarted. The first
+        # sigRegionChanged event marks an active drag; unlike the old direct
+        # connection, this handler only flips a flag and performs no ROI
+        # calculations. sigRegionChangeFinished performs the one update.
+        self._roi.sigRegionChanged.connect(self._on_roi_region_changed)
+        self._roi.sigRegionChangeFinished.connect(self._on_roi_change_finished)
+
+    def _on_roi_region_changed(self) -> None:
+        # Histogram readbacks can continue at up to 60 Hz while the mouse is
+        # moving. _update_histogram() consults this flag so none of those
+        # readbacks trigger ROI calculations during the drag either.
+        self._roi_dragging = True
+
+    def _on_roi_change_finished(self) -> None:
+        self._roi_dragging = False
+        self._update_roi_stats()
 
     def set_roi_visible(self, visible: bool) -> None:
         """Show/hide the ROI selection tool and its stats panel."""
         self._roi.setVisible(visible)
         self.ui.roiStatsPanel.setVisible(visible)
+        if not visible:
+            self._roi_dragging = False
         if visible:
             self._update_roi_stats()
 
@@ -722,7 +749,7 @@ class MCAController(QWidget):
         self._mca.clear_spectrum()
         self._hist_curve.setData([], [])
         self._last_histogram = None
-        if self._roi.isVisible():
+        if self._roi.isVisible() and not self._roi_dragging:
             self._update_roi_stats()
 
     def _on_export_csv(self) -> None:
@@ -955,9 +982,33 @@ class MCAController(QWidget):
     # ------------------------------------------------------------------
 
     def _on_readback(self, rb: MCAReadback) -> None:
+        """Coalesce worker readbacks instead of rendering every signal.
+
+        This slot runs in the GUI thread. At 30 Hz, directly calling three
+        PlotDataItem.setData() methods here kept Qt continuously busy with
+        readback/paint events and starved ordinary clicks even though the
+        plots themselves appeared current. Replacing the pending value is
+        O(1); a single-shot timer renders only the newest snapshot at the
+        capped presentation rate, so stale frames never form a queue.
+        """
+        self._pending_readback = rb
+        if not self._render_timer.isActive():
+            requested_hz = self.ui.spinRefreshRate.value()
+            render_hz = min(requested_hz, _MAX_GUI_RENDER_HZ)
+            self._render_timer.start(max(1, 1000 // render_hz))
+
+    def _render_pending_readback(self) -> None:
+        rb = self._pending_readback
+        self._pending_readback = None
+        if rb is None:
+            return
+
         self._update_debug_plot(rb.debug1, rb.debug2)
-        self._update_histogram(rb.histogram)
+        # Update elapsed time before ROI statistics, which are invoked from
+        # _update_histogram(); the old ordering displayed CPS using the
+        # previous readback's elapsed value.
         self._update_statistics(rb)
+        self._update_histogram(rb.histogram)
 
     def _update_debug_plot(self, raw_debug1: np.ndarray, raw_debug2: np.ndarray) -> None:
         samples = self.ui.sliderFrameSamples.value()
@@ -976,7 +1027,7 @@ class MCAController(QWidget):
         self._last_histogram = histogram
         channels = np.arange(len(histogram) + 1)
         self._hist_curve.setData(channels, histogram)
-        if self._roi.isVisible():
+        if self._roi.isVisible() and not self._roi_dragging:
             self._update_roi_stats()
 
     def _update_statistics(self, rb: MCAReadback) -> None:
