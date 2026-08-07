@@ -13,7 +13,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "PySide6>=6.7",
+    "PySide6>=6.7,<6.10",
     "pyqtgraph>=0.13",
     "numpy>=2.0",
     "scipy>=1.13",
@@ -89,6 +89,11 @@ replace = 'version = "{new_version}"'
 
 [project.urls]
 Repository = "https://github.com/nucliflare/nlab-digitizer-community"
+
+[tool.uv]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 
 [tool.uv.sources]
 nlab-modbus = { git = "https://github.com/nucliflare/nlab-modbus", tag = "v0.2.2" }
