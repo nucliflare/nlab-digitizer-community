@@ -360,19 +360,19 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
            <layout class="QFormLayout" name="formCrRc2">
             <item row="0" column="0">
              <widget class="QLabel" name="labelLpPreset">
-              <property name="text"><string>LP filter:</string></property>
+              <property name="text"><string>Low Pass filter:</string></property>
              </widget>
             </item>
             <item row="0" column="1">
              <widget class="QComboBox" name="comboLpPreset">
               <item><property name="text"><string>200 MHz</string></property></item>
-              <item><property name="text"><string>700 MHz</string></property></item>
+              <item><property name="text"><string>70 MHz</string></property></item>
               <item><property name="text"><string>Average</string></property></item>
              </widget>
             </item>
             <item row="1" column="0">
              <widget class="QLabel" name="labelCrrc2Cdelay">
-              <property name="text"><string>Coarse delay:</string></property>
+              <property name="text"><string>C delay:</string></property>
              </widget>
             </item>
             <item row="1" column="1">
@@ -398,7 +398,7 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
             </item>
             <item row="2" column="0">
              <widget class="QLabel" name="labelCrrc2Fdelay">
-              <property name="text"><string>Fine delay:</string></property>
+              <property name="text"><string>F delay:</string></property>
              </widget>
             </item>
             <item row="2" column="1">
