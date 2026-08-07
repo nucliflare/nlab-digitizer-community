@@ -445,14 +445,10 @@ class MCAController(QWidget):
             )
         )
         self.ui.comboDebug1.currentIndexChanged.connect(
-            lambda i: self._apply_hardware_setting(
-                lambda: self._mca.set_mem1_sig_select(i)
-            )
+            lambda i: self._mca.set_mem1_sig_select(i)
         )
         self.ui.comboDebug2.currentIndexChanged.connect(
-            lambda i: self._apply_hardware_setting(
-                lambda: self._mca.set_mem2_sig_select(i)
-            )
+            lambda i: self._mca.set_mem2_sig_select(i)
         )
         self.ui.spinPileupWindow.editingFinished.connect(
             lambda: self._apply_hardware_setting(
