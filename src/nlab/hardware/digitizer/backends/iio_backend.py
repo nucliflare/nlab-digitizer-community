@@ -109,21 +109,25 @@ _DAC_DEVICE_NAME = "vdpp_afe_dac"
 # Both device names are literal strings hardcoded once in their driver's
 # probe() (indio_dev->name = "..."), identical across every channel
 # instance -- confirmed from vdpp-pulse-processor.c / vdpp-input-filter.c --
-# so, like _SCOPE_DEVICE_NAME, channel selection is by discovery order.
+# Current pulse-processor/lm-frame drivers additionally expose channel_index;
+# _device_for_channel() uses it as the authoritative remote pairing key.
 _PULSE_PROCESSOR_DEVICE_NAME = "vdpp_pulse_processor"
 _INPUT_FILTER_DEVICE_NAME = "vdpp_input_filter"
 _LM_FRAME_DEVICE_NAME = "vdpp_lm_frame"
 
-# vdpp-lm-frame.c: the driver rejects any other scan size, mask, or buffer
-# length in lm_buffer_preenable(). One refill is therefore exactly one
-# complete, little-endian 16 KiB frame. This dtype intentionally does not
-# reuse dma.py's legacy gRPC/ZMQ _EVENT_DTYPE: that stream splits the first
-# two bytes into marker/zc_offset, while the IIO ABI defines one le16 flags
-# field followed by a le16 Q2 CFD time.
+# Current vdpp-lm-frame.c: Linux transports one opaque repeated-u8 scan
+# element (u8[16]), not the superseded five semantic scan channels. Linux
+# 5.15 tracks IIO_TIMESTAMP separately from ordinary scan masks, so the old
+# five-bit mask could never be accepted and buffer creation returned EINVAL.
+# One refill remains one unchanged 16 KiB frame. _LM_EVENT_DTYPE is only the
+# application's selected decoder for the currently deployed producer schema;
+# it is not the kernel/IIO transport ABI.
 _LM_FRAME_RECORDS = 1024
 _LM_RECORD_BYTES = 16
 _LM_FRAME_BYTES = _LM_FRAME_RECORDS * _LM_RECORD_BYTES
 _LM_IP_VERSION = 121
+_LM_KERNEL_BUFFER_COUNT = 8
+_LM_RECORD_LAYOUT = "opaque[16]"
 _LM_EVENT_DTYPE = np.dtype([
     ("flags", "<u2"),
     ("cfd_q2", "<u2"),
@@ -196,6 +200,7 @@ _LM_CLOSE_INACTIVITY_SECONDS = 1.0
 _LM_CLOSE_POLL_SECONDS = 0.050
 _LM_CLOSE_JOIN_SECONDS = 1.25
 _LM_CLOSE_RELEASE_SECONDS = 3.0
+_LM_EXPECTED_CANCEL_ERRNOS = frozenset((9, 110, 125))  # EBADF, ETIMEDOUT, ECANCELED
 
 
 def _device_number(device: iio.Device) -> int:
@@ -219,6 +224,41 @@ def _devices_named(context: iio.Context, name: str) -> list[iio.Device]:
         key=_device_number,
     )
 
+
+def _device_for_channel(
+    context: iio.Context,
+    name: str,
+    channel: int,
+) -> iio.Device | None:
+    """Return a same-name device by stable channel index when available.
+
+    Current MCA drivers expose ``channel_index`` specifically so remote iiod
+    clients can pair ``vdpp_pulse_processor`` with ``vdpp_lm_frame`` without
+    relying on probe-derived ``iio:deviceN`` identifiers. Older drivers (and
+    the current scope/input-filter drivers) lack that attribute, so retain the
+    deterministic sorted-device fallback for compatibility.
+    """
+    devices = _devices_named(context, name)
+    indexed = [device for device in devices if "channel_index" in device.attrs]
+    if indexed:
+        if len(indexed) != len(devices):
+            raise RuntimeError(
+                f"'{name}' exposes channel_index on only {len(indexed)} of "
+                f"{len(devices)} devices; refusing ambiguous channel pairing"
+            )
+        matches = [
+            device
+            for device in indexed
+            if int(device.attrs["channel_index"].value) == channel
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"expected exactly one '{name}' device with channel_index="
+                f"{channel}, found {len(matches)}"
+            )
+        return matches[0]
+    return devices[channel] if channel < len(devices) else None
+
 # vdpp-scope.c's trigger_mode is a plain integer register (0..4), not a
 # string attribute like the previous driver. Confirmed from the driver
 # source: SCOPE_TRIG_LEVEL_ABOVE=0, SCOPE_TRIG_LEVEL_BELOW=1,
@@ -231,12 +271,10 @@ def _devices_named(context: iio.Context, name: str) -> list[iio.Device]:
 class IIODigitizerBackend(DigitizerBackend):
     """Scope/MCA backend for the rewritten IIO device set.
 
-    Same-name instances are sorted by ``iio:deviceN`` before applying the
-    legacy integer *channel* index. This is deterministic within a device
-    tree, but is still only a fallback: per user-api.md, probe order is not
-    a physical A/B identity and the remote context tested so far exposes no
-    platform path or label with which userspace could pair the four device
-    types authoritatively.
+    MCA pulse-processor/list-frame instances are selected by the stable
+    ``channel_index`` exported by current drivers. Same-name device sorting is
+    retained only for older drivers and for scope/input-filter devices, which
+    still expose no authoritative channel key through the remote context.
     """
 
     def __init__(
@@ -345,9 +383,12 @@ class IIODigitizerBackend(DigitizerBackend):
         # "vdpp_pulse_processor"/"vdpp_input_filter" for every instance,
         # confirmed from vdpp-pulse-processor.c's pp_probe() and
         # vdpp-input-filter.c's vdpp_input_filter_probe()), so channel
-        # selection is by discovery order, exactly like vdpp_scope above.
-        pulse_processors = _devices_named(self._ctx, _PULSE_PROCESSOR_DEVICE_NAME)
-        self._pp = pulse_processors[channel] if channel < len(pulse_processors) else None
+        # Current pulse-processor drivers expose a stable channel_index over
+        # iiod. _device_for_channel() uses it when present and keeps sorted
+        # probe order only as an older-driver fallback.
+        self._pp = _device_for_channel(
+            self._ctx, _PULSE_PROCESSOR_DEVICE_NAME, channel,
+        )
 
         input_filters = _devices_named(self._ctx, _INPUT_FILTER_DEVICE_NAME)
         self._input_filter = input_filters[channel] if channel < len(input_filters) else None
@@ -374,36 +415,48 @@ class IIODigitizerBackend(DigitizerBackend):
         # will use.
         if self._pp is not None:
             self._mca_ctx = iio.Context(uri)
-            mca_pulse_processors = _devices_named(
-                self._mca_ctx, _PULSE_PROCESSOR_DEVICE_NAME,
+            self._mca_pp = _device_for_channel(
+                self._mca_ctx, _PULSE_PROCESSOR_DEVICE_NAME, channel,
             )
-            self._mca_pp = mca_pulse_processors[channel]
+            if self._mca_pp is None:
+                raise RuntimeError(
+                    f"no {_PULSE_PROCESSOR_DEVICE_NAME} device for channel {channel} "
+                    "in the MCA polling context"
+                )
         else:
             self._mca_ctx = None
             self._mca_pp = None
 
-        # A third, dedicated context owns list-mode DMA. MCA polling uses
-        # _mca_ctx and GUI/config calls use _ctx, so sharing either with a
-        # blocking refill loop would reintroduce the cross-thread libiio
-        # corruption already confirmed for scope DMA. The pulse-processor
-        # handle from this context owns the ordered enable write after the
-        # first reader has entered refill().
+        # List-mode DMA uses two more contexts with one transport role each.
+        # The stream context owns only vdpp_lm_frame/Buffer.refill(); the
+        # control context owns pulse_processor.enable and its gate reads.
+        # mca_listmode_capture.py explicitly forbids multiplexing a blocked
+        # refill and measurement control over one remote iiod connection.
+        # MCA polling uses _mca_ctx and GUI/config calls use _ctx, so neither
+        # is shared with the DMA worker either.
         self._mca_dma_ctx: iio.Context | None = None
+        self._mca_dma_control_ctx: iio.Context | None = None
+        self._mca_dma_control_lock = threading.RLock()
         self._mca_dma_pp: iio.Device | None = None
         self._lm_frame: iio.Device | None = None
         self._mca_dma_buf: iio.Buffer | None = None
+        self._mca_dma_stop_requested = threading.Event()
+        self._mca_dma_lifecycle_lock = threading.RLock()
+        self._mca_dma_cancel_timer: threading.Timer | None = None
         if self._pp is not None:
             mca_dma_ctx = iio.Context(uri)
-            mca_dma_pp = _devices_named(mca_dma_ctx, _PULSE_PROCESSOR_DEVICE_NAME)
-            lm_frames = _devices_named(mca_dma_ctx, _LM_FRAME_DEVICE_NAME)
-            if channel < len(mca_dma_pp) and channel < len(lm_frames):
+            mca_dma_control_ctx = iio.Context(uri)
+            mca_dma_pp = _device_for_channel(
+                mca_dma_control_ctx, _PULSE_PROCESSOR_DEVICE_NAME, channel,
+            )
+            lm_frame = _device_for_channel(
+                mca_dma_ctx, _LM_FRAME_DEVICE_NAME, channel,
+            )
+            if mca_dma_pp is not None and lm_frame is not None:
                 self._mca_dma_ctx = mca_dma_ctx
-                self._mca_dma_pp = mca_dma_pp[channel]
-                self._lm_frame = lm_frames[channel]
-                # lm_scan_masks[] permits GENMASK(4, 0) or zero only.
-                # lm_buffer_preenable() rejects every partial scan.
-                for lm_channel in self._lm_frame.channels:
-                    lm_channel.enabled = True
+                self._mca_dma_control_ctx = mca_dma_control_ctx
+                self._mca_dma_pp = mca_dma_pp
+                self._lm_frame = lm_frame
 
         log.info("IIO backend: connected ch%d (%s) to %s", channel, _SCOPE_DEVICE_NAME, uri)
         if self._pp is None:
@@ -418,12 +471,12 @@ class IIODigitizerBackend(DigitizerBackend):
                 "configuration works, but list-mode DMA is unavailable",
                 channel, _LM_FRAME_DEVICE_NAME,
             )
-        else:
+        elif "channel_index" not in self._pp.attrs:
             log.warning(
                 "IIO backend ch%d: same-name devices are selected by sorted "
-                "IIO probe index; user-api.md says this is not a guaranteed "
-                "physical A/B identity because remote IIO exposes no platform "
-                "path for authoritative pairing",
+                "IIO probe index because this older pulse-processor driver "
+                "does not expose channel_index; physical A/B identity is not "
+                "guaranteed",
                 channel,
             )
 
@@ -818,9 +871,10 @@ class IIODigitizerBackend(DigitizerBackend):
             "followed by one NUL transport terminator"
         )
 
-    # MCA list-mode DMA helpers. These exclusively use _mca_dma_ctx's
-    # handles and run on IIOMcaDmaWorker's thread; GUI configuration and
-    # MCAWorker polling remain on their two separate contexts.
+    # MCA list-mode DMA helpers run on IIOMcaDmaWorker's thread. Buffer I/O
+    # exclusively uses _mca_dma_ctx, while pulse-processor control uses the
+    # independent _mca_dma_control_ctx. GUI configuration and MCAWorker
+    # polling remain on two further contexts.
 
     def _require_lm_frame(self) -> iio.Device:
         if self._lm_frame is None:
@@ -834,7 +888,7 @@ class IIODigitizerBackend(DigitizerBackend):
         if self._mca_dma_pp is None:
             raise RuntimeError(
                 f"no {_PULSE_PROCESSOR_DEVICE_NAME} handle bound in the "
-                "dedicated MCA DMA context"
+                "dedicated MCA DMA control context"
             )
         return self._mca_dma_pp
 
@@ -842,19 +896,22 @@ class IIODigitizerBackend(DigitizerBackend):
         return str(self._require_lm_frame().attrs[name].value)
 
     def _mca_dma_pp_attr_get(self, name: str) -> str:
-        return str(self._require_mca_dma_pp().attrs[name].value)
+        with self._mca_dma_control_lock:
+            return str(self._require_mca_dma_pp().attrs[name].value)
 
     def _mca_dma_pp_attr_set(self, name: str, value: str) -> None:
-        self._require_mca_dma_pp().attrs[name].value = value
+        with self._mca_dma_control_lock:
+            self._require_mca_dma_pp().attrs[name].value = value
 
     def _validate_lm_geometry(self) -> None:
         """Validate the fixed v121 ABI before creating a DMA buffer.
 
         The constants are not client preferences: lm_probe() rejects a
         different IP version/frame size and lm_buffer_preenable() rejects
-        every scan size or buffer length except 16 bytes x 1024 records.
-        Reading all three attributes here makes a mismatched deployed
-        driver fail with a precise error before an opaque Buffer error.
+        every scan size or buffer length except one opaque u8[16] element x
+        1024 records. Reading the attributes here makes the superseded
+        five-channel driver fail precisely before iio.Buffer() returns its
+        otherwise opaque EINVAL.
         """
         version = int(self._lm_attr_get("ip_version"))
         records = int(self._lm_attr_get("frame_records"))
@@ -869,22 +926,46 @@ class IIODigitizerBackend(DigitizerBackend):
                 f"{_LM_FRAME_RECORDS}, {_LM_FRAME_BYTES}"
             )
 
-        channels = self._require_lm_frame().channels
-        if len(channels) != 5:
+        lm_frame = self._require_lm_frame()
+        pulse_processor = self._require_mca_dma_pp()
+        if "channel_index" in lm_frame.attrs and "channel_index" in pulse_processor.attrs:
+            lm_channel = int(lm_frame.attrs["channel_index"].value)
+            pp_channel = int(pulse_processor.attrs["channel_index"].value)
+            if lm_channel != self._ch or pp_channel != self._ch:
+                raise RuntimeError(
+                    "mismatched MCA DMA device pair: "
+                    f"backend channel={self._ch}, pulse_processor={pp_channel}, "
+                    f"lm_frame={lm_channel}"
+                )
+
+        channels = lm_frame.channels
+        layout = self._lm_attr_get("record_layout").strip()
+        if layout != _LM_RECORD_LAYOUT:
+            raise RuntimeError(
+                f"unsupported {_LM_FRAME_DEVICE_NAME} record_layout={layout!r}; "
+                f"expected {_LM_RECORD_LAYOUT!r}. Targets exposing five "
+                "semantic channels use the superseded Linux 5.15 ABI whose "
+                "timestamp scan mask makes buffer creation fail with EINVAL"
+            )
+        if len(channels) != 1:
             raise RuntimeError(
                 f"{_LM_FRAME_DEVICE_NAME} exposes {len(channels)} scan "
-                "channels; v121 requires exactly five"
+                "channels; the current v121 transport requires exactly one "
+                "opaque u8[16] scan element"
             )
-        for channel in channels:
-            channel.enabled = True
-        if self._require_lm_frame().sample_size != _LM_RECORD_BYTES:
+        channels[0].enabled = True
+        if lm_frame.sample_size != _LM_RECORD_BYTES:
             raise RuntimeError(
                 f"{_LM_FRAME_DEVICE_NAME} scan mask produces "
-                f"{self._require_lm_frame().sample_size} bytes per record; "
+                f"{lm_frame.sample_size} bytes per record; "
                 f"v121 requires exactly {_LM_RECORD_BYTES}"
             )
 
-    def _start_mca_reader_then_enable(self, buf: iio.Buffer) -> int:
+    def _start_mca_reader_then_enable(
+        self,
+        buf: iio.Buffer,
+        on_started: Callable[[], None] | None = None,
+    ) -> int:
         """Start the first refill before pulse_processor.enable=1.
 
         This is the list-mode form of _start_reader_then_enable(). It
@@ -919,14 +1000,34 @@ class IIODigitizerBackend(DigitizerBackend):
         thread.start()
         if not entered.wait(_DMA_FIRST_REFILL_ENTER_SECONDS):
             buf.cancel()
+            thread.join(_LM_CLOSE_JOIN_SECONDS)
             raise RuntimeError(
                 "MCA list-mode reader did not start within "
                 f"{_DMA_FIRST_REFILL_ENTER_SECONDS:.2f} seconds -- refusing "
                 "to write pulse_processor.enable=1 without a listener"
             )
 
-        if not bool(int(self._mca_dma_pp_attr_get("enable"))):
-            self._mca_dma_pp_attr_set("enable", "1")
+        try:
+            if not bool(int(self._mca_dma_pp_attr_get("enable"))):
+                self._mca_dma_pp_attr_set("enable", "1")
+            # Report readiness only after the buffer is armed, a reader is
+            # waiting, and the producer has been enabled. Previously the
+            # streamer emitted ready before iio.Buffer() even ran, allowing
+            # the polling worker to observe a false completed measurement.
+            if on_started is not None:
+                on_started()
+        except BaseException:
+            try:
+                self._mca_dma_pp_attr_set("enable", "0")
+            except OSError:
+                log.warning(
+                    "IIO backend ch%d: failed to stop MCA after start error",
+                    self._ch,
+                    exc_info=True,
+                )
+            buf.cancel()
+            thread.join(_LM_CLOSE_JOIN_SECONDS)
+            raise
 
         thread.join()
         if errors:
@@ -939,10 +1040,19 @@ class IIODigitizerBackend(DigitizerBackend):
     def _create_mca_dma_buffer(self) -> None:
         """Arm the fixed 1024-record list-mode buffer while stopped."""
         self._close_mca_dma_buffer()
-        self._validate_lm_geometry()
+        self._mca_dma_stop_requested.clear()
 
         if bool(int(self._mca_dma_pp_attr_get("enable"))):
             self._mca_dma_pp_attr_set("enable", "0")
+
+        lm_frame = self._require_lm_frame()
+        # user-api.md's production lifecycle and mca_listmode_capture.py both
+        # require several mmap blocks so the driver can rearm Simple DMA from
+        # its completion callback without a network round-trip. Eight is the
+        # reference value; unlike vdpp_scope, list mode must not force one.
+        lm_frame.set_kernel_buffers_count(_LM_KERNEL_BUFFER_COUNT)
+        self._validate_lm_geometry()
+
         if bool(int(self._mca_dma_pp_attr_get("list_buffer_active"))):
             raise RuntimeError(
                 "cannot arm MCA list-mode DMA: pulse processor still "
@@ -956,28 +1066,39 @@ class IIODigitizerBackend(DigitizerBackend):
 
         try:
             self._mca_dma_buf = iio.Buffer(
-                self._require_lm_frame(), _LM_FRAME_RECORDS, False,
+                lm_frame, _LM_FRAME_RECORDS, False,
             )
         except OSError as exc:
-            # Live-tested against the board at 192.168.10.128 on
-            # 2026-08-06: the deployed target returned EINVAL here even
-            # after all five scan elements, a 16-byte sample_size and the
-            # 1024-record/16384-byte attributes were independently
-            # verified. The official iio_readdev CLI reproduced the same
-            # failure for 512, 1024 and 2048 requested scans, so that
-            # specific failure is below this Python client (the driver's
-            # dev_err from lm_buffer_preenable or the DMA buffer core must
-            # be inspected in target dmesg).
+            diagnostics = ", ".join(
+                f"{name}={self._lm_attr_get(name)}"
+                for name in (
+                    "buffer_active",
+                    "dma_fault",
+                    "dma_error_count",
+                    "queued_blocks",
+                    "kernel_buffer_blocks",
+                )
+                if name in lm_frame.attrs
+            )
             raise RuntimeError(
-                "failed to arm vdpp_lm_frame after validating the complete "
-                "five-channel, 16-byte scan and fixed 1024-record geometry; "
-                "the target rejected buffer enable. Reproduce with "
-                "iio_readdev and inspect target dmesg for the driver-side "
-                "EINVAL reason"
+                "failed to arm vdpp_lm_frame after selecting eight kernel "
+                "blocks and validating the single opaque 16-byte scan with "
+                "1024 records; the target rejected buffer creation"
+                + (f" ({diagnostics})" if diagnostics else "")
             ) from exc
+
+        if "kernel_buffer_blocks" in lm_frame.attrs:
+            blocks = int(self._lm_attr_get("kernel_buffer_blocks"))
+            if blocks != _LM_KERNEL_BUFFER_COUNT:
+                self._close_mca_dma_buffer(drain=False)
+                raise RuntimeError(
+                    f"vdpp_lm_frame allocated {blocks} kernel blocks; "
+                    f"expected {_LM_KERNEL_BUFFER_COUNT}"
+                )
         log.debug(
-            "IIO backend ch%d: MCA list-mode buffer armed (%d records, %d bytes)",
-            self._ch, _LM_FRAME_RECORDS, _LM_FRAME_BYTES,
+            "IIO backend ch%d: MCA list-mode buffer armed (%d records, "
+            "%d bytes, %d kernel blocks)",
+            self._ch, _LM_FRAME_RECORDS, _LM_FRAME_BYTES, _LM_KERNEL_BUFFER_COUNT,
         )
 
     def _parse_lm_block(self, raw: bytes) -> np.ndarray:
@@ -988,30 +1109,73 @@ class IIODigitizerBackend(DigitizerBackend):
             )
         return np.frombuffer(raw, dtype=_LM_EVENT_DTYPE).copy()
 
+    def start_mca_dma_capture(
+        self,
+        on_started: Callable[[], None] | None = None,
+    ) -> np.ndarray:
+        """Arm list mode, start its reader, enable MCA, and return frame one.
+
+        ``on_started`` runs only after the buffer owns the list gate, the
+        first refill thread is present, and ``pulse_processor.enable`` reads
+        as enabled. It lets the GUI start status polling without the previous
+        pre-arm race. The call then remains blocked until the first complete
+        16384-byte frame arrives.
+        """
+        if self._mca_dma_buf is not None:
+            raise RuntimeError("MCA list-mode capture is already active")
+
+        self._create_mca_dma_buffer()
+        buf = self._mca_dma_buf
+        assert buf is not None
+        try:
+            nbytes = self._start_mca_reader_then_enable(buf, on_started)
+            if nbytes == 0 and self._mca_dma_stop_requested.is_set():
+                self._close_mca_dma_buffer(drain=False)
+                return np.empty(0, dtype=_LM_EVENT_DTYPE)
+            raw = ctypes.string_at(iio._buffer_start(buf._buffer), nbytes)
+            return self._parse_lm_block(raw)
+        except BaseException as exc:
+            expected_stop = (
+                self._mca_dma_stop_requested.is_set()
+                and isinstance(exc, OSError)
+                and exc.errno in _LM_EXPECTED_CANCEL_ERRNOS
+            )
+            self._close_mca_dma_buffer(drain=False)
+            if expected_stop:
+                return np.empty(0, dtype=_LM_EVENT_DTYPE)
+            raise
+
     def read_mca_dma_frame(self) -> np.ndarray:
         """Return one parsed 1024-record list-mode DMA block.
 
-        This is an IIO-backend extension, not part of MCABackend. The first
-        call arms the buffer and starts acquisition with reader-before-
-        enable ordering; later calls reuse the same buffer. The returned
+        This is an IIO-backend extension, not part of MCABackend. New stream
+        sessions should call start_mca_dma_capture() for the first block so
+        readiness can be reported at the correct lifecycle boundary. The
+        lazy-start fallback is retained for direct callers. The returned
         structured dtype follows vdpp-lm-frame.c exactly and deliberately
         differs from the legacy gRPC/ZMQ event dtype.
         """
-        first = self._mca_dma_buf is None
-        if first:
-            self._create_mca_dma_buffer()
+        if self._mca_dma_buf is None:
+            return self.start_mca_dma_capture()
 
         buf = self._mca_dma_buf
         assert buf is not None
         try:
-            nbytes = (
-                self._start_mca_reader_then_enable(buf)
-                if first else iio._buffer_refill(buf._buffer)
-            )
+            nbytes = iio._buffer_refill(buf._buffer)
+            if nbytes == 0 and self._mca_dma_stop_requested.is_set():
+                self._close_mca_dma_buffer(drain=False)
+                return np.empty(0, dtype=_LM_EVENT_DTYPE)
             raw = ctypes.string_at(iio._buffer_start(buf._buffer), nbytes)
             return self._parse_lm_block(raw)
-        except BaseException:
-            self._close_mca_dma_buffer()
+        except BaseException as exc:
+            expected_stop = (
+                self._mca_dma_stop_requested.is_set()
+                and isinstance(exc, OSError)
+                and exc.errno in _LM_EXPECTED_CANCEL_ERRNOS
+            )
+            self._close_mca_dma_buffer(drain=False)
+            if expected_stop:
+                return np.empty(0, dtype=_LM_EVENT_DTYPE)
             raise
 
     def _drain_mca_for_close(
@@ -1028,7 +1192,7 @@ class IIODigitizerBackend(DigitizerBackend):
         """
         stop = threading.Event()
         entered = threading.Event()
-        errors: list[BaseException] = []
+        errors: list[str] = []
         drained = 0
         last_activity = [time.monotonic()]
 
@@ -1046,7 +1210,9 @@ class IIODigitizerBackend(DigitizerBackend):
                     last_activity[0] = time.monotonic()
                 except BaseException as exc:
                     if not stop.is_set():
-                        errors.append(exc)
+                        # Do not retain a traceback that owns this closure and
+                        # its Buffer reference across native buffer teardown.
+                        errors.append(f"{type(exc).__name__}: {exc}")
                     return
 
         worker = threading.Thread(
@@ -1098,8 +1264,16 @@ class IIODigitizerBackend(DigitizerBackend):
     def _close_mca_dma_buffer(
         self,
         on_frame: Callable[[np.ndarray], None] | None = None,
+        *,
+        drain: bool = True,
     ) -> int:
         """Stop, drain, then destroy the list-mode buffer in driver order."""
+        with self._mca_dma_lifecycle_lock:
+            cancel_timer = self._mca_dma_cancel_timer
+            self._mca_dma_cancel_timer = None
+            if cancel_timer is not None:
+                cancel_timer.cancel()
+
         buf = self._mca_dma_buf
         if buf is None:
             return 0
@@ -1114,9 +1288,23 @@ class IIODigitizerBackend(DigitizerBackend):
                 self._ch, exc_info=True,
             )
 
-        drained = self._drain_mca_for_close(buf, on_frame)
+        if drain:
+            drained = self._drain_mca_for_close(buf, on_frame)
+        else:
+            # Failed arm/start or refill has no trustworthy tail to drain.
+            # Interrupt the outstanding descriptor before native teardown.
+            buf.cancel()
+            drained = 0
+
         self._mca_dma_buf = None
-        del buf  # release the final Buffer reference before polling driver state
+        # Match the hardened scope path: Buffer.__del__ timing is not a
+        # lifecycle boundary after cancellation. Destroy explicitly once all
+        # refill threads have stopped, then null the wrapper for idempotency.
+        native_buffer = buf._buffer
+        buf._buffer = None
+        if native_buffer is not None:
+            iio._buffer_destroy(native_buffer)
+        del buf
         try:
             self._wait_for_mca_dma_release()
         except RuntimeError:
@@ -1124,6 +1312,11 @@ class IIODigitizerBackend(DigitizerBackend):
                 "IIO backend ch%d: MCA list-mode buffer did not release in time",
                 self._ch, exc_info=True,
             )
+        finally:
+            # mca_listmode_capture.py: the scan element remains selected for
+            # the complete drain and is released only after buffer teardown.
+            for channel in self._require_lm_frame().channels:
+                channel.enabled = False
         return drained
 
     def close_mca_dma_capture(
@@ -1132,6 +1325,62 @@ class IIODigitizerBackend(DigitizerBackend):
     ) -> int:
         """Public stop/drain/close wrapper used by IIOMcaDmaStreamer."""
         return self._close_mca_dma_buffer(on_frame)
+
+    def request_mca_dma_stop(self) -> None:
+        """Stop the producer without cancelling the list-mode reader.
+
+        The in-band stop closes the current hardware frame. The worker keeps
+        the existing IIO buffer/refill alive so that complete final frame can
+        be consumed before close, per mca-architecture.md steps 8-10.
+        """
+        if self._mca_dma_pp is None:
+            return
+        self._mca_dma_stop_requested.set()
+        if bool(int(self._mca_dma_pp_attr_get("enable"))):
+            self._mca_dma_pp_attr_set("enable", "0")
+
+        # The reference client owns a continuous reader on another thread,
+        # waits one second without a complete frame, then cancels it. Our
+        # pull worker can itself be blocked in the first/next refill, so the
+        # same bounded inactivity rule needs an out-of-band cancellation.
+        # If a final frame arrives first, stream_events() enters close and
+        # cancels this timer before starting its ordinary drain reader.
+        with self._mca_dma_lifecycle_lock:
+            if self._mca_dma_buf is None or self._mca_dma_cancel_timer is not None:
+                return
+
+            timer: threading.Timer
+
+            def cancel_inactive_refill() -> None:
+                with self._mca_dma_lifecycle_lock:
+                    if self._mca_dma_cancel_timer is not timer:
+                        return
+                    self._mca_dma_cancel_timer = None
+                    buf = self._mca_dma_buf
+                    if buf is not None:
+                        buf.cancel()
+
+            timer = threading.Timer(
+                _LM_CLOSE_INACTIVITY_SECONDS,
+                cancel_inactive_refill,
+            )
+            timer.daemon = True
+            self._mca_dma_cancel_timer = timer
+            timer.start()
+
+    def get_mca_dma_capture_diagnostics(self) -> tuple[int, int, int, int]:
+        """Return DMA fault/error/frame/deadtime diagnostics after close.
+
+        ``dma_error_count`` is retained for the capture audit trail. It is a
+        cumulative driver diagnostic, so unlike the three continuity checks
+        it is not by itself grounds for rejecting the just-finished capture.
+        """
+        return (
+            int(self._lm_attr_get("dma_fault")),
+            int(self._lm_attr_get("dma_error_count")),
+            int(self._lm_attr_get("completed_frames")),
+            int(self._lm_attr_get("list_deadtime_raw")),
+        )
 
     # ------------------------------------------------------------------
     # ScopeBackend

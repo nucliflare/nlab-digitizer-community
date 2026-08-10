@@ -880,19 +880,36 @@ class MCAController(QWidget):
 
         self._set_controls_enabled(False)
         self.ui.lblDmaStatus.setText("Connecting...")
-        log.debug("MCA ch%d DMA [2/6]: starting worker thread (ZMQ connect + subscribe)",
-                  self._channel)
+        if isinstance(self._mca_dma, IIOMcaDmaStreamer):
+            log.debug(
+                "MCA ch%d DMA [2/6]: starting worker thread (IIO buffer arm)",
+                self._channel,
+            )
+        else:
+            log.debug(
+                "MCA ch%d DMA [2/6]: starting worker thread (ZMQ connect + subscribe)",
+                self._channel,
+            )
         self._dma_thread.start()
-        log.info("MCA DMA: worker started, waiting for socket ready, file=%s", filepath)
+        readiness = (
+            "IIO DMA arm"
+            if isinstance(self._mca_dma, IIOMcaDmaStreamer)
+            else "ZMQ socket"
+        )
+        log.info(
+            "MCA DMA: worker started, waiting for %s, file=%s",
+            readiness,
+            filepath,
+        )
 
     def _on_dma_ready(self) -> None:
         if isinstance(self._mca_dma, IIOMcaDmaStreamer):
-            # The worker is about to call read_mca_dma_frame(); that method
-            # arms all scan elements, enters the first blocking refill, and
-            # only then writes enable=1. A queued GUI-thread mca.start()
-            # here would race and violate that required ordering.
+            # The backend emits ready only after it has armed all eight
+            # kernel blocks, entered the first blocking refill and written
+            # enable=1. A GUI-thread mca.start() here would duplicate backend
+            # ownership of that lifecycle.
             log.debug(
-                "MCA ch%d IIO DMA: worker ready; backend owns ordered arm/start",
+                "MCA ch%d IIO DMA: buffer armed, reader active, measurement started",
                 self._channel,
             )
         else:
@@ -907,7 +924,7 @@ class MCAController(QWidget):
         self._start_worker()
         self.ui.btnStop.setEnabled(True)
         self.ui.lblDmaStatus.setText("Recording...")
-        log.info("MCA ch%d: DMA + measurement started (socket was ready)", self._channel)
+        log.info("MCA ch%d: DMA + measurement started", self._channel)
 
     def _on_dma_progress(self, event_count: int) -> None:
         unit = "records" if isinstance(self._mca_dma, IIOMcaDmaStreamer) else "events"

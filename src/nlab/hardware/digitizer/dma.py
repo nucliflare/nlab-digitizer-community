@@ -7,11 +7,14 @@ worker threads.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import struct
 import threading
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
@@ -32,14 +35,23 @@ class _IIOScopeBackend(Protocol):
 
 
 class _IIOMcaBackend(Protocol):
+    def start_mca_dma_capture(
+        self,
+        on_started: Callable[[], None] | None = None,
+    ) -> np.ndarray: ...
+
     def read_mca_dma_frame(self) -> np.ndarray: ...
 
     def mca_dma_measurement_in_progress(self) -> bool: ...
+
+    def request_mca_dma_stop(self) -> None: ...
 
     def close_mca_dma_capture(
         self,
         on_frame: Callable[[np.ndarray], None] | None = None,
     ) -> int: ...
+
+    def get_mca_dma_capture_diagnostics(self) -> tuple[int, int, int, int]: ...
 
 
 log = logging.getLogger(__name__)
@@ -57,6 +69,10 @@ FILE_HEADER_STRUCT = struct.Struct("<4sHBBdI4x")  # 24 bytes
 FILE_MAGIC = b"NDMA"
 FILE_VERSION = 1
 IIO_LM_FILE_VERSION = 2
+IIO_LM_FRAME_RECORDS = 1024
+IIO_LM_RECORD_BYTES = 16
+IIO_LM_FRAME_BYTES = IIO_LM_FRAME_RECORDS * IIO_LM_RECORD_BYTES
+IIO_LM_KERNEL_BUFFER_COUNT = 8
 
 # Each raw scope DMA frame is prefixed with a per-frame timestamp: the first
 # 4 int16 slots (8 bytes) are a little-endian uint64, the remaining
@@ -96,6 +112,59 @@ def _write_file_header(
     )
     f.write(header)
     f.flush()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_iio_mca_metadata(
+    path: Path,
+    *,
+    channel: int,
+    started_utc: datetime,
+    frame_count: int,
+    dma_fault: int,
+    dma_error_count: int,
+    completed_frames: int,
+    deadtime_records: int,
+) -> Path:
+    """Write the auditable sidecar used by the reference capture workflow."""
+    metadata_path = path.with_suffix(".json")
+    continuity_valid = (
+        dma_fault == 0
+        and completed_frames == frame_count
+        and deadtime_records == 0
+    )
+    metadata = {
+        "format": "nlab-iio-mca-ndma-v2",
+        "capture": str(path.resolve()),
+        "capture_sha256": _sha256_file(path),
+        "channel_index": channel,
+        "started_utc": started_utc.isoformat(),
+        "finished_utc": datetime.now(UTC).isoformat(),
+        "ndma_header_bytes": FILE_HEADER_STRUCT.size,
+        "record_layout": "opaque[16]",
+        "record_bytes": IIO_LM_RECORD_BYTES,
+        "frame_records": IIO_LM_FRAME_RECORDS,
+        "frame_bytes": IIO_LM_FRAME_BYTES,
+        "kernel_buffers": IIO_LM_KERNEL_BUFFER_COUNT,
+        "frames": frame_count,
+        "records": frame_count * IIO_LM_FRAME_RECORDS,
+        "driver_completed_frames": completed_frames,
+        "driver_dma_fault": dma_fault,
+        "driver_dma_error_count": dma_error_count,
+        "list_deadtime_raw": deadtime_records,
+        "continuity_valid": continuity_valid,
+    }
+    with metadata_path.open("w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return metadata_path
 
 
 class ScopeDmaStreamer:
@@ -328,8 +397,9 @@ class IIOMcaDmaStreamer:
     """Pull fixed 16 KiB MCA list-mode blocks from the IIO backend.
 
     This is not interchangeable with McaDmaStreamer. The IIO driver has no
-    ZMQ sentinels: the first backend read arms all five scan elements,
-    starts a blocking reader, and only then writes pulse_processor.enable=1.
+    ZMQ sentinels: the first backend read arms the single opaque u8[16] scan
+    element, starts a blocking reader, and only then writes
+    pulse_processor.enable=1.
     Shutdown is likewise backend-owned: enable=0, drain complete blocks for
     the documented one-second inactivity window, then destroy the buffer.
     """
@@ -337,6 +407,10 @@ class IIOMcaDmaStreamer:
     def __init__(self, backend: _IIOMcaBackend, channel: int) -> None:
         self._backend = backend
         self._channel = channel
+
+    def request_stop(self) -> None:
+        """Stop production while leaving the reader armed for tail drain."""
+        self._backend.request_mca_dma_stop()
 
     def stream_events(
         self,
@@ -358,9 +432,10 @@ class IIOMcaDmaStreamer:
         total_records = 0
         frame_count = 0
         file_handle = None
+        started_utc = datetime.now(UTC)
 
         if filepath is not None:
-            file_handle = open(filepath, "wb")
+            file_handle = open(filepath, "wb", buffering=IIO_LM_FRAME_BYTES * 8)
             _write_file_header(
                 file_handle,
                 self._channel,
@@ -380,7 +455,6 @@ class IIOMcaDmaStreamer:
                 )
             if file_handle is not None:
                 file_handle.write(events.tobytes())
-                file_handle.flush()
             if event_buffer is not None:
                 buf, lock = event_buffer
                 with lock:
@@ -390,29 +464,89 @@ class IIOMcaDmaStreamer:
             if on_progress is not None:
                 on_progress(total_records)
 
+        capture_failed = False
         try:
-            if on_ready is not None:
-                on_ready()
+            # Backend readiness is a hardware lifecycle boundary, not merely
+            # worker-thread startup: arm all eight kernel blocks, enter the
+            # first refill, enable the pulse processor, then notify the GUI.
+            first = self._backend.start_mca_dma_capture(on_started=on_ready)
+            if len(first):
+                consume(first)
             while not stop_event.is_set():
-                consume(self._backend.read_mca_dma_frame())
+                if not self._backend.mca_dma_measurement_in_progress():
+                    break
+                frame = self._backend.read_mca_dma_frame()
+                if len(frame):
+                    consume(frame)
                 # Hardware time-limit completion can occur before the GUI
                 # polling worker delivers its queued stop request. Once the
                 # final complete frame has arrived, avoid entering another
                 # refill that could block forever with the producer stopped.
                 if not self._backend.mca_dma_measurement_in_progress():
                     break
+        except BaseException:
+            capture_failed = True
+            raise
         finally:
             # Keep the file/event callback alive while close drains the
             # final complete blocks; destroying the buffer first would lose
             # that tail by construction.
-            drained = self._backend.close_mca_dma_capture(on_frame=consume)
-            if file_handle is not None:
-                file_handle.close()
+            drained = 0
+            try:
+                drained = self._backend.close_mca_dma_capture(on_frame=consume)
+            except BaseException:
+                if capture_failed:
+                    log.exception(
+                        "IIO MCA DMA: buffer close also failed while handling "
+                        "the capture error"
+                    )
+                else:
+                    raise
+            finally:
+                if file_handle is not None:
+                    file_handle.close()
             log.info(
                 "IIO MCA DMA: finished -- %d records in %d frames "
                 "(%d frame(s) received during close drain)",
                 total_records, frame_count, drained,
             )
+
+        dma_fault, dma_error_count, completed_frames, deadtime_records = (
+            self._backend.get_mca_dma_capture_diagnostics()
+        )
+        if filepath is not None:
+            metadata_path = _write_iio_mca_metadata(
+                filepath,
+                channel=self._channel,
+                started_utc=started_utc,
+                frame_count=frame_count,
+                dma_fault=dma_fault,
+                dma_error_count=dma_error_count,
+                completed_frames=completed_frames,
+                deadtime_records=deadtime_records,
+            )
+            log.info("IIO MCA DMA: capture metadata written to %s", metadata_path)
+        if dma_fault:
+            raise RuntimeError(
+                f"MCA list-mode driver latched DMA fault reason {dma_fault}; "
+                "the capture file was retained for diagnostics"
+            )
+        if completed_frames != frame_count:
+            raise RuntimeError(
+                f"MCA list-mode capture contains {frame_count} complete frames, "
+                f"but the driver completed {completed_frames}; the retained "
+                "capture is incomplete"
+            )
+        if deadtime_records:
+            raise RuntimeError(
+                f"MCA list-mode IP reports {deadtime_records} dropped records; "
+                "the capture file was retained, but continuity is invalid"
+            )
+        log.info(
+            "IIO MCA DMA: continuity verified -- %d driver frames, "
+            "dma_fault=0, dma_error_count=%d, list_deadtime_raw=0",
+            completed_frames, dma_error_count,
+        )
 
         return total_records
 

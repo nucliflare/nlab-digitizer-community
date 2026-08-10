@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from pathlib import Path
+from typing import Any, BinaryIO, TypedDict
 
 import h5py
 import numpy as np
@@ -15,13 +18,51 @@ from nlab.hardware.digitizer.dma import (
     FILE_MAGIC,
     FILE_VERSION,
     IIO_LM_FILE_VERSION,
+    IIO_LM_FRAME_BYTES,
+    IIO_LM_FRAME_RECORDS,
     SCOPE_TIMESTAMP_WORDS,
 )
 
 log = logging.getLogger(__name__)
 
 
-def read_file_header(f) -> dict:
+class FileHeader(TypedDict):
+    version: int
+    channel: int
+    timestamp: float
+    frame_samples: int
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_iio_capture_metadata(src: Path, source_sha256: str) -> dict[str, Any] | None:
+    """Read and authenticate the optional sidecar written by the IIO streamer."""
+    metadata_path = src.with_suffix(".json")
+    if not metadata_path.is_file():
+        return None
+    with metadata_path.open(encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    if not isinstance(metadata, dict):
+        raise ValueError(f"Capture metadata is not a JSON object: {metadata_path}")
+    if metadata.get("format") != "nlab-iio-mca-ndma-v2":
+        log.warning("Ignoring unrelated capture metadata sidecar: %s", metadata_path)
+        return None
+    expected_sha256 = metadata.get("capture_sha256")
+    if expected_sha256 != source_sha256:
+        raise ValueError(
+            "Capture SHA-256 does not match its metadata sidecar: "
+            f"{metadata_path}"
+        )
+    return metadata
+
+
+def read_file_header(f: BinaryIO) -> FileHeader:
     raw = f.read(FILE_HEADER_STRUCT.size)
     if len(raw) < FILE_HEADER_STRUCT.size:
         raise ValueError("File too short for header")
@@ -29,10 +70,10 @@ def read_file_header(f) -> dict:
     if magic != FILE_MAGIC:
         raise ValueError(f"Invalid magic: {magic!r}, expected {FILE_MAGIC!r}")
     return {
-        "version": version,
-        "channel": channel,
-        "timestamp": timestamp,
-        "frame_samples": frame_samples,
+        "version": int(version),
+        "channel": int(channel),
+        "timestamp": float(timestamp),
+        "frame_samples": int(frame_samples),
     }
 
 
@@ -50,11 +91,53 @@ def convert_listmode(src: Path, dst: Path) -> int:
         raise ValueError(f"Unsupported MCA list-mode format version: {header['version']}")
 
     event_size = event_dtype.itemsize
+    if len(raw_data) % event_size:
+        raise ValueError(
+            "List-mode payload is not aligned to complete records: "
+            f"{len(raw_data)} bytes for {event_size}-byte records"
+        )
+    if (
+        header["version"] == IIO_LM_FILE_VERSION
+        and len(raw_data) % IIO_LM_FRAME_BYTES
+    ):
+        raise ValueError(
+            "IIO list-mode payload is not aligned to complete DMA frames: "
+            f"{len(raw_data)} bytes for {IIO_LM_FRAME_BYTES}-byte frames"
+        )
+
     n_events = len(raw_data) // event_size
-    if len(raw_data) % event_size != 0:
-        log.warning("Listmode file size not aligned to event size, truncating %d trailing bytes",
-                    len(raw_data) % event_size)
-    events = np.frombuffer(raw_data[:n_events * event_size], dtype=event_dtype)
+    n_frames = (
+        n_events // IIO_LM_FRAME_RECORDS
+        if header["version"] == IIO_LM_FILE_VERSION
+        else None
+    )
+    events = np.frombuffer(raw_data, dtype=event_dtype)
+    source_sha256 = _sha256_file(src)
+    capture_metadata = (
+        _read_iio_capture_metadata(src, source_sha256)
+        if header["version"] == IIO_LM_FILE_VERSION
+        else None
+    )
+
+    if capture_metadata is not None:
+        expected = {
+            "channel_index": header["channel"],
+            "record_bytes": event_size,
+            "frame_records": IIO_LM_FRAME_RECORDS,
+            "frame_bytes": IIO_LM_FRAME_BYTES,
+            "frames": n_frames,
+            "records": n_events,
+        }
+        mismatches = {
+            name: (capture_metadata.get(name), value)
+            for name, value in expected.items()
+            if capture_metadata.get(name) != value
+        }
+        if mismatches:
+            raise ValueError(
+                "Capture metadata does not match the NDMA payload: "
+                f"{mismatches}"
+            )
 
     with h5py.File(dst, "w") as h5:
         h5.attrs["source_file"] = str(src)
@@ -62,6 +145,25 @@ def convert_listmode(src: Path, dst: Path) -> int:
         h5.attrs["channel"] = header["channel"]
         h5.attrs["recording_timestamp"] = header["timestamp"]
         h5.attrs["total_events"] = n_events
+        h5.attrs["source_sha256"] = source_sha256
+        if n_frames is not None:
+            h5.attrs["transport_schema"] = "opaque[16]"
+            h5.attrs["record_bytes"] = event_size
+            h5.attrs["frame_records"] = IIO_LM_FRAME_RECORDS
+            h5.attrs["frame_bytes"] = IIO_LM_FRAME_BYTES
+            h5.attrs["total_frames"] = n_frames
+        if capture_metadata is not None:
+            h5.attrs["capture_metadata_json"] = json.dumps(
+                capture_metadata, sort_keys=True,
+            )
+            for name in (
+                "driver_completed_frames",
+                "driver_dma_fault",
+                "driver_dma_error_count",
+                "list_deadtime_raw",
+                "continuity_valid",
+            ):
+                h5.attrs[name] = capture_metadata[name]
 
         ds = h5.create_dataset("events", data=events, compression="gzip", compression_opts=4)
         ds.attrs["timestamp_unit"] = "8 ns ticks"

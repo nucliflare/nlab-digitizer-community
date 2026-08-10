@@ -218,3 +218,7 @@ class IIOMcaDmaWorker(BaseWorker):
     def stop(self) -> None:
         log.info("IIOMcaDmaWorker: stop requested")
         self._stop_event.set()
+        # Stop the producer but deliberately keep the blocking refill and
+        # buffer alive. vdpp_lm_frame completes the in-band final 16 KiB
+        # frame; stream_events() then drains and closes it in driver order.
+        self._streamer.request_stop()
