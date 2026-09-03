@@ -728,38 +728,6 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
            </layout>
           </widget>
 
-          <widget class="QWidget" name="tabTemp">
-           <attribute name="title"><string>Temp.</string></attribute>
-           <layout class="QFormLayout" name="formTemp">
-            <item row="0" column="0">
-             <widget class="QLabel" name="labelTempCoeff">
-              <property name="text"><string>Coefficient:</string></property>
-             </widget>
-            </item>
-            <item row="0" column="1">
-             <widget class="QDoubleSpinBox" name="spinTempCoeff">
-              <property name="minimum"><double>-1.0</double></property>
-              <property name="maximum"><double>1.0</double></property>
-              <property name="singleStep"><double>0.00001</double></property>
-              <property name="decimals"><number>9</number></property>
-              <property name="value"><double>-0.00026735</double></property>
-             </widget>
-            </item>
-            <item row="1" column="0">
-             <widget class="QLabel" name="labelTempOffset">
-              <property name="text"><string>Offset:</string></property>
-             </widget>
-            </item>
-            <item row="1" column="1">
-             <widget class="QSpinBox" name="spinTempOffset">
-              <property name="minimum"><number>-32768</number></property>
-              <property name="maximum"><number>32767</number></property>
-              <property name="value"><number>7</number></property>
-             </widget>
-            </item>
-           </layout>
-          </widget>
-
          </widget>
         </item>
 

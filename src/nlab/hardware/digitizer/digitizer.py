@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .backends.base import DigitizerBackend, IDSBackend
 from .backends.grpc_backend import GrpcDigitizerBackend
+from .diagnostics import GlobalDiagnosticReading
 from .dma import IIOMcaDmaStreamer, IIOScopeDmaStreamer, McaDmaStreamer, ScopeDmaStreamer
 from .hv import HVSupply
 from .mca import MultiChannelAnalyzer
@@ -71,6 +72,12 @@ class Digitizer:
         check = getattr(self._backend, "mca_hardware_present", None)
         return check() if check is not None else True
 
+    def get_global_diagnostics(self) -> list[GlobalDiagnosticReading]:
+        """Read sensors shared by the complete digitizer, not one channel."""
+        if self.hv is None:
+            return []
+        return self.hv.get_global_diagnostics()
+
     @classmethod
     def from_grpc(
         cls,
@@ -100,10 +107,15 @@ class Digitizer:
         cls,
         channel: int,
         uri: str = "ip:192.168.10.128:30431",
+        *,
+        with_ids: bool = True,
     ) -> Digitizer:
         """Create a Digitizer backed by the on-FPGA IIO device tree.
 
-        No IDS/HV connection yet — d.hv is None. When a channel exposes
+        The HV module is accessed through its AD5686R, MCP3564(R), TMP117,
+        and ADS5407 IIO devices; pass ``with_ids=False`` to leave ``d.hv``
+        as ``None``. The removed SiPM controls are reported unavailable.
+        When a channel exposes
         both vdpp_pulse_processor and vdpp_lm_frame, d.mca_dma is an
         IIOMcaDmaStreamer implementing the fixed 1024-record lifecycle in
         mca-architecture.md; it remains None on older firmware without
@@ -121,12 +133,14 @@ class Digitizer:
         the IIO scope core has no continuous-streaming hardware path.
         """
         from .backends.iio_backend import IIODigitizerBackend
+        from .backends.iio_ids_backend import IIOIDSBackend
 
         backend = IIODigitizerBackend(channel, uri)
+        ids = IIOIDSBackend(channel, uri) if with_ids else None
         scope_dma = IIOScopeDmaStreamer(backend, channel)
         mca_dma = (
             IIOMcaDmaStreamer(backend, channel)
             if backend.mca_dma_hardware_present()
             else None
         )
-        return cls(backend, scope_dma=scope_dma, mca_dma=mca_dma)
+        return cls(backend, ids, scope_dma=scope_dma, mca_dma=mca_dma)

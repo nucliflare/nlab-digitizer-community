@@ -577,6 +577,24 @@ class MultiChannelAnalyzer:
     def set_temp_offset(self, val: int) -> None:
         self._b.set_temp_offset(val)
 
+    def set_temperature_correction(self, coefficient: float, offset: int) -> None:
+        """Set both correction terms through a worker-safe path if provided."""
+        MCA_PARAMETER_SPECS[MCAParam.TEMP_COEFF].validate(
+            coefficient,
+            "temperature_coefficient",
+        )
+        MCA_PARAMETER_SPECS[MCAParam.TEMP_OFFSET].validate(
+            offset,
+            "temperature_offset",
+        )
+        with self._configuration_lock:
+            writer = getattr(self._b, "set_temperature_correction_from_worker", None)
+            if writer is not None:
+                writer(coefficient, offset)
+                return
+            self._b.set_temp_coeff(coefficient)
+            self._b.set_temp_offset(offset)
+
     # ---- edge detector coefficient ----
 
     def get_edge_det_coeff(self) -> int:

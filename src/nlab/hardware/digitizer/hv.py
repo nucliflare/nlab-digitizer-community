@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import logging
 from enum import IntEnum
 from typing import TypedDict
 
-import logging
-
 from .backends.base import IDSBackend
-from .scope import ParameterSpec, RangeSpec, ListSpec
+from .diagnostics import GlobalDiagnosticReading
+from .scope import ListSpec, ParameterSpec, RangeSpec
 
 log = logging.getLogger(__name__)
 
@@ -107,11 +107,19 @@ class HVSupply:
 
     # ---- versions / info ----
 
-    def get_versions(self) -> list:
+    def get_versions(self) -> list[int]:
         return self._b.get_versions()
 
     def get_ads_temp(self) -> float:
         return self._b.get_ads_temp()
+
+    def get_ads_temp_for_correction(self) -> float:
+        """Read ADS5407 through a worker-dedicated backend path when available."""
+        reader = getattr(self._b, "get_ads_temp_for_correction", None)
+        return float(reader()) if reader is not None else self.get_ads_temp()
+
+    def get_global_diagnostics(self) -> list[GlobalDiagnosticReading]:
+        return self._b.get_global_diagnostics()
 
     # ---- SiPM bias supply ----
 
@@ -203,7 +211,14 @@ class HVSupply:
 
     def safe_shutdown(self) -> None:
         """Ramp HV to minimum and disable SiPM. Call before closing the connection."""
-        min_hv = HV_PARAMETER_SPECS[HVParam.HV_VOLTAGE].min_val  # type: ignore[union-attr]
+        shutdown_voltage = getattr(self._b, "get_safe_shutdown_voltage", None)
+        hv_voltage_spec = HV_PARAMETER_SPECS[HVParam.HV_VOLTAGE]
+        assert isinstance(hv_voltage_spec, RangeSpec)
+        min_hv = (
+            float(shutdown_voltage())
+            if shutdown_voltage is not None
+            else hv_voltage_spec.min_val
+        )
         try:
             log.info("Shutting down HV supply: setting HV to %.1f V", min_hv)
             self._b.set_hv_voltage(min_hv)

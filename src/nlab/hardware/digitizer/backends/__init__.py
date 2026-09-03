@@ -1,6 +1,7 @@
-from .base import ScopeBackend, MCABackend, IDSBackend, DigitizerBackend
+from .base import DigitizerBackend, IDSBackend, MCABackend, ScopeBackend
 from .grpc_backend import GrpcDigitizerBackend
 from .iio_backend import IIODigitizerBackend
+from .iio_ids_backend import IIOIDSBackend
 
 __all__ = [
     "ScopeBackend",
@@ -9,4 +10,5 @@ __all__ = [
     "DigitizerBackend",
     "GrpcDigitizerBackend",
     "IIODigitizerBackend",
+    "IIOIDSBackend",
 ]

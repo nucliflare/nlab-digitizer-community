@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>GlobalView</class>
+ <widget class="QWidget" name="GlobalView">
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>900</width><height>620</height></rect>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <property name="leftMargin"><number>12</number></property>
+   <property name="topMargin"><number>12</number></property>
+   <property name="rightMargin"><number>12</number></property>
+   <property name="bottomMargin"><number>12</number></property>
+   <property name="spacing"><number>12</number></property>
+   <item>
+    <widget class="QGroupBox" name="groupSoftwareStart">
+     <property name="title"><string>Synchronized MCA Software Start</string></property>
+     <property name="maximumSize">
+      <size><width>720</width><height>16777215</height></size>
+     </property>
+     <layout class="QVBoxLayout" name="layoutSoftwareStart">
+      <item>
+       <widget class="QLabel" name="labelSoftwareStartHelp">
+        <property name="text"><string>Prepare the shared source at LOW, arm every MCA channel with External Trigger enabled, then start both channels by raising the common software level.</string></property>
+        <property name="wordWrap"><bool>true</bool></property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QFormLayout" name="formSyncState">
+        <item row="0" column="0"><widget class="QLabel" name="labelSyncSource"><property name="text"><string>Start source:</string></property></widget></item>
+        <item row="0" column="1">
+         <widget class="QComboBox" name="comboSyncSource">
+          <property name="maximumSize">
+           <size><width>220</width><height>16777215</height></size>
+          </property>
+          <item><property name="text"><string>Software</string></property></item>
+          <item><property name="text"><string>Hardware</string></property></item>
+         </widget>
+        </item>
+        <item row="1" column="0"><widget class="QLabel" name="labelSyncEnable"><property name="text"><string>Common output gate:</string></property></widget></item>
+        <item row="1" column="1"><widget class="QCheckBox" name="cbSyncEnable"><property name="text"><string>Enabled</string></property></widget></item>
+        <item row="2" column="0"><widget class="QLabel" name="labelSoftwareStateKey"><property name="text"><string>Software level:</string></property></widget></item>
+        <item row="2" column="1"><widget class="QLabel" name="lblSoftwareState"><property name="text"><string>—</string></property></widget></item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="layoutSyncButtons">
+        <item><widget class="QPushButton" name="btnPrepareSoftware"><property name="text"><string>Prepare Software Sync</string></property></widget></item>
+        <item>
+         <widget class="QPushButton" name="btnSoftwareStart">
+          <property name="text"><string>Start Armed MCA Channels</string></property>
+          <property name="styleSheet"><string>QPushButton { background-color: #4CAF50; color: white; font-weight: bold; padding: 6px; } QPushButton:disabled { background-color: #A5D6A7; }</string></property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="btnSoftwareReset">
+          <property name="text"><string>Reset Software Level</string></property>
+          <property name="styleSheet"><string>QPushButton { background-color: #f44336; color: white; font-weight: bold; padding: 6px; } QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QLabel" name="lblSyncStatus">
+        <property name="text"><string>—</string></property>
+        <property name="wordWrap"><bool>true</bool></property>
+       </widget>
+      </item>
+     </layout>
+   </widget>
+  </item>
+   <item>
+    <widget class="QGroupBox" name="groupTemperatureCorrection">
+     <property name="title"><string>Shared MCA Temperature Correction</string></property>
+     <property name="maximumSize">
+      <size><width>720</width><height>16777215</height></size>
+     </property>
+     <layout class="QVBoxLayout" name="layoutTemperatureCorrection">
+      <item>
+       <layout class="QHBoxLayout" name="layoutTemperatureColumns">
+        <item>
+         <layout class="QFormLayout" name="formTemperatureSettings">
+          <item row="0" column="0"><widget class="QLabel" name="labelTempCoeff"><property name="text"><string>Base coefficient:</string></property></widget></item>
+          <item row="0" column="1">
+           <widget class="QDoubleSpinBox" name="spinTempCoeff">
+            <property name="maximumSize"><size><width>220</width><height>16777215</height></size></property>
+            <property name="minimum"><double>-1.0</double></property>
+            <property name="maximum"><double>1.0</double></property>
+            <property name="singleStep"><double>0.00001</double></property>
+            <property name="decimals"><number>9</number></property>
+            <property name="value"><double>-0.00026735</double></property>
+           </widget>
+          </item>
+          <item row="1" column="0"><widget class="QLabel" name="labelTempOffset"><property name="text"><string>Base offset:</string></property></widget></item>
+          <item row="1" column="1">
+           <widget class="QSpinBox" name="spinTempOffset">
+            <property name="maximumSize"><size><width>220</width><height>16777215</height></size></property>
+            <property name="minimum"><number>-32768</number></property>
+            <property name="maximum"><number>32767</number></property>
+            <property name="value"><number>7</number></property>
+           </widget>
+          </item>
+          <item row="2" column="0"><widget class="QLabel" name="labelTemperatureLoopEnabled"><property name="text"><string>Control loop:</string></property></widget></item>
+          <item row="2" column="1">
+           <widget class="QCheckBox" name="cbTemperatureCorrectionEnabled">
+            <property name="text"><string>Enabled</string></property>
+            <property name="checked"><bool>true</bool></property>
+           </widget>
+          </item>
+          <item row="3" column="0"><widget class="QLabel" name="labelTemperatureInterval"><property name="text"><string>Update interval:</string></property></widget></item>
+          <item row="3" column="1">
+           <widget class="QSpinBox" name="spinTemperatureInterval">
+            <property name="maximumSize"><size><width>220</width><height>16777215</height></size></property>
+            <property name="minimum"><number>250</number></property>
+            <property name="maximum"><number>10000</number></property>
+            <property name="singleStep"><number>250</number></property>
+            <property name="value"><number>1000</number></property>
+            <property name="suffix"><string> ms</string></property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QFormLayout" name="formTemperatureReadback">
+          <item row="0" column="0"><widget class="QLabel" name="labelTemperatureMax"><property name="text"><string>T_MAX:</string></property></widget></item>
+          <item row="0" column="1"><widget class="QLabel" name="lblTemperatureMax"><property name="text"><string>67</string></property></widget></item>
+          <item row="1" column="0"><widget class="QLabel" name="labelAdsTemperature"><property name="text"><string>ADS5407 reading:</string></property></widget></item>
+          <item row="1" column="1"><widget class="QLabel" name="lblAdsTemperature"><property name="text"><string>—</string></property></widget></item>
+          <item row="2" column="0"><widget class="QLabel" name="labelAppliedTempCoeff"><property name="text"><string>Applied coefficient:</string></property></widget></item>
+          <item row="2" column="1"><widget class="QLabel" name="lblAppliedTempCoeff"><property name="text"><string>—</string></property></widget></item>
+          <item row="3" column="0"><widget class="QLabel" name="labelAppliedTempOffset"><property name="text"><string>Applied offset:</string></property></widget></item>
+          <item row="3" column="1"><widget class="QLabel" name="lblAppliedTempOffset"><property name="text"><string>—</string></property></widget></item>
+         </layout>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QLabel" name="lblTemperatureStatus">
+        <property name="text"><string>—</string></property>
+        <property name="wordWrap"><bool>true</bool></property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupDiagnostics">
+     <property name="title"><string>Shared Digitizer Diagnostics</string></property>
+     <property name="maximumSize">
+      <size><width>720</width><height>16777215</height></size>
+     </property>
+     <layout class="QVBoxLayout" name="layoutDiagnostics">
+      <item>
+       <layout class="QHBoxLayout" name="layoutDiagnosticsControls">
+        <item><widget class="QLabel" name="labelDiagnosticsInterval"><property name="text"><string>Refresh interval:</string></property></widget></item>
+        <item>
+         <widget class="QSpinBox" name="spinDiagnosticsInterval">
+          <property name="minimum"><number>250</number></property>
+          <property name="maximum"><number>10000</number></property>
+          <property name="singleStep"><number>250</number></property>
+          <property name="value"><number>1000</number></property>
+          <property name="suffix"><string> ms</string></property>
+         </widget>
+        </item>
+        <item><spacer name="horizontalSpacer"><property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
+        <item><widget class="QLabel" name="labelLastUpdateKey"><property name="text"><string>Last update:</string></property></widget></item>
+        <item><widget class="QLabel" name="lblLastUpdate"><property name="text"><string>—</string></property></widget></item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QTableWidget" name="tableDiagnostics">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+          <horstretch>0</horstretch><verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="alternatingRowColors"><bool>true</bool></property>
+        <property name="editTriggers"><set>QAbstractItemView::EditTrigger::NoEditTriggers</set></property>
+        <property name="selectionMode"><enum>QAbstractItemView::SelectionMode::NoSelection</enum></property>
+        <property name="showGrid"><bool>true</bool></property>
+        <property name="rowCount"><number>0</number></property>
+        <property name="columnCount"><number>3</number></property>
+        <column><property name="text"><string>Sensor / status</string></property></column>
+        <column><property name="text"><string>Value</string></property></column>
+        <column><property name="text"><string>Unit</string></property></column>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

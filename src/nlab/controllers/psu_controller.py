@@ -6,7 +6,7 @@ from collections import deque
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QThread
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QCheckBox, QComboBox, QDoubleSpinBox, QWidget
 
 from nlab.hardware.digitizer.hv import HV_PARAMETER_SPECS, HVParam, HVSupply
 from nlab.hardware.digitizer.scope import RangeSpec
@@ -55,9 +55,7 @@ class PSUController(QWidget):
         self.ui.plotHvVoltage.showGrid(x=True, y=True, alpha=0.2)
         self.ui.plotHvVoltage.setLabel("left", "HV Voltage", units="V")
         self.ui.plotHvVoltage.setLabel("bottom", "Time", units="s")
-        self._plot_curve = self.ui.plotHvVoltage.plot(
-            pen=pg.mkPen("#e04040", width=2)
-        )
+        self._plot_curve = self.ui.plotHvVoltage.plot(pen=pg.mkPen("#e04040", width=2))
 
     # ------------------------------------------------------------------
     # Spec application — runs before signals are connected
@@ -68,12 +66,20 @@ class PSUController(QWidget):
 
         self._apply_range_to_double_spinbox(self.ui.spinHvVoltage, specs[HVParam.HV_VOLTAGE])
         self._apply_range_to_double_spinbox(self.ui.spinHvCompensCt, specs[HVParam.HV_COMPENS_CT])
-        self._apply_range_to_double_spinbox(self.ui.spinHvCompensTref, specs[HVParam.HV_COMPENS_TREF])
+        self._apply_range_to_double_spinbox(
+            self.ui.spinHvCompensTref, specs[HVParam.HV_COMPENS_TREF]
+        )
 
         if self._sipm_available:
-            self._apply_range_to_double_spinbox(self.ui.spinSipmVoltage, specs[HVParam.SIPM_VOLTAGE])
-            self._apply_range_to_double_spinbox(self.ui.spinSipmCompensCt, specs[HVParam.SIPM_COMPENS_CT])
-            self._apply_range_to_double_spinbox(self.ui.spinSipmCompensTref, specs[HVParam.SIPM_COMPENS_TREF])
+            self._apply_range_to_double_spinbox(
+                self.ui.spinSipmVoltage, specs[HVParam.SIPM_VOLTAGE]
+            )
+            self._apply_range_to_double_spinbox(
+                self.ui.spinSipmCompensCt, specs[HVParam.SIPM_COMPENS_CT]
+            )
+            self._apply_range_to_double_spinbox(
+                self.ui.spinSipmCompensTref, specs[HVParam.SIPM_COMPENS_TREF]
+            )
 
     @staticmethod
     def _apply_range_to_double_spinbox(spinbox, spec: RangeSpec) -> None:
@@ -130,30 +136,52 @@ class PSUController(QWidget):
     def _connect_signals(self) -> None:
         if self._sipm_available:
             self.ui.cbSipmEnable.toggled.connect(
-                lambda v: (log.debug("PSU: sipm_enable=%s", v), self.hv.set_sipm_enable(int(v))))
+                lambda v: (log.debug("PSU: sipm_enable=%s", v), self.hv.set_sipm_enable(int(v)))
+            )
             self.ui.spinSipmVoltage.editingFinished.connect(self._on_sipm_voltage_changed)
             self.ui.comboSipmCompensMode.currentIndexChanged.connect(
-                lambda i: (log.debug("PSU: sipm_compens_mode=%d", i), self.hv.set_sipm_compens_mode(i)))
+                lambda i: (
+                    log.debug("PSU: sipm_compens_mode=%d", i),
+                    self.hv.set_sipm_compens_mode(i),
+                )
+            )
             self.ui.spinSipmCompensCt.editingFinished.connect(
-                lambda: (log.debug("PSU: sipm_compens_ct=%.4f", self.ui.spinSipmCompensCt.value()),
-                         self.hv.set_sipm_compens_ct(self.ui.spinSipmCompensCt.value())))
+                lambda: (
+                    log.debug("PSU: sipm_compens_ct=%.4f", self.ui.spinSipmCompensCt.value()),
+                    self.hv.set_sipm_compens_ct(self.ui.spinSipmCompensCt.value()),
+                )
+            )
             self.ui.spinSipmCompensTref.editingFinished.connect(
-                lambda: (log.debug("PSU: sipm_compens_tref=%.2f", self.ui.spinSipmCompensTref.value()),
-                         self.hv.set_sipm_compens_tref(self.ui.spinSipmCompensTref.value())))
+                lambda: (
+                    log.debug("PSU: sipm_compens_tref=%.2f", self.ui.spinSipmCompensTref.value()),
+                    self.hv.set_sipm_compens_tref(self.ui.spinSipmCompensTref.value()),
+                )
+            )
 
         self.ui.spinHvVoltage.editingFinished.connect(self._on_hv_voltage_changed)
 
         self.ui.comboHvCompensMode.currentIndexChanged.connect(
-            lambda i: (log.debug("PSU: hv_compens_mode=%d", i), self.hv.set_hv_compens_mode(i)))
+            lambda i: (log.debug("PSU: hv_compens_mode=%d", i), self.hv.set_hv_compens_mode(i))
+        )
         self.ui.spinHvCompensCt.editingFinished.connect(
-            lambda: (log.debug("PSU: hv_compens_ct=%.4f", self.ui.spinHvCompensCt.value()),
-                     self.hv.set_hv_compens_ct(self.ui.spinHvCompensCt.value())))
+            lambda: (
+                log.debug("PSU: hv_compens_ct=%.4f", self.ui.spinHvCompensCt.value()),
+                self.hv.set_hv_compens_ct(self.ui.spinHvCompensCt.value()),
+            )
+        )
         self.ui.spinHvCompensTref.editingFinished.connect(
-            lambda: (log.debug("PSU: hv_compens_tref=%.2f", self.ui.spinHvCompensTref.value()),
-                     self.hv.set_hv_compens_tref(self.ui.spinHvCompensTref.value())))
+            lambda: (
+                log.debug("PSU: hv_compens_tref=%.2f", self.ui.spinHvCompensTref.value()),
+                self.hv.set_hv_compens_tref(self.ui.spinHvCompensTref.value()),
+            )
+        )
 
         self.ui.comboTempDigitalEnable.currentIndexChanged.connect(
-            lambda i: (log.debug("PSU: temp_digital_enable=%d", i), self.hv.set_temp_digital_enable(i)))
+            lambda i: (
+                log.debug("PSU: temp_digital_enable=%d", i),
+                self.hv.set_temp_digital_enable(i),
+            )
+        )
 
         self.ui.btnStartMonitor.clicked.connect(self._on_start_monitor)
         self.ui.btnStopMonitor.clicked.connect(self._on_stop_monitor)
@@ -186,7 +214,9 @@ class PSUController(QWidget):
         self.ui.btnStartMonitor.setEnabled(False)
         self.ui.btnStopMonitor.setEnabled(True)
         self._worker_thread.start()
-        log.info("PSU: monitoring started (interval %d ms, sipm=%s)", interval_ms, self._sipm_available)
+        log.info(
+            "PSU: monitoring started (interval %d ms, sipm=%s)", interval_ms, self._sipm_available
+        )
 
     def _on_stop_monitor(self) -> None:
         if self._worker is not None:
@@ -235,6 +265,70 @@ class PSUController(QWidget):
             readback = self.hv.get_sipm_adc_voltage()
             self.ui.lblSipmVoltage.setText(f"{readback:.2f}")
             log.debug("PSU: sipm readback=%.2f", readback)
+
+    def hardware_configuration_settings(self) -> dict[str, int | float]:
+        """Return all IDS setpoint widgets (the backend exposes no getters)."""
+        settings: dict[str, int | float] = {
+            "hv_voltage": self.ui.spinHvVoltage.value(),
+            "hv_compens_ct": self.ui.spinHvCompensCt.value(),
+            "hv_compens_tref": self.ui.spinHvCompensTref.value(),
+            "hv_compens_mode": self.ui.comboHvCompensMode.currentIndex(),
+            "temp_digital_enable": self.ui.comboTempDigitalEnable.currentIndex(),
+        }
+        if self._sipm_available:
+            settings.update(
+                {
+                    "sipm_enable": int(self.ui.cbSipmEnable.isChecked()),
+                    "sipm_voltage": self.ui.spinSipmVoltage.value(),
+                    "sipm_compens_ct": self.ui.spinSipmCompensCt.value(),
+                    "sipm_compens_tref": self.ui.spinSipmCompensTref.value(),
+                    "sipm_compens_mode": self.ui.comboSipmCompensMode.currentIndex(),
+                }
+            )
+        return settings
+
+    def populate_hardware_configuration_settings(self, settings: object) -> None:
+        """Populate write-only IDS controls after their values are applied."""
+        if not isinstance(settings, dict):
+            return
+        widgets = {
+            "hv_voltage": self.ui.spinHvVoltage,
+            "hv_compens_ct": self.ui.spinHvCompensCt,
+            "hv_compens_tref": self.ui.spinHvCompensTref,
+            "hv_compens_mode": self.ui.comboHvCompensMode,
+            "temp_digital_enable": self.ui.comboTempDigitalEnable,
+            "sipm_enable": self.ui.cbSipmEnable,
+            "sipm_voltage": self.ui.spinSipmVoltage,
+            "sipm_compens_ct": self.ui.spinSipmCompensCt,
+            "sipm_compens_tref": self.ui.spinSipmCompensTref,
+            "sipm_compens_mode": self.ui.comboSipmCompensMode,
+        }
+        for name, value in settings.items():
+            widget = widgets.get(name)
+            if widget is None:
+                continue
+            widget.blockSignals(True)
+            if isinstance(widget, QCheckBox):
+                widget.setChecked(bool(value))
+            elif isinstance(widget, QComboBox):
+                widget.setCurrentIndex(int(value))
+            elif isinstance(widget, QDoubleSpinBox):
+                widget.setValue(float(value))
+            widget.blockSignals(False)
+
+    def configuration_settings(self) -> dict[str, int]:
+        return {
+            "refresh_interval_ms": self.ui.spinRefreshRate.value(),
+            "plot_time_range_s": self.ui.spinTimeRange.value(),
+        }
+
+    def apply_configuration_settings(self, settings: object) -> None:
+        if not isinstance(settings, dict):
+            return
+        if "refresh_interval_ms" in settings:
+            self.ui.spinRefreshRate.setValue(int(settings["refresh_interval_ms"]))
+        if "plot_time_range_s" in settings:
+            self.ui.spinTimeRange.setValue(int(settings["plot_time_range_s"]))
 
     # ------------------------------------------------------------------
     # Readback handling (main thread, via signal)

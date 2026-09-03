@@ -13,14 +13,15 @@ supplied alongside it, and confirmed live against the rewritten board.
 MCABackend is implemented against vdpp-pulse-processor.c (signal
 parameters, acquisition control, statistics, filters, pulse memory,
 histogram) and vdpp-input-filter.c (FIR/IIR low-pass filter, temperature
-compensation). The extension methods below also implement the fixed-frame
-list-mode DMA path owned by vdpp-lm-frame.c -- see mca-architecture.md for
-how the three cores relate, and
+compensation). The channel-independent trigger-sync interface is implemented
+against vdpp-sync-trigger.c. The extension methods below also implement the
+fixed-frame list-mode DMA path owned by vdpp-lm-frame.c -- see
+mca-architecture.md for how the three per-channel cores relate, and
 notebooks/mca_walkthrough.ipynb for a live-tested, cell-by-cell
 verification of the register/configuration half. A few MCABackend methods stay stubbed
 because no matching register exists in either driver: see
-_MCA_SYNC_UNSUPPORTED, _MCA_EVENTS_LOST_UNSUPPORTED and
-_MCA_HISTOGRAM_CLEAR_UNSUPPORTED below for the specifics. get_edge_det_coeff/
+_MCA_EVENTS_LOST_UNSUPPORTED and _MCA_HISTOGRAM_CLEAR_UNSUPPORTED below for
+the specifics. get_edge_det_coeff/
 set_edge_det_coeff() are a software-only shadow value for the same reason
 (no register), kept non-raising only so MCAController's unconditional
 default-hydration pass doesn't need a backend-specific special case.
@@ -65,16 +66,10 @@ from .base import DigitizerBackend
 
 log = logging.getLogger(__name__)
 
-# Registers genuinely do not exist in either MCA driver source (checked
+# Registers genuinely do not exist in the MCA driver sources (checked
 # against every #define/PP_F_* in vdpp-pulse-processor.c and every attribute
-# in vdpp-input-filter.c) -- these three stay stubbed rather than guessing
+# in vdpp-input-filter.c) -- these methods stay stubbed rather than guessing
 # at a mapping. See each raise site's docstring for the specific reasoning.
-_MCA_SYNC_UNSUPPORTED = (
-    "IIO MCA backend: no sync-trigger core found in vdpp-pulse-processor.c "
-    "or vdpp-input-filter.c -- this appears to be a separate, not-yet-ported "
-    "device. SyncTrigger is unused by MCAController, so this is safe to "
-    "leave unimplemented."
-)
 _MCA_EVENTS_LOST_UNSUPPORTED = (
     "IIO MCA backend: vdpp-pulse-processor.c (IP version 101) has no "
     "events-lost counter register -- throughput_error_counter is a "
@@ -114,6 +109,11 @@ _DAC_DEVICE_NAME = "vdpp_afe_dac"
 _PULSE_PROCESSOR_DEVICE_NAME = "vdpp_pulse_processor"
 _INPUT_FILTER_DEVICE_NAME = "vdpp_input_filter"
 _LM_FRAME_DEVICE_NAME = "vdpp_lm_frame"
+
+# One channel-independent device shared by both MCA pulse processors. Per
+# vdpp-sync-trigger.c, this is a level-sensitive common measurement-start
+# controller, not an IIO trigger provider and not a scope trigger.
+_SYNC_TRIGGER_DEVICE_NAME = "vdpp_sync_trigger"
 
 # Current vdpp-lm-frame.c: Linux transports one opaque repeated-u8 scan
 # element (u8[16]), not the superseded five semantic scan channels. Linux
@@ -200,7 +200,28 @@ _LM_CLOSE_INACTIVITY_SECONDS = 1.0
 _LM_CLOSE_POLL_SECONDS = 0.050
 _LM_CLOSE_JOIN_SECONDS = 1.25
 _LM_CLOSE_RELEASE_SECONDS = 3.0
-_LM_EXPECTED_CANCEL_ERRNOS = frozenset((9, 110, 125))  # EBADF, ETIMEDOUT, ECANCELED
+# A network refill can report either the target's Linux ETIMEDOUT=110 through
+# the iiod protocol or the local socket timeout. The latter is also 110 on
+# Linux but WSAETIMEDOUT=10060 on Windows. Both mean "no block arrived in the
+# current wait window"; comparing only with the host errno constant caused
+# target-side 110 to terminate legitimate external-trigger waits on Windows.
+_REMOTE_ETIMEDOUT = 110
+_LIBIIO_TIMEOUT_ERRNOS = frozenset((_REMOTE_ETIMEDOUT, errno.ETIMEDOUT))
+_LM_EXPECTED_CANCEL_ERRNOS = frozenset((9, 125, *_LIBIIO_TIMEOUT_ERRNOS))
+
+
+def _disable_mca_dma_client_timeout(context: iio.Context) -> None:
+    """Disable the client-side timeout on the list-mode stream context.
+
+    The project uses pylibiio/libiio 0.x (currently 0.26). Its documented
+    ``iio_context_set_timeout()`` contract assigns zero to "no timeout".
+    This affects the client's dedicated stream socket. The v0.26 network
+    backend opens the device stream on another iiod connection, however, and
+    does not forward the context's TIMEOUT command to it (network.c's
+    network_open()/network_set_timeout()). That remote connection can still
+    return ETIMEDOUT and is handled by _refill_mca_dma_buffer().
+    """
+    context.set_timeout(0)
 
 
 def _device_number(device: iio.Device) -> int:
@@ -285,6 +306,7 @@ class IIODigitizerBackend(DigitizerBackend):
         dac_channel: int | None = None,
     ) -> None:
         self._ch = channel
+        self._uri = uri
         self._ctx = iio.Context(uri)
 
         scopes = _devices_named(self._ctx, _SCOPE_DEVICE_NAME)
@@ -396,6 +418,26 @@ class IIODigitizerBackend(DigitizerBackend):
             self._input_filter.find_channel("voltage0") if self._input_filter is not None else None
         )
 
+        # TemperatureCorrectionWorker writes continuously from its own
+        # QThread. It must not share the GUI/config context above or the MCA
+        # polling context below; one remote IIO context per active thread is
+        # a confirmed requirement for this backend.
+        self._temperature_correction_ctx: iio.Context | None = None
+        self._temperature_correction_filter: iio.Device | None = None
+
+        # Trigger sync is one global core shared by both MCA channels, not a
+        # per-channel device. sync_trigger_smoke_test.sh explicitly requires
+        # exactly one instance. Keep absence compatible with older firmware,
+        # but reject multiple instances because selecting either would make
+        # channel-independent control ambiguous.
+        sync_triggers = _devices_named(self._ctx, _SYNC_TRIGGER_DEVICE_NAME)
+        if len(sync_triggers) > 1:
+            raise RuntimeError(
+                f"expected at most one '{_SYNC_TRIGGER_DEVICE_NAME}' device, "
+                f"found {len(sync_triggers)}"
+            )
+        self._sync_trigger = sync_triggers[0] if sync_triggers else None
+
         # Software-only shadow for get/set_edge_det_coeff() -- see the
         # module docstring, no matching register exists in either driver.
         self._edge_det_coeff = 0
@@ -443,6 +485,7 @@ class IIODigitizerBackend(DigitizerBackend):
         self._mca_dma_stop_requested = threading.Event()
         self._mca_dma_lifecycle_lock = threading.RLock()
         self._mca_dma_cancel_timer: threading.Timer | None = None
+        self._mca_dma_cancel_explained = False
         if self._pp is not None:
             mca_dma_ctx = iio.Context(uri)
             mca_dma_control_ctx = iio.Context(uri)
@@ -453,6 +496,17 @@ class IIODigitizerBackend(DigitizerBackend):
                 mca_dma_ctx, _LM_FRAME_DEVICE_NAME, channel,
             )
             if mca_dma_pp is not None and lm_frame is not None:
+                # refill() may legitimately wait for an operator-driven
+                # shared software trigger for an arbitrary amount of time.
+                # Keep only the buffer stream unbounded; control I/O stays
+                # on mca_dma_control_ctx with its normal network timeout.
+                _disable_mca_dma_client_timeout(mca_dma_ctx)
+                log.debug(
+                    "IIO backend ch%d: MCA DMA external-trigger wait "
+                    "configured; retryable timeout errnos=%s",
+                    channel,
+                    sorted(_LIBIIO_TIMEOUT_ERRNOS),
+                )
                 self._mca_dma_ctx = mca_dma_ctx
                 self._mca_dma_control_ctx = mca_dma_control_ctx
                 self._mca_dma_pp = mca_dma_pp
@@ -478,6 +532,13 @@ class IIODigitizerBackend(DigitizerBackend):
                 "does not expose channel_index; physical A/B identity is not "
                 "guaranteed",
                 channel,
+            )
+        if self._sync_trigger is None:
+            log.warning(
+                "IIO backend ch%d: no %s device found -- MCA trigger-sync "
+                "methods are unavailable",
+                channel,
+                _SYNC_TRIGGER_DEVICE_NAME,
             )
 
     def close(self) -> None:
@@ -822,6 +883,22 @@ class IIODigitizerBackend(DigitizerBackend):
             )
         self._input_filter.attrs[name].value = value
 
+    def _sync_attr_get(self, name: str) -> str:
+        if self._sync_trigger is None:
+            raise RuntimeError(
+                f"no {_SYNC_TRIGGER_DEVICE_NAME} device bound -- shared MCA "
+                "trigger-sync core not present on this firmware"
+            )
+        return str(self._sync_trigger.attrs[name].value)
+
+    def _sync_attr_set(self, name: str, value: str) -> None:
+        if self._sync_trigger is None:
+            raise RuntimeError(
+                f"no {_SYNC_TRIGGER_DEVICE_NAME} device bound -- shared MCA "
+                "trigger-sync core not present on this firmware"
+            )
+        self._sync_trigger.attrs[name].value = value
+
     def _mca_pp_attr_get(self, name: str) -> str:
         return self._require_mca_pp().attrs[name].value
 
@@ -982,7 +1059,7 @@ class IIODigitizerBackend(DigitizerBackend):
         def reader() -> None:
             entered.set()
             try:
-                result.append(iio._buffer_refill(buf._buffer))
+                result.append(self._refill_mca_dma_buffer(buf))
             except OSError as exc:
                 # Do not carry the exception object across threads: its
                 # traceback frame owns this closure and therefore ``buf``.
@@ -999,7 +1076,7 @@ class IIODigitizerBackend(DigitizerBackend):
         )
         thread.start()
         if not entered.wait(_DMA_FIRST_REFILL_ENTER_SECONDS):
-            buf.cancel()
+            self._cancel_mca_dma_refill(buf, "reader thread did not enter refill")
             thread.join(_LM_CLOSE_JOIN_SECONDS)
             raise RuntimeError(
                 "MCA list-mode reader did not start within "
@@ -1025,7 +1102,7 @@ class IIODigitizerBackend(DigitizerBackend):
                     self._ch,
                     exc_info=True,
                 )
-            buf.cancel()
+            self._cancel_mca_dma_refill(buf, "MCA start failed")
             thread.join(_LM_CLOSE_JOIN_SECONDS)
             raise
 
@@ -1041,6 +1118,7 @@ class IIODigitizerBackend(DigitizerBackend):
         """Arm the fixed 1024-record list-mode buffer while stopped."""
         self._close_mca_dma_buffer()
         self._mca_dma_stop_requested.clear()
+        self._mca_dma_cancel_explained = False
 
         if bool(int(self._mca_dma_pp_attr_get("enable"))):
             self._mca_dma_pp_attr_set("enable", "0")
@@ -1109,6 +1187,42 @@ class IIODigitizerBackend(DigitizerBackend):
             )
         return np.frombuffer(raw, dtype=_LM_EVENT_DTYPE).copy()
 
+    def _refill_mca_dma_buffer(self, buf: iio.Buffer) -> int:
+        """Wait for one list-mode block across server-side idle timeouts.
+
+        libiio v0.26's network_open() creates a separate socket for the IIO
+        buffer, but unlike network_set_timeout() it does not send a TIMEOUT
+        command on that socket. The target therefore periodically returns
+        ETIMEDOUT while an armed external-trigger measurement legitimately
+        has no data. The buffer and its queued DMA descriptors remain valid,
+        so retry the same refill. Buffer.cancel() still wins during Stop;
+        once the stop event is set, its ETIMEDOUT/EBADF/ECANCELED propagates
+        to the existing expected-cancellation path instead of being retried.
+
+        Confirmed live on 2026-08-11: ch0 list-mode DMA remained armed for
+        nine seconds (across two remote ETIMEDOUT responses) while ch1 was
+        armed normally; the shared software trigger then produced complete
+        DMA frames and the capture closed with valid continuity diagnostics.
+        """
+        timeout_count = 0
+        while True:
+            try:
+                return iio._buffer_refill(buf._buffer)
+            except OSError as exc:
+                if (
+                    exc.errno not in _LIBIIO_TIMEOUT_ERRNOS
+                    or self._mca_dma_stop_requested.is_set()
+                ):
+                    raise
+                timeout_count += 1
+                if timeout_count == 1 or timeout_count % 15 == 0:
+                    log.debug(
+                        "IIO backend ch%d: MCA list-mode refill still "
+                        "waiting for data after %d server timeout(s); retrying",
+                        self._ch,
+                        timeout_count,
+                    )
+
     def start_mca_dma_capture(
         self,
         on_started: Callable[[], None] | None = None,
@@ -1161,7 +1275,7 @@ class IIODigitizerBackend(DigitizerBackend):
         buf = self._mca_dma_buf
         assert buf is not None
         try:
-            nbytes = iio._buffer_refill(buf._buffer)
+            nbytes = self._refill_mca_dma_buffer(buf)
             if nbytes == 0 and self._mca_dma_stop_requested.is_set():
                 self._close_mca_dma_buffer(drain=False)
                 return np.empty(0, dtype=_LM_EVENT_DTYPE)
@@ -1177,6 +1291,29 @@ class IIODigitizerBackend(DigitizerBackend):
             if expected_stop:
                 return np.empty(0, dtype=_LM_EVENT_DTYPE)
             raise
+
+    def _cancel_mca_dma_refill(self, buf: iio.Buffer, reason: str) -> None:
+        """Cancel one native refill with context for libiio's stderr noise.
+
+        libiio 0.26's IIO_ERROR macro writes directly to the process stderr
+        and exposes no runtime callback in the shipped DLL. Redirecting that
+        descriptor would be process-wide and could swallow unrelated errors
+        from other threads. Log the meaning immediately before cancellation
+        instead, once per DMA session.
+        """
+        with self._mca_dma_lifecycle_lock:
+            explain = not self._mca_dma_cancel_explained
+            self._mca_dma_cancel_explained = True
+        if explain:
+            log.info(
+                "IIO backend ch%d: cancelling blocked MCA DMA refill (%s). "
+                "Native libiio may now print 'READ LINE: -9' and/or "
+                "'READ INTEGER: -9'; -9 is the expected EBADF from "
+                "Buffer.cancel(), not a DMA acquisition fault",
+                self._ch,
+                reason,
+            )
+        buf.cancel()
 
     def _drain_mca_for_close(
         self,
@@ -1232,7 +1369,7 @@ class IIODigitizerBackend(DigitizerBackend):
                 time.sleep(_LM_CLOSE_POLL_SECONDS)
         finally:
             stop.set()
-            buf.cancel()
+            self._cancel_mca_dma_refill(buf, "tail-drain inactivity window elapsed")
             worker.join(_LM_CLOSE_JOIN_SECONDS)
 
         if worker.is_alive():
@@ -1293,7 +1430,7 @@ class IIODigitizerBackend(DigitizerBackend):
         else:
             # Failed arm/start or refill has no trustworthy tail to drain.
             # Interrupt the outstanding descriptor before native teardown.
-            buf.cancel()
+            self._cancel_mca_dma_refill(buf, "capture cleanup without tail drain")
             drained = 0
 
         self._mca_dma_buf = None
@@ -1358,7 +1495,10 @@ class IIODigitizerBackend(DigitizerBackend):
                     self._mca_dma_cancel_timer = None
                     buf = self._mca_dma_buf
                     if buf is not None:
-                        buf.cancel()
+                        self._cancel_mca_dma_refill(
+                            buf,
+                            "stop requested and no complete frame arrived",
+                        )
 
             timer = threading.Timer(
                 _LM_CLOSE_INACTIVITY_SECONDS,
@@ -2396,6 +2536,34 @@ class IIODigitizerBackend(DigitizerBackend):
     def set_temp_offset(self, val: int) -> None:
         self._if_attr_set("temperature_offset_raw", str(val))
 
+    def set_temperature_correction_from_worker(
+        self,
+        coefficient: float,
+        offset: int,
+    ) -> None:
+        """Write both correction terms through the worker-only IIO context."""
+        if self._temperature_correction_ctx is None:
+            context = iio.Context(self._uri)
+            filters = _devices_named(context, _INPUT_FILTER_DEVICE_NAME)
+            if self._ch >= len(filters):
+                raise RuntimeError(
+                    f"no {_INPUT_FILTER_DEVICE_NAME} device for channel "
+                    f"{self._ch} in the temperature-correction context"
+                )
+            self._temperature_correction_ctx = context
+            self._temperature_correction_filter = filters[self._ch]
+        device = self._temperature_correction_filter
+        if device is None:
+            raise RuntimeError(
+                f"no {_INPUT_FILTER_DEVICE_NAME} device bound for MCA "
+                "temperature correction"
+            )
+        scale = float(device.attrs["temperature_coefficient_scale"].value)
+        device.attrs["temperature_coefficient_raw"].value = str(
+            round(coefficient / scale)
+        )
+        device.attrs["temperature_offset_raw"].value = str(offset)
+
     def get_edge_det_coeff(self) -> int:
         """Software-only shadow, no hardware effect -- see module docstring.
         Neither vdpp-pulse-processor.c nor vdpp-input-filter.c expose an
@@ -2689,22 +2857,34 @@ class IIODigitizerBackend(DigitizerBackend):
         return _PP_MEM_HISTOGRAM_ENTRIES
 
     def get_sync_enable(self) -> bool:
-        raise NotImplementedError(_MCA_SYNC_UNSUPPORTED)
+        return bool(int(self._sync_attr_get("start_enable")))
 
     def set_sync_enable(self, val: bool) -> None:
-        raise NotImplementedError(_MCA_SYNC_UNSUPPORTED)
+        self._sync_attr_set("start_enable", "1" if val else "0")
 
     def get_sync_sw_trig(self) -> int:
-        raise NotImplementedError(_MCA_SYNC_UNSUPPORTED)
+        return int(self._sync_attr_get("software_start_state"))
 
     def set_sync_sw_trig(self, val: int) -> None:
-        raise NotImplementedError(_MCA_SYNC_UNSUPPORTED)
+        self._sync_attr_set("software_start_state", str(val))
 
     def get_sync_trig_src(self) -> int:
-        raise NotImplementedError(_MCA_SYNC_UNSUPPORTED)
+        return int(self._sync_attr_get("start_source"))
 
     def set_sync_trig_src(self, val: int) -> None:
-        raise NotImplementedError(_MCA_SYNC_UNSUPPORTED)
+        """Select software (0) or synchronized hardware input (1).
+
+        Per vdpp-sync-trigger.c's start_source_store(), the driver rejects
+        this write with EBUSY while start_enable is set. Do not hide that
+        global hardware-state transition by cycling start_enable here.
+        """
+        self._sync_attr_set("start_source", str(val))
 
     def get_sync_timestamp(self) -> int:
-        raise NotImplementedError(_MCA_SYNC_UNSUPPORTED)
+        """Return the free-running 64-bit ap_clk counter.
+
+        vdpp-sync-trigger.c reads the split hardware counter with a
+        high/low/high retry under its mutex, so timestamp_raw is already a
+        coherent integer and needs no client-side reconstruction.
+        """
+        return int(self._sync_attr_get("timestamp_raw"))

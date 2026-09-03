@@ -30,7 +30,14 @@ from .hv import (
     HVSettingEntry,
     HV_PARAMETER_SPECS,
 )
-from .backends import ScopeBackend, MCABackend, DigitizerBackend, GrpcDigitizerBackend, IIODigitizerBackend
+from .backends import (
+    DigitizerBackend,
+    GrpcDigitizerBackend,
+    IIOIDSBackend,
+    IIODigitizerBackend,
+    MCABackend,
+    ScopeBackend,
+)
 
 __all__ = [
     "Digitizer",
@@ -55,4 +62,5 @@ __all__ = [
     "DigitizerBackend",
     "GrpcDigitizerBackend",
     "IIODigitizerBackend",
+    "IIOIDSBackend",
 ]

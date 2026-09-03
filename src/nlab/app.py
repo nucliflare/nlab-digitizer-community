@@ -41,7 +41,12 @@ class MainAppWindow(QMainWindow):
     """Top-level application window. Owns the UI and its controller."""
 
     def __init__(
-        self, backend: str = "grpc", host: str = "", port: int = 50050, channels: int = 2,
+        self,
+        backend: str = "grpc",
+        host: str = "",
+        port: int = 50050,
+        channels: int = 2,
+        config_path: Path | None = None,
     ) -> None:
         super().__init__()
         self._host = host
@@ -56,8 +61,14 @@ class MainAppWindow(QMainWindow):
         # dock layout on the screen, discarding the pre-show WM_SETICON.
         self.setWindowTitle(f"Nuclear Lab Digitizer — {backend}://{host}:{port}")
         self._controller = MainWindowController(
-            self, backend=backend, host=host, port=port, channels=channels,
+            self,
+            backend=backend,
+            host=host,
+            port=port,
+            channels=channels,
         )
+        if config_path is not None:
+            self._controller.load_all_settings(config_path)
         self._apply_view_state()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
@@ -134,6 +145,39 @@ class MainAppWindow(QMainWindow):
         settings.setValue(_KEY_SHOW_ROI, self.ui.actionShowRoi.isChecked())
         settings.setValue(_KEY_LOG_Y, self.ui.actionLogY.isChecked())
 
+    def configuration_settings(self) -> dict[str, object]:
+        """Return top-level controls that are owned only by the application."""
+        return {
+            "show_system_log": self.ui.actionShowSystemLog.isChecked(),
+            "debug_mode": self.ui.actionDebugMode.isChecked(),
+            "show_roi": self.ui.actionShowRoi.isChecked(),
+            "log_y": self.ui.actionLogY.isChecked(),
+            "dma_save_folder": str(QSettings().value(_KEY_DMA_FOLDER, "measurements")),
+            "active_tab": self.ui.mainTabs.currentIndex(),
+        }
+
+    def apply_configuration_settings(self, settings: object) -> None:
+        """Populate top-level GUI controls from the YAML application section."""
+        if not isinstance(settings, dict):
+            return
+        actions = {
+            "show_system_log": self.ui.actionShowSystemLog,
+            "debug_mode": self.ui.actionDebugMode,
+            "show_roi": self.ui.actionShowRoi,
+            "log_y": self.ui.actionLogY,
+        }
+        for name, action in actions.items():
+            if name in settings:
+                action.setChecked(bool(settings[name]))
+        if "dma_save_folder" in settings:
+            QSettings().setValue(_KEY_DMA_FOLDER, str(settings["dma_save_folder"]))
+        if "active_tab" in settings:
+            index = int(settings["active_tab"])
+            if 0 <= index < self.ui.mainTabs.count():
+                self.ui.mainTabs.setCurrentIndex(index)
+        self._save_developer_settings()
+        self._apply_view_state()
+
     def _apply_view_state(self) -> None:
         """Re-apply persisted view toggles to the (re)built MCA controllers."""
         self._controller.set_roi_visible(self.ui.actionShowRoi.isChecked())
@@ -153,9 +197,11 @@ class MainAppWindow(QMainWindow):
     def _on_debug_mode_toggled(self, checked: bool) -> None:
         level = logging.DEBUG if checked else logging.INFO
         logging.getLogger().setLevel(level)
-        logging.getLogger(__name__).info("Debug mode %s (log level: %s)",
-                                         "enabled" if checked else "disabled",
-                                         logging.getLevelName(level))
+        logging.getLogger(__name__).info(
+            "Debug mode %s (log level: %s)",
+            "enabled" if checked else "disabled",
+            logging.getLevelName(level),
+        )
         if checked and not self.ui.actionShowSystemLog.isChecked():
             self.ui.actionShowSystemLog.setChecked(True)
 
@@ -168,7 +214,9 @@ class MainAppWindow(QMainWindow):
     def _request_board_power_action(self, command: BoardPowerCommand) -> None:
         if self._board_power_process is not None:
             QMessageBox.information(
-                self, "Remote Board", "A remote board power request is already running.",
+                self,
+                "Remote Board",
+                "A remote board power request is already running.",
             )
             return
 
@@ -209,7 +257,9 @@ class MainAppWindow(QMainWindow):
         ssh_program = QStandardPaths.findExecutable("ssh")
         if not ssh_program:
             QMessageBox.critical(
-                self, title, "OpenSSH client 'ssh' was not found in PATH.",
+                self,
+                title,
+                "OpenSSH client 'ssh' was not found in PATH.",
             )
             return
 
@@ -220,7 +270,10 @@ class MainAppWindow(QMainWindow):
         self._start_board_ssh_process(ssh_program, key_path, "check")
 
     def _start_board_ssh_process(
-        self, ssh_program: str, key_path: Path, remote_command: str,
+        self,
+        ssh_program: str,
+        key_path: Path,
+        remote_command: str,
     ) -> None:
         process = QProcess(self)
         process.setProgram(ssh_program)
@@ -231,7 +284,9 @@ class MainAppWindow(QMainWindow):
         process.start()
 
     def _on_board_ssh_finished(
-        self, exit_code: int, exit_status: QProcess.ExitStatus,
+        self,
+        exit_code: int,
+        exit_status: QProcess.ExitStatus,
     ) -> None:
         process = self._board_power_process
         if process is None:
@@ -272,15 +327,12 @@ class MainAppWindow(QMainWindow):
 
             self.ui.mainTabs.setEnabled(False)
             self._board_power_phase = "command"
-            self.statusBar().showMessage(
-                f"Sending {command} command to {self._host}..."
-            )
+            self.statusBar().showMessage(f"Sending {command} command to {self._host}...")
             self._start_board_ssh_process(ssh_program, key_path, command)
             return
 
-        delivered = (
-            exit_status == QProcess.ExitStatus.NormalExit
-            and power_command_was_delivered(exit_code, stderr)
+        delivered = exit_status == QProcess.ExitStatus.NormalExit and power_command_was_delivered(
+            exit_code, stderr
         )
         if not delivered or command is None:
             detail = stderr or stdout or f"ssh exited with code {exit_code}"
@@ -297,8 +349,7 @@ class MainAppWindow(QMainWindow):
             )
         else:
             message = (
-                "Shutdown command was sent. Restore board power before using "
-                "Reconnect Device."
+                "Shutdown command was sent. Restore board power before using Reconnect Device."
             )
         logging.getLogger(__name__).info("Remote board %s command delivered", command)
         self._finish_board_power_request(message=message)
@@ -314,7 +365,10 @@ class MainAppWindow(QMainWindow):
         self._finish_board_power_request(error=f"Could not start ssh:\n{detail}")
 
     def _finish_board_power_request(
-        self, *, message: str | None = None, error: str | None = None,
+        self,
+        *,
+        message: str | None = None,
+        error: str | None = None,
     ) -> None:
         command = self._board_power_command
         self._board_power_command = None
@@ -339,13 +393,18 @@ class MainAppWindow(QMainWindow):
         from nlab.utils.dma_converter import convert_listmode, convert_scope, read_file_header
 
         src, _ = QFileDialog.getOpenFileName(
-            self, "Select Binary DMA File", "", "Binary files (*.bin);;All files (*)",
+            self,
+            "Select Binary DMA File",
+            "",
+            "Binary files (*.bin);;All files (*)",
         )
         if not src:
             return
 
         dst, _ = QFileDialog.getSaveFileName(
-            self, "Save HDF5 File", str(Path(src).with_suffix(".h5")),
+            self,
+            "Save HDF5 File",
+            str(Path(src).with_suffix(".h5")),
             "HDF5 files (*.h5 *.hdf5);;All files (*)",
         )
         if not dst:
@@ -357,19 +416,24 @@ class MainAppWindow(QMainWindow):
 
             if header["frame_samples"] > 0:
                 n = convert_scope(Path(src), Path(dst))
-                QMessageBox.information(self, "Conversion Complete",
-                                        f"Converted {n} scope frames to:\n{dst}")
+                QMessageBox.information(
+                    self, "Conversion Complete", f"Converted {n} scope frames to:\n{dst}"
+                )
             else:
                 n = convert_listmode(Path(src), Path(dst))
-                QMessageBox.information(self, "Conversion Complete",
-                                        f"Converted {n} listmode events to:\n{dst}")
+                QMessageBox.information(
+                    self, "Conversion Complete", f"Converted {n} listmode events to:\n{dst}"
+                )
         except Exception as e:
             logging.getLogger(__name__).exception("HDF5 conversion failed")
             QMessageBox.critical(self, "Conversion Failed", str(e))
 
     def _on_save_settings(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Settings", "", "YAML files (*.yaml *.yml);;All files (*)",
+            self,
+            "Save Settings",
+            "",
+            "YAML files (*.yaml *.yml);;All files (*)",
         )
         if not path:
             return
@@ -382,7 +446,10 @@ class MainAppWindow(QMainWindow):
 
     def _on_load_settings(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load Settings", "", "YAML files (*.yaml *.yml);;All files (*)",
+            self,
+            "Load Settings",
+            "",
+            "YAML files (*.yaml *.yml);;All files (*)",
         )
         if not path:
             return
@@ -404,7 +471,8 @@ class MainAppWindow(QMainWindow):
 
     def _on_reconnect_device(self) -> None:
         reply = QMessageBox.question(
-            self, "Reconnect Device",
+            self,
+            "Reconnect Device",
             "This will stop all running measurements and re-establish the "
             "device connection. Continue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,

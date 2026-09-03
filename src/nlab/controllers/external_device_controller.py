@@ -136,7 +136,8 @@ class ExternalDeviceController(QWidget):
 
     def _build_ui(self) -> None:
         self.ui.lblHeader.setText(
-            f"{self.device.device_type.name}  —  {self.device.connection_info()}")
+            f"{self.device.device_type.name}  —  {self.device.connection_info()}"
+        )
 
         self._configure_table(self.ui.settingsTable)
         self._configure_table(self.ui.telemetryTable)
@@ -197,7 +198,8 @@ class ExternalDeviceController(QWidget):
         """Holding (writable) registers, excluding password-protected and service ones."""
         items = self.device.REGISTER_MAP.items()
         return [
-            (n, s) for n, s in items
+            (n, s)
+            for n, s in items
             if s.reg_type == RegisterType.HOLDING
             and not s.password_protected
             and not _is_service_register(n)
@@ -215,7 +217,8 @@ class ExternalDeviceController(QWidget):
         stop = getattr(self.device, "READOUT_STOP", None)
         items = self.device.REGISTER_MAP.items()
         specs = [
-            (n, s) for n, s in items
+            (n, s)
+            for n, s in items
             if s.reg_type == RegisterType.INPUT and not _is_service_register(n)
         ]
         if start is not None and stop is not None:
@@ -270,13 +273,15 @@ class ExternalDeviceController(QWidget):
             double_editor.setRange(spec.min * spec.scale, spec.max * spec.scale)
             double_editor.setSingleStep(spec.scale)
             double_editor.editingFinished.connect(
-                lambda n=name, e=double_editor: self._on_setting_changed(n, e.value()))
+                lambda n=name, e=double_editor: self._on_setting_changed(n, e.value())
+            )
             editor = double_editor
         else:
             int_editor = QSpinBox()
             int_editor.setRange(spec.min, spec.max)
             int_editor.editingFinished.connect(
-                lambda n=name, e=int_editor: self._on_setting_changed(n, e.value()))
+                lambda n=name, e=int_editor: self._on_setting_changed(n, e.value())
+            )
             editor = int_editor
         return editor
 
@@ -316,6 +321,73 @@ class ExternalDeviceController(QWidget):
             self.device.write(name, value)
         except Exception:
             log.exception("Write failed for %s.%s", self.device.connection_info(), name)
+
+    @property
+    def configuration_id(self) -> str:
+        """Stable human-readable identifier within one discovered bus."""
+        return f"{self.device.device_type.name}:{self.device.device_id}"
+
+    def hardware_configuration_settings(self) -> dict[str, int | float]:
+        values: dict[str, int | float] = {}
+        for name, _spec in self._holding_specs():
+            row = self._row_by_name.get(f"settings:{name}")
+            widget = self.ui.settingsTable.cellWidget(row, 1) if row is not None else None
+            if isinstance(widget, QCheckBox):
+                values[name] = int(widget.isChecked())
+            elif isinstance(widget, QDoubleSpinBox | QSpinBox):
+                values[name] = widget.value()
+        return values
+
+    def apply_hardware_configuration_settings(self, settings: object) -> None:
+        if not isinstance(settings, dict):
+            return
+        specs = dict(self._holding_specs())
+        for name, value in settings.items():
+            if name not in specs or not isinstance(value, int | float):
+                continue
+            row = self._row_by_name.get(f"settings:{name}")
+            widget = self.ui.settingsTable.cellWidget(row, 1) if row is not None else None
+            if widget is not None:
+                widget.blockSignals(True)
+                try:
+                    if isinstance(widget, QCheckBox):
+                        widget.setChecked(bool(value))
+                    elif isinstance(widget, QDoubleSpinBox):
+                        widget.setValue(float(value))
+                    elif isinstance(widget, QSpinBox):
+                        widget.setValue(int(value))
+                finally:
+                    widget.blockSignals(False)
+            self.device.write(name, value)
+
+    def configuration_settings(self) -> dict[str, object]:
+        plotted: list[str] = []
+        for name, _spec in self._input_specs():
+            row = self._row_by_name.get(f"telemetry:{name}")
+            widget = self.ui.telemetryTable.cellWidget(row, 3) if row is not None else None
+            if isinstance(widget, QCheckBox) and widget.isChecked():
+                plotted.append(name)
+        return {
+            "refresh_interval_ms": self.ui.spinRefreshRate.value(),
+            "plot_time_range_s": self.ui.spinTimeRange.value(),
+            "plotted_registers": plotted,
+        }
+
+    def apply_configuration_settings(self, settings: object) -> None:
+        if not isinstance(settings, dict):
+            return
+        if "refresh_interval_ms" in settings:
+            self.ui.spinRefreshRate.setValue(int(settings["refresh_interval_ms"]))
+        if "plot_time_range_s" in settings:
+            self.ui.spinTimeRange.setValue(int(settings["plot_time_range_s"]))
+        plotted = settings.get("plotted_registers")
+        if isinstance(plotted, list):
+            selected = {str(name) for name in plotted}
+            for name, _spec in self._input_specs():
+                row = self._row_by_name.get(f"telemetry:{name}")
+                widget = self.ui.telemetryTable.cellWidget(row, 3) if row is not None else None
+                if isinstance(widget, QCheckBox):
+                    widget.setChecked(name in selected)
 
     # ------------------------------------------------------------------
     # Polling start / stop

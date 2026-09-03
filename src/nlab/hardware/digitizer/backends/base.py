@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
+from ..diagnostics import GlobalDiagnosticReading
+
 
 class ScopeBackend(ABC):
     """Abstract interface for scope hardware access. All units are hardware-native (samples, ADC counts)."""
@@ -406,15 +408,21 @@ class MCABackend(ABC):
 class IDSBackend(ABC):
     """Abstract interface for the IDS subsystem.
 
-    Separate gRPC server managing power supplies and temperature sensors.
+    Power-supply and temperature-sensor access, provided either by the
+    legacy separate gRPC service or directly by IIO devices.
     """
 
     # ---- versions ----
     @abstractmethod
-    def get_versions(self) -> list: ...
+    def get_versions(self) -> list[int]: ...
 
     @abstractmethod
     def get_ads_temp(self) -> float: ...
+
+    @abstractmethod
+    def get_global_diagnostics(self) -> list[GlobalDiagnosticReading]:
+        """Read channel-independent board sensors and health indicators."""
+        ...
 
     # ---- SiPM bias supply ----
     @abstractmethod

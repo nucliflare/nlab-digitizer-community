@@ -45,6 +45,17 @@
        </layout>
       </widget>
 
+      <!-- Global digitizer controls and channel-independent diagnostics -->
+      <widget class="QWidget" name="tabGlobal">
+       <attribute name="title"><string>Global</string></attribute>
+       <layout class="QVBoxLayout" name="layoutTabGlobal">
+        <property name="leftMargin"><number>0</number></property>
+        <property name="topMargin"><number>0</number></property>
+        <property name="rightMargin"><number>0</number></property>
+        <property name="bottomMargin"><number>0</number></property>
+       </layout>
+      </widget>
+
       <!-- ── Power Supply tab (inner channel tabs added programmatically) ── -->
       <widget class="QWidget" name="tabPSU">
        <attribute name="title"><string>Power Supply</string></attribute>

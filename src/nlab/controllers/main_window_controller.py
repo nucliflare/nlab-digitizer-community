@@ -3,10 +3,11 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QSettings, Qt, QThread, QThreadPool
+from PySide6.QtCore import QByteArray, QSettings, Qt, QThread, QThreadPool
 from PySide6.QtWidgets import QDockWidget, QMainWindow, QWidget
 
 from nlab.controllers.external_device_controller import ExternalDeviceController
+from nlab.controllers.global_controller import GlobalController
 from nlab.controllers.mca_controller import MCAController
 from nlab.controllers.psu_controller import PSUController
 from nlab.controllers.scope_controller import ScopeController
@@ -51,20 +52,27 @@ class MainWindowController:
         self._mca_controllers: list[MCAController] = []
         self._psu_controllers: list[PSUController] = []
         self._external_controllers: list[ExternalDeviceController] = []
+        self._global_controller: GlobalController | None = None
         self._external_devices = ExternalDevices()
         self._thread: QThread | None = None
 
         self._scope_dock_host = self._make_dock_host()
         self._mca_dock_host = self._make_dock_host()
         self._psu_dock_host = self._make_dock_host()
+        self._global_dock_host = self._make_dock_host()
         self._external_dock_host = self._make_dock_host()
+        self._build_global_tab()
         self._build_channel_docks()
         self._build_external_docks()
         self._restore_dock_state()
         self._connect_signals()
-        log.info("UI initialized, %d scope / %d MCA / %d PSU / %d external controllers",
-                 len(self._scope_controllers), len(self._mca_controllers),
-                 len(self._psu_controllers), len(self._external_controllers))
+        log.info(
+            "UI initialized, %d scope / %d MCA / %d PSU / %d external controllers",
+            len(self._scope_controllers),
+            len(self._mca_controllers),
+            len(self._psu_controllers),
+            len(self._external_controllers),
+        )
 
     def _connect_channel(self, ch: int) -> Digitizer:
         """Connect one channel using the selected backend.
@@ -76,8 +84,17 @@ class MainWindowController:
         connection order — ch itself is never used as a storage key.
         """
         if self._backend == "iio":
-            return Digitizer.from_iio(channel=ch - 1, uri=f"ip:{self._host}:{self._port}")
-        return Digitizer.from_grpc(channel=ch, hostname=self._host, port=self._port)
+            return Digitizer.from_iio(
+                channel=ch - 1,
+                uri=f"ip:{self._host}:{self._port}",
+                with_ids=True,
+            )
+        return Digitizer.from_grpc(
+            channel=ch,
+            hostname=self._host,
+            port=self._port,
+            with_ids=True,
+        )
 
     def _display_channel(self, idx: int) -> int:
         """Channel number the way the connected backend's own hardware
@@ -140,6 +157,19 @@ class MainWindowController:
         mca_docks: list[QDockWidget] = []
         psu_docks: list[QDockWidget] = []
 
+        # _connect_channel() requests IDS explicitly for every startup and
+        # reconnect. Treat a missing backend as a connection failure instead
+        # of silently starting with an empty PSU tab: the PSUController owns
+        # the HV defaults/readback lifecycle and must exist for every channel.
+        missing_psu_channels = [
+            self._display_channel(index)
+            for index, device in enumerate(self._devices)
+            if device.hv is None
+        ]
+        if missing_psu_channels:
+            channels = ", ".join(str(channel) for channel in missing_psu_channels)
+            raise RuntimeError(f"PSU backend missing for channel(s): {channels}")
+
         # IIODigitizerBackend now implements MCABackend against
         # vdpp-pulse-processor.c/vdpp-input-filter.c (see iio_backend.py's
         # module docstring for the few methods that still raise
@@ -167,10 +197,12 @@ class MainWindowController:
                 self._mca_controllers.append(mca_ctrl)
                 mca_docks.append(self._make_dock(f"mca_ch{ch}", ch_label, mca_ctrl))
 
-            if device.hv is not None:
-                psu_ctrl = PSUController(device.hv)
-                self._psu_controllers.append(psu_ctrl)
-                psu_docks.append(self._make_dock(f"psu_ch{ch}", ch_label, psu_ctrl))
+            hv = device.hv
+            if hv is None:  # Guard kept local for static type narrowing.
+                raise RuntimeError(f"PSU backend missing for channel {ch}")
+            psu_ctrl = PSUController(hv)
+            self._psu_controllers.append(psu_ctrl)
+            psu_docks.append(self._make_dock(f"psu_ch{ch}", ch_label, psu_ctrl))
 
         self._populate_dock_host(self._scope_dock_host, scope_docks)
         self._populate_dock_host(self._mca_dock_host, mca_docks)
@@ -183,10 +215,27 @@ class MainWindowController:
         mca_tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabMCA)
         self._window.ui.mainTabs.setTabEnabled(mca_tab_index, build_mca)
         self._window.ui.tabMCA.setToolTip(
-            "" if build_mca else
-            "MCA is disabled: no pulse-processor/input-filter device found "
+            ""
+            if build_mca
+            else "MCA is disabled: no pulse-processor/input-filter device found "
             "for one or more connected channels (older or scope-only firmware)."
         )
+
+        psu_tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabPSU)
+        self._window.ui.mainTabs.setTabEnabled(psu_tab_index, bool(psu_docks))
+        self._window.ui.tabPSU.setToolTip(
+            "" if psu_docks else "PSU is disabled: no IDS/HV backend connected."
+        )
+
+    def _build_global_tab(self) -> None:
+        """Build the one floatable channel-independent digitizer panel."""
+        labels = [self._display_channel(index) for index in range(len(self._devices))]
+        self._global_controller = GlobalController(self._devices, labels)
+        dock = self._make_dock("global_panel", "Global", self._global_controller)
+        self._populate_dock_host(self._global_dock_host, [dock])
+        layout = self._window.ui.layoutTabGlobal
+        if layout.indexOf(self._global_dock_host) < 0:
+            layout.addWidget(self._global_dock_host)
 
     def _build_external_docks(self) -> None:
         """Discover Modbus devices on the digitizer host and dock one tab each.
@@ -203,9 +252,18 @@ class MainWindowController:
             self._external_controllers.append(ctrl)
             label = f"{device.device_type.name.title()} #{device.device_id}"
             docks.append(self._make_dock(f"external_{idx}", label, ctrl))
+            log.info("External module panel created: %s", label)
 
         self._populate_dock_host(self._external_dock_host, docks)
-        self._window.ui.layoutTabExternal.addWidget(self._external_dock_host)
+        layout = self._window.ui.layoutTabExternal
+        if layout.indexOf(self._external_dock_host) < 0:
+            layout.addWidget(self._external_dock_host)
+
+        tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabExternal)
+        self._window.ui.mainTabs.setTabEnabled(tab_index, bool(docks))
+        self._window.ui.tabExternal.setToolTip(
+            "" if docks else "No external Modbus modules were detected on the digitizer host."
+        )
 
     # ------------------------------------------------------------------
     # Dock state persistence
@@ -216,6 +274,7 @@ class MainWindowController:
     _DOCK_STATE_KEY_SCOPE = "docks/v2/scope"
     _DOCK_STATE_KEY_MCA = "docks/v2/mca"
     _DOCK_STATE_KEY_PSU = "docks/v2/psu"
+    _DOCK_STATE_KEY_GLOBAL = "docks/v2/global"
     _DOCK_STATE_KEY_EXTERNAL = "docks/v2/external"
 
     def _save_dock_state(self) -> None:
@@ -223,6 +282,7 @@ class MainWindowController:
         settings.setValue(self._DOCK_STATE_KEY_SCOPE, self._scope_dock_host.saveState())
         settings.setValue(self._DOCK_STATE_KEY_MCA, self._mca_dock_host.saveState())
         settings.setValue(self._DOCK_STATE_KEY_PSU, self._psu_dock_host.saveState())
+        settings.setValue(self._DOCK_STATE_KEY_GLOBAL, self._global_dock_host.saveState())
         settings.setValue(self._DOCK_STATE_KEY_EXTERNAL, self._external_dock_host.saveState())
 
     def _restore_dock_state(self) -> None:
@@ -236,6 +296,9 @@ class MainWindowController:
         if state := settings.value(self._DOCK_STATE_KEY_PSU):
             if not self._psu_dock_host.restoreState(state):
                 settings.remove(self._DOCK_STATE_KEY_PSU)
+        if state := settings.value(self._DOCK_STATE_KEY_GLOBAL):
+            if not self._global_dock_host.restoreState(state):
+                settings.remove(self._DOCK_STATE_KEY_GLOBAL)
         if state := settings.value(self._DOCK_STATE_KEY_EXTERNAL):
             if not self._external_dock_host.restoreState(state):
                 settings.remove(self._DOCK_STATE_KEY_EXTERNAL)
@@ -246,14 +309,22 @@ class MainWindowController:
         settings.remove(self._DOCK_STATE_KEY_SCOPE)
         settings.remove(self._DOCK_STATE_KEY_MCA)
         settings.remove(self._DOCK_STATE_KEY_PSU)
+        settings.remove(self._DOCK_STATE_KEY_GLOBAL)
         settings.remove(self._DOCK_STATE_KEY_EXTERNAL)
 
         dock_hosts = (
-            self._scope_dock_host, self._mca_dock_host,
-            self._psu_dock_host, self._external_dock_host,
+            self._scope_dock_host,
+            self._mca_dock_host,
+            self._psu_dock_host,
+            self._global_dock_host,
+            self._external_dock_host,
         )
         for host in dock_hosts:
             docks = host.findChildren(QDockWidget)
+            if not docks:
+                continue
+            for dock in docks:
+                host.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
             if len(docks) < 2:
                 continue
             for i in range(1, len(docks)):
@@ -303,6 +374,10 @@ class MainWindowController:
 
     def _stop_all_workers(self) -> None:
         """Stop all running timers/workers (blocking). Devices stay open."""
+        if self._global_controller is not None:
+            self._global_controller.disarm_sync()
+            self._global_controller.stop_polling_sync()
+
         # 1. Stop scope timers — no new workers will be submitted
         for ctrl in self._scope_controllers:
             ctrl._refresh_timer.stop()
@@ -363,6 +438,8 @@ class MainWindowController:
 
         self._stop_all_workers()
 
+        self._global_controller = None
+
         for device in self._devices:
             device.close()
         self._devices.clear()
@@ -370,8 +447,11 @@ class MainWindowController:
         self._external_devices = ExternalDevices()
 
         dock_hosts = (
-            self._scope_dock_host, self._mca_dock_host,
-            self._psu_dock_host, self._external_dock_host,
+            self._scope_dock_host,
+            self._mca_dock_host,
+            self._psu_dock_host,
+            self._global_dock_host,
+            self._external_dock_host,
         )
         for host in dock_hosts:
             for dock in host.findChildren(QDockWidget):
@@ -386,39 +466,205 @@ class MainWindowController:
         self._psu_controllers.clear()
         self._external_controllers.clear()
 
-        log.info("Reconnect: connecting via %s to %s:%d, %d channel(s)",
-                 self._backend, self._host, self._port, self._channels)
+        log.info(
+            "Reconnect: connecting via %s to %s:%d, %d channel(s)",
+            self._backend,
+            self._host,
+            self._port,
+            self._channels,
+        )
         for ch in range(1, 1 + self._channels):
             self._devices.append(self._connect_channel(ch))
         log.info("Reconnect: all %d device(s) connected", len(self._devices))
 
+        self._build_global_tab()
         self._build_channel_docks()
         self._build_external_docks()
         self._restore_dock_state()
-        log.info("Reconnect complete, %d scope / %d MCA / %d PSU / %d external controllers",
-                 len(self._scope_controllers), len(self._mca_controllers),
-                 len(self._psu_controllers), len(self._external_controllers))
+        log.info(
+            "Reconnect complete, %d scope / %d MCA / %d PSU / %d external controllers",
+            len(self._scope_controllers),
+            len(self._mca_controllers),
+            len(self._psu_controllers),
+            len(self._external_controllers),
+        )
 
     def save_all_settings(self, path) -> None:
         """Save settings for all channels to a single YAML file."""
-        from nlab.utils.settings_io import save_settings
+        from nlab.utils.settings_io import (
+            FORMAT_VERSION,
+            collect_channel_hardware,
+            write_configuration,
+        )
+
+        hardware_channels: dict[str, object] = {}
+        application_channels: dict[str, object] = {}
         for idx, device in enumerate(self._devices):
-            ch_path = path.with_stem(f"{path.stem}_ch{self._display_channel(idx)}")
-            save_settings(device.scope, device.mca, device.hv, ch_path)
-        log.info("All channel settings saved to %s", path.parent)
+            channel = self._display_channel(idx)
+            mca_ctrl = self._mca_controllers[idx] if idx < len(self._mca_controllers) else None
+            psu_ctrl = self._psu_controllers[idx]
+            lp_preset = None
+            if mca_ctrl is not None:
+                lp_preset = mca_ctrl.hardware_configuration_settings()["low_pass_preset"]
+            hardware_channels[str(channel)] = collect_channel_hardware(
+                device.scope,
+                device.mca if device.mca_available() else None,
+                device.hv,
+                mca_lp_preset=lp_preset,
+                psu_settings=psu_ctrl.hardware_configuration_settings(),
+            )
+            application_channel: dict[str, object] = {
+                "scope": self._scope_controllers[idx].configuration_settings(),
+                "psu": psu_ctrl.configuration_settings(),
+            }
+            if mca_ctrl is not None:
+                application_channel["mca"] = mca_ctrl.configuration_settings()
+            application_channels[str(channel)] = application_channel
+
+        external_hardware = {
+            ctrl.configuration_id: ctrl.hardware_configuration_settings()
+            for ctrl in self._external_controllers
+        }
+        external_application = {
+            ctrl.configuration_id: ctrl.configuration_settings()
+            for ctrl in self._external_controllers
+        }
+        shared_hardware = (
+            self._global_controller.hardware_configuration_settings()
+            if self._global_controller is not None
+            else {}
+        )
+        global_application = (
+            self._global_controller.configuration_settings()
+            if self._global_controller is not None
+            else {}
+        )
+        layout = {
+            "scope": self._scope_dock_host.saveState().toBase64().data().decode("ascii"),
+            "mca": self._mca_dock_host.saveState().toBase64().data().decode("ascii"),
+            "psu": self._psu_dock_host.saveState().toBase64().data().decode("ascii"),
+            "global": self._global_dock_host.saveState().toBase64().data().decode("ascii"),
+            "external": self._external_dock_host.saveState().toBase64().data().decode("ascii"),
+        }
+        document = {
+            "format_version": FORMAT_VERSION,
+            "connection": {
+                "backend": self._backend,
+                "ip": self._host,
+                "port": self._port,
+                "channels": self._channels,
+            },
+            "hardware": {
+                "channels": hardware_channels,
+                "shared_trigger": shared_hardware,
+                "external_devices": external_hardware,
+            },
+            "application": {
+                "main_window": self._window.configuration_settings(),
+                "global": global_application,
+                "channels": application_channels,
+                "external_devices": external_application,
+                "dock_layout": layout,
+            },
+        }
+        write_configuration(path, document)
+        log.info("All channel and application settings saved to %s", path)
 
     def load_all_settings(self, path) -> None:
         """Load settings from YAML and apply to hardware, then refresh UI."""
-        from nlab.utils.settings_io import load_settings
+        from nlab.utils.settings_io import (
+            apply_channel_hardware,
+            channel_application_entry,
+            channel_entry,
+            read_configuration,
+        )
+
+        document = read_configuration(path)
+        if "hardware" not in document:
+            # Original files contained one channel directly at the root.
+            apply_channel_hardware(
+                self._devices[0].scope,
+                self._devices[0].mca if self._devices[0].mca_available() else None,
+                self._devices[0].hv,
+                document,
+            )
+            log.warning("Loaded legacy settings into the first connected channel")
+        else:
+            for idx, device in enumerate(self._devices):
+                channel = self._display_channel(idx)
+                hardware = channel_entry(document, channel)
+                if hardware is None:
+                    log.warning("No settings found for channel %s", channel)
+                    continue
+                apply_channel_hardware(
+                    device.scope,
+                    device.mca if device.mca_available() else None,
+                    device.hv,
+                    hardware,
+                )
+
         for idx, device in enumerate(self._devices):
-            ch_path = path.with_stem(f"{path.stem}_ch{self._display_channel(idx)}")
-            if ch_path.exists():
-                load_settings(device.scope, device.mca, device.hv, ch_path)
-        for ctrl in self._scope_controllers:
-            ctrl._load_hardware_state()
-        for ctrl in self._mca_controllers:
-            ctrl._load_hardware_state()
-        log.info("All channel settings loaded and UI refreshed")
+            self._scope_controllers[idx]._load_hardware_state()
+            if idx < len(self._mca_controllers):
+                self._mca_controllers[idx]._load_hardware_state()
+            channel = self._display_channel(idx)
+            hardware = channel_entry(document, channel)
+            if hardware is not None:
+                mca_settings = hardware.get("mca", {})
+                if idx < len(self._mca_controllers) and isinstance(mca_settings, dict):
+                    low_pass = mca_settings.get("low_pass", {})
+                    if isinstance(low_pass, dict) and "preset" in low_pass:
+                        self._mca_controllers[idx].populate_hardware_configuration_settings(
+                            {"low_pass_preset": low_pass["preset"]}
+                        )
+                psu_settings = hardware.get("psu", {})
+                self._psu_controllers[idx].populate_hardware_configuration_settings(psu_settings)
+
+            app_channel = channel_application_entry(document, channel)
+            if app_channel is not None:
+                self._scope_controllers[idx].apply_configuration_settings(app_channel.get("scope"))
+                self._psu_controllers[idx].apply_configuration_settings(app_channel.get("psu"))
+                if idx < len(self._mca_controllers):
+                    self._mca_controllers[idx].apply_configuration_settings(app_channel.get("mca"))
+
+        hardware_root = document.get("hardware", {})
+        application = document.get("application", {})
+        if isinstance(hardware_root, dict) and self._global_controller is not None:
+            self._global_controller.apply_hardware_configuration_settings(
+                hardware_root.get("shared_trigger")
+            )
+        if self._global_controller is not None:
+            if isinstance(application, dict):
+                self._global_controller.apply_configuration_settings(application.get("global"))
+            self._global_controller.refresh_temperature_state()
+        if isinstance(hardware_root, dict):
+            external = hardware_root.get("external_devices", {})
+            if isinstance(external, dict):
+                for ctrl in self._external_controllers:
+                    ctrl.apply_hardware_configuration_settings(external.get(ctrl.configuration_id))
+        if isinstance(application, dict):
+            self._window.apply_configuration_settings(application.get("main_window"))
+            external = application.get("external_devices", {})
+            if isinstance(external, dict):
+                for ctrl in self._external_controllers:
+                    ctrl.apply_configuration_settings(external.get(ctrl.configuration_id))
+            self._restore_yaml_dock_layout(application.get("dock_layout"))
+        log.info("All hardware and application settings loaded from %s", path)
+
+    def _restore_yaml_dock_layout(self, settings: object) -> None:
+        if not isinstance(settings, dict):
+            return
+        hosts = {
+            "scope": self._scope_dock_host,
+            "mca": self._mca_dock_host,
+            "psu": self._psu_dock_host,
+            "global": self._global_dock_host,
+            "external": self._external_dock_host,
+        }
+        for name, host in hosts.items():
+            encoded = settings.get(name)
+            if isinstance(encoded, str):
+                host.restoreState(QByteArray.fromBase64(encoded.encode("ascii")))
 
     def _connect_signals(self) -> None:
         self._window.ui.mainTabs.currentChanged.connect(self._on_tab_changed)

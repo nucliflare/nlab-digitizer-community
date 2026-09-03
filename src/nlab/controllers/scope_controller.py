@@ -170,6 +170,29 @@ class ScopeController(QWidget):
         s.setValue(self._settings_key("persistence"), self.ui.dialPersistence.value())
         s.setValue(self._settings_key("refresh_rate"), self.ui.spinRefreshRate.value())
 
+    def configuration_settings(self) -> dict[str, int]:
+        """Return settings owned by this view rather than by scope hardware."""
+        return {
+            "display_mode": self.ui.comboDisplayMode.currentIndex(),
+            "persistence": self.ui.dialPersistence.value(),
+            "refresh_rate_hz": self.ui.spinRefreshRate.value(),
+            "measurement_time_s": self.ui.spinTime.value(),
+        }
+
+    def apply_configuration_settings(self, settings: object) -> None:
+        """Populate app-only controls from a YAML channel section."""
+        if not isinstance(settings, dict):
+            return
+        if "display_mode" in settings:
+            self.ui.comboDisplayMode.setCurrentIndex(int(settings["display_mode"]))
+        if "persistence" in settings:
+            self.ui.dialPersistence.setValue(int(settings["persistence"]))
+        if "refresh_rate_hz" in settings:
+            self.ui.spinRefreshRate.setValue(int(settings["refresh_rate_hz"]))
+        if "measurement_time_s" in settings:
+            self.ui.spinTime.setValue(int(settings["measurement_time_s"]))
+        self.save_display_settings()
+
     def reset_zoom(self) -> None:
         """Reset the waveform plot to its default fixed range."""
         self._update_axis_ranges()
@@ -246,8 +269,7 @@ class ScopeController(QWidget):
     def _on_start(self) -> None:
         if self._dma_worker is not None or self._dma_thread is not None:
             log.warning(
-                "Scope ch%d: refusing to start while the previous DMA "
-                "worker is still closing",
+                "Scope ch%d: refusing to start while the previous DMA worker is still closing",
                 self._channel,
             )
             return
@@ -276,16 +298,19 @@ class ScopeController(QWidget):
         self._dma_filepath = None
 
         if isinstance(self._scope_dma, IIOScopeDmaStreamer):
-            log.debug("Scope ch%d IIO DMA [1/4]: creating worker, file=%s",
-                      self._channel, filepath)
+            log.debug("Scope ch%d IIO DMA [1/4]: creating worker, file=%s", self._channel, filepath)
             self._dma_worker = IIOScopeDmaWorker(
                 streamer=self._scope_dma,
                 filepath=filepath,
             )
         else:
             frame_samples = self.ui.spinFrameSamples.value()
-            log.debug("Scope ch%d DMA [1/6]: creating worker, file=%s, frame_samples=%d",
-                      self._channel, filepath, frame_samples)
+            log.debug(
+                "Scope ch%d DMA [1/6]: creating worker, file=%s, frame_samples=%d",
+                self._channel,
+                filepath,
+                frame_samples,
+            )
             self._dma_worker = ScopeDmaWorker(
                 streamer=self._scope_dma,
                 filepath=filepath,
@@ -305,8 +330,9 @@ class ScopeController(QWidget):
 
         self._set_controls_enabled(False)
         self.ui.lblRecordingStatus.setText("Connecting...")
-        log.debug("Scope ch%d DMA [2/6]: starting worker thread (ZMQ connect + subscribe)",
-                  self._channel)
+        log.debug(
+            "Scope ch%d DMA [2/6]: starting worker thread (ZMQ connect + subscribe)", self._channel
+        )
         self._dma_thread.start()
         log.info("Scope DMA: worker started, waiting for socket ready, file=%s", filepath)
 
@@ -320,10 +346,15 @@ class ScopeController(QWidget):
                 self._channel,
             )
         else:
-            log.debug("Scope ch%d DMA [3/6]: ZMQ socket ready, DMA already enabled via checkbox",
-                      self._channel)
-            log.debug("Scope ch%d DMA [4/6]: calling scope.start() -> set_enable(True) "
-                      "(HW fires start_irq -> server sends StreamSTART)", self._channel)
+            log.debug(
+                "Scope ch%d DMA [3/6]: ZMQ socket ready, DMA already enabled via checkbox",
+                self._channel,
+            )
+            log.debug(
+                "Scope ch%d DMA [4/6]: calling scope.start() -> set_enable(True) "
+                "(HW fires start_irq -> server sends StreamSTART)",
+                self._channel,
+            )
             self._scope.start()
         interval_ms = 1000 // self.ui.spinRefreshRate.value()
         self._refresh_timer.start(interval_ms)
@@ -533,7 +564,10 @@ class ScopeController(QWidget):
     def _on_dma_file(self) -> None:
         default_dir = str(QSettings().value("dma/save_folder", "measurements"))
         path, _ = QFileDialog.getSaveFileName(
-            self, "Scope DMA File", default_dir, "Binary files (*.bin);;All files (*)",
+            self,
+            "Scope DMA File",
+            default_dir,
+            "Binary files (*.bin);;All files (*)",
         )
         if path:
             self._dma_filepath = Path(path)
@@ -575,15 +609,13 @@ class ScopeController(QWidget):
                 self._scope.acknowledge_dma_recovery()
             except RuntimeError:
                 log.error(
-                    "Scope ch%d: DMA fault did not clear -- board restart "
-                    "likely required", self._channel, exc_info=True,
+                    "Scope ch%d: DMA fault did not clear -- board restart likely required",
+                    self._channel,
+                    exc_info=True,
                 )
-                self.ui.lblRecordingStatus.setText(
-                    "DMA fault -- restart the board, then reconnect"
-                )
+                self.ui.lblRecordingStatus.setText("DMA fault -- restart the board, then reconnect")
                 return
-            log.info("Scope ch%d: DMA fault cleared, DMA capture is usable again",
-                      self._channel)
+            log.info("Scope ch%d: DMA fault cleared, DMA capture is usable again", self._channel)
             self.ui.lblRecordingStatus.setText("Stopped (recovered from DMA fault)")
             return
 
@@ -644,11 +676,13 @@ class ScopeController(QWidget):
                 return
             except OSError as e:
                 if getattr(e, "errno", None) != 16 or attempt == 9:
-                    log.warning("Scope ch%d: failed to disarm during shutdown",
-                                self._channel, exc_info=True)
+                    log.warning(
+                        "Scope ch%d: failed to disarm during shutdown", self._channel, exc_info=True
+                    )
                     return
                 time.sleep(0.02)
             except Exception:
-                log.warning("Scope ch%d: failed to disarm during shutdown",
-                            self._channel, exc_info=True)
+                log.warning(
+                    "Scope ch%d: failed to disarm during shutdown", self._channel, exc_info=True
+                )
                 return

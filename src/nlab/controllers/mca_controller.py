@@ -76,6 +76,7 @@ class MCAController(QWidget):
         self._render_timer.timeout.connect(self._render_pending_readback)
 
         self._populate_combos()
+        self._disarm_before_initialization()
         self._send_defaults()
         self._load_hardware_state()
         self._setup_debug_plot()
@@ -102,6 +103,17 @@ class MCAController(QWidget):
     # ------------------------------------------------------------------
     # Write defaults to hardware, then read back
     # ------------------------------------------------------------------
+
+    def _disarm_before_initialization(self) -> None:
+        """Clear a stale enable gate before writing configuration defaults.
+
+        ``measurement_in_progress`` is not the ownership gate: an MCA armed
+        for an external trigger can report false there while ``enable`` is
+        still one. Per vdpp-pulse-processor.c's pp_enable_store(), writing
+        enable=0 is always accepted, including after a previous GUI crashed.
+        """
+        self._mca.stop()
+        log.debug("MCA ch%d: startup enable gate cleared", self._channel)
 
     def _send_defaults(self) -> None:
         specs = MCA_PARAMETER_SPECS
@@ -156,11 +168,7 @@ class MCAController(QWidget):
         self._mca.filters.psd_zc.set_time_window_low(int(specs[MCAParam.PSD_ZC_LOW].default))
         self._mca.filters.psd_zc.set_time_window_high(int(specs[MCAParam.PSD_ZC_HIGH].default))
 
-        # Temperature compensation
-        self._mca.set_temp_coeff(float(specs[MCAParam.TEMP_COEFF].default))
-        self._mca.set_temp_offset(int(specs[MCAParam.TEMP_OFFSET].default))
-
-        log.info("MCA ch%d: defaults sent to hardware (full parameter set)", self._channel)
+        log.info("MCA ch%d: channel defaults sent to hardware", self._channel)
 
     def _load_hardware_state(self) -> None:
         self.ui.spinTriggerLevel.setValue(self._mca.get_trigger_level())
@@ -216,10 +224,6 @@ class MCAController(QWidget):
         self.ui.comboPsdZcMode.setCurrentIndex(self._mca.filters.psd_zc.get_mode())
         self.ui.spinPsdZcLow.setValue(self._mca.filters.psd_zc.get_time_window_low())
         self.ui.spinPsdZcHigh.setValue(self._mca.filters.psd_zc.get_time_window_high())
-
-        # Temperature compensation
-        self.ui.spinTempCoeff.setValue(self._mca.get_temp_coeff())
-        self.ui.spinTempOffset.setValue(self._mca.get_temp_offset())
 
         log.info("MCA ch%d: hardware state loaded into UI", self._channel)
 
@@ -325,6 +329,33 @@ class MCAController(QWidget):
         self._debug_plot.autoRange()
         self._hist_plot.autoRange()
 
+    def hardware_configuration_settings(self) -> dict[str, int]:
+        """Return write-only hardware choices that cannot be read back."""
+        return {"low_pass_preset": self.ui.comboLpPreset.currentIndex()}
+
+    def populate_hardware_configuration_settings(self, settings: object) -> None:
+        if not isinstance(settings, dict) or "low_pass_preset" not in settings:
+            return
+        self.ui.comboLpPreset.blockSignals(True)
+        self.ui.comboLpPreset.setCurrentIndex(int(settings["low_pass_preset"]))
+        self.ui.comboLpPreset.blockSignals(False)
+
+    def configuration_settings(self) -> dict[str, object]:
+        """Return controls that affect only GUI polling and presentation."""
+        return {
+            "refresh_rate_hz": self.ui.spinRefreshRate.value(),
+            "roi": [float(value) for value in self._roi.getRegion()],
+        }
+
+    def apply_configuration_settings(self, settings: object) -> None:
+        if not isinstance(settings, dict):
+            return
+        if "refresh_rate_hz" in settings:
+            self.ui.spinRefreshRate.setValue(int(settings["refresh_rate_hz"]))
+        roi = settings.get("roi")
+        if isinstance(roi, list) and len(roi) == 2:
+            self._roi.setRegion((float(roi[0]), float(roi[1])))
+
     # ------------------------------------------------------------------
     # ROI statistics (gross counts, peak centroid/FWHM estimate — no curve fit)
     # ------------------------------------------------------------------
@@ -346,7 +377,7 @@ class MCAController(QWidget):
             low_bin, high_bin = high_bin, low_bin
         width = high_bin - low_bin + 1
 
-        window = histogram[low_bin:high_bin + 1].astype(np.float64)
+        window = histogram[low_bin : high_bin + 1].astype(np.float64)
         bins = np.arange(low_bin, high_bin + 1, dtype=np.float64)
 
         gross_counts = float(window.sum())
@@ -440,32 +471,20 @@ class MCAController(QWidget):
             )
         )
         self.ui.comboBaseline.currentIndexChanged.connect(
-            lambda i: self._apply_hardware_setting(
-                lambda: self._mca.set_baseline_window(i)
-            )
+            lambda i: self._apply_hardware_setting(lambda: self._mca.set_baseline_window(i))
         )
-        self.ui.comboDebug1.currentIndexChanged.connect(
-            lambda i: self._mca.set_mem1_sig_select(i)
-        )
-        self.ui.comboDebug2.currentIndexChanged.connect(
-            lambda i: self._mca.set_mem2_sig_select(i)
-        )
+        self.ui.comboDebug1.currentIndexChanged.connect(lambda i: self._mca.set_mem1_sig_select(i))
+        self.ui.comboDebug2.currentIndexChanged.connect(lambda i: self._mca.set_mem2_sig_select(i))
         self.ui.spinPileupWindow.editingFinished.connect(
             lambda: self._apply_hardware_setting(
-                lambda: self._mca.set_pileup_window(
-                    self.ui.spinPileupWindow.value()
-                )
+                lambda: self._mca.set_pileup_window(self.ui.spinPileupWindow.value())
             )
         )
         self.ui.comboBinning.currentIndexChanged.connect(
-            lambda i: self._apply_hardware_setting(
-                lambda: self._mca.set_energy_bin(i)
-            )
+            lambda i: self._apply_hardware_setting(lambda: self._mca.set_energy_bin(i))
         )
         self.ui.cbExtTrigger.toggled.connect(
-            lambda value: self._apply_hardware_setting(
-                lambda: self._mca.set_ext_trig_enable(value)
-            )
+            lambda value: self._apply_hardware_setting(lambda: self._mca.set_ext_trig_enable(value))
         )
 
         self.ui.spinTimeLimit.editingFinished.connect(
@@ -501,16 +520,12 @@ class MCAController(QWidget):
         )
         self.ui.spinEdgeDetCoeff.editingFinished.connect(
             lambda: self._apply_hardware_setting(
-                lambda: self._mca.set_edge_det_coeff(
-                    int(self.ui.spinEdgeDetCoeff.value())
-                )
+                lambda: self._mca.set_edge_det_coeff(int(self.ui.spinEdgeDetCoeff.value()))
             )
         )
 
         self.ui.comboLpPreset.currentIndexChanged.connect(
-            lambda i: self._apply_hardware_setting(
-                lambda: self._mca.filters.lp.set_preset(i)
-            )
+            lambda i: self._apply_hardware_setting(lambda: self._mca.filters.lp.set_preset(i))
         )
 
         self._wire_slider_spinbox(
@@ -536,9 +551,7 @@ class MCAController(QWidget):
         )
         self.ui.spinCfdFactor.editingFinished.connect(
             lambda: self._apply_hardware_setting(
-                lambda: self._mca.filters.cfd.set_factor(
-                    self.ui.spinCfdFactor.value()
-                )
+                lambda: self._mca.filters.cfd.set_factor(self.ui.spinCfdFactor.value())
             )
         )
         self._wire_slider_spinbox(
@@ -548,16 +561,12 @@ class MCAController(QWidget):
         )
         self.ui.spinCfdTwLow.editingFinished.connect(
             lambda: self._apply_hardware_setting(
-                lambda: self._mca.filters.cfd.set_time_window_low(
-                    self.ui.spinCfdTwLow.value()
-                )
+                lambda: self._mca.filters.cfd.set_time_window_low(self.ui.spinCfdTwLow.value())
             )
         )
         self.ui.spinCfdTwHigh.editingFinished.connect(
             lambda: self._apply_hardware_setting(
-                lambda: self._mca.filters.cfd.set_time_window_high(
-                    self.ui.spinCfdTwHigh.value()
-                )
+                lambda: self._mca.filters.cfd.set_time_window_high(self.ui.spinCfdTwHigh.value())
             )
         )
 
@@ -578,9 +587,7 @@ class MCAController(QWidget):
         )
         self.ui.spinTrapT.editingFinished.connect(
             lambda: self._apply_hardware_setting(
-                lambda: self._mca.filters.trapezoid.set_T(
-                    int(self.ui.spinTrapT.value())
-                )
+                lambda: self._mca.filters.trapezoid.set_T(int(self.ui.spinTrapT.value()))
             )
         )
         self._wire_slider_spinbox(
@@ -589,9 +596,7 @@ class MCAController(QWidget):
             lambda v: self._mca.filters.trapezoid.set_E(v),
         )
         self.ui.comboTrapFt.currentIndexChanged.connect(
-            lambda i: self._apply_hardware_setting(
-                lambda: self._mca.filters.trapezoid.set_FT(i)
-            )
+            lambda i: self._apply_hardware_setting(lambda: self._mca.filters.trapezoid.set_FT(i))
         )
 
         self.ui.cbCcEnable.toggled.connect(
@@ -601,9 +606,7 @@ class MCAController(QWidget):
         )
         self.ui.spinCcTime.editingFinished.connect(
             lambda: self._apply_hardware_setting(
-                lambda: self._mca.filters.charge_comparison.set_time(
-                    self.ui.spinCcTime.value()
-                )
+                lambda: self._mca.filters.charge_comparison.set_time(self.ui.spinCcTime.value())
             )
         )
         self.ui.cbPsdZcEnable.toggled.connect(
@@ -612,33 +615,16 @@ class MCAController(QWidget):
             )
         )
         self.ui.comboPsdZcMode.currentIndexChanged.connect(
-            lambda i: self._apply_hardware_setting(
-                lambda: self._mca.filters.psd_zc.set_mode(i)
-            )
+            lambda i: self._apply_hardware_setting(lambda: self._mca.filters.psd_zc.set_mode(i))
         )
         self.ui.spinPsdZcLow.editingFinished.connect(
             lambda: self._apply_hardware_setting(
-                lambda: self._mca.filters.psd_zc.set_time_window_low(
-                    self.ui.spinPsdZcLow.value()
-                )
+                lambda: self._mca.filters.psd_zc.set_time_window_low(self.ui.spinPsdZcLow.value())
             )
         )
         self.ui.spinPsdZcHigh.editingFinished.connect(
             lambda: self._apply_hardware_setting(
-                lambda: self._mca.filters.psd_zc.set_time_window_high(
-                    self.ui.spinPsdZcHigh.value()
-                )
-            )
-        )
-
-        self.ui.spinTempCoeff.editingFinished.connect(
-            lambda: self._apply_hardware_setting(
-                lambda: self._mca.set_temp_coeff(self.ui.spinTempCoeff.value())
-            )
-        )
-        self.ui.spinTempOffset.editingFinished.connect(
-            lambda: self._apply_hardware_setting(
-                lambda: self._mca.set_temp_offset(self.ui.spinTempOffset.value())
+                lambda: self._mca.filters.psd_zc.set_time_window_high(self.ui.spinPsdZcHigh.value())
             )
         )
 
@@ -677,12 +663,40 @@ class MCAController(QWidget):
         self.ui.btnStop.setChecked(False)
         self.ui.cbDmaEnable.setEnabled(False)
         self.ui.btnDmaFile.setEnabled(False)
-        if self.ui.cbDmaEnable.isChecked() and self._mca_dma is not None:
-            self._start_with_dma()
-        else:
-            self._start_polling_only()
+        try:
+            if self.ui.cbDmaEnable.isChecked() and self._mca_dma is not None:
+                self._start_with_dma()
+            else:
+                self._start_polling_only()
+        except Exception:
+            # Qt prints an uncaught slot exception and leaves Start disabled.
+            # Restore a retryable, definitely-disarmed state instead.  The
+            # driver accepts enable=0 even when a configuration write has
+            # just failed with EBUSY.
+            log.exception("MCA ch%d: measurement start failed", self._channel)
+            self._stop_worker()
+            try:
+                self._mca.stop()
+            except Exception:
+                log.warning(
+                    "MCA ch%d: failed to disarm after start error",
+                    self._channel,
+                    exc_info=True,
+                )
+            self._set_controls_enabled(True)
+            self.ui.btnStart.setChecked(False)
+            self.ui.btnStart.setEnabled(True)
+            self.ui.btnStop.setChecked(False)
+            self.ui.btnStop.setEnabled(False)
+            self.ui.cbDmaEnable.setEnabled(True)
+            self.ui.btnDmaFile.setEnabled(True)
 
     def _start_polling_only(self) -> None:
+        # A completed timed measurement clears measurement_in_progress but
+        # leaves the pulse processor's enable ownership gate asserted.  Clear
+        # it unconditionally before writing measurement_time_raw, otherwise
+        # pp_field_store() returns EBUSY on the next run.
+        self._mca.stop()
         self._mca.set_time_limit(self.ui.spinTimeLimit.value())
         self._mca.start()
         self.ui.btnStop.setEnabled(True)
@@ -727,13 +741,24 @@ class MCAController(QWidget):
         """Called when the hardware stops the measurement (time limit reached).
 
         The worker has already stopped its own timer before emitting this signal.
+        The driver's measurement_in_progress bit is only status; reaching the
+        time limit does not release the separate enable ownership gate.  Stop
+        explicitly before making Start available again.
         """
         log.info("MCA ch%d: measurement completed by hardware (time limit)", self._channel)
         if self._dma_worker is not None:
-            if not isinstance(self._mca_dma, IIOMcaDmaStreamer):
+            if isinstance(self._mca_dma, IIOMcaDmaStreamer):
+                # Match the manual-stop ordering: prevent another refill,
+                # then release enable so the close path can drain the tail.
+                self._dma_worker.stop()
+                self._mca.stop()
+            else:
+                self._mca.stop()
                 self._mca.set_dma_enable(False)
-            self._dma_worker.stop()
+                self._dma_worker.stop()
             self._set_controls_enabled(True)
+        else:
+            self._mca.stop()
         self.ui.btnStart.setChecked(False)
         self.ui.btnStart.setEnabled(True)
         self.ui.btnStop.setChecked(True)
@@ -757,7 +782,10 @@ class MCAController(QWidget):
         ts = time.strftime("%Y%m%d_%H%M%S")
         default_name = f"{default_dir}/ch{self._channel}_spectrum_{ts}.csv"
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Spectrum CSV", default_name, "CSV files (*.csv);;All files (*)",
+            self,
+            "Export Spectrum CSV",
+            default_name,
+            "CSV files (*.csv);;All files (*)",
         )
         if not path:
             return
@@ -837,7 +865,10 @@ class MCAController(QWidget):
     def _on_dma_file(self) -> None:
         default_dir = str(QSettings().value("dma/save_folder", "measurements"))
         path, _ = QFileDialog.getSaveFileName(
-            self, "MCA DMA File", default_dir, "Binary files (*.bin);;All files (*)",
+            self,
+            "MCA DMA File",
+            default_dir,
+            "Binary files (*.bin);;All files (*)",
         )
         if path:
             self._dma_filepath = Path(path)
@@ -848,6 +879,11 @@ class MCAController(QWidget):
         self._dma_filepath = None
         self._event_buffer.clear()
         log.debug("MCA ch%d DMA [1/6]: creating worker, file=%s", self._channel, filepath)
+
+        # Both the pulse-processor configuration path and lm_buffer_preenable
+        # require enable=0.  This also recovers a stale timed acquisition
+        # before set_time_limit() below touches measurement_time_raw.
+        self._mca.stop()
 
         if isinstance(self._mca_dma, IIOMcaDmaStreamer):
             # Pulse-processor fields are immutable while list_buffer_active
@@ -891,11 +927,7 @@ class MCAController(QWidget):
                 self._channel,
             )
         self._dma_thread.start()
-        readiness = (
-            "IIO DMA arm"
-            if isinstance(self._mca_dma, IIOMcaDmaStreamer)
-            else "ZMQ socket"
-        )
+        readiness = "IIO DMA arm" if isinstance(self._mca_dma, IIOMcaDmaStreamer) else "ZMQ socket"
         log.info(
             "MCA DMA: worker started, waiting for %s, file=%s",
             readiness,
@@ -913,14 +945,22 @@ class MCAController(QWidget):
                 self._channel,
             )
         else:
-            log.debug("MCA ch%d DMA [3/6]: ZMQ socket ready, DMA already enabled via checkbox",
-                      self._channel)
-            log.debug("MCA ch%d DMA [4/6]: calling mca.start() -> set_global_enable(True) "
-                      "(HW fires list_start_irq -> server sends StreamSTART)", self._channel)
+            log.debug(
+                "MCA ch%d DMA [3/6]: ZMQ socket ready, DMA already enabled via checkbox",
+                self._channel,
+            )
+            log.debug(
+                "MCA ch%d DMA [4/6]: calling mca.start() -> set_global_enable(True) "
+                "(HW fires list_start_irq -> server sends StreamSTART)",
+                self._channel,
+            )
             self._mca.set_time_limit(self.ui.spinTimeLimit.value())
             self._mca.start()
-        log.debug("MCA ch%d DMA: starting polling worker (time_limit=%d s)",
-                  self._channel, self.ui.spinTimeLimit.value())
+        log.debug(
+            "MCA ch%d DMA: starting polling worker (time_limit=%d s)",
+            self._channel,
+            self.ui.spinTimeLimit.value(),
+        )
         self._start_worker()
         self.ui.btnStop.setEnabled(True)
         self.ui.lblDmaStatus.setText("Recording...")
@@ -964,7 +1004,8 @@ class MCAController(QWidget):
                 except Exception:
                     log.warning(
                         "MCA ch%d: failed to stop before IIO DMA shutdown",
-                        self._channel, exc_info=True,
+                        self._channel,
+                        exc_info=True,
                     )
         if thread is not None:
             if not thread.wait(3000):
@@ -982,13 +1023,14 @@ class MCAController(QWidget):
         reconnect -- see stop_dma_sync()'s docstring for why this exists.
         """
         try:
-            if self._mca.get_measurement_in_progress():
-                self._mca.stop()
+            # Stop unconditionally. An externally armed channel may have
+            # measurement_in_progress=0 while global enable remains one;
+            # testing the former was what left hardware owned across restart.
+            self._mca.stop()
             if had_dma_worker:
                 self._mca.set_dma_enable(False)
         except Exception:
-            log.warning("MCA ch%d: failed to disarm during shutdown",
-                        self._channel, exc_info=True)
+            log.warning("MCA ch%d: failed to disarm during shutdown", self._channel, exc_info=True)
 
     # ------------------------------------------------------------------
     # Readback handling (gRPC polling)

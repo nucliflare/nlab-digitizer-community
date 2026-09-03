@@ -3,11 +3,13 @@ from __future__ import annotations
 import ctypes
 import io
 import json
+import logging
 import threading
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock, call
 
 import h5py
 import iio
@@ -15,11 +17,14 @@ import numpy as np
 import pytest
 
 from nlab.hardware.digitizer.backends.iio_backend import (
-    _LM_EVENT_DTYPE as _BACKEND_LM_EVENT_DTYPE,
+    _LIBIIO_TIMEOUT_ERRNOS,
+    _LM_KERNEL_BUFFER_COUNT,
+    _REMOTE_ETIMEDOUT,
+    IIODigitizerBackend,
+    _disable_mca_dma_client_timeout,
 )
 from nlab.hardware.digitizer.backends.iio_backend import (
-    _LM_KERNEL_BUFFER_COUNT,
-    IIODigitizerBackend,
+    _LM_EVENT_DTYPE as _BACKEND_LM_EVENT_DTYPE,
 )
 from nlab.hardware.digitizer.dma import (
     _LM_EVENT_DTYPE,
@@ -126,6 +131,72 @@ def test_iio_event_dtype_matches_v121_layout() -> None:
         "trapezoid_energy": 6,
         "timestamp": 8,
     }
+
+
+def test_mca_dma_client_stream_context_disables_socket_timeout() -> None:
+    context = SimpleNamespace(set_timeout=Mock())
+
+    _disable_mca_dma_client_timeout(context)
+
+    # pylibiio/libiio 0.x defines zero as no timeout. The separate control
+    # context retains its default timeout and Buffer.cancel() stops refill.
+    context.set_timeout.assert_called_once_with(0)
+
+
+@pytest.mark.parametrize("timeout_errno", sorted(_LIBIIO_TIMEOUT_ERRNOS))
+def test_mca_dma_refill_retries_timeout_while_waiting_for_trigger(
+    monkeypatch: Any,
+    timeout_errno: int,
+) -> None:
+    native_buffer = object()
+    buffer = SimpleNamespace(_buffer=native_buffer)
+    backend = object.__new__(IIODigitizerBackend)
+    backend._ch = 0
+    backend._mca_dma_stop_requested = threading.Event()
+    refill = Mock(side_effect=[
+        OSError(timeout_errno, "host unreachable"),
+        16384,
+    ])
+    monkeypatch.setattr(iio, "_buffer_refill", refill)
+
+    assert backend._refill_mca_dma_buffer(buffer) == 16384
+    assert refill.call_args_list == [call(native_buffer), call(native_buffer)]
+
+
+def test_mca_dma_refill_does_not_retry_timeout_after_stop(monkeypatch: Any) -> None:
+    native_buffer = object()
+    buffer = SimpleNamespace(_buffer=native_buffer)
+    backend = object.__new__(IIODigitizerBackend)
+    backend._ch = 0
+    backend._mca_dma_stop_requested = threading.Event()
+    backend._mca_dma_stop_requested.set()
+    refill = Mock(side_effect=OSError(_REMOTE_ETIMEDOUT, "host unreachable"))
+    monkeypatch.setattr(iio, "_buffer_refill", refill)
+
+    with pytest.raises(OSError) as exc_info:
+        backend._refill_mca_dma_buffer(buffer)
+
+    assert exc_info.value.errno == _REMOTE_ETIMEDOUT
+    refill.assert_called_once_with(native_buffer)
+
+
+def test_mca_dma_cancel_explains_native_ebadf_once(caplog: Any) -> None:
+    buffer = SimpleNamespace(cancel=Mock())
+    backend = object.__new__(IIODigitizerBackend)
+    backend._ch = 0
+    backend._mca_dma_lifecycle_lock = threading.RLock()
+    backend._mca_dma_cancel_explained = False
+
+    with caplog.at_level(logging.INFO, logger="nlab.hardware.digitizer.backends.iio_backend"):
+        backend._cancel_mca_dma_refill(buffer, "test stop")
+        backend._cancel_mca_dma_refill(buffer, "duplicate cleanup")
+
+    assert buffer.cancel.call_count == 2
+    messages = [record.getMessage() for record in caplog.records]
+    matching = [message for message in messages if "READ LINE: -9" in message]
+    assert len(matching) == 1
+    assert "expected EBADF" in matching[0]
+    assert "test stop" in matching[0]
 
 
 def test_binary_attribute_read_reserves_libiio_terminator(monkeypatch: Any) -> None:

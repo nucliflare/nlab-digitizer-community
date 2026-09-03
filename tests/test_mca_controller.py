@@ -117,6 +117,74 @@ def test_controller_routes_running_write_through_reconfiguration() -> None:
     histogram_curve.setData.assert_called_once_with([], [])
 
 
+def test_controller_initialization_unconditionally_clears_stale_enable() -> None:
+    mca = Mock()
+    controller = SimpleNamespace(_mca=mca, _channel=0)
+
+    MCAController._disarm_before_initialization(controller)
+
+    mca.stop.assert_called_once_with()
+    mca.get_measurement_in_progress.assert_not_called()
+
+
+def test_shutdown_stops_externally_armed_channel_even_when_not_in_progress() -> None:
+    mca = Mock()
+    mca.get_measurement_in_progress.return_value = False
+    controller = SimpleNamespace(_mca=mca, _channel=0)
+
+    MCAController._ensure_disarmed(controller, had_dma_worker=False)
+
+    mca.stop.assert_called_once_with()
+    mca.get_measurement_in_progress.assert_not_called()
+
+
+def test_polling_start_clears_enable_before_writing_time_limit() -> None:
+    events: list[object] = []
+    mca = Mock()
+    mca.stop.side_effect = lambda: events.append("stop")
+    mca.set_time_limit.side_effect = lambda value: events.append(("limit", value))
+    mca.start.side_effect = lambda: events.append("start")
+    start_worker = Mock(side_effect=lambda: events.append("worker"))
+    controller = SimpleNamespace(
+        _mca=mca,
+        _channel=0,
+        _start_worker=start_worker,
+        ui=SimpleNamespace(
+            spinTimeLimit=SimpleNamespace(value=lambda: 30),
+            btnStop=SimpleNamespace(setEnabled=Mock()),
+        ),
+    )
+
+    MCAController._start_polling_only(controller)
+
+    assert events == ["stop", ("limit", 30), "start", "worker"]
+
+
+def test_hardware_completion_releases_enable_before_rearming_gui() -> None:
+    events: list[str] = []
+    mca = Mock()
+    mca.stop.side_effect = lambda: events.append("stop")
+    controller = SimpleNamespace(
+        _mca=mca,
+        _mca_dma=None,
+        _dma_worker=None,
+        _channel=0,
+        ui=SimpleNamespace(
+            btnStart=SimpleNamespace(
+                setChecked=Mock(),
+                setEnabled=Mock(side_effect=lambda value: events.append(f"start:{value}")),
+            ),
+            btnStop=SimpleNamespace(setChecked=Mock(), setEnabled=Mock()),
+            cbDmaEnable=SimpleNamespace(setEnabled=Mock()),
+            btnDmaFile=SimpleNamespace(setEnabled=Mock()),
+        ),
+    )
+
+    MCAController._on_measurement_done(controller)
+
+    assert events[:2] == ["stop", "start:True"]
+
+
 def test_roi_statistics_are_deferred_until_drag_finishes() -> None:
     update_stats = Mock()
     controller = SimpleNamespace(

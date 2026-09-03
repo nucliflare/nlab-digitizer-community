@@ -30,7 +30,15 @@ class ConnectionDialog(QDialog):
     can be added later by populating the combo from a background scanner.
     """
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        ip: str | None = None,
+        port: int | None = None,
+        backend: str | None = None,
+        channels: int | None = None,
+    ) -> None:
         super().__init__(parent)
         self._ui = Ui_ConnectionDialog()
         self._ui.setupUi(self)
@@ -40,6 +48,7 @@ class ConnectionDialog(QDialog):
         self._ui.comboBackend.currentIndexChanged.connect(self._on_backend_changed)
         apply_taskbar_icon(self)
         self._load_settings()
+        self._apply_initial_values(ip=ip, port=port, backend=backend, channels=channels)
 
     # ------------------------------------------------------------------
     # Public properties — read after exec() == Accepted
@@ -84,7 +93,9 @@ class ConnectionDialog(QDialog):
             self._ui.comboIp.setCurrentIndex(0)
 
         backend = settings.value(_KEY_LAST_BACKEND, _DEFAULT_BACKEND)  # type: ignore[assignment]
-        backend_index = _BACKENDS.index(backend) if backend in _BACKENDS else _BACKENDS.index(_DEFAULT_BACKEND)
+        backend_index = (
+            _BACKENDS.index(backend) if backend in _BACKENDS else _BACKENDS.index(_DEFAULT_BACKEND)
+        )
         self._ui.comboBackend.blockSignals(True)
         self._ui.comboBackend.setCurrentIndex(backend_index)
         self._ui.comboBackend.blockSignals(False)
@@ -92,6 +103,26 @@ class ConnectionDialog(QDialog):
         default_port = _BACKEND_DEFAULT_PORTS[_BACKENDS[backend_index]]
         self._ui.spinPort.setValue(int(settings.value(_KEY_LAST_PORT, default_port)))  # type: ignore[arg-type]
         self._ui.spinChannels.setValue(int(settings.value(_KEY_LAST_CHANNELS, _DEFAULT_CHANNELS)))  # type: ignore[arg-type]
+
+    def _apply_initial_values(
+        self,
+        *,
+        ip: str | None,
+        port: int | None,
+        backend: str | None,
+        channels: int | None,
+    ) -> None:
+        """Apply YAML/CLI defaults after persistent QSettings are restored."""
+        if backend in _BACKENDS:
+            self._ui.comboBackend.blockSignals(True)
+            self._ui.comboBackend.setCurrentIndex(_BACKENDS.index(backend))
+            self._ui.comboBackend.blockSignals(False)
+        if ip is not None:
+            self._ui.comboIp.setEditText(ip)
+        if port is not None:
+            self._ui.spinPort.setValue(port)
+        if channels is not None:
+            self._ui.spinChannels.setValue(channels)
 
     def _save_settings(self) -> None:
         settings = QSettings()

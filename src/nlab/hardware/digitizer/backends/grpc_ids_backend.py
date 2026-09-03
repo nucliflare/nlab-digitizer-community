@@ -6,17 +6,16 @@ service on a different port (default :50040).  Uses its own proto
 services will be merged in a future firmware revision.
 """
 
+import logging
 from typing import Any
 
+import base_pb2 as bsp
 import grpc
-
 import IDS_pb2 as ids
 import IDS_pb2_grpc
-import base_pb2 as bsp
 
+from ..diagnostics import GlobalDiagnosticReading
 from .base import IDSBackend
-
-import logging
 
 log = logging.getLogger(__name__)
 
@@ -83,12 +82,24 @@ class GrpcIDSBackend(IDSBackend):
 
     # ---- versions ----
 
-    def get_versions(self) -> list:
+    def get_versions(self) -> list[int]:
         resp = self._reg(_CMD.VDPP_IDS_get_versions)
         return list(resp.value.ids_ip)
 
     def get_ads_temp(self) -> float:
         return self._float(_CMD.VDPP_IDS_ADS5407_get_temp, no_channel=True)
+
+    def get_global_diagnostics(self) -> list[GlobalDiagnosticReading]:
+        """The legacy IDS service exposes only the common ADS temperature."""
+        return [
+            GlobalDiagnosticReading(
+                key="ads_temperature",
+                label="ADS5407 temperature",
+                value=self.get_ads_temp(),
+                unit="°C",
+                precision=1,
+            )
+        ]
 
     # ---- SiPM bias supply ----
 

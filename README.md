@@ -57,7 +57,7 @@ same host; only the ports differ.
 ### General
 - Undockable, floatable channel panels (dual-monitor friendly)
 - Dock layout persisted across sessions
-- Save/load hardware settings to YAML
+- Save/load all channels, hardware, and application-only settings in one YAML file
 - Convert binary DMA recordings to HDF5 via the File menu
 - In-app system log with colour-coded levels
 
@@ -93,10 +93,15 @@ python scripts/generate_proto.py
 uv run nlab
 # or
 python -m nlab.main
+
+# Pre-fill the connection dialog and apply a saved configuration after connecting
+uv run nlab --config experiment.yaml --ip 192.168.10.128 --port 30431
 ```
 
 The connection dialog appears on startup. Enter the digitizer's IP address and
 gRPC port (default `192.168.10.20:50050`), then click **Connect**.
+`--config` also supplies the saved backend, address, port, and channel count to
+the dialog; explicit `--ip` and `--port` arguments override the file values.
 
 ---
 
