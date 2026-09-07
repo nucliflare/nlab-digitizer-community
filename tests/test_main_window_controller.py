@@ -107,6 +107,10 @@ def test_startup_builds_one_psu_controller_and_dock_per_channel(
 
     assert psu_factory.call_args_list == [call(supplies[0]), call(supplies[1])]
     assert len(controller._psu_controllers) == 2
+    assert controller._psu_controller_by_device == {
+        0: controller._psu_controllers[0],
+        1: controller._psu_controllers[1],
+    }
     assert [name for name, _, _ in made_docks if name.startswith("psu_")] == [
         "psu_ch0",
         "psu_ch1",
@@ -118,12 +122,56 @@ def test_startup_builds_one_psu_controller_and_dock_per_channel(
     tab_psu.setToolTip.assert_called_once_with("")
 
 
-def test_startup_rejects_missing_psu_backend() -> None:
+def test_startup_disables_psu_tab_when_backend_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     controller = _bare_controller()
-    controller._devices = [SimpleNamespace(hv=None)]
+    controller._devices = [
+        SimpleNamespace(
+            scope=object(),
+            scope_dma=None,
+            mca=object(),
+            mca_dma=None,
+            hv=None,
+            mca_available=lambda: False,
+        )
+    ]
+    controller._scope_controllers = []
+    controller._mca_controllers = []
+    controller._psu_controllers = []
+    controller._scope_dock_host = object()
+    controller._mca_dock_host = object()
+    controller._psu_dock_host = object()
+    tab_mca = SimpleNamespace(setToolTip=Mock())
+    tab_psu = SimpleNamespace(setToolTip=Mock())
+    main_tabs = SimpleNamespace(
+        indexOf=Mock(side_effect=lambda tab: 7 if tab is tab_mca else 8),
+        setTabEnabled=Mock(),
+    )
+    controller._window = SimpleNamespace(
+        ui=SimpleNamespace(
+            layoutTabScope=SimpleNamespace(addWidget=Mock()),
+            layoutTabMCA=SimpleNamespace(addWidget=Mock()),
+            layoutTabPSU=SimpleNamespace(addWidget=Mock()),
+            mainTabs=main_tabs,
+            tabMCA=tab_mca,
+            tabPSU=tab_psu,
+        )
+    )
+    monkeypatch.setattr(
+        main_window_module,
+        "ScopeController",
+        Mock(return_value=SimpleNamespace()),
+    )
+    controller._make_dock = Mock(return_value=SimpleNamespace())
+    controller._populate_dock_host = Mock()
 
-    with pytest.raises(RuntimeError, match="PSU backend missing for channel.*0"):
-        controller._build_channel_docks()
+    controller._build_channel_docks()
+
+    assert controller._psu_controllers == []
+    assert controller._psu_controller_by_device == {}
+    main_tabs.setTabEnabled.assert_any_call(8, False)
+    assert "no IDS/HV backend" in tab_psu.setToolTip.call_args.args[0]
 
 
 def test_startup_builds_one_global_controller_for_all_channels(

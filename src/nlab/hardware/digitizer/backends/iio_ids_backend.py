@@ -68,6 +68,10 @@ _COMPENSATION_MODE_UNSUPPORTED = (
 )
 
 
+class IIOIDSUnavailableError(RuntimeError):
+    """Required IIO devices for one channel's IDS/PSU panel are absent."""
+
+
 def _find_device(context: iio.Context, *names: str) -> iio.Device | None:
     """Find the first device whose IIO name matches one of *names*."""
     for name in names:
@@ -167,32 +171,32 @@ def _discover_devices(
 ) -> _IDSDevices:
     adc = _find_device(context, *_ADC_DEVICE_NAMES)
     if adc is None:
-        raise RuntimeError(
+        raise IIOIDSUnavailableError(
             "IIO IDS backend: no mcp3564/mcp3564r device found"
         )
 
     feedback_label = _HV_FEEDBACK_LABELS[channel]
     hv_feedback = _find_labelled_channel(adc, feedback_label)
     if hv_feedback is None:
-        raise RuntimeError(
+        raise IIOIDSUnavailableError(
             f"IIO IDS backend: {adc.name} has no channel labelled "
             f"'{feedback_label}'"
         )
 
     adc_temperature = _find_labelled_channel(adc, "temperature")
     if adc_temperature is None:
-        raise RuntimeError(
+        raise IIOIDSUnavailableError(
             f"IIO IDS backend: {adc.name} has no channel labelled 'temperature'"
         )
 
     dac = _find_device(context, _DAC_DEVICE_NAME)
     if dac is None:
-        raise RuntimeError(
+        raise IIOIDSUnavailableError(
             f"IIO IDS backend: no {_DAC_DEVICE_NAME} device found"
         )
     hv_output = dac.find_channel(f"voltage{dac_channel}", True)
     if hv_output is None:
-        raise RuntimeError(
+        raise IIOIDSUnavailableError(
             f"IIO IDS backend: {_DAC_DEVICE_NAME} has no output channel "
             f"voltage{dac_channel}"
         )
@@ -200,13 +204,13 @@ def _discover_devices(
     temp_label = _TMP_LABELS[channel]
     channel_temp = _find_labelled_device(context, _TMP_DEVICE_NAME, temp_label)
     if channel_temp is None:
-        raise RuntimeError(
+        raise IIOIDSUnavailableError(
             f"IIO IDS backend: no {_TMP_DEVICE_NAME} device labelled "
             f"'{temp_label}'"
         )
     channel_temp_input = channel_temp.find_channel("temp")
     if channel_temp_input is None:
-        raise RuntimeError(
+        raise IIOIDSUnavailableError(
             f"IIO IDS backend: {_TMP_DEVICE_NAME} '{temp_label}' has no temp channel"
         )
 

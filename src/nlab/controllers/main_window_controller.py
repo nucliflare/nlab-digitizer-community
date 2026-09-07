@@ -51,6 +51,7 @@ class MainWindowController:
         self._scope_controllers: list[ScopeController] = []
         self._mca_controllers: list[MCAController] = []
         self._psu_controllers: list[PSUController] = []
+        self._psu_controller_by_device: dict[int, PSUController] = {}
         self._external_controllers: list[ExternalDeviceController] = []
         self._global_controller: GlobalController | None = None
         self._external_devices = ExternalDevices()
@@ -157,18 +158,8 @@ class MainWindowController:
         mca_docks: list[QDockWidget] = []
         psu_docks: list[QDockWidget] = []
 
-        # _connect_channel() requests IDS explicitly for every startup and
-        # reconnect. Treat a missing backend as a connection failure instead
-        # of silently starting with an empty PSU tab: the PSUController owns
-        # the HV defaults/readback lifecycle and must exist for every channel.
-        missing_psu_channels = [
-            self._display_channel(index)
-            for index, device in enumerate(self._devices)
-            if device.hv is None
-        ]
-        if missing_psu_channels:
-            channels = ", ".join(str(channel) for channel in missing_psu_channels)
-            raise RuntimeError(f"PSU backend missing for channel(s): {channels}")
+        self._psu_controller_by_device = {}
+        missing_psu_channels: list[int] = []
 
         # IIODigitizerBackend now implements MCABackend against
         # vdpp-pulse-processor.c/vdpp-input-filter.c (see iio_backend.py's
@@ -198,11 +189,14 @@ class MainWindowController:
                 mca_docks.append(self._make_dock(f"mca_ch{ch}", ch_label, mca_ctrl))
 
             hv = device.hv
-            if hv is None:  # Guard kept local for static type narrowing.
-                raise RuntimeError(f"PSU backend missing for channel {ch}")
-            psu_ctrl = PSUController(hv)
-            self._psu_controllers.append(psu_ctrl)
-            psu_docks.append(self._make_dock(f"psu_ch{ch}", ch_label, psu_ctrl))
+            if hv is None:
+                missing_psu_channels.append(ch)
+                log.warning("PSU controls unavailable for channel %s", ch)
+            else:
+                psu_ctrl = PSUController(hv)
+                self._psu_controllers.append(psu_ctrl)
+                self._psu_controller_by_device[idx] = psu_ctrl
+                psu_docks.append(self._make_dock(f"psu_ch{ch}", ch_label, psu_ctrl))
 
         self._populate_dock_host(self._scope_dock_host, scope_docks)
         self._populate_dock_host(self._mca_dock_host, mca_docks)
@@ -223,9 +217,14 @@ class MainWindowController:
 
         psu_tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabPSU)
         self._window.ui.mainTabs.setTabEnabled(psu_tab_index, bool(psu_docks))
-        self._window.ui.tabPSU.setToolTip(
-            "" if psu_docks else "PSU is disabled: no IDS/HV backend connected."
-        )
+        if not psu_docks:
+            psu_tooltip = "PSU is disabled: no IDS/HV backend connected."
+        elif missing_psu_channels:
+            channels = ", ".join(str(channel) for channel in missing_psu_channels)
+            psu_tooltip = f"PSU controls unavailable for channel(s): {channels}."
+        else:
+            psu_tooltip = ""
+        self._window.ui.tabPSU.setToolTip(psu_tooltip)
 
     def _build_global_tab(self) -> None:
         """Build the one floatable channel-independent digitizer panel."""
@@ -464,6 +463,7 @@ class MainWindowController:
         self._scope_controllers.clear()
         self._mca_controllers.clear()
         self._psu_controllers.clear()
+        self._psu_controller_by_device.clear()
         self._external_controllers.clear()
 
         log.info(
@@ -502,7 +502,7 @@ class MainWindowController:
         for idx, device in enumerate(self._devices):
             channel = self._display_channel(idx)
             mca_ctrl = self._mca_controllers[idx] if idx < len(self._mca_controllers) else None
-            psu_ctrl = self._psu_controllers[idx]
+            psu_ctrl = self._psu_controller_by_device.get(idx)
             lp_preset = None
             if mca_ctrl is not None:
                 lp_preset = mca_ctrl.hardware_configuration_settings()["low_pass_preset"]
@@ -511,12 +511,17 @@ class MainWindowController:
                 device.mca if device.mca_available() else None,
                 device.hv,
                 mca_lp_preset=lp_preset,
-                psu_settings=psu_ctrl.hardware_configuration_settings(),
+                psu_settings=(
+                    psu_ctrl.hardware_configuration_settings()
+                    if psu_ctrl is not None
+                    else None
+                ),
             )
             application_channel: dict[str, object] = {
                 "scope": self._scope_controllers[idx].configuration_settings(),
-                "psu": psu_ctrl.configuration_settings(),
             }
+            if psu_ctrl is not None:
+                application_channel["psu"] = psu_ctrl.configuration_settings()
             if mca_ctrl is not None:
                 application_channel["mca"] = mca_ctrl.configuration_settings()
             application_channels[str(channel)] = application_channel
@@ -617,13 +622,17 @@ class MainWindowController:
                         self._mca_controllers[idx].populate_hardware_configuration_settings(
                             {"low_pass_preset": low_pass["preset"]}
                         )
-                psu_settings = hardware.get("psu", {})
-                self._psu_controllers[idx].populate_hardware_configuration_settings(psu_settings)
+                psu_ctrl = self._psu_controller_by_device.get(idx)
+                if psu_ctrl is not None:
+                    psu_settings = hardware.get("psu", {})
+                    psu_ctrl.populate_hardware_configuration_settings(psu_settings)
 
             app_channel = channel_application_entry(document, channel)
             if app_channel is not None:
                 self._scope_controllers[idx].apply_configuration_settings(app_channel.get("scope"))
-                self._psu_controllers[idx].apply_configuration_settings(app_channel.get("psu"))
+                psu_ctrl = self._psu_controller_by_device.get(idx)
+                if psu_ctrl is not None:
+                    psu_ctrl.apply_configuration_settings(app_channel.get("psu"))
                 if idx < len(self._mca_controllers):
                     self._mca_controllers[idx].apply_configuration_settings(app_channel.get("mca"))
 

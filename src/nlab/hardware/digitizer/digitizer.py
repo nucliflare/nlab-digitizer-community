@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from .backends.base import DigitizerBackend, IDSBackend
 from .backends.grpc_backend import GrpcDigitizerBackend
 from .diagnostics import GlobalDiagnosticReading
@@ -7,6 +9,8 @@ from .dma import IIOMcaDmaStreamer, IIOScopeDmaStreamer, McaDmaStreamer, ScopeDm
 from .hv import HVSupply
 from .mca import MultiChannelAnalyzer
 from .scope import Scope
+
+log = logging.getLogger(__name__)
 
 
 class Digitizer:
@@ -114,7 +118,9 @@ class Digitizer:
 
         The HV module is accessed through its AD5686R, MCP3564(R), TMP117,
         and ADS5407 IIO devices; pass ``with_ids=False`` to leave ``d.hv``
-        as ``None``. The removed SiPM controls are reported unavailable.
+        as ``None``. If a required IDS device is absent, construction logs a
+        warning and also leaves ``d.hv`` as ``None`` so scope/MCA operation
+        remains available. The removed SiPM controls are reported unavailable.
         When a channel exposes
         both vdpp_pulse_processor and vdpp_lm_frame, d.mca_dma is an
         IIOMcaDmaStreamer implementing the fixed 1024-record lifecycle in
@@ -133,10 +139,23 @@ class Digitizer:
         the IIO scope core has no continuous-streaming hardware path.
         """
         from .backends.iio_backend import IIODigitizerBackend
-        from .backends.iio_ids_backend import IIOIDSBackend
+        from .backends.iio_ids_backend import IIOIDSBackend, IIOIDSUnavailableError
 
         backend = IIODigitizerBackend(channel, uri)
-        ids = IIOIDSBackend(channel, uri) if with_ids else None
+        ids = None
+        if with_ids:
+            try:
+                ids = IIOIDSBackend(channel, uri)
+            except IIOIDSUnavailableError as exc:
+                # Scope and MCA are independent IIO cores. A firmware image
+                # may legitimately omit one of the IDS converters/sensors;
+                # keep the acquired DPP backend and disable only this
+                # channel's PSU functionality.
+                log.warning(
+                    "IIO channel %d: IDS/PSU unavailable; continuing without it: %s",
+                    channel,
+                    exc,
+                )
         scope_dma = IIOScopeDmaStreamer(backend, channel)
         mca_dma = (
             IIOMcaDmaStreamer(backend, channel)

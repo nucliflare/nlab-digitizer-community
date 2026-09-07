@@ -54,6 +54,10 @@ def test_menu_save_writes_one_document_with_each_channel(
             configuration_settings=lambda: {"refresh_interval_ms": 2000},
         ),
     ]
+    controller._psu_controller_by_device = {
+        0: controller._psu_controllers[0],
+        1: controller._psu_controllers[1],
+    }
     controller._global_controller = SimpleNamespace(
         hardware_configuration_settings=lambda: {"enabled": False},
         configuration_settings=lambda: {"diagnostics_interval_ms": 1000},

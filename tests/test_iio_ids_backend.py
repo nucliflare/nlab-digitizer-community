@@ -7,8 +7,11 @@ import iio
 import pytest
 
 from nlab.hardware.digitizer.backends import iio_ids_backend
-from nlab.hardware.digitizer.backends.base import IDSBackend
-from nlab.hardware.digitizer.backends.iio_ids_backend import IIOIDSBackend
+from nlab.hardware.digitizer.backends.base import DigitizerBackend, IDSBackend
+from nlab.hardware.digitizer.backends.iio_ids_backend import (
+    IIOIDSBackend,
+    IIOIDSUnavailableError,
+)
 from nlab.hardware.digitizer.hv import HVSupply
 
 
@@ -214,7 +217,10 @@ def test_factory_can_disable_iio_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     from nlab.hardware.digitizer import digitizer
     from nlab.hardware.digitizer.backends import iio_backend
 
-    fake_backend = SimpleNamespace(mca_dma_hardware_present=lambda: False)
+    fake_backend = cast(
+        DigitizerBackend,
+        SimpleNamespace(mca_dma_hardware_present=lambda: False),
+    )
     monkeypatch.setattr(
         iio_backend,
         "IIODigitizerBackend",
@@ -252,3 +258,32 @@ def test_factory_enables_iio_ids_by_default(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert result.hv is not None
     assert result.hv._b is fake_ids
+
+
+def test_factory_continues_when_channel_ids_devices_are_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nlab.hardware.digitizer import digitizer
+    from nlab.hardware.digitizer.backends import iio_backend
+
+    fake_backend = cast(
+        DigitizerBackend,
+        SimpleNamespace(mca_dma_hardware_present=lambda: False),
+    )
+    monkeypatch.setattr(
+        iio_backend,
+        "IIODigitizerBackend",
+        lambda channel, uri: fake_backend,
+    )
+
+    def unavailable(channel: int, uri: str) -> IDSBackend:
+        raise IIOIDSUnavailableError(
+            "IIO IDS backend: no tmp117 device labelled 'cha_temp'"
+        )
+
+    monkeypatch.setattr(iio_ids_backend, "IIOIDSBackend", unavailable)
+
+    result = digitizer.Digitizer.from_iio(0, "ip:test")
+
+    assert result.hv is None
+    assert result.scope._b is fake_backend

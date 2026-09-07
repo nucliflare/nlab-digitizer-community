@@ -41,17 +41,19 @@ class GlobalController(QWidget):
             raise ValueError("GlobalController requires at least one digitizer channel")
         super().__init__(parent)
 
-        # The first channel's Digitizer owns handles to the one shared sync
-        # core and the one shared diagnostics context. _devices is retained
-        # only to verify that every MCA channel is armed before firing.
-        self.device = devices[0]
+        # The first channel owns the shared sync core. Global diagnostics and
+        # temperature correction may use any channel's IDS context because
+        # IIO firmware can expose IDS hardware for only a subset of channels.
+        self.device = next(
+            (device for device in devices if device.hv is not None), devices[0]
+        )
         self._devices = tuple(devices)
         self._channel_labels = tuple(
             channel_labels if channel_labels is not None else range(len(devices))
         )
         if len(self._channel_labels) != len(self._devices):
             raise ValueError("channel_labels must match the number of devices")
-        self._sync = self.device.mca.sync
+        self._sync = devices[0].mca.sync
 
         self.ui = Ui_GlobalView()
         self.ui.setupUi(self)  # type: ignore[no-untyped-call]
