@@ -71,6 +71,7 @@ def test_apply_channel_hardware_includes_write_only_and_previously_missing_value
             "trigger_level": -42,
             "pretrigger_samples": 24,
             "frame_samples": 1024,
+            "frame_period_cycles": 1234,
             "edge_mode": 1,
             "dac_value": 7,
             "dma_enabled": True,
@@ -91,6 +92,7 @@ def test_apply_channel_hardware_includes_write_only_and_previously_missing_value
     apply_channel_hardware(scope, mca, hv, settings)
 
     scope.set_trigger_level.assert_called_once_with(-42)
+    scope.set_frame_period_cycles.assert_called_once_with(1234)
     scope.set_trigger_mode.assert_called_once_with(TriggerMode(1))
     scope.set_dma_enable.assert_called_once_with(True)
     mca.reconfigure_while_running.assert_called_once()

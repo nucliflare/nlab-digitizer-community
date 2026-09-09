@@ -68,12 +68,16 @@ def test_startup_builds_one_psu_controller_and_dock_per_channel(
     ]
     controller._scope_controllers = []
     controller._mca_controllers = []
+    controller._psd_controllers = []
+    controller._psd_controller_by_device = {}
     controller._psu_controllers = []
     controller._scope_dock_host = object()
     controller._mca_dock_host = object()
+    controller._psd_dock_host = object()
     controller._psu_dock_host = object()
 
     tab_mca = SimpleNamespace(setToolTip=Mock())
+    tab_psd = SimpleNamespace(setToolTip=Mock())
     tab_psu = SimpleNamespace(setToolTip=Mock())
     main_tabs = SimpleNamespace(
         indexOf=Mock(side_effect=lambda tab: 7 if tab is tab_mca else 8),
@@ -83,9 +87,11 @@ def test_startup_builds_one_psu_controller_and_dock_per_channel(
         ui=SimpleNamespace(
             layoutTabScope=SimpleNamespace(addWidget=Mock()),
             layoutTabMCA=SimpleNamespace(addWidget=Mock()),
+            layoutTabPSD=SimpleNamespace(addWidget=Mock()),
             layoutTabPSU=SimpleNamespace(addWidget=Mock()),
             mainTabs=main_tabs,
             tabMCA=tab_mca,
+            tabPSD=tab_psd,
             tabPSU=tab_psu,
         )
     )
@@ -97,9 +103,9 @@ def test_startup_builds_one_psu_controller_and_dock_per_channel(
 
     made_docks: list[tuple[str, str, object]] = []
     controller._make_dock = Mock(
-        side_effect=lambda name, title, widget: made_docks.append(
-            (name, title, widget)
-        ) or SimpleNamespace()
+        side_effect=lambda name, title, widget: (
+            made_docks.append((name, title, widget)) or SimpleNamespace()
+        )
     )
     controller._populate_dock_host = Mock()
 
@@ -115,9 +121,7 @@ def test_startup_builds_one_psu_controller_and_dock_per_channel(
         "psu_ch0",
         "psu_ch1",
     ]
-    controller._window.ui.layoutTabPSU.addWidget.assert_called_once_with(
-        controller._psu_dock_host
-    )
+    controller._window.ui.layoutTabPSU.addWidget.assert_called_once_with(controller._psu_dock_host)
     main_tabs.setTabEnabled.assert_any_call(8, True)
     tab_psu.setToolTip.assert_called_once_with("")
 
@@ -138,11 +142,15 @@ def test_startup_disables_psu_tab_when_backend_is_missing(
     ]
     controller._scope_controllers = []
     controller._mca_controllers = []
+    controller._psd_controllers = []
+    controller._psd_controller_by_device = {}
     controller._psu_controllers = []
     controller._scope_dock_host = object()
     controller._mca_dock_host = object()
+    controller._psd_dock_host = object()
     controller._psu_dock_host = object()
     tab_mca = SimpleNamespace(setToolTip=Mock())
+    tab_psd = SimpleNamespace(setToolTip=Mock())
     tab_psu = SimpleNamespace(setToolTip=Mock())
     main_tabs = SimpleNamespace(
         indexOf=Mock(side_effect=lambda tab: 7 if tab is tab_mca else 8),
@@ -152,9 +160,11 @@ def test_startup_disables_psu_tab_when_backend_is_missing(
         ui=SimpleNamespace(
             layoutTabScope=SimpleNamespace(addWidget=Mock()),
             layoutTabMCA=SimpleNamespace(addWidget=Mock()),
+            layoutTabPSD=SimpleNamespace(addWidget=Mock()),
             layoutTabPSU=SimpleNamespace(addWidget=Mock()),
             mainTabs=main_tabs,
             tabMCA=tab_mca,
+            tabPSD=tab_psd,
             tabPSU=tab_psu,
         )
     )
@@ -172,6 +182,71 @@ def test_startup_disables_psu_tab_when_backend_is_missing(
     assert controller._psu_controller_by_device == {}
     main_tabs.setTabEnabled.assert_any_call(8, False)
     assert "no IDS/HV backend" in tab_psu.setToolTip.call_args.args[0]
+
+
+def test_startup_shares_bounded_event_buffer_with_mca_and_psd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _bare_controller()
+    dma = object()
+    controller._devices = [
+        SimpleNamespace(
+            scope=object(),
+            scope_dma=None,
+            mca=object(),
+            mca_dma=dma,
+            hv=None,
+            mca_available=lambda: True,
+        )
+    ]
+    controller._scope_controllers = []
+    controller._mca_controllers = []
+    controller._psd_controllers = []
+    controller._psd_controller_by_device = {}
+    controller._psu_controllers = []
+    controller._scope_dock_host = object()
+    controller._mca_dock_host = object()
+    controller._psd_dock_host = object()
+    controller._psu_dock_host = object()
+
+    tab_mca = SimpleNamespace(setToolTip=Mock())
+    tab_psd = SimpleNamespace(setToolTip=Mock())
+    tab_psu = SimpleNamespace(setToolTip=Mock())
+    main_tabs = SimpleNamespace(indexOf=Mock(return_value=1), setTabEnabled=Mock())
+    controller._window = SimpleNamespace(
+        ui=SimpleNamespace(
+            layoutTabScope=SimpleNamespace(addWidget=Mock()),
+            layoutTabMCA=SimpleNamespace(addWidget=Mock()),
+            layoutTabPSD=SimpleNamespace(addWidget=Mock()),
+            layoutTabPSU=SimpleNamespace(addWidget=Mock()),
+            mainTabs=main_tabs,
+            tabMCA=tab_mca,
+            tabPSD=tab_psd,
+            tabPSU=tab_psu,
+        )
+    )
+
+    scope = object()
+    psd = object()
+    mca = object()
+    scope_factory = Mock(return_value=scope)
+    psd_factory = Mock(return_value=psd)
+    mca_factory = Mock(return_value=mca)
+    monkeypatch.setattr(main_window_module, "ScopeController", scope_factory)
+    monkeypatch.setattr(main_window_module, "PSDController", psd_factory)
+    monkeypatch.setattr(main_window_module, "MCAController", mca_factory)
+    controller._make_dock = Mock(return_value=SimpleNamespace())
+    controller._populate_dock_host = Mock()
+
+    controller._build_channel_docks()
+
+    psd_buffer = psd_factory.call_args.kwargs["event_buffer"]
+    assert isinstance(psd_buffer, main_window_module.McaEventBuffer)
+    assert mca_factory.call_args.kwargs["event_buffer"] is psd_buffer
+    assert mca_factory.call_args.kwargs["psd_capture"] is psd
+    assert controller._psd_controllers == [psd]
+    assert controller._psd_controller_by_device == {0: psd}
+    main_tabs.setTabEnabled.assert_any_call(1, True)
 
 
 def test_startup_builds_one_global_controller_for_all_channels(
@@ -196,10 +271,13 @@ def test_startup_builds_one_global_controller_for_all_channels(
     factory.assert_called_once_with(controller._devices, [0, 1])
     assert controller._global_controller is expected
     controller._make_dock.assert_called_once_with(
-        "global_panel", "Global", expected,
+        "global_panel",
+        "Global",
+        expected,
     )
     controller._populate_dock_host.assert_called_once_with(
-        controller._global_dock_host, [expected_dock],
+        controller._global_dock_host,
+        [expected_dock],
     )
     layout.addWidget.assert_called_once_with(controller._global_dock_host)
 

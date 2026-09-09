@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -18,8 +19,8 @@ class MCAReadback:
     debug1: np.ndarray
     debug2: np.ndarray
     count_rate: int = 0
-    pulse_deadtime: int = 0
-    events_lost: int = 0
+    pulse_deadtime_ms: float = 0.0
+    events_lost: int | None = None
     elapsed_time: int = 0
     pulse_overrange: int = 0
     pulse_pileup: int = 0
@@ -76,7 +77,7 @@ class MCAWorker(BaseWorker):
         self.finished.emit()
 
     @staticmethod
-    def _stat(fn) -> int:
+    def _stat(fn: Callable[[], int]) -> int:
         """Some backends don't implement every statistic (e.g. the IIO
         backend's get_events_lost() -- vdpp-pulse-processor.c has no
         matching register). Without this, one missing stat would raise
@@ -84,9 +85,17 @@ class MCAWorker(BaseWorker):
         (histogram/waveforms included), not just that one field.
         """
         try:
-            return fn()
+            return int(fn())
         except NotImplementedError:
             return 0
+
+    @staticmethod
+    def _optional_stat(fn: Callable[[], int]) -> int | None:
+        """Return None when a backend has no register for this statistic."""
+        try:
+            return int(fn())
+        except NotImplementedError:
+            return None
 
     def _acquire_histogram(self) -> np.ndarray:
         """Fall back to the last successful histogram on transport errors.
@@ -158,8 +167,8 @@ class MCAWorker(BaseWorker):
                 debug1=debug1,
                 debug2=debug2,
                 count_rate=self._stat(stats.get_count_rate),
-                pulse_deadtime=self._stat(stats.get_pulse_deadtime),
-                events_lost=self._stat(stats.get_events_lost),
+                pulse_deadtime_ms=stats.get_pulse_deadtime_ms(),
+                events_lost=self._optional_stat(stats.get_events_lost),
                 elapsed_time=self._stat(stats.get_elapsed_time),
                 pulse_overrange=self._stat(stats.get_pulse_overrange),
                 pulse_pileup=self._stat(stats.get_pulse_pileup),

@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol
 
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QSettings, QThread, QTimer
-from PySide6.QtWidgets import QFileDialog, QSlider, QSpinBox, QWidget
+from PySide6.QtWidgets import QDoubleSpinBox, QFileDialog, QSlider, QSpinBox, QWidget
 
-from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaDmaStreamer
+from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaDmaStreamer, McaEventBuffer
 from nlab.hardware.digitizer.mca import MCA_PARAMETER_SPECS, MCAParam, MultiChannelAnalyzer
+from nlab.hardware.digitizer.scope import RangeSpec
 from nlab.ui.ui_mca_view import Ui_MCAView
 from nlab.views.plot_viewbox import ModifierZoomViewBox
 from nlab.workers.dma_workers import IIOMcaDmaWorker, McaDmaWorker
@@ -24,14 +25,17 @@ _DEBUG_SIGNAL_NAMES = [
     "Input signal",
     "Trigger signal",
     "Trapezoid signal",
-    "Trapezoid energy window",
+    "Trapezoid energy",
     "CFD signal",
-    "CFD zc window",
-    "CC gate",
+    "CFD window",
     "PSD ZC window",
+    "Logic trigger",
 ]
 
 _BINNING_LABELS = ["1", "2", "4", "8", "16", "32", "64", "128", "256", "512"]
+_WINDOW_LABELS = ["8 ns", "16 ns", "32 ns", "64 ns", "128 ns", "256 ns", "512 ns"]
+_TRIGGER_SOURCE_LABELS = ["Threshold", "CR-RC2", "CR2-RC2"]
+_LP_PRESET_LABELS = ["200 MHz", "70 MHz", "Moving average"]
 
 # Hardware/network polling can run faster than Qt can repaint the two debug
 # curves plus a 16384-bin histogram. Keep acquisition at the requested rate,
@@ -39,6 +43,14 @@ _BINNING_LABELS = ["1", "2", "4", "8", "16", "32", "64", "128", "256", "512"]
 # events in the GUI thread. 15 Hz is still visually continuous and leaves a
 # comfortable event-loop budget on the machine used for the live review.
 _MAX_GUI_RENDER_HZ = 15
+
+
+class _PsdCaptureSink(Protocol):
+    def begin_capture(self, enabled: bool, note: str = "") -> None: ...
+
+    def finish_capture(self) -> None: ...
+
+    def set_capture_error(self, message: str) -> None: ...
 
 
 class MCAController(QWidget):
@@ -50,11 +62,14 @@ class MCAController(QWidget):
         mca_dma: McaDmaStreamer | IIOMcaDmaStreamer | None = None,
         channel: int = 1,
         parent: QWidget | None = None,
+        event_buffer: McaEventBuffer | None = None,
+        psd_capture: _PsdCaptureSink | None = None,
     ) -> None:
         super().__init__(parent)
         self._mca = mca
         self._mca_dma = mca_dma
         self._channel = channel
+        self._psd_capture = psd_capture
         self.ui = Ui_MCAView()
         self.ui.setupUi(self)
 
@@ -65,8 +80,8 @@ class MCAController(QWidget):
         self._dma_thread: QThread | None = None
         self._dma_filepath: Path | None = None
         self._dma_counter = 0
-        self._event_buffer: list[np.ndarray] = []
-        self._event_lock = threading.Lock()
+        self._event_buffer = event_buffer or McaEventBuffer()
+        self._psd_capture_enabled = False
 
         self._last_histogram: np.ndarray | None = None
         self._last_elapsed_s: float = 0.0
@@ -76,6 +91,7 @@ class MCAController(QWidget):
         self._render_timer.timeout.connect(self._render_pending_readback)
 
         self._populate_combos()
+        self._apply_parameter_specs()
         self._disarm_before_initialization()
         self._send_defaults()
         self._load_hardware_state()
@@ -89,6 +105,11 @@ class MCAController(QWidget):
     # ------------------------------------------------------------------
 
     def _populate_combos(self) -> None:
+        self.ui.comboPulsePolarity.clear()
+        self.ui.comboPulsePolarity.addItems(["Negative", "Positive"])
+        self.ui.comboBaseline.clear()
+        self.ui.comboBaseline.addItems(_WINDOW_LABELS)
+
         for name in _DEBUG_SIGNAL_NAMES:
             self.ui.comboDebug1.addItem(name)
             self.ui.comboDebug2.addItem(name)
@@ -97,8 +118,90 @@ class MCAController(QWidget):
         for label in _BINNING_LABELS:
             self.ui.comboBinning.addItem(label)
 
-        for i in range(7):
-            self.ui.comboTrapFt.addItem(str(i))
+        self.ui.comboTriggerSource.clear()
+        self.ui.comboTriggerSource.addItems(_TRIGGER_SOURCE_LABELS)
+        self.ui.comboLpPreset.clear()
+        self.ui.comboLpPreset.addItems(_LP_PRESET_LABELS)
+        self.ui.comboTrapFt.addItems(_WINDOW_LABELS)
+
+    # ------------------------------------------------------------------
+    # Hardware range application
+    # ------------------------------------------------------------------
+
+    def _apply_parameter_specs(self) -> None:
+        """Drive every numerical hardware control from MCA specs.
+
+        The specs mirror ``user-api.md`` and the deployed v101 IIO
+        attributes. Keeping the form and validation layer tied to the same
+        table prevents a widget from silently clamping a valid readback or
+        offering a value the driver will reject.
+        """
+        pairs = (
+            (MCAParam.TRIGGER_LEVEL, self.ui.spinTriggerLevel, self.ui.sliderTriggerLevel),
+            (MCAParam.PRETRIGGER_SAMPLES, self.ui.spinPretrigger, self.ui.sliderPretrigger),
+            (MCAParam.FRAME_SAMPLES, self.ui.spinFrameSamples, self.ui.sliderFrameSamples),
+            (MCAParam.CRRC2_CDELAY, self.ui.spinCrrc2Cdelay, self.ui.sliderCrrc2Cdelay),
+            (MCAParam.CRRC2_FDELAY, self.ui.spinCrrc2Fdelay, self.ui.sliderCrrc2Fdelay),
+            (MCAParam.CRRC2_PZC, self.ui.spinCrrc2Pzc, self.ui.sliderCrrc2Pzc),
+            (MCAParam.CFD_DELAY, self.ui.spinCfdDelay, self.ui.sliderCfdDelay),
+            (MCAParam.TRAPEZ_R, self.ui.spinTrapR, self.ui.sliderTrapR),
+            (MCAParam.TRAPEZ_M, self.ui.spinTrapM, self.ui.sliderTrapM),
+            (MCAParam.TRAPEZ_E, self.ui.spinTrapE, self.ui.sliderTrapE),
+        )
+        for parameter, spinbox, slider in pairs:
+            spec = MCA_PARAMETER_SPECS[parameter]
+            assert isinstance(spec, RangeSpec)
+            self._apply_range_to_spinbox(spinbox, spec)
+            self._apply_range_to_slider(slider, spec)
+
+        singles = (
+            (MCAParam.PILEUP_WINDOW, self.ui.spinPileupWindow),
+            (MCAParam.TIME_LIMIT, self.ui.spinTimeLimit),
+            (MCAParam.CFD_TW_LOW, self.ui.spinCfdTwLow),
+            (MCAParam.CFD_TW_HIGH, self.ui.spinCfdTwHigh),
+            (MCAParam.CC_TIME, self.ui.spinCcTime),
+            (MCAParam.PSD_ZC_LOW, self.ui.spinPsdZcLow),
+            (MCAParam.PSD_ZC_HIGH, self.ui.spinPsdZcHigh),
+        )
+        for parameter, spinbox in singles:
+            spec = MCA_PARAMETER_SPECS[parameter]
+            assert isinstance(spec, RangeSpec)
+            self._apply_range_to_spinbox(spinbox, spec)
+
+        for parameter, double_spinbox in (
+            (MCAParam.CFD_FACTOR, self.ui.spinCfdFactor),
+            (MCAParam.TRAPEZ_T, self.ui.spinTrapT),
+            (MCAParam.EDGE_DET_COEFF, self.ui.spinEdgeDetCoeff),
+        ):
+            spec = MCA_PARAMETER_SPECS[parameter]
+            assert isinstance(spec, RangeSpec)
+            self._apply_range_to_double_spinbox(double_spinbox, spec)
+
+        # There is no edge-detector-coefficient attribute in the current
+        # IIO pulse processor. Hide the legacy-only compatibility control so
+        # its in-memory shadow cannot be mistaken for hardware readback.
+        edge_backed = self._mca.edge_det_coeff_is_hardware_backed()
+        self.ui.labelEdgeDetCoeff.setVisible(edge_backed)
+        self.ui.spinEdgeDetCoeff.setVisible(edge_backed)
+
+    @staticmethod
+    def _apply_range_to_spinbox(spinbox: QSpinBox, spec: RangeSpec) -> None:
+        spinbox.setRange(int(spec.min_val), int(spec.max_val))
+        spinbox.setSingleStep(int(spec.step) or 1)
+        spinbox.setValue(int(spec.default))
+
+    @staticmethod
+    def _apply_range_to_slider(slider: QSlider, spec: RangeSpec) -> None:
+        slider.setRange(int(spec.min_val), int(spec.max_val))
+        slider.setSingleStep(int(spec.step) or 1)
+        slider.setPageStep(max(int(spec.step), 1))
+        slider.setValue(int(spec.default))
+
+    @staticmethod
+    def _apply_range_to_double_spinbox(spinbox: QDoubleSpinBox, spec: RangeSpec) -> None:
+        spinbox.setRange(float(spec.min_val), float(spec.max_val))
+        spinbox.setSingleStep(float(spec.step) or 1.0)
+        spinbox.setValue(float(spec.default))
 
     # ------------------------------------------------------------------
     # Write defaults to hardware, then read back
@@ -690,6 +793,7 @@ class MCAController(QWidget):
             self.ui.btnStop.setEnabled(False)
             self.ui.cbDmaEnable.setEnabled(True)
             self.ui.btnDmaFile.setEnabled(True)
+            self._finish_psd_capture()
 
     def _start_polling_only(self) -> None:
         # A completed timed measurement clears measurement_in_progress but
@@ -885,6 +989,8 @@ class MCAController(QWidget):
         # before set_time_limit() below touches measurement_time_raw.
         self._mca.stop()
 
+        display_buffer = self._prepare_psd_capture()
+
         if isinstance(self._mca_dma, IIOMcaDmaStreamer):
             # Pulse-processor fields are immutable while list_buffer_active
             # is set, so apply the duration before the worker's first read
@@ -893,14 +999,14 @@ class MCAController(QWidget):
             self._dma_worker = IIOMcaDmaWorker(
                 streamer=self._mca_dma,
                 filepath=filepath,
-                event_buffer=(self._event_buffer, self._event_lock),
+                event_buffer=display_buffer,
             )
         else:
             assert isinstance(self._mca_dma, McaDmaStreamer)
             self._dma_worker = McaDmaWorker(
                 streamer=self._mca_dma,
                 filepath=filepath,
-                event_buffer=(self._event_buffer, self._event_lock),
+                event_buffer=display_buffer,
             )
         self._dma_thread = QThread(self)
         self._dma_worker.moveToThread(self._dma_thread)
@@ -933,6 +1039,22 @@ class MCAController(QWidget):
             readiness,
             filepath,
         )
+
+    def _prepare_psd_capture(self) -> McaEventBuffer | None:
+        """Arm display-only event interception when Charge Comparison is on."""
+        self._psd_capture_enabled = bool(
+            self._psd_capture is not None and self.ui.cbCcEnable.isChecked()
+        )
+        if self._psd_capture is not None:
+            self._psd_capture.begin_capture(
+                self._psd_capture_enabled,
+                (
+                    "Recording live PSD."
+                    if self._psd_capture_enabled
+                    else "PSD inactive: enable Charge Comparison before starting DMA."
+                ),
+            )
+        return self._event_buffer if self._psd_capture_enabled else None
 
     def _on_dma_ready(self) -> None:
         if isinstance(self._mca_dma, IIOMcaDmaStreamer):
@@ -973,12 +1095,20 @@ class MCAController(QWidget):
     def _on_dma_error(self, message: str) -> None:
         log.error("MCA DMA error: %s", message)
         self.ui.lblDmaStatus.setText(f"Error: {message}")
+        if self._psd_capture is not None:
+            self._psd_capture.set_capture_error(message)
 
     def _on_dma_finished(self) -> None:
         self._dma_worker = None
         self._dma_thread = None
         self.ui.lblDmaStatus.setText("Stopped")
+        self._finish_psd_capture()
         log.info("MCA DMA: worker finished")
+
+    def _finish_psd_capture(self) -> None:
+        if self._psd_capture is not None:
+            self._psd_capture.finish_capture()
+        self._psd_capture_enabled = False
 
     def stop_dma_sync(self) -> None:
         """Blocking stop for use during application shutdown/reconnect only.
@@ -1017,6 +1147,7 @@ class MCAController(QWidget):
         self._dma_worker = None
 
         self._ensure_disarmed(had_dma_worker)
+        self._finish_psd_capture()
 
     def _ensure_disarmed(self, had_dma_worker: bool) -> None:
         """Best-effort mca.stop()/set_dma_enable(False) for shutdown or
@@ -1088,9 +1219,9 @@ class MCAController(QWidget):
     def _update_statistics(self, rb: MCAReadback) -> None:
         self._last_elapsed_s = rb.elapsed_time / 10.0
         self.ui.lblCountRate.setText(str(rb.count_rate))
-        self.ui.lblDeadTime.setText(str(rb.pulse_deadtime))
+        self.ui.lblDeadTime.setText(f"{rb.pulse_deadtime_ms:.6f}")
         self.ui.lblElapsedTime.setText(f"{rb.elapsed_time / 10:.1f}")
-        self.ui.lblEventsLost.setText(str(rb.events_lost))
+        self.ui.lblEventsLost.setText("N/A" if rb.events_lost is None else str(rb.events_lost))
         self.ui.lblPulsePileup.setText(str(rb.pulse_pileup))
         self.ui.lblPulseOverrange.setText(str(rb.pulse_overrange))
         self.ui.lblEnergyOverrange.setText(str(rb.energy_overrange))

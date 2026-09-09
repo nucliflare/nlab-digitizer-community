@@ -13,6 +13,7 @@ import logging
 import struct
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -73,6 +74,7 @@ IIO_LM_FRAME_RECORDS = 1024
 IIO_LM_RECORD_BYTES = 16
 IIO_LM_FRAME_BYTES = IIO_LM_FRAME_RECORDS * IIO_LM_RECORD_BYTES
 IIO_LM_KERNEL_BUFFER_COUNT = 8
+IIO_LM_CLIENT_SCHEMA = "vdpp-pulse-processor-event-v1"
 
 # Each raw scope DMA frame is prefixed with a per-frame timestamp: the first
 # 4 int16 slots (8 bytes) are a little-endian uint64, the remaining
@@ -99,6 +101,55 @@ _LM_EVENT_DTYPE = np.dtype([
     ("trapezoid_energy", "<u2"),
     ("timestamp", "<u8"),
 ])
+
+
+class McaEventBuffer:
+    """Bounded hand-off queue for live consumers of MCA DMA batches.
+
+    File recording remains synchronous in the streamer. If the GUI cannot
+    drain this queue quickly enough, only the oldest display batch is
+    discarded; raw capture continuity is unaffected.
+    """
+
+    def __init__(self, max_batches: int = 128) -> None:
+        if max_batches <= 0:
+            raise ValueError("max_batches must be positive")
+        self._max_batches = max_batches
+        self._batches: deque[np.ndarray] = deque()
+        self._lock = threading.Lock()
+        self._dropped_records = 0
+
+    def append(self, events: np.ndarray) -> None:
+        copied = events.copy()
+        with self._lock:
+            if len(self._batches) >= self._max_batches:
+                self._dropped_records += len(self._batches.popleft())
+            self._batches.append(copied)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._batches.clear()
+            self._dropped_records = 0
+
+    def drain(self) -> tuple[list[np.ndarray], int]:
+        """Atomically remove pending batches and report cumulative drops."""
+        with self._lock:
+            batches = list(self._batches)
+            self._batches.clear()
+            return batches, self._dropped_records
+
+
+def _append_mca_event_batch(
+    target: McaEventBuffer | tuple[list[np.ndarray], threading.Lock],
+    events: np.ndarray,
+) -> None:
+    """Support the bounded GUI queue and the legacy tuple test/API shape."""
+    if isinstance(target, McaEventBuffer):
+        target.append(events)
+        return
+    batches, lock = target
+    with lock:
+        batches.append(events.copy())
 
 
 def _write_file_header(
@@ -149,6 +200,9 @@ def _write_iio_mca_metadata(
         "finished_utc": datetime.now(UTC).isoformat(),
         "ndma_header_bytes": FILE_HEADER_STRUCT.size,
         "record_layout": "opaque[16]",
+        # The kernel intentionally promises only opaque[16]. Decoded PSD
+        # fields belong to this explicitly named, replaceable client schema.
+        "client_record_schema": IIO_LM_CLIENT_SCHEMA,
         "record_bytes": IIO_LM_RECORD_BYTES,
         "frame_records": IIO_LM_FRAME_RECORDS,
         "frame_bytes": IIO_LM_FRAME_BYTES,
@@ -416,7 +470,7 @@ class IIOMcaDmaStreamer:
         self,
         stop_event: threading.Event,
         filepath: Path | None = None,
-        event_buffer: tuple[list[np.ndarray], threading.Lock] | None = None,
+        event_buffer: McaEventBuffer | tuple[list[np.ndarray], threading.Lock] | None = None,
         on_ready: Callable[[], None] | None = None,
         on_progress: Callable[[int], None] | None = None,
     ) -> int:
@@ -456,9 +510,7 @@ class IIOMcaDmaStreamer:
             if file_handle is not None:
                 file_handle.write(events.tobytes())
             if event_buffer is not None:
-                buf, lock = event_buffer
-                with lock:
-                    buf.append(events.copy())
+                _append_mca_event_batch(event_buffer, events)
             frame_count += 1
             total_records += len(events)
             if on_progress is not None:
@@ -582,7 +634,7 @@ class McaDmaStreamer:
         self,
         stop_event: threading.Event,
         filepath: Path | None = None,
-        event_buffer: tuple[list[np.ndarray], threading.Lock] | None = None,
+        event_buffer: McaEventBuffer | tuple[list[np.ndarray], threading.Lock] | None = None,
         on_ready: Callable[[], None] | None = None,
         on_progress: Callable[[int], None] | None = None,
     ) -> int:
@@ -674,9 +726,7 @@ class McaDmaStreamer:
 
                 if event_buffer is not None and n_events > 0:
                     parsed = self.parse_events(message[:n_events * EVENT_SIZE])
-                    buf, lock = event_buffer
-                    with lock:
-                        buf.append(parsed)
+                    _append_mca_event_batch(event_buffer, parsed)
 
                 if on_progress is not None:
                     on_progress(total_events)

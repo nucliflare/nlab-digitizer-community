@@ -45,6 +45,17 @@
        </layout>
       </widget>
 
+      <!-- Live pulse-shape-discrimination views, one dock per MCA channel -->
+      <widget class="QWidget" name="tabPSD">
+       <attribute name="title"><string>PSD</string></attribute>
+       <layout class="QVBoxLayout" name="layoutTabPSD">
+        <property name="leftMargin"><number>0</number></property>
+        <property name="topMargin"><number>0</number></property>
+        <property name="rightMargin"><number>0</number></property>
+        <property name="bottomMargin"><number>0</number></property>
+       </layout>
+      </widget>
+
       <!-- Global digitizer controls and channel-independent diagnostics -->
       <widget class="QWidget" name="tabGlobal">
        <attribute name="title"><string>Global</string></attribute>

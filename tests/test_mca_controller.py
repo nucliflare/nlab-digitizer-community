@@ -7,6 +7,7 @@ import pyqtgraph as pg
 import pytest
 
 from nlab.controllers.mca_controller import MCAController
+from nlab.hardware.digitizer.dma import McaEventBuffer
 from nlab.hardware.digitizer.mca import MultiChannelAnalyzer
 from nlab.workers.mca_worker import MCAReadback
 
@@ -36,9 +37,7 @@ def test_live_reconfiguration_stops_writes_and_restarts() -> None:
     backend = _Backend()
     mca = MultiChannelAnalyzer(backend)  # type: ignore[arg-type]
 
-    restarted = mca.reconfigure_while_running(
-        lambda: backend.events.append("write")
-    )
+    restarted = mca.reconfigure_while_running(lambda: backend.events.append("write"))
 
     assert restarted is True
     assert backend.events == [("enable", False), "write", ("enable", True)]
@@ -71,9 +70,7 @@ def test_completion_poll_cannot_observe_reconfiguration_stop() -> None:
         write_started.set()
         assert allow_write.wait(1)
 
-    reconfigure_thread = threading.Thread(
-        target=lambda: mca.reconfigure_while_running(write)
-    )
+    reconfigure_thread = threading.Thread(target=lambda: mca.reconfigure_while_running(write))
     reconfigure_thread.start()
     assert write_started.wait(1)
 
@@ -158,6 +155,29 @@ def test_polling_start_clears_enable_before_writing_time_limit() -> None:
     MCAController._start_polling_only(controller)
 
     assert events == ["stop", ("limit", 30), "start", "worker"]
+
+
+@pytest.mark.parametrize("charge_comparison_enabled", [False, True])
+def test_psd_interception_requires_charge_comparison(
+    charge_comparison_enabled: bool,
+) -> None:
+    capture = Mock()
+    event_buffer = McaEventBuffer()
+    controller = SimpleNamespace(
+        _psd_capture=capture,
+        _psd_capture_enabled=False,
+        _event_buffer=event_buffer,
+        ui=SimpleNamespace(
+            cbCcEnable=SimpleNamespace(isChecked=lambda: charge_comparison_enabled),
+        ),
+    )
+
+    result = MCAController._prepare_psd_capture(controller)
+
+    assert (result is event_buffer) is charge_comparison_enabled
+    assert controller._psd_capture_enabled is charge_comparison_enabled
+    capture.begin_capture.assert_called_once()
+    assert capture.begin_capture.call_args.args[0] is charge_comparison_enabled
 
 
 def test_hardware_completion_releases_enable_before_rearming_gui() -> None:

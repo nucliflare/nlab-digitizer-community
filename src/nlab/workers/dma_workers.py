@@ -19,6 +19,7 @@ from nlab.hardware.digitizer.dma import (
     IIOMcaDmaStreamer,
     IIOScopeDmaStreamer,
     McaDmaStreamer,
+    McaEventBuffer,
     ScopeDmaStreamer,
 )
 from nlab.workers.base_worker import BaseWorker
@@ -144,7 +145,7 @@ class McaDmaWorker(BaseWorker):
         self,
         streamer: McaDmaStreamer,
         filepath: Path | None = None,
-        event_buffer: tuple[list[np.ndarray], threading.Lock] | None = None,
+        event_buffer: McaEventBuffer | tuple[list[np.ndarray], threading.Lock] | None = None,
     ) -> None:
         super().__init__()
         self._streamer = streamer
@@ -190,7 +191,7 @@ class IIOMcaDmaWorker(BaseWorker):
         self,
         streamer: IIOMcaDmaStreamer,
         filepath: Path | None = None,
-        event_buffer: tuple[list[np.ndarray], threading.Lock] | None = None,
+        event_buffer: McaEventBuffer | tuple[list[np.ndarray], threading.Lock] | None = None,
     ) -> None:
         super().__init__()
         self._streamer = streamer

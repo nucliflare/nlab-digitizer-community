@@ -84,6 +84,7 @@ def collect_channel_hardware(
             "trigger_level": scope.get_trigger_level(),
             "pretrigger_samples": scope.get_pretrigger_samples(),
             "frame_samples": scope.get_frame_samples(),
+            "frame_period_cycles": scope.get_frame_period_cycles(),
             "edge_mode": scope.get_trigger_mode().value,
             "dac_value": scope.get_dac_value(),
             "dma_enabled": scope.get_dma_enable(),
@@ -284,6 +285,7 @@ def apply_channel_hardware(
             ("trigger_level", scope.set_trigger_level),
             ("pretrigger_samples", scope.set_pretrigger_samples),
             ("frame_samples", scope.set_frame_samples),
+            ("frame_period_cycles", scope.set_frame_period_cycles),
             ("dac_value", scope.set_dac_value),
         ),
     )

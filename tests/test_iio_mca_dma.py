@@ -31,6 +31,7 @@ from nlab.hardware.digitizer.dma import (
     FILE_HEADER_STRUCT,
     IIO_LM_FILE_VERSION,
     IIOMcaDmaStreamer,
+    McaEventBuffer,
 )
 from nlab.utils.dma_converter import convert_listmode, read_file_header
 
@@ -407,6 +408,24 @@ def test_iio_streamer_writes_versioned_frames_and_preserves_tail(tmp_path: Path)
     assert metadata["driver_completed_frames"] == 2
     assert metadata["driver_dma_error_count"] == 0
     assert metadata["continuity_valid"] is True
+
+
+def test_iio_streamer_forwards_initial_and_drained_frames_to_bounded_buffer() -> None:
+    stop_event = threading.Event()
+    backend = _FakeBackend(stop_event)
+    event_buffer = McaEventBuffer()
+
+    total = IIOMcaDmaStreamer(backend, channel=0).stream_events(
+        stop_event=stop_event,
+        event_buffer=event_buffer,
+    )
+
+    batches, dropped = event_buffer.drain()
+    assert total == 2048
+    assert dropped == 0
+    assert len(batches) == 2
+    np.testing.assert_array_equal(batches[0], backend.first)
+    np.testing.assert_array_equal(batches[1], backend.tail)
 
 
 def test_converter_understands_iio_listmode_version(tmp_path: Path) -> None:

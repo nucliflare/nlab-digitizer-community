@@ -10,7 +10,11 @@ import pyqtgraph as pg
 from PySide6.QtCore import QRectF, QSettings, QThread, QThreadPool, QTimer
 from PySide6.QtWidgets import QFileDialog, QSlider, QSpinBox, QWidget
 
-from nlab.hardware.digitizer.dma import IIOScopeDmaStreamer, ScopeDmaStreamer
+from nlab.hardware.digitizer.dma import (
+    FILE_HEADER_STRUCT,
+    IIOScopeDmaStreamer,
+    ScopeDmaStreamer,
+)
 from nlab.hardware.digitizer.scope import (
     ListSpec,
     RangeSpec,
@@ -41,6 +45,7 @@ class ScopeController(QWidget):
     _Y_SCALE_FACTOR = 20
     _Y_MIN = -32_000
     _Y_MAX = 32_000
+    _SAMPLE_PERIOD_NS = 2
 
     def __init__(
         self,
@@ -75,6 +80,8 @@ class ScopeController(QWidget):
         self._restore_display_settings()
         self._setup_graph()
         self._connect_signals()
+        self._update_frame_gap_enabled()
+        self._update_viewer_transport_hint()
         self.ui.btnStop.setEnabled(False)
 
     # ------------------------------------------------------------------
@@ -101,6 +108,10 @@ class ScopeController(QWidget):
         spec = specs[ScopeParam.FRAME_SAMPLES]
         assert isinstance(spec, RangeSpec)
         self._apply_range_to_spinbox(self.ui.spinFrameSamples, spec)
+
+        spec = specs[ScopeParam.FRAME_PERIOD_CYCLES]
+        assert isinstance(spec, RangeSpec)
+        self._apply_range_to_spinbox(self.ui.spinFrameGap, spec)
 
         spec = specs[ScopeParam.EDGE_MODE]
         assert isinstance(spec, ListSpec)
@@ -135,6 +146,9 @@ class ScopeController(QWidget):
         self._scope.set_dac_value(int(specs[ScopeParam.DAC_VALUE].default))
         self._scope.set_pretrigger_samples(int(specs[ScopeParam.PRETRIGGER_SAMPLES].default))
         self._scope.set_frame_samples(int(specs[ScopeParam.FRAME_SAMPLES].default))
+        self._scope.set_frame_period_cycles(
+            int(specs[ScopeParam.FRAME_PERIOD_CYCLES].default)
+        )
         self._scope.set_trigger_mode(TriggerMode(specs[ScopeParam.EDGE_MODE].default))
         self._scope.set_dma_enable(bool(specs[ScopeParam.DMA_ENABLED].default))
 
@@ -145,6 +159,7 @@ class ScopeController(QWidget):
         self.ui.sliderDacValue.setValue(self._scope.get_dac_value())
         self.ui.spinPretrigger.setValue(self._scope.get_pretrigger_samples())
         self.ui.spinFrameSamples.setValue(self._scope.get_frame_samples())
+        self.ui.spinFrameGap.setValue(self._scope.get_frame_period_cycles())
         self.ui.comboTriggerMode.setCurrentIndex(self._scope.get_trigger_mode().value)
         self.ui.cbDmaEnable.setChecked(self._scope.get_dma_enable())
 
@@ -206,6 +221,34 @@ class ScopeController(QWidget):
         self.ui.groupTiming.setEnabled(enabled)
         self.ui.cbDmaEnable.setEnabled(enabled)
 
+    def _viewer_frame_limit(self) -> int | None:
+        return self._scope.get_viewer_frame_samples_limit()
+
+    def _frame_exceeds_viewer_limit(self) -> bool:
+        limit = self._viewer_frame_limit()
+        return limit is not None and self.ui.spinFrameSamples.value() > limit
+
+    def _viewer_limit_message(self) -> str:
+        limit = self._viewer_frame_limit()
+        assert limit is not None
+        return (
+            f"The IIO live viewer is limited to {limit} samples by its "
+            "page-sized text transport. Enable Record DMA frames for this "
+            "frame length; live preview will be paused."
+        )
+
+    def _update_viewer_transport_hint(self) -> None:
+        limit = self._viewer_frame_limit()
+        if limit is None:
+            return
+        tip = (
+            f"Hardware and DMA support up to 8188 samples. The IIO live "
+            f"viewer is guaranteed complete through {limit} samples because "
+            "viewer_data is limited to one text page."
+        )
+        self.ui.spinFrameSamples.setToolTip(tip)
+        self.ui.plotWaveform.setToolTip(tip)
+
     # ------------------------------------------------------------------
     # Signal wiring
     # ------------------------------------------------------------------
@@ -226,10 +269,13 @@ class ScopeController(QWidget):
             lambda: self._scope.set_pretrigger_samples(self.ui.spinPretrigger.value())
         )
         self.ui.spinFrameSamples.editingFinished.connect(self._on_frame_samples_changed)
-        self.ui.comboTriggerMode.currentIndexChanged.connect(
-            lambda i: self._scope.set_trigger_mode(TriggerMode(i))
+        self.ui.spinFrameGap.editingFinished.connect(
+            lambda: self._scope.set_frame_period_cycles(self.ui.spinFrameGap.value())
         )
-        self.ui.cbDmaEnable.toggled.connect(lambda v: self._scope.set_dma_enable(v))
+        self.ui.comboTriggerMode.currentIndexChanged.connect(
+            self._on_trigger_mode_changed
+        )
+        self.ui.cbDmaEnable.toggled.connect(self._on_dma_toggled)
         self.ui.btnStart.clicked.connect(self._on_start)
         self.ui.btnStop.clicked.connect(self._on_stop)
         self.ui.btnAcquireFrame.clicked.connect(self._on_acquire_frame)
@@ -238,6 +284,16 @@ class ScopeController(QWidget):
         self.ui.comboDisplayMode.currentIndexChanged.connect(self._on_display_mode_changed)
         self.ui.dialPersistence.valueChanged.connect(self._on_persistence_changed)
         self.ui.spinRefreshRate.valueChanged.connect(self._on_refresh_rate_changed)
+
+    def _on_trigger_mode_changed(self, index: int) -> None:
+        self._scope.set_trigger_mode(TriggerMode(index))
+        self._update_frame_gap_enabled()
+
+    def _update_frame_gap_enabled(self) -> None:
+        periodic = self.ui.comboTriggerMode.currentIndex() == TriggerMode.TIMED
+        enabled = periodic and self._scope.frame_period_cycles_supported()
+        self.ui.labelFrameGap.setEnabled(enabled)
+        self.ui.spinFrameGap.setEnabled(enabled)
 
     def _wire_slider_spinbox(
         self,
@@ -266,12 +322,23 @@ class ScopeController(QWidget):
     # Start / Stop
     # ------------------------------------------------------------------
 
+    def _on_dma_toggled(self, enabled: bool) -> None:
+        self._scope.set_dma_enable(enabled)
+        self._update_viewer_transport_hint()
+
     def _on_start(self) -> None:
         if self._dma_worker is not None or self._dma_thread is not None:
             log.warning(
                 "Scope ch%d: refusing to start while the previous DMA worker is still closing",
                 self._channel,
             )
+            return
+        use_dma = self.ui.cbDmaEnable.isChecked() and self._scope_dma is not None
+        if self._frame_exceeds_viewer_limit() and not use_dma:
+            message = self._viewer_limit_message()
+            self.ui.btnStart.setChecked(False)
+            self.ui.lblRecordingStatus.setText(message)
+            log.warning("Scope ch%d: %s", self._channel, message)
             return
         self.ui.btnStart.setChecked(True)
         self.ui.btnStart.setEnabled(False)
@@ -357,9 +424,16 @@ class ScopeController(QWidget):
             )
             self._scope.start()
         interval_ms = 1000 // self.ui.spinRefreshRate.value()
-        self._refresh_timer.start(interval_ms)
+        if self._frame_exceeds_viewer_limit():
+            self._refresh_timer.stop()
+        else:
+            self._refresh_timer.start(interval_ms)
         self.ui.btnStop.setEnabled(True)
-        self.ui.lblRecordingStatus.setText("Recording...")
+        self.ui.lblRecordingStatus.setText(
+            "Recording... (live viewer paused for this frame length)"
+            if self._frame_exceeds_viewer_limit()
+            else "Recording..."
+        )
         self._start_measurement_timer()
         log.info("Scope ch%d: DMA + acquisition started (socket was ready)", self._channel)
 
@@ -416,6 +490,10 @@ class ScopeController(QWidget):
             self._refresh_timer.setInterval(1000 // value)
 
     def _request_frame(self) -> None:
+        if self._frame_exceeds_viewer_limit():
+            self._refresh_timer.stop()
+            self.ui.lblRecordingStatus.setText(self._viewer_limit_message())
+            return
         if self._acquiring:
             return
         self._acquiring = True
@@ -438,16 +516,47 @@ class ScopeController(QWidget):
 
     def _on_frame_samples_changed(self) -> None:
         value = self.ui.spinFrameSamples.value()
+        if (
+            self._refresh_timer.isActive()
+            and self._dma_worker is None
+            and self._frame_exceeds_viewer_limit()
+        ):
+            # Do not alter the hardware geometry under a viewer read that
+            # may already be in flight. Restore the last accepted value and
+            # explain how to capture the requested long frame.
+            previous = self._scope.get_frame_samples()
+            self.ui.spinFrameSamples.blockSignals(True)
+            self.ui.spinFrameSamples.setValue(previous)
+            self.ui.spinFrameSamples.blockSignals(False)
+            message = self._viewer_limit_message()
+            self.ui.lblRecordingStatus.setText(message)
+            log.warning("Scope ch%d: %s", self._channel, message)
+            return
         self._scope.set_frame_samples(value)
         self._display_nx = value // 4
         self._display_ny = self._display_nx * self._Y_SCALE_FACTOR
         self._persistence_buffer = np.zeros((self._display_nx, self._display_ny), dtype=np.float32)
         self._update_axis_ranges()
+        self._update_viewer_transport_hint()
 
     def _on_acquire_frame(self) -> None:
-        self._scope.start()
-        raw_frame = self._scope.acquire_frame()
-        self._scope.stop()
+        if self._frame_exceeds_viewer_limit():
+            message = self._viewer_limit_message()
+            self.ui.lblRecordingStatus.setText(message)
+            log.warning("Scope ch%d: %s", self._channel, message)
+            return
+        try:
+            self._scope.start()
+            raw_frame = self._scope.acquire_frame()
+        except Exception as exc:
+            log.exception("Scope ch%d: single-frame acquisition failed", self._channel)
+            self.ui.lblRecordingStatus.setText(f"Viewer error: {exc}")
+            return
+        finally:
+            try:
+                self._scope.stop()
+            except Exception:
+                log.exception("Scope ch%d: failed to disarm after viewer read", self._channel)
         value = self.ui.spinFrameSamples.value()
         frame = raw_frame[: value // 4]
         time_arr = np.arange(0, 8 * len(frame), 8)
@@ -497,7 +606,7 @@ class ScopeController(QWidget):
         self.ui.plotWaveform.setCentralItem(layout)
         self.ui.plotWaveform.setBackground("#f8f9fa")
 
-        layout.addLabel("Amplitude", angle=-90)
+        layout.addLabel("Amplitude [raw]", angle=-90)
         self._plot_item = layout.addPlot(viewBox=ModifierZoomViewBox())
         self._plot_item.showAxis("right")
         self._plot_item.showAxis("top")
@@ -520,10 +629,13 @@ class ScopeController(QWidget):
 
     def _update_axis_ranges(self) -> None:
         frame = self.ui.spinFrameSamples.value()
+        duration_ns = frame * self._SAMPLE_PERIOD_NS
         vb = self._plot_item.getViewBox()
-        vb.setXRange(0, frame, padding=0)
+        vb.setXRange(0, duration_ns, padding=0)
         vb.setYRange(self._Y_MIN, self._Y_MAX, padding=0)
-        self._persistence_img.setRect(QRectF(0, self._Y_MIN, frame, self._Y_MAX - self._Y_MIN))
+        self._persistence_img.setRect(
+            QRectF(0, self._Y_MIN, duration_ns, self._Y_MAX - self._Y_MIN)
+        )
 
     # ------------------------------------------------------------------
     # Display mode
@@ -574,10 +686,19 @@ class ScopeController(QWidget):
             log.info("Scope DMA: user selected filepath: %s", self._dma_filepath)
 
     def _on_dma_progress(self, bytes_written: int) -> None:
-        if bytes_written < 1024 * 1024:
-            self.ui.lblRecordingStatus.setText(f"Recording: {bytes_written / 1024:.1f} KB")
+        # Both scope formats prepend the same 24-byte NDMA header. The
+        # streamer progress value counts payload only, so add the header to
+        # make the displayed number equal the actual file size.
+        file_bytes = bytes_written + FILE_HEADER_STRUCT.size
+        suffix = "; viewer paused" if self._frame_exceeds_viewer_limit() else ""
+        if file_bytes < 1024 * 1024:
+            self.ui.lblRecordingStatus.setText(
+                f"Recording: {file_bytes / 1024:.1f} KiB{suffix}"
+            )
         else:
-            self.ui.lblRecordingStatus.setText(f"Recording: {bytes_written / (1024 * 1024):.1f} MB")
+            self.ui.lblRecordingStatus.setText(
+                f"Recording: {file_bytes / (1024 * 1024):.1f} MiB{suffix}"
+            )
 
     def _on_dma_error(self, message: str) -> None:
         log.error("Scope DMA error: %s", message)

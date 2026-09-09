@@ -56,11 +56,11 @@ class MCAParam(IntEnum):
     # --- internal — no JSON widget id ---
     GLOBAL_ENABLE = 200
     DMA_ENABLED = 201
-    LP_PRESET = 202  # write-only preset loader (0=200 MHz, 1=700 MHz, 2=average)
+    LP_PRESET = 202  # preset selector (0=200 MHz, 1=70 MHz, 2=moving average)
 
 
 MCA_PARAMETER_SPECS: dict[MCAParam, ParameterSpec] = {
-    # --- All ranges from hw_def.json (hardware ground truth) ---
+    # Ranges below follow user-api.md and the checked-in kernel drivers.
     # int16_t (hw_def: MIN–MAX, step 1)
     MCAParam.TRIGGER_LEVEL: RangeSpec(min_val=-32768, max_val=32767, step=1, default=-512),
     # VDPP_PULSE_POLARITY (hw_def: 0–1); 0=negative (falling edge), 1=positive (rising edge)
@@ -75,16 +75,18 @@ MCA_PARAMETER_SPECS: dict[MCAParam, ParameterSpec] = {
     MCAParam.ENERGY_BIN: ListSpec(items=(0, 1, 2, 3, 4, 5, 6, 7, 8, 9), default=0),
     # uint8_t (hw_def: 0–255, step 1)
     MCAParam.PILEUP_WINDOW: RangeSpec(min_val=0, max_val=255, step=1, default=0),
-    # uint32_t (hw_def: 0–16777216, step 1)
-    MCAParam.TIME_LIMIT: RangeSpec(min_val=0, max_val=16777216, step=1, default=0),
+    # GUI/API value is seconds. The IIO hardware range is measurement_time_raw
+    # u32 multiplied by measurement_time_scale=0.134217728 seconds/count.
+    MCAParam.TIME_LIMIT: RangeSpec(min_val=0, max_val=576460752, step=1, default=0),
     MCAParam.GLOBAL_ENABLE: ListSpec(items=(False, True), default=False),
     # float on wire; FPGA register is 16-bit fixed-point (xinput_filters_hw.h: temp_coeff_V)
     MCAParam.TEMP_COEFF: RangeSpec(min_val=-1.0, max_val=1.0, step=1e-9, default=-0.00026735),
     # int16_t (hw_def for temp_offset not present; using input.txt C type range)
     MCAParam.TEMP_OFFSET: RangeSpec(min_val=-32768, max_val=32767, step=1, default=7),
     MCAParam.TRAPEZ_ENABLE: ListSpec(items=(False, True), default=False),
-    # uint16_t (hw_def: 0–4088, step 8)
-    MCAParam.TRAPEZ_R: RangeSpec(min_val=0, max_val=4088, step=8, default=64),
+    # vdpp-pulse-processor.c rejects 0 and 8: the dependent reciprocal
+    # calculation is undefined at 8 (Rdelay would be zero).
+    MCAParam.TRAPEZ_R: RangeSpec(min_val=16, max_val=4088, step=8, default=64),
     MCAParam.TRAPEZ_M: RangeSpec(min_val=0, max_val=4088, step=8, default=64),
     # uint32_t (hw_def: MIN–MAX, step 1)
     MCAParam.TRAPEZ_T: RangeSpec(min_val=0, max_val=4294967295, step=1, default=96),
@@ -93,14 +95,20 @@ MCA_PARAMETER_SPECS: dict[MCAParam, ParameterSpec] = {
     # VDPP_TRAPEZ_WINDOW enum (hw_def: 0–6)
     MCAParam.TRAPEZ_FT: ListSpec(items=(0, 1, 2, 3, 4, 5, 6), default=0),
     MCAParam.CFD_ENABLE: ListSpec(items=(False, True), default=False),
-    # double on wire; FPGA is 16-bit fixed-point (hw_def: 0–0.99994, step ~2^-14)
-    MCAParam.CFD_FACTOR: RangeSpec(min_val=0.0, max_val=0.99994, step=6.103515625e-5, default=0.4),
+    # cfd_factor_raw is an unsigned 16-bit Q1.15 value. Its live scale is
+    # exactly 2^-15, hence the representable physical range is 0..1.99996948.
+    MCAParam.CFD_FACTOR: RangeSpec(
+        min_val=0.0,
+        max_val=1.999969482421875,
+        step=0.000030517578125,
+        default=0.4,
+    ),
     # uint16_t (hw_def: 0–254, step 2)
     MCAParam.CFD_DELAY: RangeSpec(min_val=0, max_val=254, step=2, default=2),
     MCAParam.CC_ENABLE: ListSpec(items=(False, True), default=False),
     # uint16_t (hw_def: 0–65534, step 2)
     MCAParam.CC_TIME: RangeSpec(min_val=0, max_val=65534, step=2, default=8),
-    # VDPP_TRG_SRC enum (hw_def: 0–2); 0=threshold, 1=CFD, 2=CR-RC2
+    # trigger_source_available: 0=threshold, 1=CR-RC2, 2=CR2-RC2
     MCAParam.TRG_SOURCE: ListSpec(items=(0, 1, 2), default=0),
     # uint16_t (hw_def: 8–504, step 8)
     MCAParam.CRRC2_CDELAY: RangeSpec(min_val=8, max_val=504, step=8, default=8),
@@ -111,9 +119,9 @@ MCA_PARAMETER_SPECS: dict[MCAParam, ParameterSpec] = {
     # uint16_t (hw_def: 0–65534, step 2)
     MCAParam.CFD_TW_LOW: RangeSpec(min_val=0, max_val=65534, step=2, default=8),
     MCAParam.CFD_TW_HIGH: RangeSpec(min_val=0, max_val=65534, step=2, default=64),
-    # VDPP_DBG_SIGNAL enum (hw_def: 0–6)
-    MCAParam.MEM1_SIG_SELECT: ListSpec(items=(0, 1, 2, 3, 4, 5, 6), default=0),
-    MCAParam.MEM2_SIG_SELECT: ListSpec(items=(0, 1, 2, 3, 4, 5, 6), default=1),
+    # debug_signalX_available exposes selectors 0..7 on pulse-processor v101.
+    MCAParam.MEM1_SIG_SELECT: ListSpec(items=(0, 1, 2, 3, 4, 5, 6, 7), default=0),
+    MCAParam.MEM2_SIG_SELECT: ListSpec(items=(0, 1, 2, 3, 4, 5, 6, 7), default=1),
     MCAParam.EXT_TRIG_ENABLE: ListSpec(items=(False, True), default=False),
     # uint32_t (hw_def: not present; using full C type range)
     MCAParam.EDGE_DET_COEFF: RangeSpec(min_val=0, max_val=4294967295, step=1, default=1),
@@ -122,7 +130,7 @@ MCA_PARAMETER_SPECS: dict[MCAParam, ParameterSpec] = {
     MCAParam.PSD_ZC_MODE: ListSpec(items=(0, 1), default=0),
     MCAParam.PSD_ZC_LOW: RangeSpec(min_val=0, max_val=65534, step=2, default=8),
     MCAParam.PSD_ZC_HIGH: RangeSpec(min_val=0, max_val=65534, step=2, default=16),
-    # uint8_t (hw_def: 0–2, step 1); 0=200 MHz, 1=700 MHz, 2=average
+    # fir_preset: 0=200 MHz, 1=70 MHz, 2=moving average
     MCAParam.LP_PRESET: ListSpec(items=(0, 1, 2), default=0),
 }
 
@@ -151,30 +159,37 @@ class Trapezoid:
         return self._b.get_trapez_R()
 
     def set_R(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.TRAPEZ_R].validate(val, "trapezoid_r")
         self._b.set_trapez_R(val)
 
     def get_M(self) -> int:
         return self._b.get_trapez_M()
 
     def set_M(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.TRAPEZ_M].validate(val, "trapezoid_m")
         self._b.set_trapez_M(val)
 
     def get_T(self) -> int:
         return self._b.get_trapez_T()
 
     def set_T(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.TRAPEZ_T].validate(val, "trapezoid_beta_raw")
         self._b.set_trapez_T(val)
 
     def get_E(self) -> int:
         return self._b.get_trapez_E()
 
     def set_E(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.TRAPEZ_E].validate(val, "trapezoid_time")
         self._b.set_trapez_E(val)
 
     def get_FT(self) -> int:
         return self._b.get_trapez_FT()
 
     def set_FT(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.TRAPEZ_FT].validate(
+            val, "trapezoid_flat_top_window"
+        )
         self._b.set_trapez_FT(val)
 
 
@@ -192,24 +207,28 @@ class CFD:
         return self._b.get_cfd_factor()
 
     def set_factor(self, val: float) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.CFD_FACTOR].validate(val, "cfd_factor")
         self._b.set_cfd_factor(val)
 
     def get_delay(self) -> int:
         return self._b.get_cfd_delay()
 
     def set_delay(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.CFD_DELAY].validate(val, "cfd_delay")
         self._b.set_cfd_delay(val)
 
     def get_time_window_low(self) -> int:
         return self._b.get_cfd_time_window_low()
 
     def set_time_window_low(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.CFD_TW_LOW].validate(val, "cfd_time_walk_low")
         self._b.set_cfd_time_window_low(val)
 
     def get_time_window_high(self) -> int:
         return self._b.get_cfd_time_window_high()
 
     def set_time_window_high(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.CFD_TW_HIGH].validate(val, "cfd_time_walk_high")
         self._b.set_cfd_time_window_high(val)
 
 
@@ -221,18 +240,21 @@ class CRRC2:
         return self._b.get_crrc2_Cdelay()
 
     def set_Cdelay(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.CRRC2_CDELAY].validate(val, "crrc2_cdelay")
         self._b.set_crrc2_Cdelay(val)
 
     def get_Fdelay(self) -> int:
         return self._b.get_crrc2_Fdelay()
 
     def set_Fdelay(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.CRRC2_FDELAY].validate(val, "crrc2_fdelay")
         self._b.set_crrc2_Fdelay(val)
 
     def get_pzc_coeff(self) -> int:
         return self._b.get_crrc2_pzc_coeff()
 
     def set_pzc_coeff(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.CRRC2_PZC].validate(val, "crrc2_pzc_raw")
         self._b.set_crrc2_pzc_coeff(val)
 
 
@@ -250,6 +272,7 @@ class ChargeComparison:
         return self._b.get_cc_time()
 
     def set_time(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.CC_TIME].validate(val, "charge_comparison_time")
         self._b.set_cc_time(val)
 
 
@@ -267,18 +290,23 @@ class PSDZeroCrossing:
         return self._b.get_psd_zc_mode()
 
     def set_mode(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.PSD_ZC_MODE].validate(
+            val, "psd_zero_crossing_mode"
+        )
         self._b.set_psd_zc_mode(val)
 
     def get_time_window_low(self) -> int:
         return self._b.get_psd_zc_time_window_low()
 
     def set_time_window_low(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.PSD_ZC_LOW].validate(val, "psd_time_walk_low")
         self._b.set_psd_zc_time_window_low(val)
 
     def get_time_window_high(self) -> int:
         return self._b.get_psd_zc_time_window_high()
 
     def set_time_window_high(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.PSD_ZC_HIGH].validate(val, "psd_time_walk_high")
         self._b.set_psd_zc_time_window_high(val)
 
 
@@ -337,8 +365,13 @@ class MCAStatistics:
     def get_count_rate(self) -> int:
         return self._b.get_count_rate()
 
-    def get_pulse_deadtime(self) -> int:
-        return self._b.get_pulse_deadtime()
+    def get_pulse_deadtime_ms(self) -> float:
+        """Return dead time in milliseconds when the backend exposes its scale."""
+        scaled_reader = getattr(self._b, "get_pulse_deadtime_ms", None)
+        if scaled_reader is not None:
+            return float(scaled_reader())
+        # The legacy gRPC API exposes only its already-interpreted value.
+        return float(self._b.get_pulse_deadtime())
 
     def get_events_lost(self) -> int:
         return self._b.get_events_lost()
@@ -601,7 +634,12 @@ class MultiChannelAnalyzer:
         return self._b.get_edge_det_coeff()
 
     def set_edge_det_coeff(self, val: int) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.EDGE_DET_COEFF].validate(val, "edge_det_coeff")
         self._b.set_edge_det_coeff(val)
+
+    def edge_det_coeff_is_hardware_backed(self) -> bool:
+        """Whether the selected backend has a real edge-coefficient register."""
+        return bool(getattr(self._b, "edge_det_coeff_is_hardware_backed", lambda: True)())
 
     # ---- pulse memory signal routing ----
 

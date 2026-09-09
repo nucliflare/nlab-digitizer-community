@@ -86,6 +86,20 @@ _MCA_HISTOGRAM_CLEAR_UNSUPPORTED = (
 
 _SCOPE_DEVICE_NAME = "vdpp_scope"
 
+# ``vdpp-scope.c`` serializes viewer samples with ``"%d "`` into one
+# 4096-byte sysfs page and stops once fewer than 16 bytes remain. A signed
+# int16 needs at most seven bytes including its trailing space. This is the
+# largest frame length whose decimated (one entry per four ADC samples)
+# viewer representation is guaranteed to fit regardless of signal values.
+# The DMA path is binary and retains the full 8188-sample hardware range.
+_SCOPE_VIEWER_PAGE_BYTES = 4096
+_SCOPE_VIEWER_TAIL_BYTES = 16
+_SCOPE_VIEWER_MAX_ENTRY_BYTES = len("-32768 ")
+_SCOPE_VIEWER_SAFE_ENTRIES = (
+    _SCOPE_VIEWER_PAGE_BYTES - _SCOPE_VIEWER_TAIL_BYTES
+) // _SCOPE_VIEWER_MAX_ENTRY_BYTES
+_SCOPE_VIEWER_SAFE_FRAME_SAMPLES = _SCOPE_VIEWER_SAFE_ENTRIES * 4
+
 # The AFE DAC now has a real driver: vdpp_afe_dac, added to the device tree
 # after this backend was first written (the ad5686r device present on the
 # live tree is a different, unrelated DAC -- not this one). Confirmed live:
@@ -94,9 +108,7 @@ _SCOPE_DEVICE_NAME = "vdpp_scope"
 # scope channel -- each with `raw` (the underlying DAC output code, full
 # range, not what the GUI's DC-offset control means) and `baseline` (the
 # actual DC-offset control: 0-1023 confirmed via voltage0/1's
-# baseline_available, matching Scope's DAC_VALUE spec of 0-1024 closely
-# enough that the 1023-vs-1024 top-of-range mismatch is left to the driver
-# to enforce rather than clamped here).
+# baseline_available, matching Scope's DAC_VALUE spec of 0-1023).
 _DAC_DEVICE_NAME = "vdpp_afe_dac"
 
 # MCA: two more per-channel IIO devices, one pipeline stage each (see
@@ -1626,8 +1638,9 @@ class IIODigitizerBackend(DigitizerBackend):
     def get_frame_period_cycles(self) -> int:
         """Extension method (not part of ScopeBackend), called via
         d._backend -- only meaningful with trigger_mode=TriggerMode.TIMED
-        (SCOPE_TRIG_PERIODIC=4). Period between periodic triggers, in
-        8 ns datapath clocks.
+        (SCOPE_TRIG_PERIODIC=4). Gap after a frame, in 8 ns datapath
+        clocks. Per vdpp-scope.c, the complete periodic interval is this
+        value plus frame_samples / 4 clocks.
         """
         return int(self._attr_get("frame_period_cycles"))
 
@@ -1812,6 +1825,16 @@ class IIODigitizerBackend(DigitizerBackend):
             raise RuntimeError("no AFE DAC device bound")
         return bool(int(self._dac_dev.attrs["ready"].value))
 
+    def get_viewer_frame_samples_limit(self) -> int:
+        """Largest frame guaranteed to fit the scope's text viewer ABI.
+
+        This is a transport/display limit, not the hardware or DMA limit.
+        It is derived from ``vdpp-scope.c``'s PAGE_SIZE-16 guard, its
+        ``"%d "`` serialization of signed int16 entries, and one viewer
+        entry per four ADC samples.
+        """
+        return _SCOPE_VIEWER_SAFE_FRAME_SAMPLES
+
     def read_frame(self) -> np.ndarray:
         """Read the on-chip pulse-viewer memory: one entry per core clock
         (frame_samples / 4 entries, capped at viewer_mem_entries=2048),
@@ -1831,20 +1854,11 @@ class IIODigitizerBackend(DigitizerBackend):
 
         The driver caps the text at PAGE_SIZE (4096 bytes); if fewer than
         frame_samples // 4 entries come back, the frame was truncated
-        server-side (frame_samples too large for one page) -- logged here,
-        not otherwise recoverable.
-
-        NOTE: deliberately does NOT cross-check against the viewer_samples
-        attribute, which looks like it should report this same expected
-        count but doesn't. Confirmed from the driver source:
-        viewer_data_show() computes its loop bound as frame_length /
-        SCOPE_N (i.e. // 4, matching its own "one viewer entry is the
-        average of SCOPE_N samples" comment) -- but viewer_samples_show()
-        returns the raw frame_length register value undivided, despite
-        carrying the identical comment. Confirmed live: frame_samples=168
-        -> 42 real entries from viewer_data (168 // 4, correct), while
-        viewer_samples itself reports 168. Computing the expected count
-        locally instead avoids a false "truncated" warning on every read.
+        server-side (frame_samples too large for one page) and is rejected.
+        Current ``vdpp-scope.c`` and ``user-api.md`` define
+        ``viewer_samples`` as that same frame_samples // 4 count. Computing
+        it locally avoids an extra network attribute read while preserving
+        the driver's exact geometry.
         """
         raw = self._read_large_attr("viewer_data")
         # The oversized read buffer comes back padded with trailing NUL
@@ -2427,15 +2441,25 @@ class IIODigitizerBackend(DigitizerBackend):
     # nine go through self._mca_pp (background-poll context), not self._pp.
 
     def get_pulse_deadtime(self) -> int:
-        """Raw tick count from dead_time_raw, deliberately NOT scaled by
-        the sibling dead_time_scale attribute (0.524288 s/tick): unlike
-        get_time_limit()/get_elapsed_time(), this ABC method has no
-        documented seconds contract anywhere (mca.py's MCAStatistics
-        wrapper passes it through unchanged), and the GUI displays it with
-        str(), no unit -- so returning the raw register value is the
-        choice requiring the least unverified assumption.
+        """Raw tick count from ``dead_time_raw``.
+
+        The ABC retains this legacy raw-counter method. GUI code uses
+        :meth:`get_pulse_deadtime_ms` so the documented 0.524288 ms/count
+        scale is not lost.
         """
         return int(self._mca_pp_attr_get("dead_time_raw"))
+
+    def get_pulse_deadtime_ms(self) -> float:
+        """Physical milliseconds from the live raw value and driver scale.
+
+        ``user-api.md`` and ``vdpp-pulse-processor.c`` define
+        ``dead_time_scale`` as milliseconds per ``dead_time_raw`` count.
+        Reading the scale keeps the GUI correct if a later compatible image
+        changes that constant.
+        """
+        raw = int(self._mca_pp_attr_get("dead_time_raw"))
+        scale = float(self._mca_pp_attr_get("dead_time_scale"))
+        return raw * scale
 
     def get_events_lost(self) -> int:
         raise NotImplementedError(_MCA_EVENTS_LOST_UNSUPPORTED)
@@ -2580,6 +2604,10 @@ class IIODigitizerBackend(DigitizerBackend):
     def set_edge_det_coeff(self, val: int) -> None:
         self._edge_det_coeff = val
 
+    def edge_det_coeff_is_hardware_backed(self) -> bool:
+        """The current IIO pulse processor exposes no such register."""
+        return False
+
     def get_crrc2_Cdelay(self) -> int:
         return int(self._pp_attr_get("crrc2_cdelay"))
 
@@ -2620,10 +2648,8 @@ class IIODigitizerBackend(DigitizerBackend):
         dependent trapezoid_1r register kernel-side (Rdelay/1Rdelay) --
         there is no separate userspace attribute for that, nothing extra
         needed here. The kernel's real minimum is 16 (8 would make Rdelay
-        zero, per the same doc), which is stricter than mca.py's stale
-        RangeSpec (min_val=0) for MCAParam.TRAPEZ_R -- a value 0..15 will
-        reach the driver and come back as -ERANGE rather than being
-        caught earlier.
+        zero, per the same doc). ``mca.py`` and the GUI use the same
+        16..4088 step-8 range, so invalid values are rejected before I/O.
         """
         return int(self._pp_attr_get("trapezoid_r"))
 

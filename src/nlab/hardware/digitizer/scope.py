@@ -63,6 +63,7 @@ class ScopeParam(IntEnum):
     DAC_VALUE = 5
     # Internal — no JSON widget id (scope ids 6/7 are software DMA config, not this flag)
     DMA_ENABLED = 100
+    FRAME_PERIOD_CYCLES = 101
 
 
 # ---------------------------------------------------------------------------
@@ -70,12 +71,18 @@ class ScopeParam(IntEnum):
 # ---------------------------------------------------------------------------
 
 PARAMETER_SPECS: dict[ScopeParam, ParameterSpec] = {
-    # int16_t (hw_def: MIN–MAX, step 1)
+    # vdpp-scope.c / user-api.md, confirmed by live v121 IIO discovery.
     ScopeParam.TRIGGER_LEVEL: RangeSpec(min_val=-32768, max_val=32767, step=1, default=0),
-    # uint16_t (hw_def: 0–2046, step 2)
-    ScopeParam.PRETRIGGER_SAMPLES: RangeSpec(min_val=0, max_val=2040, step=8, default=32),
-    # uint16_t (hw_def: 0–16382, step 2)
-    ScopeParam.FRAME_SAMPLES: RangeSpec(min_val=0, max_val=16382, step=8, default=1024),
+    # Four ADC samples arrive per datapath beat, so both lengths are exact
+    # multiples of four. The driver rejects, rather than rounds, bad values.
+    ScopeParam.PRETRIGGER_SAMPLES: RangeSpec(min_val=0, max_val=1020, step=4, default=32),
+    ScopeParam.FRAME_SAMPLES: RangeSpec(min_val=4, max_val=8188, step=4, default=1024),
+    # vdpp-scope.c's Scope_Frame_Period is a gap after each frame, expressed
+    # directly in 125 MHz datapath clocks. The IIO attribute accepts the full
+    # unsigned 16-bit range with no client-side conversion.
+    ScopeParam.FRAME_PERIOD_CYCLES: RangeSpec(
+        min_val=0, max_val=65535, step=1, default=0,
+    ),
     ScopeParam.EDGE_MODE: ListSpec(
         items=tuple(m.name for m in TriggerMode),
         default=TriggerMode.ANY_BELOW,
@@ -156,6 +163,35 @@ class Scope:
     def set_trigger_mode(self, val: TriggerMode) -> None:
         self._b.set_edge(int(val))
 
+    def frame_period_cycles_supported(self) -> bool:
+        """Whether this backend exposes the v121 periodic-gap register."""
+        return callable(getattr(self._b, "get_frame_period_cycles", None)) and callable(
+            getattr(self._b, "set_frame_period_cycles", None)
+        )
+
+    def get_frame_period_cycles(self) -> int:
+        """Return the gap after a periodic frame, in 8 ns datapath clocks.
+
+        The legacy gRPC API has no matching command. Its safe software-only
+        fallback is the documented reset/default value so GUI construction
+        remains backend-agnostic; the controller keeps the editor disabled
+        when :meth:`frame_period_cycles_supported` is false.
+        """
+        reader = getattr(self._b, "get_frame_period_cycles", None)
+        if reader is None:
+            spec = PARAMETER_SPECS[ScopeParam.FRAME_PERIOD_CYCLES]
+            return int(spec.default)
+        return int(reader())
+
+    def set_frame_period_cycles(self, val: int) -> None:
+        """Set the periodic gap in 8 ns clocks when supported by the backend."""
+        PARAMETER_SPECS[ScopeParam.FRAME_PERIOD_CYCLES].validate(
+            val, "frame_period_cycles"
+        )
+        writer = getattr(self._b, "set_frame_period_cycles", None)
+        if writer is not None:
+            writer(val)
+
     # ---- timing (in samples) ----
 
     def get_pretrigger_samples(self) -> int:
@@ -187,6 +223,16 @@ class Scope:
         """Read one captured frame. Returns int16 array of shape (n_samples,)."""
         return self._b.read_frame()
 
+    def get_viewer_frame_samples_limit(self) -> int | None:
+        """Return a backend-specific live-viewer limit, if one exists.
+
+        The current IIO driver transports viewer data as page-sized text,
+        which is more restrictive than its binary DMA frame geometry. The
+        legacy gRPC backend has no separate documented viewer limit.
+        """
+        reader = getattr(self._b, "get_viewer_frame_samples_limit", None)
+        return int(reader()) if reader is not None else None
+
     # ---- DMA fault recovery ----
     # Extension methods, only meaningful for backends that latch a fault on
     # a genuine DMA session error (currently the IIO backend -- see
@@ -213,6 +259,10 @@ class Scope:
             ScopeSettingEntry(id=int(ScopeParam.TRIGGER_LEVEL), value=self.get_trigger_level()),
             ScopeSettingEntry(id=int(ScopeParam.PRETRIGGER_SAMPLES), value=self.get_pretrigger_samples()),
             ScopeSettingEntry(id=int(ScopeParam.FRAME_SAMPLES), value=self.get_frame_samples()),
+            ScopeSettingEntry(
+                id=int(ScopeParam.FRAME_PERIOD_CYCLES),
+                value=self.get_frame_period_cycles(),
+            ),
             ScopeSettingEntry(id=int(ScopeParam.EDGE_MODE), value=self.get_trigger_mode().name),
             ScopeSettingEntry(id=int(ScopeParam.DAC_VALUE), value=self.get_dac_value()),
         ]

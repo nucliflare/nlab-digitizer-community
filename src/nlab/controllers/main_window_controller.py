@@ -9,9 +9,11 @@ from PySide6.QtWidgets import QDockWidget, QMainWindow, QWidget
 from nlab.controllers.external_device_controller import ExternalDeviceController
 from nlab.controllers.global_controller import GlobalController
 from nlab.controllers.mca_controller import MCAController
+from nlab.controllers.psd_controller import PSDController
 from nlab.controllers.psu_controller import PSUController
 from nlab.controllers.scope_controller import ScopeController
 from nlab.hardware.digitizer.digitizer import Digitizer
+from nlab.hardware.digitizer.dma import McaEventBuffer
 from nlab.hardware.modbus_devices import ExternalDevices
 
 if TYPE_CHECKING:
@@ -50,6 +52,8 @@ class MainWindowController:
 
         self._scope_controllers: list[ScopeController] = []
         self._mca_controllers: list[MCAController] = []
+        self._psd_controllers: list[PSDController] = []
+        self._psd_controller_by_device: dict[int, PSDController] = {}
         self._psu_controllers: list[PSUController] = []
         self._psu_controller_by_device: dict[int, PSUController] = {}
         self._external_controllers: list[ExternalDeviceController] = []
@@ -59,6 +63,7 @@ class MainWindowController:
 
         self._scope_dock_host = self._make_dock_host()
         self._mca_dock_host = self._make_dock_host()
+        self._psd_dock_host = self._make_dock_host()
         self._psu_dock_host = self._make_dock_host()
         self._global_dock_host = self._make_dock_host()
         self._external_dock_host = self._make_dock_host()
@@ -68,9 +73,10 @@ class MainWindowController:
         self._restore_dock_state()
         self._connect_signals()
         log.info(
-            "UI initialized, %d scope / %d MCA / %d PSU / %d external controllers",
+            "UI initialized, %d scope / %d MCA / %d PSD / %d PSU / %d external controllers",
             len(self._scope_controllers),
             len(self._mca_controllers),
+            len(self._psd_controllers),
             len(self._psu_controllers),
             len(self._external_controllers),
         )
@@ -156,9 +162,11 @@ class MainWindowController:
     def _build_channel_docks(self) -> None:
         scope_docks: list[QDockWidget] = []
         mca_docks: list[QDockWidget] = []
+        psd_docks: list[QDockWidget] = []
         psu_docks: list[QDockWidget] = []
 
         self._psu_controller_by_device = {}
+        self._psd_controller_by_device = {}
         missing_psu_channels: list[int] = []
 
         # IIODigitizerBackend now implements MCABackend against
@@ -184,7 +192,21 @@ class MainWindowController:
             scope_docks.append(self._make_dock(f"scope_ch{ch}", ch_label, scope_ctrl))
 
             if build_mca:
-                mca_ctrl = MCAController(device.mca, mca_dma=device.mca_dma, channel=ch)
+                event_buffer = None
+                psd_ctrl = None
+                if device.mca_dma is not None:
+                    event_buffer = McaEventBuffer()
+                    psd_ctrl = PSDController(event_buffer=event_buffer, channel=ch)
+                    self._psd_controllers.append(psd_ctrl)
+                    self._psd_controller_by_device[idx] = psd_ctrl
+                    psd_docks.append(self._make_dock(f"psd_ch{ch}", ch_label, psd_ctrl))
+                mca_ctrl = MCAController(
+                    device.mca,
+                    mca_dma=device.mca_dma,
+                    channel=ch,
+                    event_buffer=event_buffer,
+                    psd_capture=psd_ctrl,
+                )
                 self._mca_controllers.append(mca_ctrl)
                 mca_docks.append(self._make_dock(f"mca_ch{ch}", ch_label, mca_ctrl))
 
@@ -200,10 +222,12 @@ class MainWindowController:
 
         self._populate_dock_host(self._scope_dock_host, scope_docks)
         self._populate_dock_host(self._mca_dock_host, mca_docks)
+        self._populate_dock_host(self._psd_dock_host, psd_docks)
         self._populate_dock_host(self._psu_dock_host, psu_docks)
 
         self._window.ui.layoutTabScope.addWidget(self._scope_dock_host)
         self._window.ui.layoutTabMCA.addWidget(self._mca_dock_host)
+        self._window.ui.layoutTabPSD.addWidget(self._psd_dock_host)
         self._window.ui.layoutTabPSU.addWidget(self._psu_dock_host)
 
         mca_tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabMCA)
@@ -213,6 +237,14 @@ class MainWindowController:
             if build_mca
             else "MCA is disabled: no pulse-processor/input-filter device found "
             "for one or more connected channels (older or scope-only firmware)."
+        )
+
+        psd_tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabPSD)
+        self._window.ui.mainTabs.setTabEnabled(psd_tab_index, bool(psd_docks))
+        self._window.ui.tabPSD.setToolTip(
+            ""
+            if psd_docks
+            else "PSD is disabled: MCA list-mode DMA is unavailable on all channels."
         )
 
         psu_tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabPSU)
@@ -272,6 +304,7 @@ class MainWindowController:
     # are silently discarded rather than corrupting the initial tab arrangement.
     _DOCK_STATE_KEY_SCOPE = "docks/v2/scope"
     _DOCK_STATE_KEY_MCA = "docks/v2/mca"
+    _DOCK_STATE_KEY_PSD = "docks/v2/psd"
     _DOCK_STATE_KEY_PSU = "docks/v2/psu"
     _DOCK_STATE_KEY_GLOBAL = "docks/v2/global"
     _DOCK_STATE_KEY_EXTERNAL = "docks/v2/external"
@@ -280,6 +313,7 @@ class MainWindowController:
         settings = QSettings()
         settings.setValue(self._DOCK_STATE_KEY_SCOPE, self._scope_dock_host.saveState())
         settings.setValue(self._DOCK_STATE_KEY_MCA, self._mca_dock_host.saveState())
+        settings.setValue(self._DOCK_STATE_KEY_PSD, self._psd_dock_host.saveState())
         settings.setValue(self._DOCK_STATE_KEY_PSU, self._psu_dock_host.saveState())
         settings.setValue(self._DOCK_STATE_KEY_GLOBAL, self._global_dock_host.saveState())
         settings.setValue(self._DOCK_STATE_KEY_EXTERNAL, self._external_dock_host.saveState())
@@ -292,6 +326,9 @@ class MainWindowController:
         if state := settings.value(self._DOCK_STATE_KEY_MCA):
             if not self._mca_dock_host.restoreState(state):
                 settings.remove(self._DOCK_STATE_KEY_MCA)
+        if state := settings.value(self._DOCK_STATE_KEY_PSD):
+            if not self._psd_dock_host.restoreState(state):
+                settings.remove(self._DOCK_STATE_KEY_PSD)
         if state := settings.value(self._DOCK_STATE_KEY_PSU):
             if not self._psu_dock_host.restoreState(state):
                 settings.remove(self._DOCK_STATE_KEY_PSU)
@@ -307,6 +344,7 @@ class MainWindowController:
         settings = QSettings()
         settings.remove(self._DOCK_STATE_KEY_SCOPE)
         settings.remove(self._DOCK_STATE_KEY_MCA)
+        settings.remove(self._DOCK_STATE_KEY_PSD)
         settings.remove(self._DOCK_STATE_KEY_PSU)
         settings.remove(self._DOCK_STATE_KEY_GLOBAL)
         settings.remove(self._DOCK_STATE_KEY_EXTERNAL)
@@ -314,6 +352,7 @@ class MainWindowController:
         dock_hosts = (
             self._scope_dock_host,
             self._mca_dock_host,
+            self._psd_dock_host,
             self._psu_dock_host,
             self._global_dock_host,
             self._external_dock_host,
@@ -349,6 +388,8 @@ class MainWindowController:
         for ctrl in self._scope_controllers:
             ctrl.reset_zoom()
         for ctrl in self._mca_controllers:
+            ctrl.reset_zoom()
+        for ctrl in self._psd_controllers:
             ctrl.reset_zoom()
         log.info("Zoom reset on all plots")
 
@@ -390,6 +431,11 @@ class MainWindowController:
         # 3. Stop MCA polling workers (blocking)
         for ctrl in self._mca_controllers:
             ctrl.stop_worker_sync()
+
+        # PSD timers consume only already-decoded display batches. Stop them
+        # after MCA DMA tail drain has completed.
+        for ctrl in self._psd_controllers:
+            ctrl.stop_processing()
 
         # 4. Wait for in-flight scope workers to finish
         QThreadPool.globalInstance().waitForDone(3000)
@@ -448,6 +494,7 @@ class MainWindowController:
         dock_hosts = (
             self._scope_dock_host,
             self._mca_dock_host,
+            self._psd_dock_host,
             self._psu_dock_host,
             self._global_dock_host,
             self._external_dock_host,
@@ -462,6 +509,8 @@ class MainWindowController:
 
         self._scope_controllers.clear()
         self._mca_controllers.clear()
+        self._psd_controllers.clear()
+        self._psd_controller_by_device.clear()
         self._psu_controllers.clear()
         self._psu_controller_by_device.clear()
         self._external_controllers.clear()
@@ -482,9 +531,10 @@ class MainWindowController:
         self._build_external_docks()
         self._restore_dock_state()
         log.info(
-            "Reconnect complete, %d scope / %d MCA / %d PSU / %d external controllers",
+            "Reconnect complete, %d scope / %d MCA / %d PSD / %d PSU / %d external controllers",
             len(self._scope_controllers),
             len(self._mca_controllers),
+            len(self._psd_controllers),
             len(self._psu_controllers),
             len(self._external_controllers),
         )
@@ -512,9 +562,7 @@ class MainWindowController:
                 device.hv,
                 mca_lp_preset=lp_preset,
                 psu_settings=(
-                    psu_ctrl.hardware_configuration_settings()
-                    if psu_ctrl is not None
-                    else None
+                    psu_ctrl.hardware_configuration_settings() if psu_ctrl is not None else None
                 ),
             )
             application_channel: dict[str, object] = {
@@ -524,6 +572,9 @@ class MainWindowController:
                 application_channel["psu"] = psu_ctrl.configuration_settings()
             if mca_ctrl is not None:
                 application_channel["mca"] = mca_ctrl.configuration_settings()
+            psd_ctrl = self._psd_controller_by_device.get(idx)
+            if psd_ctrl is not None:
+                application_channel["psd"] = psd_ctrl.configuration_settings()
             application_channels[str(channel)] = application_channel
 
         external_hardware = {
@@ -547,6 +598,7 @@ class MainWindowController:
         layout = {
             "scope": self._scope_dock_host.saveState().toBase64().data().decode("ascii"),
             "mca": self._mca_dock_host.saveState().toBase64().data().decode("ascii"),
+            "psd": self._psd_dock_host.saveState().toBase64().data().decode("ascii"),
             "psu": self._psu_dock_host.saveState().toBase64().data().decode("ascii"),
             "global": self._global_dock_host.saveState().toBase64().data().decode("ascii"),
             "external": self._external_dock_host.saveState().toBase64().data().decode("ascii"),
@@ -635,6 +687,9 @@ class MainWindowController:
                     psu_ctrl.apply_configuration_settings(app_channel.get("psu"))
                 if idx < len(self._mca_controllers):
                     self._mca_controllers[idx].apply_configuration_settings(app_channel.get("mca"))
+                psd_ctrl = self._psd_controller_by_device.get(idx)
+                if psd_ctrl is not None:
+                    psd_ctrl.apply_configuration_settings(app_channel.get("psd"))
 
         hardware_root = document.get("hardware", {})
         application = document.get("application", {})
@@ -666,6 +721,7 @@ class MainWindowController:
         hosts = {
             "scope": self._scope_dock_host,
             "mca": self._mca_dock_host,
+            "psd": self._psd_dock_host,
             "psu": self._psu_dock_host,
             "global": self._global_dock_host,
             "external": self._external_dock_host,

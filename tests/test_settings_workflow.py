@@ -44,6 +44,14 @@ def test_menu_save_writes_one_document_with_each_channel(
             configuration_settings=lambda: {"refresh_rate_hz": 6},
         ),
     ]
+    controller._psd_controllers = [
+        SimpleNamespace(configuration_settings=lambda: {"ratio_cut": 0.2}),
+        SimpleNamespace(configuration_settings=lambda: {"ratio_cut": 0.3}),
+    ]
+    controller._psd_controller_by_device = {
+        0: controller._psd_controllers[0],
+        1: controller._psd_controllers[1],
+    }
     controller._psu_controllers = [
         SimpleNamespace(
             hardware_configuration_settings=lambda: {"hv_voltage": 100.0},
@@ -67,6 +75,7 @@ def test_menu_save_writes_one_document_with_each_channel(
     dock = SimpleNamespace(saveState=lambda: QByteArray(b"dock-state"))
     controller._scope_dock_host = dock
     controller._mca_dock_host = dock
+    controller._psd_dock_host = dock
     controller._psu_dock_host = dock
     controller._global_dock_host = dock
     controller._external_dock_host = dock
@@ -87,6 +96,9 @@ def test_menu_save_writes_one_document_with_each_channel(
         "1": {"source": "scope-1"},
     }
     assert set(document["application"]["channels"]) == {"0", "1"}
+    assert document["application"]["channels"]["0"]["psd"] == {"ratio_cut": 0.2}
+    assert document["application"]["channels"]["1"]["psd"] == {"ratio_cut": 0.3}
+    assert "psd" in document["application"]["dock_layout"]
     assert document["connection"] == {
         "backend": "iio",
         "ip": "board.local",

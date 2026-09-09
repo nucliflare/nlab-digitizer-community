@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>PSDView</class>
+ <widget class="QWidget" name="PSDView">
+  <property name="minimumSize"><size><width>760</width><height>520</height></size></property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <property name="leftMargin"><number>6</number></property>
+   <property name="topMargin"><number>6</number></property>
+   <property name="rightMargin"><number>6</number></property>
+   <property name="bottomMargin"><number>6</number></property>
+   <item>
+    <layout class="QGridLayout" name="controlsLayout">
+     <item row="0" column="0"><widget class="QLabel" name="labelEnergyBins"><property name="text"><string>Energy display bins</string></property><property name="toolTip"><string>Client-side PSD histogram resolution; this does not change the MCA energy-bin register.</string></property></widget></item>
+     <item row="0" column="1"><widget class="QSpinBox" name="spinEnergyBins"><property name="minimum"><number>64</number></property><property name="maximum"><number>4096</number></property><property name="singleStep"><number>64</number></property><property name="value"><number>1024</number></property></widget></item>
+     <item row="0" column="2"><widget class="QLabel" name="labelRatioBins"><property name="text"><string>Ratio display bins</string></property><property name="toolTip"><string>Client-side PSD histogram resolution.</string></property></widget></item>
+     <item row="0" column="3"><widget class="QSpinBox" name="spinRatioBins"><property name="minimum"><number>32</number></property><property name="maximum"><number>1024</number></property><property name="singleStep"><number>32</number></property><property name="value"><number>256</number></property></widget></item>
+     <item row="0" column="4"><widget class="QLabel" name="labelEnergyShift"><property name="text"><string>Energy shift (bits)</string></property><property name="toolTip"><string>Optional display-only right shift of the raw 16-bit trapezoid energy.</string></property></widget></item>
+     <item row="0" column="5"><widget class="QSpinBox" name="spinEnergyShift"><property name="minimum"><number>0</number></property><property name="maximum"><number>15</number></property><property name="singleStep"><number>1</number></property><property name="value"><number>0</number></property></widget></item>
+     <item row="1" column="0"><widget class="QLabel" name="labelRatioMin"><property name="text"><string>Ratio min</string></property></widget></item>
+     <item row="1" column="1"><widget class="QDoubleSpinBox" name="spinRatioMin"><property name="decimals"><number>3</number></property><property name="minimum"><double>-10.000000000000000</double></property><property name="maximum"><double>10.000000000000000</double></property><property name="singleStep"><double>0.050000000000000</double></property><property name="value"><double>-1.000000000000000</double></property></widget></item>
+     <item row="1" column="2"><widget class="QLabel" name="labelRatioMax"><property name="text"><string>Ratio max</string></property></widget></item>
+     <item row="1" column="3"><widget class="QDoubleSpinBox" name="spinRatioMax"><property name="decimals"><number>3</number></property><property name="minimum"><double>-10.000000000000000</double></property><property name="maximum"><double>10.000000000000000</double></property><property name="singleStep"><double>0.050000000000000</double></property><property name="value"><double>1.000000000000000</double></property></widget></item>
+     <item row="1" column="4"><widget class="QLabel" name="labelCut"><property name="text"><string>PSD cut</string></property></widget></item>
+     <item row="1" column="5"><widget class="QDoubleSpinBox" name="spinCut"><property name="decimals"><number>4</number></property><property name="minimum"><double>-1.000000000000000</double></property><property name="maximum"><double>1.000000000000000</double></property><property name="singleStep"><double>0.005000000000000</double></property></widget></item>
+     <item row="0" column="6" rowspan="2"><widget class="QPushButton" name="btnClear"><property name="text"><string>Clear</string></property></widget></item>
+     <item row="0" column="7" rowspan="2"><spacer name="horizontalSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>20</height></size></property></spacer></item>
+    </layout>
+   </item>
+   <item>
+    <layout class="QGridLayout" name="plotsLayout" rowstretch="3,2" columnstretch="3,2">
+     <property name="spacing"><number>4</number></property>
+     <item row="0" column="0"><widget class="PlotWidget" name="plotPsd" native="true"/></item>
+     <item row="0" column="1"><widget class="PlotWidget" name="plotRatio" native="true"/></item>
+     <item row="1" column="0" colspan="2"><widget class="PlotWidget" name="plotEnergy" native="true"/></item>
+    </layout>
+   </item>
+   <item><widget class="QLabel" name="lblStatus"><property name="text"><string>Waiting for DMA with Charge Comparison enabled.</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+  </layout>
+ </widget>
+ <customwidgets>
+  <customwidget><class>PlotWidget</class><extends>QWidget</extends><header>pyqtgraph</header><container>1</container></customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>
