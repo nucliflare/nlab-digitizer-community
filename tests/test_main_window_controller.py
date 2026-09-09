@@ -6,6 +6,7 @@ from unittest.mock import Mock, call
 import pytest
 
 from nlab.controllers import main_window_controller as main_window_module
+from nlab.controllers.global_controller import GlobalController
 from nlab.controllers.main_window_controller import MainWindowController
 
 
@@ -366,3 +367,95 @@ def test_external_tab_is_disabled_when_discovery_finds_no_modules() -> None:
     layout.addWidget.assert_not_called()
     main_tabs.setTabEnabled.assert_called_once_with(9, False)
     assert "No external Modbus modules" in tab_external.setToolTip.call_args.args[0]
+
+
+def test_shutdown_requests_all_pollers_before_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _bare_controller()
+    events: list[str] = []
+
+    def record(name: str) -> Mock:
+        return Mock(side_effect=lambda *args: events.append(name))
+
+    controller._global_controller = SimpleNamespace(
+        request_polling_stop=record("request-global"),
+        disarm_sync=record("disarm-global"),
+        stop_polling_sync=record("wait-global"),
+    )
+    controller._scope_controllers = [
+        SimpleNamespace(
+            _refresh_timer=SimpleNamespace(stop=record("stop-scope-timer")),
+            stop_dma_sync=record("wait-scope-dma"),
+        )
+    ]
+    controller._mca_controllers = [
+        SimpleNamespace(
+            stop_dma_sync=record("wait-mca-dma"),
+            stop_worker_sync=record("wait-mca-worker"),
+        )
+    ]
+    controller._psd_controllers = [
+        SimpleNamespace(stop_processing=record("stop-psd"))
+    ]
+    controller._psu_controllers = [
+        SimpleNamespace(
+            request_monitor_stop=record("request-psu"),
+            stop_monitor_sync=record("wait-psu"),
+        )
+    ]
+    controller._external_controllers = [
+        SimpleNamespace(
+            request_polling_stop=record("request-external"),
+            stop_polling_sync=record("wait-external"),
+        )
+    ]
+    controller._thread = None
+    thread_pool = SimpleNamespace(waitForDone=record("wait-thread-pool"))
+    monkeypatch.setattr(
+        main_window_module.QThreadPool,
+        "globalInstance",
+        Mock(return_value=thread_pool),
+    )
+
+    controller._stop_all_workers()
+
+    assert events[:3] == [
+        "request-global",
+        "request-psu",
+        "request-external",
+    ]
+    first_wait = min(index for index, event in enumerate(events) if event.startswith("wait-"))
+    assert all(
+        events.index(request) < first_wait
+        for request in ("request-global", "request-psu", "request-external")
+    )
+
+
+def test_global_stop_request_keeps_worker_alive_and_emits_only_once() -> None:
+    request_shutdown = Mock()
+    worker = SimpleNamespace(request_shutdown=request_shutdown)
+    controller = SimpleNamespace(
+        _temperature_worker=worker,
+        _temperature_worker_stop_requested=False,
+    )
+
+    GlobalController._request_temperature_correction_stop(controller)  # type: ignore[arg-type]
+    GlobalController._request_temperature_correction_stop(controller)  # type: ignore[arg-type]
+
+    request_shutdown.assert_called_once_with()
+    assert controller._temperature_worker is worker
+    assert controller._temperature_worker_stop_requested
+
+
+def test_global_stop_request_tolerates_already_deleted_qobject() -> None:
+    controller = SimpleNamespace(
+        _worker=SimpleNamespace(
+            request_shutdown=Mock(side_effect=RuntimeError("Signal source has been deleted")),
+        ),
+        _worker_stop_requested=False,
+    )
+
+    GlobalController._request_diagnostics_stop(controller)  # type: ignore[arg-type]
+
+    assert controller._worker_stop_requested

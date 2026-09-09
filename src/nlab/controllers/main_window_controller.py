@@ -414,6 +414,16 @@ class MainWindowController:
 
     def _stop_all_workers(self) -> None:
         """Stop all running timers/workers (blocking). Devices stay open."""
+        # Broadcast the cheap stop requests before waiting for any individual
+        # worker. Independent IIO/Modbus calls then finish concurrently rather
+        # than making shutdown pay every transport timeout in series.
+        if self._global_controller is not None:
+            self._global_controller.request_polling_stop()
+        for ctrl in self._psu_controllers:
+            ctrl.request_monitor_stop()
+        for ctrl in self._external_controllers:
+            ctrl.request_polling_stop()
+
         if self._global_controller is not None:
             self._global_controller.disarm_sync()
             self._global_controller.stop_polling_sync()

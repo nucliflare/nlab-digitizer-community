@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QRectF, QSettings, QThread, QThreadPool, QTimer
+from PySide6.QtCore import QRectF, QSettings, Qt, QThread, QThreadPool, QTimer
 from PySide6.QtWidgets import QFileDialog, QSlider, QSpinBox, QWidget
 
 from nlab.hardware.digitizer.dma import (
@@ -390,7 +390,10 @@ class ScopeController(QWidget):
         self._dma_worker.ready.connect(self._on_dma_ready)
         self._dma_worker.progress.connect(self._on_dma_progress)
         self._dma_worker.error.connect(self._on_dma_error)
-        self._dma_worker.finished.connect(self._dma_thread.quit)
+        self._dma_worker.finished.connect(
+            self._dma_thread.quit,
+            Qt.ConnectionType.DirectConnection,
+        )
         self._dma_worker.finished.connect(self._dma_worker.deleteLater)
         self._dma_thread.finished.connect(self._dma_thread.deleteLater)
         self._dma_thread.finished.connect(self._on_dma_finished)

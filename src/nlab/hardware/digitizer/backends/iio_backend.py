@@ -139,6 +139,7 @@ _LM_RECORD_BYTES = 16
 _LM_FRAME_BYTES = _LM_FRAME_RECORDS * _LM_RECORD_BYTES
 _LM_IP_VERSION = 121
 _LM_KERNEL_BUFFER_COUNT = 8
+_SCOPE_KERNEL_BUFFER_COUNT = 1
 _LM_RECORD_LAYOUT = "opaque[16]"
 _LM_EVENT_DTYPE = np.dtype([
     ("flags", "<u2"),
@@ -2197,6 +2198,13 @@ class IIODigitizerBackend(DigitizerBackend):
                 "prior session was not fully torn down"
             )
 
+        # user-api.md and scope-architecture.md require exactly one mmap
+        # block for this Xilinx 5.15 Direct Register DMA path. Libiio 0.25's
+        # default of four can report pending-but-never-executed descriptors as
+        # completed, producing stale, duplicate, or zero-filled full-size
+        # frames without a DMA error. This call works through iiod and must be
+        # made after the old buffer is closed and before the new one is opened.
+        self._dma_scope.set_kernel_buffers_count(_SCOPE_KERNEL_BUFFER_COUNT)
         self._dma_buf = iio.Buffer(self._dma_scope, n, False)
         self._dma_buf_frame_samples = n
         log.debug(

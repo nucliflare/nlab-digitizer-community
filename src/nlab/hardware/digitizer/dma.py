@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import queue
 import struct
 import threading
 import time
@@ -80,6 +81,15 @@ IIO_LM_CLIENT_SCHEMA = "vdpp-pulse-processor-event-v1"
 # 4 int16 slots (8 bytes) are a little-endian uint64, the remaining
 # (frame_samples - SCOPE_TIMESTAMP_WORDS) slots are the int16 waveform.
 SCOPE_TIMESTAMP_WORDS = 4
+
+# Keep file-system stalls out of the time-critical IIO refill loop while still
+# bounding memory use. At the largest legal scope frame this queue occupies
+# roughly 4 MiB. If storage remains slower than acquisition after the queue is
+# full, producer backpressure is intentional: silently dropping raw frames
+# would make the capture file look valid while losing data.
+_IIO_SCOPE_WRITE_QUEUE_FRAMES = 256
+_IIO_SCOPE_WRITE_QUEUE_POLL_SECONDS = 0.050
+_IIO_SCOPE_WRITER_STOP = object()
 
 _EVENT_DTYPE = np.dtype([
     ("marker", np.uint8),
@@ -339,7 +349,10 @@ class IIOScopeDmaStreamer:
     continuously streams frames captured by hardware running free. The IIO
     scope core exposes a pull-based IIO buffer rather than the legacy ZMQ
     push stream. This class arms one buffer for the measurement, repeatedly
-    refills it, and writes each complete frame to file.
+    refills it and hands copied, complete records to a dedicated file-writer
+    thread. The refill loop therefore starts waiting for the next hardware
+    frame as soon as the preceding record has entered the bounded queue; disk
+    writes and ordinary file-system latency do not extend that interval.
 
     Uses the same NDMA file header as ScopeDmaStreamer for tooling
     consistency, but the per-frame record layout is IIO's own (8-byte
@@ -367,12 +380,13 @@ class IIOScopeDmaStreamer:
         """Repeatedly capture full-resolution frames and append them to file.
 
         Runs until *stop_event* is set or *n_frames* frames have been
-        written (None = unbounded). *on_ready* is called once, right
-        before the first capture attempt -- at that point no DMA buffer
-        exists yet (it's created lazily by the first read_dma_frame()
-        call), and that first call arms DMA, starts its blocking reader and
-        then writes ``enable=1`` in the backend-defined order. There is no
-        separate hardware-arm operation for the controller.
+        queued for writing (None = unbounded). *on_ready* is called once the
+        writer has created and flushed the one-time NDMA header, right before
+        the first capture attempt. At that point no DMA buffer exists yet
+        (it's created lazily by the first read_dma_frame() call), and that
+        first call arms DMA, starts its blocking reader and then writes
+        ``enable=1`` in the backend-defined order. There is no separate
+        hardware-arm operation for the controller.
 
         Returns the number of frames actually written — a failed capture
         (e.g. the known xilinx-vdma channel-stop issue, see references/...
@@ -380,7 +394,16 @@ class IIOScopeDmaStreamer:
         than silently skipping the frame, since a silently-incomplete file
         would be worse than a loud failure.
 
-        *on_progress* is called with the total bytes written so far, not
+        A completed frame is copied into an immutable bytes record and put on
+        a bounded queue. A separate writer consumes those records without a
+        per-frame ``flush()``; normal file close flushes the complete stream.
+        This lets the producer immediately issue the next blocking refill.
+        The queue is bounded so a persistently slow or failed destination
+        cannot consume unlimited memory, and writer failures cancel a blocked
+        refill and propagate to the caller.
+
+        *on_progress* is called by the writer thread with the total bytes
+        accepted by Python's buffered file object so far, not
         a frame count -- matching ScopeDmaStreamer's convention (which
         passes total_bytes), since ScopeController._on_dma_progress()
         treats the value as a byte count for its KB/MB display regardless
@@ -404,44 +427,149 @@ class IIOScopeDmaStreamer:
         frame_samples = self._backend.get_frame_samples()
         expected_waveform_samples = frame_samples - SCOPE_TIMESTAMP_WORDS
         frame_count = 0
-        total_bytes = 0
+        write_queue: queue.Queue[bytes | object] = queue.Queue(
+            maxsize=_IIO_SCOPE_WRITE_QUEUE_FRAMES,
+        )
+        writer_ready = threading.Event()
+        writer_failed = threading.Event()
+        queue_backpressure_reported = threading.Event()
+        writer_errors: list[BaseException] = []
+        written_frames: list[int] = [0]
+
+        def writer() -> None:
+            total_bytes = 0
+            try:
+                with open(filepath, "wb") as f:
+                    log.info("IIO scope DMA: recording to %s", filepath)
+                    # This deliberate, one-time flush makes the file/header
+                    # visible before on_ready can start hardware. Frame writes
+                    # below are not flushed individually.
+                    _write_file_header(f, self._channel, frame_samples)
+                    writer_ready.set()
+
+                    while True:
+                        record = write_queue.get()
+                        if record is _IIO_SCOPE_WRITER_STOP:
+                            break
+                        if not isinstance(record, bytes):
+                            raise TypeError(
+                                "scope DMA writer received a non-bytes record"
+                            )
+                        bytes_written = f.write(record)
+                        if bytes_written != len(record):
+                            raise OSError(
+                                "short scope DMA file write: "
+                                f"wrote {bytes_written} of {len(record)} bytes"
+                            )
+                        written_frames[0] += 1
+                        total_bytes += len(record)
+                        if on_progress is not None:
+                            on_progress(total_bytes)
+            except BaseException as exc:
+                writer_errors.append(exc)
+                writer_failed.set()
+                writer_ready.set()
+                # A writer can fail while the producer is blocked in refill.
+                # Cancel it so the worker can observe and report the real file
+                # error instead of waiting forever for another trigger.
+                try:
+                    self._backend.request_dma_stop()
+                except Exception:
+                    log.exception(
+                        "IIO scope DMA: failed to cancel capture after writer error"
+                    )
+
+        writer_thread = threading.Thread(
+            target=writer,
+            name=f"iio-scope-ch{self._channel}-file-writer",
+            daemon=False,
+        )
+        writer_thread.start()
+
+        def raise_writer_error() -> None:
+            if writer_failed.is_set():
+                raise writer_errors[0]
+
+        def enqueue_record(record: bytes | object) -> bool:
+            """Queue a record, noticing a dead writer while backpressured."""
+            while writer_thread.is_alive():
+                raise_writer_error()
+                try:
+                    write_queue.put(
+                        record,
+                        timeout=_IIO_SCOPE_WRITE_QUEUE_POLL_SECONDS,
+                    )
+                    return True
+                except queue.Full:
+                    if not queue_backpressure_reported.is_set():
+                        queue_backpressure_reported.set()
+                        log.warning(
+                            "IIO scope DMA: the %d-frame file queue is full; "
+                            "capture is now limited by storage throughput",
+                            _IIO_SCOPE_WRITE_QUEUE_FRAMES,
+                        )
+                    continue
+            raise_writer_error()
+            return False
+
+        def finish_writer() -> None:
+            """Append the FIFO sentinel and always join the file owner."""
+            while writer_thread.is_alive():
+                try:
+                    write_queue.put(
+                        _IIO_SCOPE_WRITER_STOP,
+                        timeout=_IIO_SCOPE_WRITE_QUEUE_POLL_SECONDS,
+                    )
+                    break
+                except queue.Full:
+                    continue
+            writer_thread.join()
 
         try:
-            with open(filepath, "wb") as f:
-                log.info("IIO scope DMA: recording to %s", filepath)
-                _write_file_header(f, self._channel, frame_samples)
+            writer_ready.wait()
+            raise_writer_error()
 
-                if on_ready is not None:
-                    on_ready()
+            if on_ready is not None:
+                on_ready()
 
-                while not stop_event.is_set():
-                    if n_frames is not None and frame_count >= n_frames:
+            while not stop_event.is_set():
+                if n_frames is not None and frame_count >= n_frames:
+                    break
+
+                raise_writer_error()
+                try:
+                    timestamp, samples = self._backend.read_dma_frame()
+                except InterruptedError:
+                    if writer_failed.is_set():
+                        raise_writer_error()
+                    if stop_event.is_set():
                         break
+                    raise
+                if samples.ndim != 1 or samples.size != expected_waveform_samples:
+                    raise RuntimeError(
+                        "scope DMA returned an incomplete waveform: "
+                        f"{samples.size} samples, expected "
+                        f"{expected_waveform_samples}"
+                    )
 
-                    try:
-                        timestamp, samples = self._backend.read_dma_frame()
-                    except InterruptedError:
-                        if stop_event.is_set():
-                            break
-                        raise
-                    if samples.ndim != 1 or samples.size != expected_waveform_samples:
-                        raise RuntimeError(
-                            "scope DMA returned an incomplete waveform: "
-                            f"{samples.size} samples, expected "
-                            f"{expected_waveform_samples}"
-                        )
-                    ts_bytes = struct.pack("<Q", timestamp)
-                    payload_bytes = samples.tobytes()
-                    f.write(ts_bytes)
-                    f.write(payload_bytes)
-                    f.flush()
-
-                    frame_count += 1
-                    total_bytes += len(ts_bytes) + len(payload_bytes)
-                    if on_progress is not None:
-                        on_progress(total_bytes)
+                # struct.pack() and ndarray.tobytes() make this record wholly
+                # independent of the IIO buffer before the next refill starts.
+                record = struct.pack("<Q", timestamp) + samples.tobytes()
+                if not enqueue_record(record):
+                    raise RuntimeError("scope DMA writer stopped unexpectedly")
+                frame_count += 1
         finally:
-            self._backend.close_dma_capture()
+            try:
+                self._backend.close_dma_capture()
+            finally:
+                finish_writer()
+
+        raise_writer_error()
+        if written_frames[0] != frame_count:
+            raise RuntimeError(
+                "scope DMA writer stopped before committing every queued frame: "
+                f"wrote {written_frames[0]} of {frame_count}"
+            )
 
         log.info("IIO scope DMA: finished -- %d frames to %s", frame_count, filepath)
         return frame_count

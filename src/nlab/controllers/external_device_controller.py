@@ -119,6 +119,7 @@ class ExternalDeviceController(QWidget):
 
         self._worker: ExternalDeviceWorker | None = None
         self._worker_thread: QThread | None = None
+        self._worker_stop_requested = False
         self._row_by_name: dict[str, int] = {}
 
         self._plot_colors: dict[str, object] = {}
@@ -396,11 +397,15 @@ class ExternalDeviceController(QWidget):
     def start_polling(self, interval_ms: int = 1000) -> None:
         self._worker = ExternalDeviceWorker(self.device, interval_ms=interval_ms)
         self._worker_thread = QThread(self)
+        self._worker_stop_requested = False
         self._worker.moveToThread(self._worker_thread)
 
         self._worker_thread.started.connect(self._worker.run)
         self._worker.readback.connect(self._on_readback)
-        self._worker.finished.connect(self._worker_thread.quit)
+        self._worker.finished.connect(
+            self._worker_thread.quit,
+            Qt.ConnectionType.DirectConnection,
+        )
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
         self._worker_thread.finished.connect(self._on_polling_finished)
@@ -414,8 +419,7 @@ class ExternalDeviceController(QWidget):
         self.ui.btnStopMonitor.setEnabled(True)
 
     def _on_stop_monitor(self) -> None:
-        if self._worker is not None:
-            self._worker.request_stop.emit()
+        self.request_polling_stop()
         self.ui.btnStartMonitor.setEnabled(True)
         self.ui.btnStopMonitor.setEnabled(False)
 
@@ -426,13 +430,25 @@ class ExternalDeviceController(QWidget):
     def _on_polling_finished(self) -> None:
         self._worker = None
         self._worker_thread = None
+        self._worker_stop_requested = False
+
+    def request_polling_stop(self) -> None:
+        """Ask the Modbus worker to stop without blocking the GUI thread."""
+        if self._worker_stop_requested:
+            return
+        self._worker_stop_requested = True
+        worker = self._worker
+        if worker is None:
+            return
+        try:
+            worker.request_stop.emit()
+        except RuntimeError:
+            log.debug("External device worker was already deleted during shutdown")
 
     def stop_polling_sync(self) -> None:
         """Blocking stop for use during application shutdown only."""
-        worker = self._worker
         thread = self._worker_thread
-        if worker is not None:
-            worker.request_stop.emit()
+        self.request_polling_stop()
         if thread is not None:
             if not thread.wait(3000):
                 log.warning("External device worker thread did not stop in time, terminating")
@@ -440,6 +456,7 @@ class ExternalDeviceController(QWidget):
                 thread.wait()
         self._worker_thread = None
         self._worker = None
+        self._worker_stop_requested = False
 
     def _on_readback(self, timestamp: float, snapshot: dict[str, int | float]) -> None:
         for name, value in snapshot.items():

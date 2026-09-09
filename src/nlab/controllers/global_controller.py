@@ -4,7 +4,7 @@ import logging
 from collections.abc import Sequence
 from typing import cast
 
-from PySide6.QtCore import QSettings, QThread, QTime
+from PySide6.QtCore import QSettings, Qt, QThread, QTime
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QHeaderView, QTableWidgetItem, QWidget
 
@@ -67,8 +67,10 @@ class GlobalController(QWidget):
 
         self._worker: GlobalDiagnosticsWorker | None = None
         self._worker_thread: QThread | None = None
+        self._worker_stop_requested = False
         self._temperature_worker: TemperatureCorrectionWorker | None = None
         self._temperature_worker_thread: QThread | None = None
+        self._temperature_worker_stop_requested = False
         self._reset_sync_for_initialization()
         self._sync_available = self._load_sync_state()
         self._load_settings()
@@ -256,12 +258,17 @@ class GlobalController(QWidget):
         thread.started.connect(worker.run)
         worker.readback.connect(self._on_temperature_readback)
         worker.error.connect(self._on_temperature_error)
-        worker.finished.connect(thread.quit)
+        # shutdown() synchronously waits in the GUI thread. QThread itself
+        # also lives there, so an AutoConnection would queue quit() behind
+        # that blocking wait and consume the entire timeout. quit() is
+        # thread-safe; invoke it directly when the worker finishes.
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._on_temperature_finished)
         self._temperature_worker = worker
         self._temperature_worker_thread = thread
+        self._temperature_worker_stop_requested = False
         thread.start()
         self._set_temperature_status("Temperature-correction loop started.")
 
@@ -287,18 +294,53 @@ class GlobalController(QWidget):
     def _on_temperature_finished(self) -> None:
         self._temperature_worker = None
         self._temperature_worker_thread = None
+        self._temperature_worker_stop_requested = False
 
     def _stop_temperature_correction_sync(self) -> None:
-        worker = self._temperature_worker
         thread = self._temperature_worker_thread
-        if worker is not None:
-            worker.request_shutdown()
+        self._request_temperature_correction_stop()
         if thread is not None and not thread.wait(5000):
             log.warning("Waiting for in-flight temperature-correction cycle")
             thread.quit()
             thread.wait()
         self._temperature_worker = None
         self._temperature_worker_thread = None
+        self._temperature_worker_stop_requested = False
+
+    def _request_temperature_correction_stop(self) -> None:
+        if self._temperature_worker_stop_requested:
+            return
+        self._temperature_worker_stop_requested = True
+        # Keep the Python wrapper alive until _stop_temperature_correction_sync()
+        # joins its QThread. Dropping the last reference here can destroy the
+        # worker-owned QTimer from this GUI thread and trigger Qt's
+        # "Timers cannot be stopped from another thread" warning.
+        worker = self._temperature_worker
+        if worker is None:
+            return
+        try:
+            worker.request_shutdown()
+        except RuntimeError:
+            # Idempotent shutdown: a queued thread-finished callback may not
+            # yet have cleared a wrapper whose C++ QObject is already gone.
+            log.debug("Temperature worker was already deleted during shutdown")
+
+    def _request_diagnostics_stop(self) -> None:
+        if self._worker_stop_requested:
+            return
+        self._worker_stop_requested = True
+        worker = self._worker
+        if worker is None:
+            return
+        try:
+            worker.request_shutdown()
+        except RuntimeError:
+            log.debug("Diagnostics worker was already deleted during shutdown")
+
+    def request_polling_stop(self) -> None:
+        """Signal both global workers without waiting for either one."""
+        self._request_temperature_correction_stop()
+        self._request_diagnostics_stop()
 
     def refresh_temperature_state(self) -> None:
         """Reapply the global base values after channel settings are loaded."""
@@ -458,11 +500,15 @@ class GlobalController(QWidget):
         interval_ms = self.ui.spinDiagnosticsInterval.value()
         self._worker = GlobalDiagnosticsWorker(self.device, interval_ms)
         self._worker_thread = QThread(self)
+        self._worker_stop_requested = False
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
         self._worker.readback.connect(self._on_diagnostics_readback)
         self._worker.error.connect(self._on_diagnostics_error)
-        self._worker.finished.connect(self._worker_thread.quit)
+        self._worker.finished.connect(
+            self._worker_thread.quit,
+            Qt.ConnectionType.DirectConnection,
+        )
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
         self._worker_thread.finished.connect(self._on_diagnostics_finished)
@@ -518,14 +564,17 @@ class GlobalController(QWidget):
     def _on_diagnostics_finished(self) -> None:
         self._worker = None
         self._worker_thread = None
+        self._worker_stop_requested = False
 
     def stop_polling_sync(self) -> None:
         """Stop both global workers before closing their device contexts."""
+        # Start both shutdowns together. If each is inside a synchronous
+        # network read, their bounded completion times now overlap instead of
+        # being paid serially.
+        self.request_polling_stop()
         self._stop_temperature_correction_sync()
-        worker = self._worker
         thread = self._worker_thread
-        if worker is not None:
-            worker.request_shutdown()
+        self._request_diagnostics_stop()
         if thread is not None and not thread.wait(5000):
             # A remote libiio attribute read is synchronous.  Do not let the
             # application close its contexts underneath that call; request a
@@ -535,3 +584,4 @@ class GlobalController(QWidget):
             thread.wait()
         self._worker = None
         self._worker_thread = None
+        self._worker_stop_requested = False

@@ -8,7 +8,7 @@ from typing import Protocol
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QSettings, QThread, QTimer
+from PySide6.QtCore import QSettings, Qt, QThread, QTimer
 from PySide6.QtWidgets import QDoubleSpinBox, QFileDialog, QSlider, QSpinBox, QWidget
 
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaDmaStreamer, McaEventBuffer
@@ -919,7 +919,10 @@ class MCAController(QWidget):
         self._worker_thread.started.connect(self._worker.run)
         self._worker.readback.connect(self._on_readback)
         self._worker.measurement_done.connect(self._on_measurement_done)
-        self._worker.finished.connect(self._worker_thread.quit)
+        self._worker.finished.connect(
+            self._worker_thread.quit,
+            Qt.ConnectionType.DirectConnection,
+        )
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
         self._worker_thread.finished.connect(self._on_worker_finished)
@@ -1015,7 +1018,10 @@ class MCAController(QWidget):
         self._dma_worker.ready.connect(self._on_dma_ready)
         self._dma_worker.progress.connect(self._on_dma_progress)
         self._dma_worker.error.connect(self._on_dma_error)
-        self._dma_worker.finished.connect(self._dma_thread.quit)
+        self._dma_worker.finished.connect(
+            self._dma_thread.quit,
+            Qt.ConnectionType.DirectConnection,
+        )
         self._dma_worker.finished.connect(self._dma_worker.deleteLater)
         self._dma_thread.finished.connect(self._dma_thread.deleteLater)
         self._dma_thread.finished.connect(self._on_dma_finished)
