@@ -926,13 +926,12 @@ class IIODigitizerBackend(DigitizerBackend):
             )
         return self._mca_pp
 
-    def _read_large_pp_attr(self, device: iio.Device, name: str, size: int) -> bytes:
-        """Binary equivalent of _read_large_attr() (see its docstring for
-        why pylibiio 0.25's 1024-byte default is unusable here) for the
-        pulse-processor's debug_data/histogram_data bin_attributes.
+    def _read_binary_attr(self, device: iio.Device, name: str, size: int) -> bytes:
+        """Read an exact-size binary IIO device attribute.
 
         Unlike _read_large_attr()'s text truncation at the first NUL
-        (viewer_data is a C string), these are raw binary snapshots, so
+        (legacy viewer_data is a C string), binary snapshots may contain
+        embedded NULs, so
         embedded NULs must be preserved. The updated remote iiod transport
         needs approximately twice the raw-payload capacity: confirmed live,
         debug_data fails with EIO at capacities 8192/8193 but succeeds at
@@ -959,6 +958,10 @@ class IIODigitizerBackend(DigitizerBackend):
             f"'{name}' returned {n} bytes; expected {size} bytes, optionally "
             "followed by one NUL transport terminator"
         )
+
+    def _read_large_pp_attr(self, device: iio.Device, name: str, size: int) -> bytes:
+        """Compatibility-named wrapper for MCA binary attributes."""
+        return self._read_binary_attr(device, name, size)
 
     # MCA list-mode DMA helpers run on IIOMcaDmaWorker's thread. Buffer I/O
     # exclusively uses _mca_dma_ctx, while pulse-processor control uses the
@@ -1825,41 +1828,47 @@ class IIODigitizerBackend(DigitizerBackend):
             raise RuntimeError("no AFE DAC device bound")
         return bool(int(self._dac_dev.attrs["ready"].value))
 
-    def get_viewer_frame_samples_limit(self) -> int:
-        """Largest frame guaranteed to fit the scope's text viewer ABI.
+    def get_viewer_frame_samples_limit(self) -> int | None:
+        """Return the legacy text-viewer limit, or None for binary readout.
 
-        This is a transport/display limit, not the hardware or DMA limit.
-        It is derived from ``vdpp-scope.c``'s PAGE_SIZE-16 guard, its
-        ``"%d "`` serialization of signed int16 entries, and one viewer
-        entry per four ADC samples.
+        Updated drivers expose ``viewer_data_raw`` and can return every
+        averaged entry through the full 8188-sample hardware range. Older
+        drivers retain the PAGE_SIZE-limited ``viewer_data`` text ABI.
         """
+        if "viewer_data_raw" in self._scope.attrs:
+            return None
         return _SCOPE_VIEWER_SAFE_FRAME_SAMPLES
 
     def read_frame(self) -> np.ndarray:
         """Read the on-chip pulse-viewer memory: one entry per core clock
-        (frame_samples / 4 entries, capped at viewer_mem_entries=2048),
-        as a space-separated text attribute rather than the previous
-        driver's binary blob.
+        (frame_samples / 4 entries, capped at viewer_mem_entries=2048).
 
-        Self-contained per call -- per vdpp-scope.c's viewer_data_show():
-        reading this attribute itself raises the pulse-viewer semaphore,
-        sleeps out the worst-case frame time (~20-25ms) so the read can't
-        catch a half-written pulse, copies the memory, and drops the
-        semaphore, all synchronously inside the read. No separate arm
-        attribute is needed this time (unlike the previous driver
-        rewrite's capture_enable/viewer_update_enable pair) -- set_enable
-        (True) is the only precondition, and once armed every read_frame()
-        call blocks for that ~20-25ms and returns a genuinely fresh
-        snapshot.
+        Updated drivers expose ``viewer_data_raw`` as copied little-endian
+        int16 data and can return the complete viewer memory. Confirmed live
+        on both channels at frame_samples=4096 (1024 entries) and the
+        hardware maximum 8188 (2047 entries). The driver performs the
+        viewer semaphore/snapshot handshake as part of the attribute read.
 
-        The driver caps the text at PAGE_SIZE (4096 bytes); if fewer than
-        frame_samples // 4 entries come back, the frame was truncated
-        server-side (frame_samples too large for one page) and is rejected.
-        Current ``vdpp-scope.c`` and ``user-api.md`` define
-        ``viewer_samples`` as that same frame_samples // 4 count. Computing
-        it locally avoids an extra network attribute read while preserving
-        the driver's exact geometry.
+        Older drivers fall back to the space-separated ``viewer_data``
+        attribute. That ABI is capped at PAGE_SIZE; a truncated legacy frame
+        is rejected rather than displayed as complete. ``viewer_samples``
+        is frame_samples // 4 in both ABIs. Computing it locally avoids an
+        extra network read while preserving the driver's geometry.
         """
+        expected = min(self.get_frame_samples() // 4, self.get_mem_frame_size())
+        if "viewer_data_raw" in self._scope.attrs:
+            payload = self._read_binary_attr(
+                self._scope,
+                "viewer_data_raw",
+                expected * np.dtype("<i2").itemsize,
+            )
+            samples = np.frombuffer(payload, dtype="<i2").copy()
+            if len(samples) != expected:
+                raise RuntimeError(
+                    f"viewer_data_raw returned {len(samples)} of {expected} entries"
+                )
+            return samples
+
         raw = self._read_large_attr("viewer_data")
         # The oversized read buffer comes back padded with trailing NUL
         # bytes beyond the real string content (confirmed live: the byte
@@ -1870,7 +1879,6 @@ class IIODigitizerBackend(DigitizerBackend):
         if not text:
             return np.empty(0, dtype=np.int16)
         samples = np.array(text.split(), dtype=np.int16)
-        expected = min(self.get_frame_samples() // 4, self.get_mem_frame_size())
         if len(samples) != expected:
             raise RuntimeError(
                 f"viewer_data returned {len(samples)} of {expected} entries; "

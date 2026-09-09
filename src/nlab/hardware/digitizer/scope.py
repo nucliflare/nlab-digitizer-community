@@ -231,7 +231,10 @@ class Scope:
         legacy gRPC backend has no separate documented viewer limit.
         """
         reader = getattr(self._b, "get_viewer_frame_samples_limit", None)
-        return int(reader()) if reader is not None else None
+        if reader is None:
+            return None
+        value = reader()
+        return int(value) if value is not None else None
 
     # ---- DMA fault recovery ----
     # Extension methods, only meaningful for backends that latch a fault on

@@ -109,7 +109,10 @@ def test_iio_viewer_limit_is_separate_from_dma_hardware_limit() -> None:
     backend = object.__new__(IIODigitizerBackend)
     scope = Scope(backend)
 
+    backend._scope = SimpleNamespace(attrs={})
     assert scope.get_viewer_frame_samples_limit() == 2328
+    backend._scope = SimpleNamespace(attrs={"viewer_data_raw": object()})
+    assert scope.get_viewer_frame_samples_limit() is None
     frame_spec = PARAMETER_SPECS[ScopeParam.FRAME_SAMPLES]
     assert isinstance(frame_spec, RangeSpec)
     assert frame_spec.max_val == 8188
@@ -132,6 +135,21 @@ def test_scope_rejects_long_viewer_only_start(qtbot: QtBot) -> None:
     controller._request_frame()
     assert not controller._refresh_timer.isActive()
     scope.acquire_frame.assert_not_called()
+
+
+def test_binary_viewer_allows_long_viewer_only_start(qtbot: QtBot) -> None:
+    scope = _scope_model_for_controller()
+    scope.get_viewer_frame_samples_limit.return_value = None
+    controller = ScopeController(scope, scope_dma=None, channel=0)
+    qtbot.addWidget(controller)
+    scope.reset_mock()
+    controller.ui.spinFrameSamples.setValue(4096)
+
+    controller._on_start()
+
+    scope.start.assert_called_once_with()
+    assert controller._refresh_timer.isActive()
+    controller._on_stop()
 
 
 def test_scope_rejects_long_frame_change_during_viewer_readout(qtbot: QtBot) -> None:

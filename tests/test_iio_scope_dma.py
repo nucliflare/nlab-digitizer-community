@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import ctypes
 import errno
 import gc
 import threading
 import weakref
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
+import iio
 import numpy as np
 import pytest
 
@@ -18,6 +21,31 @@ from nlab.hardware.digitizer.dma import (
     IIOScopeDmaStreamer,
 )
 from nlab.utils.dma_converter import convert_scope
+
+
+def test_binary_viewer_returns_complete_4096_sample_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected_entries = 1024
+    expected = np.arange(expected_entries, dtype="<i2")
+    payload = expected.tobytes()
+
+    def read_attr(device: object, name: bytes, buffer: object, capacity: int) -> int:
+        assert name == b"viewer_data_raw"
+        assert capacity == 2 * len(payload) + 1
+        ctypes.memmove(buffer, payload, len(payload))
+        return len(payload) + 1
+
+    monkeypatch.setattr(iio, "_d_read_attr", read_attr)
+    backend = object.__new__(IIODigitizerBackend)
+    backend._scope = SimpleNamespace(
+        attrs={"viewer_data_raw": object()},
+        _device=object(),
+    )
+    monkeypatch.setattr(backend, "get_frame_samples", lambda: 4096)
+    monkeypatch.setattr(backend, "get_mem_frame_size", lambda: 2048)
+
+    frame = backend.read_frame()
+
+    np.testing.assert_array_equal(frame, expected)
 
 
 class _BlockingScopeBackend:
