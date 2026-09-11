@@ -24,10 +24,27 @@ from nlab.hardware.digitizer.scope import (
 )
 from nlab.ui.ui_scope_view import Ui_ScopeView
 from nlab.views.plot_viewbox import ModifierZoomViewBox
+from nlab.views.time_axis import format_duration_ns, time_axis_scale
 from nlab.workers.dma_workers import IIOScopeDmaWorker, ScopeDmaWorker
 from nlab.workers.scope_worker import ScopeWorker
 
 log = logging.getLogger(__name__)
+
+_SCOPE_CONTROL_TOOLTIPS = {
+    "comboTriggerMode": "Selects the condition that starts each scope frame.",
+    "spinTriggerLevel": "Sets the raw ADC threshold used by the selected trigger mode.",
+    "spinDacValue": "Sets the analog front-end baseline (DC offset) DAC code.",
+    "spinPretrigger": "Sets how many full-rate ADC samples are retained before the trigger.",
+    "spinFrameSamples": "Sets the number of full-rate ADC samples captured in each frame.",
+    "spinFrameGap": (
+        "In Periodic mode, adds this many 8 ns clocks after each frame before the next frame."
+    ),
+    "spinTime": (
+        "Stops the acquisition automatically after this many seconds; 0 runs until stopped."
+    ),
+    "comboDisplayMode": "Chooses a raw waveform trace or an accumulated persistence display.",
+    "spinRefreshRate": "Sets how often the live waveform is requested and redrawn, in hertz.",
+}
 
 
 class DisplayMode(IntEnum):
@@ -45,7 +62,12 @@ class ScopeController(QWidget):
     _Y_SCALE_FACTOR = 20
     _Y_MIN = -32_000
     _Y_MAX = 32_000
+    # The scope captures raw ADC samples at 500 MSPS (2 ns/sample).  Its
+    # lightweight viewer memory contains one four-sample boxcar average per
+    # 125 MHz datapath beat, hence one displayed point every 8 ns.  See
+    # hw_description/user-api.md, "Timebase" and "Viewer".
     _SAMPLE_PERIOD_NS = 2
+    _VIEWER_POINT_PERIOD_NS = 8
 
     def __init__(
         self,
@@ -60,6 +82,7 @@ class ScopeController(QWidget):
         self._channel = channel
         self.ui = Ui_ScopeView()
         self.ui.setupUi(self)
+        self._apply_control_tooltips()
 
         self._acquiring = False
         self._refresh_timer = QTimer(self)
@@ -87,6 +110,10 @@ class ScopeController(QWidget):
     # ------------------------------------------------------------------
     # Spec application
     # ------------------------------------------------------------------
+
+    def _apply_control_tooltips(self) -> None:
+        for object_name, tooltip in _SCOPE_CONTROL_TOOLTIPS.items():
+            getattr(self.ui, object_name).setToolTip(tooltip)
 
     def _apply_parameter_specs(self) -> None:
         specs = self._scope.specs
@@ -232,22 +259,33 @@ class ScopeController(QWidget):
         limit = self._viewer_frame_limit()
         assert limit is not None
         return (
-            f"The IIO live viewer is limited to {limit} samples by its "
-            "page-sized text transport. Enable Record DMA frames for this "
-            "frame length; live preview will be paused."
+            f"Live preview is truncated above {limit} frame samples. "
+            "Enable Record DMA frames to save complete frames."
         )
 
-    def _update_viewer_transport_hint(self) -> None:
-        limit = self._viewer_frame_limit()
-        if limit is None:
-            return
-        tip = (
-            f"Hardware and DMA support up to 8188 samples. The IIO live "
-            f"viewer is guaranteed complete through {limit} samples because "
-            "viewer_data is limited to one text page."
+    def _viewer_truncation_message(self, displayed: int, expected: int) -> str:
+        suffix = (
+            "DMA is recording the full frame."
+            if self._dma_worker is not None
+            else "Enable Record DMA frames to save the full frame."
         )
+        return f"Live preview truncated: showing {displayed} of {expected} points. {suffix}"
+
+    def _update_viewer_transport_hint(self) -> None:
+        frame_samples = self.ui.spinFrameSamples.value()
+        tip = (
+            f"Sets the frame length: {frame_samples} ADC samples at "
+            f"{self._SAMPLE_PERIOD_NS} ns/sample "
+            f"({format_duration_ns(frame_samples * self._SAMPLE_PERIOD_NS)} total). "
+            f"The live viewer plots {self._VIEWER_POINT_PERIOD_NS} ns averages."
+        )
+        limit = self._viewer_frame_limit()
+        if limit is not None:
+            tip += (
+                f" Legacy live preview may truncate above {limit} samples; "
+                "DMA records the complete frame."
+            )
         self.ui.spinFrameSamples.setToolTip(tip)
-        self.ui.plotWaveform.setToolTip(tip)
 
     # ------------------------------------------------------------------
     # Signal wiring
@@ -333,13 +371,6 @@ class ScopeController(QWidget):
                 self._channel,
             )
             return
-        use_dma = self.ui.cbDmaEnable.isChecked() and self._scope_dma is not None
-        if self._frame_exceeds_viewer_limit() and not use_dma:
-            message = self._viewer_limit_message()
-            self.ui.btnStart.setChecked(False)
-            self.ui.lblRecordingStatus.setText(message)
-            log.warning("Scope ch%d: %s", self._channel, message)
-            return
         self.ui.btnStart.setChecked(True)
         self.ui.btnStart.setEnabled(False)
         self.ui.btnStop.setChecked(False)
@@ -357,6 +388,8 @@ class ScopeController(QWidget):
         self.ui.btnStop.setEnabled(True)
         interval_ms = 1000 // self.ui.spinRefreshRate.value()
         self._refresh_timer.start(interval_ms)
+        if self._frame_exceeds_viewer_limit():
+            self.ui.lblRecordingStatus.setText(self._viewer_limit_message())
         self._start_measurement_timer()
         log.info("Scope ch%d: acquisition started (refresh %d ms)", self._channel, interval_ms)
 
@@ -427,13 +460,10 @@ class ScopeController(QWidget):
             )
             self._scope.start()
         interval_ms = 1000 // self.ui.spinRefreshRate.value()
-        if self._frame_exceeds_viewer_limit():
-            self._refresh_timer.stop()
-        else:
-            self._refresh_timer.start(interval_ms)
+        self._refresh_timer.start(interval_ms)
         self.ui.btnStop.setEnabled(True)
         self.ui.lblRecordingStatus.setText(
-            "Recording... (live viewer paused for this frame length)"
+            "Recording full frames; live preview is truncated."
             if self._frame_exceeds_viewer_limit()
             else "Recording..."
         )
@@ -493,10 +523,6 @@ class ScopeController(QWidget):
             self._refresh_timer.setInterval(1000 // value)
 
     def _request_frame(self) -> None:
-        if self._frame_exceeds_viewer_limit():
-            self._refresh_timer.stop()
-            self.ui.lblRecordingStatus.setText(self._viewer_limit_message())
-            return
         if self._acquiring:
             return
         self._acquiring = True
@@ -509,8 +535,13 @@ class ScopeController(QWidget):
         if data is None:
             return
         x_time, y_voltage = data
+        expected = self.ui.spinFrameSamples.value() // 4
+        if len(y_voltage) < expected:
+            self.ui.lblRecordingStatus.setText(
+                self._viewer_truncation_message(len(y_voltage), expected)
+            )
         if self._display_mode == DisplayMode.RAW:
-            self._raw_curve.setData(x_time, y_voltage)
+            self._raw_curve.setData(x_time / self._time_scale.ns_per_unit, y_voltage)
         else:
             self._rasterize_frame(y_voltage)
             self._persistence_img.setImage(
@@ -519,35 +550,15 @@ class ScopeController(QWidget):
 
     def _on_frame_samples_changed(self) -> None:
         value = self.ui.spinFrameSamples.value()
-        if (
-            self._refresh_timer.isActive()
-            and self._dma_worker is None
-            and self._frame_exceeds_viewer_limit()
-        ):
-            # Do not alter the hardware geometry under a viewer read that
-            # may already be in flight. Restore the last accepted value and
-            # explain how to capture the requested long frame.
-            previous = self._scope.get_frame_samples()
-            self.ui.spinFrameSamples.blockSignals(True)
-            self.ui.spinFrameSamples.setValue(previous)
-            self.ui.spinFrameSamples.blockSignals(False)
-            message = self._viewer_limit_message()
-            self.ui.lblRecordingStatus.setText(message)
-            log.warning("Scope ch%d: %s", self._channel, message)
-            return
         self._scope.set_frame_samples(value)
         self._display_nx = value // 4
         self._display_ny = self._display_nx * self._Y_SCALE_FACTOR
         self._persistence_buffer = np.zeros((self._display_nx, self._display_ny), dtype=np.float32)
         self._update_axis_ranges()
-        self._update_viewer_transport_hint()
+        if self._frame_exceeds_viewer_limit():
+            self.ui.lblRecordingStatus.setText(self._viewer_limit_message())
 
     def _on_acquire_frame(self) -> None:
-        if self._frame_exceeds_viewer_limit():
-            message = self._viewer_limit_message()
-            self.ui.lblRecordingStatus.setText(message)
-            log.warning("Scope ch%d: %s", self._channel, message)
-            return
         try:
             self._scope.start()
             raw_frame = self._scope.acquire_frame()
@@ -562,7 +573,16 @@ class ScopeController(QWidget):
                 log.exception("Scope ch%d: failed to disarm after viewer read", self._channel)
         value = self.ui.spinFrameSamples.value()
         frame = raw_frame[: value // 4]
-        time_arr = np.arange(0, 8 * len(frame), 8)
+        expected = value // 4
+        if len(frame) < expected:
+            self.ui.lblRecordingStatus.setText(
+                self._viewer_truncation_message(len(frame), expected)
+            )
+        time_arr = (
+            np.arange(len(frame))
+            * self._VIEWER_POINT_PERIOD_NS
+            / self._time_scale.ns_per_unit
+        )
         if self._display_mode == DisplayMode.RAW:
             self._raw_curve.setData(time_arr, frame)
         else:
@@ -574,7 +594,10 @@ class ScopeController(QWidget):
     def _rasterize_frame(self, frame: np.ndarray) -> None:
         self._persistence_buffer *= self.persistence
         n_samples = len(frame)
-        x_float = np.linspace(0, self._display_nx - 1, n_samples)
+        # A legacy text viewer can return only the prefix that fits in one
+        # sysfs page. Keep that prefix at its real time coordinates instead
+        # of stretching it across the full configured frame.
+        x_float = np.arange(n_samples, dtype=np.float32)
         y_float = (
             (frame.astype(np.float32) - self._Y_MIN)
             / (self._Y_MAX - self._Y_MIN)
@@ -615,7 +638,7 @@ class ScopeController(QWidget):
         self._plot_item.showAxis("top")
         self._plot_item.showGrid(x=True, y=True, alpha=0.2)
         layout.nextRow()
-        layout.addLabel("Time [ns]", col=1)
+        self._time_axis_label = layout.addLabel("Time [ns]", col=1)
 
     def _setup_persistence_layer(self) -> None:
         self._display_nx = self.ui.spinFrameSamples.value() // 4
@@ -633,12 +656,29 @@ class ScopeController(QWidget):
     def _update_axis_ranges(self) -> None:
         frame = self.ui.spinFrameSamples.value()
         duration_ns = frame * self._SAMPLE_PERIOD_NS
+        self._time_scale = time_axis_scale(duration_ns)
+        duration = self._time_scale.from_nanoseconds(duration_ns)
+        self._time_axis_label.setText(
+            f"Time [{self._time_scale.unit}]  "
+            f"({self._SAMPLE_PERIOD_NS} ns/ADC sample; "
+            f"{self._VIEWER_POINT_PERIOD_NS} ns/viewer point)"
+        )
+        _, plotted_frame = self._raw_curve.getData()
+        if plotted_frame is not None and len(plotted_frame) > 0:
+            plotted_frame = plotted_frame[: frame // 4]
+            plotted_time = (
+                np.arange(len(plotted_frame))
+                * self._VIEWER_POINT_PERIOD_NS
+                / self._time_scale.ns_per_unit
+            )
+            self._raw_curve.setData(plotted_time, plotted_frame)
         vb = self._plot_item.getViewBox()
-        vb.setXRange(0, duration_ns, padding=0)
+        vb.setXRange(0, duration, padding=0)
         vb.setYRange(self._Y_MIN, self._Y_MAX, padding=0)
         self._persistence_img.setRect(
-            QRectF(0, self._Y_MIN, duration_ns, self._Y_MAX - self._Y_MIN)
+            QRectF(0, self._Y_MIN, duration, self._Y_MAX - self._Y_MIN)
         )
+        self._update_viewer_transport_hint()
 
     # ------------------------------------------------------------------
     # Display mode

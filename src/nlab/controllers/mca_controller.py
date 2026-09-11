@@ -16,6 +16,7 @@ from nlab.hardware.digitizer.mca import MCA_PARAMETER_SPECS, MCAParam, MultiChan
 from nlab.hardware.digitizer.scope import RangeSpec
 from nlab.ui.ui_mca_view import Ui_MCAView
 from nlab.views.plot_viewbox import ModifierZoomViewBox
+from nlab.views.time_axis import format_duration_ns, time_axis_scale
 from nlab.workers.dma_workers import IIOMcaDmaWorker, McaDmaWorker
 from nlab.workers.mca_worker import MCAReadback, MCAWorker
 
@@ -43,6 +44,44 @@ _LP_PRESET_LABELS = ["200 MHz", "70 MHz", "Moving average"]
 # events in the GUI thread. 15 Hz is still visually continuous and leaves a
 # comfortable event-loop budget on the machine used for the live review.
 _MAX_GUI_RENDER_HZ = 15
+
+# The diagnostic memories publish one entry per 125 MHz datapath beat.  The
+# board timebase is therefore 8 ns per displayed debug sample; see
+# hw_description/user-api.md, "Timebase" and "Diagnostic memories".
+_DEBUG_SAMPLE_PERIOD_NS = 8
+
+_MCA_CONTROL_TOOLTIPS = {
+    "comboPulsePolarity": "Selects whether pulses are expected to be negative or positive.",
+    "comboBaseline": "Selects the time window used to estimate the signal baseline.",
+    "comboDebug1": "Selects the internal signal captured in diagnostic waveform bank 1.",
+    "comboDebug2": "Selects the internal signal captured in diagnostic waveform bank 2.",
+    "spinPileupWindow": "Sets the interval in which a second pulse is classified as pile-up.",
+    "comboBinning": "Sets the histogram energy-bin width; larger factors combine more codes.",
+    "spinTimeLimit": "Sets the acquisition duration in seconds; 0 runs until stopped.",
+    "spinRefreshRate": "Sets the requested rate for waveform, spectrum, and statistics updates.",
+    "spinTriggerLevel": "Sets the raw signal threshold used by the selected trigger source.",
+    "spinFrameSamples": "Sets the diagnostic waveform capture-window length.",
+    "spinPretrigger": "Sets the diagnostic waveform window offset before the trigger.",
+    "comboTriggerSource": "Selects threshold, CR-RC2, or CR2-RC2 pulse triggering.",
+    "spinEdgeDetCoeff": "Sets the legacy edge-detector coefficient when supported by hardware.",
+    "comboLpPreset": "Selects the input FIR low-pass response or moving-average filter.",
+    "spinCrrc2Cdelay": "Sets the C-stage delay of the CR-RC2 shaping filter.",
+    "spinCrrc2Fdelay": "Sets the F-stage delay of the CR-RC2 shaping filter.",
+    "spinCrrc2Pzc": "Sets the raw pole-zero correction coefficient for CR-RC2 shaping.",
+    "spinCfdFactor": "Sets the constant-fraction multiplier used to form the CFD signal.",
+    "spinCfdDelay": "Sets the delay applied when forming the constant-fraction signal.",
+    "spinCfdTwLow": "Sets the lower accepted CFD time-walk window boundary.",
+    "spinCfdTwHigh": "Sets the upper accepted CFD time-walk window boundary.",
+    "spinTrapR": "Sets the rise-time parameter of the trapezoidal shaping filter.",
+    "spinTrapM": "Sets the second timing parameter of the trapezoidal shaping filter.",
+    "spinTrapT": "Sets the raw beta coefficient used for exponential decay compensation.",
+    "spinTrapE": "Sets when the trapezoidal-filter energy estimate is sampled.",
+    "comboTrapFt": "Selects the trapezoidal filter's flat-top window duration.",
+    "spinCcTime": "Sets the integration time used by the charge-comparison estimator.",
+    "comboPsdZcMode": "Selects hardware mode 0 or 1 for PSD zero-crossing analysis.",
+    "spinPsdZcLow": "Sets the lower accepted PSD zero-crossing time boundary.",
+    "spinPsdZcHigh": "Sets the upper accepted PSD zero-crossing time boundary.",
+}
 
 
 class _PsdCaptureSink(Protocol):
@@ -72,6 +111,7 @@ class MCAController(QWidget):
         self._psd_capture = psd_capture
         self.ui = Ui_MCAView()
         self.ui.setupUi(self)
+        self._apply_control_tooltips()
 
         self._worker: MCAWorker | None = None
         self._worker_thread: QThread | None = None
@@ -103,6 +143,10 @@ class MCAController(QWidget):
     # ------------------------------------------------------------------
     # Combo population
     # ------------------------------------------------------------------
+
+    def _apply_control_tooltips(self) -> None:
+        for object_name, tooltip in _MCA_CONTROL_TOOLTIPS.items():
+            getattr(self.ui, object_name).setToolTip(tooltip)
 
     def _populate_combos(self) -> None:
         self.ui.comboPulsePolarity.clear()
@@ -358,7 +402,7 @@ class MCAController(QWidget):
         self._debug_plot.showGrid(x=True, y=True, alpha=0.2)
         self._debug_plot.addLegend(offset=(10, 10))
         layout.nextRow()
-        layout.addLabel("Time [ns]", col=1)
+        self._debug_time_axis_label = layout.addLabel("Time [ns]", col=1)
 
         self._debug1_curve = self._debug_plot.plot(
             pen=pg.mkPen("#00bfff", width=1),
@@ -368,6 +412,36 @@ class MCAController(QWidget):
             pen=pg.mkPen("#ff8c00", width=1),
             name="Debug 2",
         )
+        self._update_debug_time_axis()
+
+    def _update_debug_time_axis(self, frame_samples: int | None = None) -> None:
+        if frame_samples is None:
+            frame_samples = self.ui.spinFrameSamples.value()
+        displayed_samples = frame_samples // _DEBUG_SAMPLE_PERIOD_NS
+        duration_ns = displayed_samples * _DEBUG_SAMPLE_PERIOD_NS
+        self._debug_time_scale = time_axis_scale(duration_ns)
+        self._debug_time_axis_label.setText(
+            f"Time [{self._debug_time_scale.unit}]  "
+            f"({_DEBUG_SAMPLE_PERIOD_NS} ns/debug sample)"
+        )
+        for curve in (self._debug1_curve, self._debug2_curve):
+            _, plotted_samples = curve.getData()
+            if plotted_samples is None or len(plotted_samples) == 0:
+                continue
+            plotted_samples = plotted_samples[:displayed_samples]
+            plotted_time = (
+                np.arange(len(plotted_samples))
+                * _DEBUG_SAMPLE_PERIOD_NS
+                / self._debug_time_scale.ns_per_unit
+            )
+            curve.setData(plotted_time, plotted_samples)
+        tip = (
+            "Sets the diagnostic waveform capture-window length. "
+            f"Debug sample period: {_DEBUG_SAMPLE_PERIOD_NS} ns "
+            f"(125 MHz datapath). The current frame displays up to "
+            f"{displayed_samples} debug samples ({format_duration_ns(duration_ns)})."
+        )
+        self.ui.spinFrameSamples.setToolTip(tip)
 
     # ------------------------------------------------------------------
     # Histogram plot (channels vs counts, with ROI)
@@ -613,6 +687,7 @@ class MCAController(QWidget):
             self.ui.spinFrameSamples,
             lambda v: self._mca.set_frame_samples(v),
         )
+        self.ui.spinFrameSamples.valueChanged.connect(self._update_debug_time_axis)
         self._wire_slider_spinbox(
             self.ui.sliderPretrigger,
             self.ui.spinPretrigger,
@@ -1204,13 +1279,22 @@ class MCAController(QWidget):
 
     def _update_debug_plot(self, raw_debug1: np.ndarray, raw_debug2: np.ndarray) -> None:
         samples = self.ui.sliderFrameSamples.value()
+        self._update_debug_time_axis(samples)
         if raw_debug1 is not None and len(raw_debug1) > 0:
-            debug1 = raw_debug1[: samples // 8]
-            t1 = np.arange(0, 8 * len(debug1), 8)
+            debug1 = raw_debug1[: samples // _DEBUG_SAMPLE_PERIOD_NS]
+            t1 = (
+                np.arange(len(debug1))
+                * _DEBUG_SAMPLE_PERIOD_NS
+                / self._debug_time_scale.ns_per_unit
+            )
             self._debug1_curve.setData(t1, debug1)
         if raw_debug2 is not None and len(raw_debug2) > 0:
-            debug2 = raw_debug2[: samples // 8]
-            t2 = np.arange(0, 8 * len(debug2), 8)
+            debug2 = raw_debug2[: samples // _DEBUG_SAMPLE_PERIOD_NS]
+            t2 = (
+                np.arange(len(debug2))
+                * _DEBUG_SAMPLE_PERIOD_NS
+                / self._debug_time_scale.ns_per_unit
+            )
             self._debug2_curve.setData(t2, debug2)
 
     def _update_histogram(self, histogram: np.ndarray) -> None:

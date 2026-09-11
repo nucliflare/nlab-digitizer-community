@@ -1851,10 +1851,11 @@ class IIODigitizerBackend(DigitizerBackend):
         viewer semaphore/snapshot handshake as part of the attribute read.
 
         Older drivers fall back to the space-separated ``viewer_data``
-        attribute. That ABI is capped at PAGE_SIZE; a truncated legacy frame
-        is rejected rather than displayed as complete. ``viewer_samples``
-        is frame_samples // 4 in both ABIs. Computing it locally avoids an
-        extra network read while preserving the driver's geometry.
+        attribute. That ABI is capped at PAGE_SIZE, so long frames return the
+        available prefix for the GUI to display explicitly as truncated.
+        ``viewer_samples`` is frame_samples // 4 in both ABIs. Computing it
+        locally avoids an extra network read while preserving the driver's
+        geometry.
         """
         expected = min(self.get_frame_samples() // 4, self.get_mem_frame_size())
         if "viewer_data_raw" in self._scope.attrs:
@@ -1880,10 +1881,17 @@ class IIODigitizerBackend(DigitizerBackend):
         if not text:
             return np.empty(0, dtype=np.int16)
         samples = np.array(text.split(), dtype=np.int16)
-        if len(samples) != expected:
+        if len(samples) > expected:
             raise RuntimeError(
-                f"viewer_data returned {len(samples)} of {expected} entries; "
-                "reduce frame_samples or use the DMA capture path"
+                f"viewer_data returned {len(samples)} entries; expected at most {expected}"
+            )
+        if len(samples) < expected:
+            log.debug(
+                "IIO scope ch%d: legacy viewer_data returned a truncated "
+                "prefix (%d of %d entries)",
+                self._ch,
+                len(samples),
+                expected,
             )
         return samples
 

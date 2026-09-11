@@ -4,8 +4,9 @@ import logging
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QRectF, QTimer
-from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer
+from PySide6.QtGui import QKeyEvent
+from PySide6.QtWidgets import QApplication, QWidget
 
 from nlab.analysis.psd import PsdAccumulator
 from nlab.hardware.digitizer.dma import McaEventBuffer
@@ -37,12 +38,16 @@ class PSDController(QWidget):
         self._capture_failed = False
         self._capture_note = "Waiting for DMA with Charge Comparison enabled."
         self._last_dropped_records = 0
+        self._energy_log_y = False
 
         self.ui = Ui_PSDView()
         self.ui.setupUi(self)  # type: ignore[no-untyped-call]
         self._accumulator = self._make_accumulator()
         self._setup_plots()
         self._connect_signals()
+        self._application = QApplication.instance()
+        if self._application is not None:
+            self._application.installEventFilter(self)
 
         self._timer = QTimer(self)
         self._timer.setInterval(_DISPLAY_INTERVAL_MS)
@@ -109,6 +114,10 @@ class PSDController(QWidget):
         self._energy_plot.setLabel("bottom", "Trapezoid energy", units="raw")
         self._energy_plot.setLabel("left", "Counts")
         self._energy_plot.addLegend(offset=(10, 10))
+        self.ui.plotEnergy.setToolTip(
+            "Hover here and press L to toggle logarithmic Y scale. "
+            "Shift+wheel zooms X; Ctrl+wheel zooms Y."
+        )
         self._below_curve = self._energy_plot.plot(
             pen=pg.mkPen("#277da1", width=1.5), name="Below cut"
         )
@@ -129,6 +138,27 @@ class PSDController(QWidget):
         self.ui.btnClear.clicked.connect(self.clear)
         self._cut_line.sigPositionChanged.connect(self._on_cut_line_changed)
         self._energy_roi.sigRegionChangeFinished.connect(self._render_projections)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        """Handle the local log shortcut without stealing a global key."""
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and self.isVisible()
+            and self.ui.plotEnergy.underMouse()
+            and isinstance(event, QKeyEvent)
+            and event.key() == Qt.Key.Key_L
+            and event.modifiers()
+            in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.ShiftModifier)
+            and not event.isAutoRepeat()
+        ):
+            self.set_energy_log_y(not self._energy_log_y)
+            return True
+        return super().eventFilter(watched, event)
+
+    def set_energy_log_y(self, enabled: bool) -> None:
+        """Set logarithmic Y display on the bottom energy histogram."""
+        self._energy_log_y = bool(enabled)
+        self._energy_plot.setLogMode(y=self._energy_log_y)
 
     def begin_capture(self, enabled: bool, note: str = "") -> None:
         """Reset the live view and declare whether this capture feeds PSD."""
@@ -261,6 +291,7 @@ class PSDController(QWidget):
             "ratio_range": [self.ui.spinRatioMin.value(), self.ui.spinRatioMax.value()],
             "ratio_cut": self.ui.spinCut.value(),
             "energy_roi": [float(value) for value in self._energy_roi.getRegion()],
+            "energy_log_y": self._energy_log_y,
         }
 
     def apply_configuration_settings(self, settings: object) -> None:
@@ -292,7 +323,11 @@ class PSDController(QWidget):
         energy_roi = settings.get("energy_roi")
         if isinstance(energy_roi, list) and len(energy_roi) == 2:
             self._energy_roi.setRegion((float(energy_roi[0]), float(energy_roi[1])))
+        self.set_energy_log_y(bool(settings.get("energy_log_y", False)))
         self._render_projections()
 
     def stop_processing(self) -> None:
         self._timer.stop()
+        if self._application is not None:
+            self._application.removeEventFilter(self)
+            self._application = None

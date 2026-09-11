@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
 from pyqtgraph import PlotWidget, ViewBox
+from PySide6.QtCore import Qt
 
 
 class ModifierZoomViewBox(ViewBox):

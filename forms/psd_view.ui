@@ -29,16 +29,16 @@
    <item>
     <layout class="QGridLayout" name="plotsLayout" rowstretch="3,2" columnstretch="3,2">
      <property name="spacing"><number>4</number></property>
-     <item row="0" column="0"><widget class="PlotWidget" name="plotPsd" native="true"/></item>
-     <item row="0" column="1"><widget class="PlotWidget" name="plotRatio" native="true"/></item>
-     <item row="1" column="0" colspan="2"><widget class="PlotWidget" name="plotEnergy" native="true"/></item>
+     <item row="0" column="0"><widget class="NLabPlotWidget" name="plotPsd" native="true"/></item>
+     <item row="0" column="1"><widget class="NLabPlotWidget" name="plotRatio" native="true"/></item>
+     <item row="1" column="0" colspan="2"><widget class="NLabPlotWidget" name="plotEnergy" native="true"/></item>
     </layout>
    </item>
    <item><widget class="QLabel" name="lblStatus"><property name="text"><string>Waiting for DMA with Charge Comparison enabled.</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
   </layout>
  </widget>
  <customwidgets>
-  <customwidget><class>PlotWidget</class><extends>QWidget</extends><header>pyqtgraph</header><container>1</container></customwidget>
+  <customwidget><class>NLabPlotWidget</class><extends>QWidget</extends><header>nlab.views.plot_viewbox</header><container>1</container></customwidget>
  </customwidgets>
  <resources/>
  <connections/>

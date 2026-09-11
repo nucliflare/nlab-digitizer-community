@@ -315,6 +315,15 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string>
         </item>
         <item>
          <widget class="QLabel" name="lblRecordingStatus">
+          <property name="sizePolicy">
+           <sizepolicy hsizetype="Ignored" vsizetype="Preferred">
+            <horstretch>0</horstretch>
+            <verstretch>0</verstretch>
+           </sizepolicy>
+          </property>
+          <property name="wordWrap">
+           <bool>true</bool>
+          </property>
           <property name="text">
            <string></string>
           </property>

@@ -9,6 +9,8 @@ from nlab.hardware.digitizer.scope import Scope
 
 log = logging.getLogger(__name__)
 
+_VIEWER_POINT_PERIOD_NS = 8
+
 
 class _FrameSignals(QObject):
     ready = Signal(object)
@@ -32,7 +34,7 @@ class ScopeWorker(QRunnable):
             frame_samples = self._scope.get_frame_samples()
             raw_frame = self._scope.acquire_frame()
             frame = raw_frame[: int(frame_samples) // 4]
-            raw_time = np.arange(0, 8 * len(frame), 8)
+            raw_time = np.arange(len(frame)) * _VIEWER_POINT_PERIOD_NS
             self.signals.ready.emit([raw_time, frame])
         except Exception:
             log.exception("Frame acquisition failed")

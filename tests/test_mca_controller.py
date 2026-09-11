@@ -295,3 +295,38 @@ def test_pending_readback_renders_only_latest_snapshot() -> None:
         call.statistics(latest),
         call.histogram(latest.histogram),
     ]
+
+
+def test_mca_debug_viewer_scales_time_axis_and_explains_sample_period() -> None:
+    class DebugControllerStub:
+        _update_debug_time_axis = MCAController._update_debug_time_axis
+
+    label = Mock()
+    plot = Mock()
+    frame_control = Mock()
+    frame_control.value.return_value = 2048
+    debug1_curve = Mock()
+    debug2_curve = Mock()
+    debug1_curve.getData.return_value = (None, None)
+    debug2_curve.getData.return_value = (None, None)
+    controller = DebugControllerStub()
+    controller.ui = SimpleNamespace(
+        spinFrameSamples=frame_control,
+        plotDebug=plot,
+        sliderFrameSamples=SimpleNamespace(value=lambda: 2048),
+    )
+    controller._debug_time_axis_label = label
+    controller._debug1_curve = debug1_curve
+    controller._debug2_curve = debug2_curve
+
+    MCAController._update_debug_time_axis(controller)
+    label.setText.assert_called_with("Time [\N{MICRO SIGN}s]  (8 ns/debug sample)")
+    plot.setToolTip.assert_not_called()
+    assert "Debug sample period: 8 ns" in frame_control.setToolTip.call_args.args[0]
+
+    raw = np.arange(300, dtype=np.int16)
+    MCAController._update_debug_plot(controller, raw, raw)
+
+    x_data, y_data = debug1_curve.setData.call_args.args
+    assert len(y_data) == 256
+    np.testing.assert_allclose(x_data[:3], [0.0, 0.008, 0.016])

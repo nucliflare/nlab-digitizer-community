@@ -50,6 +50,21 @@ def test_binary_viewer_returns_complete_4096_sample_frame(monkeypatch: pytest.Mo
     np.testing.assert_array_equal(frame, expected)
 
 
+def test_legacy_text_viewer_returns_available_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = object.__new__(IIODigitizerBackend)
+    backend._ch = 0
+    backend._scope = SimpleNamespace(attrs={})
+    monkeypatch.setattr(backend, "get_frame_samples", lambda: 4096)
+    monkeypatch.setattr(backend, "get_mem_frame_size", lambda: 2048)
+    monkeypatch.setattr(backend, "_read_large_attr", lambda _name: b"10 20 30 \x00")
+
+    frame = backend.read_frame()
+
+    np.testing.assert_array_equal(frame, np.array([10, 20, 30], dtype=np.int16))
+
+
 class _BlockingScopeBackend:
     def __init__(self) -> None:
         self.reading = threading.Event()

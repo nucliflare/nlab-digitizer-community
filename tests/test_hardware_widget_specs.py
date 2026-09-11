@@ -3,12 +3,19 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import (
+    QAbstractSpinBox,
+    QApplication,
+    QComboBox,
+    QSizePolicy,
+    QWidget,
+)
 from pytestqt.qtbot import QtBot
 
 from nlab.controllers.mca_controller import MCAController
-from nlab.controllers.scope_controller import ScopeController
+from nlab.controllers.scope_controller import DisplayMode, ScopeController
 from nlab.hardware.digitizer.backends.iio_backend import IIODigitizerBackend
 from nlab.hardware.digitizer.mca import MCA_PARAMETER_SPECS, MCAParam
 from nlab.hardware.digitizer.scope import (
@@ -21,6 +28,12 @@ from nlab.hardware.digitizer.scope import (
 from nlab.ui.ui_mca_view import Ui_MCAView
 from nlab.ui.ui_psd_view import Ui_PSDView
 from nlab.ui.ui_scope_view import Ui_ScopeView
+
+
+def _assert_all_spinboxes_and_combos_have_tooltips(widget: QWidget) -> None:
+    controls = [*widget.findChildren(QAbstractSpinBox), *widget.findChildren(QComboBox)]
+    missing = sorted(control.objectName() for control in controls if not control.toolTip().strip())
+    assert not missing, f"controls without tooltips: {missing}"
 
 
 def test_scope_v121_hardware_ranges() -> None:
@@ -84,6 +97,50 @@ def _scope_model_for_controller() -> MagicMock:
     return scope
 
 
+def test_scope_viewer_scales_time_axis_and_explains_sample_period(qtbot: QtBot) -> None:
+    scope = _scope_model_for_controller()
+    controller = ScopeController(scope, scope_dma=None, channel=0)
+    qtbot.addWidget(controller)
+
+    assert controller._time_scale.unit == "\N{MICRO SIGN}s"
+    assert "Time [\N{MICRO SIGN}s]" in controller._time_axis_label.text
+    assert "2 ns/ADC sample" in controller._time_axis_label.text
+    assert "8 ns/viewer point" in controller._time_axis_label.text
+    assert controller.ui.plotWaveform.toolTip() == ""
+    assert "2 ns/sample" in controller.ui.spinFrameSamples.toolTip()
+    _assert_all_spinboxes_and_combos_have_tooltips(controller)
+
+    controller._set_display_mode(DisplayMode.RAW)
+    controller._on_frame_received(
+        [np.array([0, 8, 16]), np.array([10, 20, 30], dtype=np.int16)]
+    )
+    x_data, _ = controller._raw_curve.getData()
+    np.testing.assert_allclose(x_data, [0.0, 0.008, 0.016])
+
+    controller.ui.spinFrameSamples.setValue(256)
+    controller._on_frame_samples_changed()
+
+    assert controller._time_scale.unit == "ns"
+    assert "Time [ns]" in controller._time_axis_label.text
+    assert "256 ADC samples at 2 ns/sample (512 ns total)" in (
+        controller.ui.spinFrameSamples.toolTip()
+    )
+    x_data, _ = controller._raw_curve.getData()
+    np.testing.assert_allclose(x_data, [0.0, 8.0, 16.0])
+
+
+def test_scope_status_message_cannot_widen_controls_panel(qtbot: QtBot) -> None:
+    controller = ScopeController(_scope_model_for_controller(), scope_dma=None, channel=0)
+    qtbot.addWidget(controller)
+
+    status = controller.ui.lblRecordingStatus
+    assert status.wordWrap()
+    assert status.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Ignored
+
+    status.setText(controller._viewer_limit_message())
+    assert "truncated above 2328 frame samples" in status.text()
+
+
 def test_scope_frame_gap_is_enabled_only_for_periodic_trigger(qtbot: QtBot) -> None:
     scope = _scope_model_for_controller()
     controller = ScopeController(scope, scope_dma=None, channel=0)
@@ -118,7 +175,7 @@ def test_iio_viewer_limit_is_separate_from_dma_hardware_limit() -> None:
     assert frame_spec.max_val == 8188
 
 
-def test_scope_rejects_long_viewer_only_start(qtbot: QtBot) -> None:
+def test_scope_allows_truncated_long_viewer_only_start(qtbot: QtBot) -> None:
     scope = _scope_model_for_controller()
     controller = ScopeController(scope, scope_dma=None, channel=0)
     qtbot.addWidget(controller)
@@ -127,14 +184,12 @@ def test_scope_rejects_long_viewer_only_start(qtbot: QtBot) -> None:
 
     controller._on_start()
 
-    scope.start.assert_not_called()
-    assert not controller.ui.btnStart.isChecked()
+    scope.start.assert_called_once_with()
+    assert controller.ui.btnStart.isChecked()
+    assert controller._refresh_timer.isActive()
+    assert "Live preview is truncated" in controller.ui.lblRecordingStatus.text()
     assert "Enable Record DMA frames" in controller.ui.lblRecordingStatus.text()
-
-    controller._refresh_timer.start(1000)
-    controller._request_frame()
-    assert not controller._refresh_timer.isActive()
-    scope.acquire_frame.assert_not_called()
+    controller._on_stop()
 
 
 def test_binary_viewer_allows_long_viewer_only_start(qtbot: QtBot) -> None:
@@ -152,7 +207,7 @@ def test_binary_viewer_allows_long_viewer_only_start(qtbot: QtBot) -> None:
     controller._on_stop()
 
 
-def test_scope_rejects_long_frame_change_during_viewer_readout(qtbot: QtBot) -> None:
+def test_scope_accepts_long_frame_change_during_viewer_readout(qtbot: QtBot) -> None:
     scope = _scope_model_for_controller()
     controller = ScopeController(scope, scope_dma=None, channel=0)
     qtbot.addWidget(controller)
@@ -163,13 +218,13 @@ def test_scope_rejects_long_frame_change_during_viewer_readout(qtbot: QtBot) -> 
 
     controller._on_frame_samples_changed()
 
-    assert controller.ui.spinFrameSamples.value() == 1024
-    scope.set_frame_samples.assert_not_called()
-    assert "Enable Record DMA frames" in controller.ui.lblRecordingStatus.text()
+    assert controller.ui.spinFrameSamples.value() == 4096
+    scope.set_frame_samples.assert_called_once_with(4096)
+    assert "Live preview is truncated" in controller.ui.lblRecordingStatus.text()
     controller._refresh_timer.stop()
 
 
-def test_long_dma_capture_pauses_text_viewer_polling(qtbot: QtBot) -> None:
+def test_long_dma_capture_keeps_truncated_text_viewer_polling(qtbot: QtBot) -> None:
     scope = _scope_model_for_controller()
     controller = ScopeController(scope, scope_dma=None, channel=0)
     qtbot.addWidget(controller)
@@ -178,9 +233,32 @@ def test_long_dma_capture_pauses_text_viewer_polling(qtbot: QtBot) -> None:
 
     controller._on_dma_ready()
 
-    assert not controller._refresh_timer.isActive()
-    assert "live viewer paused" in controller.ui.lblRecordingStatus.text()
+    assert controller._refresh_timer.isActive()
+    assert "live preview is truncated" in controller.ui.lblRecordingStatus.text()
     controller._on_stop()
+
+
+def test_scope_displays_partial_frame_with_explicit_warning(qtbot: QtBot) -> None:
+    scope = _scope_model_for_controller()
+    controller = ScopeController(scope, scope_dma=None, channel=0)
+    qtbot.addWidget(controller)
+    controller.ui.spinFrameSamples.setValue(4096)
+    controller._set_display_mode(DisplayMode.RAW)
+
+    controller._on_frame_received(
+        [np.array([0, 8, 16]), np.array([10, 20, 30], dtype=np.int16)]
+    )
+
+    x_data, y_data = controller._raw_curve.getData()
+    np.testing.assert_allclose(x_data, [0.0, 0.008, 0.016])
+    np.testing.assert_array_equal(y_data, [10, 20, 30])
+    assert "showing 3 of 1024 points" in controller.ui.lblRecordingStatus.text()
+    assert "Enable Record DMA frames" in controller.ui.lblRecordingStatus.text()
+
+    controller._persistence_buffer.fill(0)
+    controller._rasterize_frame(np.array([10, 20, 30], dtype=np.int16))
+    occupied_x = np.nonzero(controller._persistence_buffer)[0]
+    assert occupied_x.max() <= 2
 
 
 def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> None:
@@ -198,6 +276,7 @@ def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> No
 
     MCAController._populate_combos(controller)
     MCAController._apply_parameter_specs(controller)
+    MCAController._apply_control_tooltips(controller)
 
     integer_controls = {
         MCAParam.TRIGGER_LEVEL: (ui.spinTriggerLevel, ui.sliderTriggerLevel),
@@ -293,6 +372,7 @@ def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> No
         "512 ns",
     ]
     assert ui.spinEdgeDetCoeff.isHidden()
+    _assert_all_spinboxes_and_combos_have_tooltips(widget)
 
 
 def test_psd_widgets_reflect_unsigned_16_bit_event_energy(qapp: QApplication) -> None:
