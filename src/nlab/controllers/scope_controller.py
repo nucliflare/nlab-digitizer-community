@@ -24,6 +24,7 @@ from nlab.hardware.digitizer.scope import (
 )
 from nlab.ui.ui_scope_view import Ui_ScopeView
 from nlab.views.plot_viewbox import ModifierZoomViewBox
+from nlab.views.responsive_layout import configure_scope_layout
 from nlab.views.time_axis import format_duration_ns, time_axis_scale
 from nlab.workers.dma_workers import IIOScopeDmaWorker, ScopeDmaWorker
 from nlab.workers.scope_worker import ScopeWorker
@@ -82,6 +83,7 @@ class ScopeController(QWidget):
         self._channel = channel
         self.ui = Ui_ScopeView()
         self.ui.setupUi(self)
+        configure_scope_layout(self, self.ui)
         self._apply_control_tooltips()
 
         self._acquiring = False

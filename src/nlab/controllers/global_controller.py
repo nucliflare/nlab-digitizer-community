@@ -12,6 +12,7 @@ from nlab.hardware.digitizer.diagnostics import GlobalDiagnosticReading
 from nlab.hardware.digitizer.digitizer import Digitizer
 from nlab.hardware.digitizer.mca import MCA_PARAMETER_SPECS, MCAParam
 from nlab.ui.ui_global_view import Ui_GlobalView
+from nlab.views.responsive_layout import configure_global_layout
 from nlab.workers.global_diagnostics_worker import GlobalDiagnosticsWorker
 from nlab.workers.temperature_correction_worker import (
     T_MAX,
@@ -57,6 +58,7 @@ class GlobalController(QWidget):
 
         self.ui = Ui_GlobalView()
         self.ui.setupUi(self)  # type: ignore[no-untyped-call]
+        configure_global_layout(self, self.ui)
         self.ui.tableDiagnostics.verticalHeader().setVisible(False)
         header = self.ui.tableDiagnostics.horizontalHeader()
         for column in range(self.ui.tableDiagnostics.columnCount()):

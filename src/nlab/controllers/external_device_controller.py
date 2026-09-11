@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from nlab.ui.ui_external_device_view import Ui_ExternalDeviceView
+from nlab.views.responsive_layout import configure_external_layout
 from nlab.workers.external_device_worker import ExternalDeviceWorker
 
 log = logging.getLogger(__name__)
@@ -116,6 +117,7 @@ class ExternalDeviceController(QWidget):
         self.device = device
         self.ui = Ui_ExternalDeviceView()
         self.ui.setupUi(self)
+        configure_external_layout(self, self.ui)
 
         self._worker: ExternalDeviceWorker | None = None
         self._worker_thread: QThread | None = None

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QCheckBox, QComboBox, QDoubleSpinBox, QWidget
 from nlab.hardware.digitizer.hv import HV_PARAMETER_SPECS, HVParam, HVSupply
 from nlab.hardware.digitizer.scope import RangeSpec
 from nlab.ui.ui_psu_view import Ui_PSUView
+from nlab.views.responsive_layout import configure_psu_layout
 from nlab.workers.psu_worker import PSUReadback, PSUWorker
 
 log = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class PSUController(QWidget):
         self.hv = hv
         self.ui = Ui_PSUView()
         self.ui.setupUi(self)
+        configure_psu_layout(self, self.ui)
 
         self._sipm_available = hv.sipm_available()
         if not self._sipm_available:

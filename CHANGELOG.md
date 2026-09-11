@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The desktop layout now fits 720p displays by sizing the main window against
+  available screen space, reacting when a window moves between monitors, moving the
+  MCA header controls into its scrollable control column only below 1080p, reflowing
+  dense controls, and preserving usable plot sizes
 - Scope and MCA DMA now start the first blocking reader before enabling acquisition,
   explicitly destroy native IIO buffers, reject partial frames, and require recovery
   acknowledgement after persistent transport or DMA faults

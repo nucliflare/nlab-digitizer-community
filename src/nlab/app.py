@@ -3,9 +3,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QSettings, QStandardPaths
-from PySide6.QtGui import QCloseEvent, QIcon
-from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox
+from PySide6.QtCore import QProcess, QSettings, QStandardPaths, QTimer
+from PySide6.QtGui import QCloseEvent, QIcon, QScreen, QShowEvent
+from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
 from nlab import __version__
 from nlab.controllers.main_window_controller import MainWindowController
@@ -50,6 +50,7 @@ class MainAppWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self._host = host
+        self._screen_change_connected = False
         self._board_power_process: QProcess | None = None
         self._board_power_command: BoardPowerCommand | None = None
         self._board_power_phase: str | None = None
@@ -76,6 +77,13 @@ class MainAppWindow(QMainWindow):
         self._controller.shutdown()
         super().closeEvent(event)
 
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        window = self.windowHandle()
+        if window is not None and not self._screen_change_connected:
+            window.screenChanged.connect(self._on_screen_changed)
+            self._screen_change_connected = True
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -83,7 +91,7 @@ class MainAppWindow(QMainWindow):
     def _setup_ui(self) -> None:
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
-        self.resize(1024, 768)
+        self._resize_for_available_screen()
 
         self.ui.actionExit.triggered.connect(self.close)
         self.ui.actionConvertToHdf5.triggered.connect(self._on_convert_to_hdf5)
@@ -107,6 +115,38 @@ class MainAppWindow(QMainWindow):
         self.ui.actionShutdownBoard.setEnabled(power_actions_enabled)
 
         self._restore_developer_settings()
+
+    def _resize_for_available_screen(self, screen: QScreen | None = None) -> None:
+        """Choose a useful initial size without exceeding the desktop.
+
+        A fixed 1024x768 client window cannot fit on a 1280x720 desktop once
+        the title bar and taskbar are accounted for. Keep the comfortable
+        1280x800 target used on larger displays, but reserve a small margin on
+        compact screens. Dense views provide their own control-panel scrolling
+        rather than forcing the top-level window beyond this size.
+        """
+        screen = screen or self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1024, 640)
+            return
+
+        available = screen.availableGeometry()
+        margin = 32
+        width = max(800, min(1280, available.width() - margin))
+        height = max(480, min(800, available.height() - margin))
+        self.resize(width, height)
+
+    def _on_screen_changed(self, screen: QScreen) -> None:
+        if not self.isMaximized() and not self.isFullScreen():
+            self._resize_for_available_screen(screen)
+            # Child views receive the same screenChanged signal and may lower
+            # their layout minimums in response. Retry on the next event-loop
+            # turn so the old large-screen minimum cannot reject this resize.
+            QTimer.singleShot(0, self._resize_after_screen_layout_change)
+
+    def _resize_after_screen_layout_change(self) -> None:
+        if not self.isMaximized() and not self.isFullScreen():
+            self._resize_for_available_screen()
 
     # ------------------------------------------------------------------
     # QSettings persistence for developer panel state

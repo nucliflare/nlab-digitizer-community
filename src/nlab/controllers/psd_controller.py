@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from nlab.analysis.psd import PsdAccumulator
 from nlab.hardware.digitizer.dma import McaEventBuffer
 from nlab.ui.ui_psd_view import Ui_PSDView
+from nlab.views.responsive_layout import configure_psd_layout
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class PSDController(QWidget):
 
         self.ui = Ui_PSDView()
         self.ui.setupUi(self)  # type: ignore[no-untyped-call]
+        configure_psd_layout(self, self.ui)
         self._accumulator = self._make_accumulator()
         self._setup_plots()
         self._connect_signals()

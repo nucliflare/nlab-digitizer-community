@@ -16,6 +16,7 @@ from nlab.hardware.digitizer.mca import MCA_PARAMETER_SPECS, MCAParam, MultiChan
 from nlab.hardware.digitizer.scope import RangeSpec
 from nlab.ui.ui_mca_view import Ui_MCAView
 from nlab.views.plot_viewbox import ModifierZoomViewBox
+from nlab.views.responsive_layout import configure_mca_layout
 from nlab.views.time_axis import format_duration_ns, time_axis_scale
 from nlab.workers.dma_workers import IIOMcaDmaWorker, McaDmaWorker
 from nlab.workers.mca_worker import MCAReadback, MCAWorker
@@ -111,6 +112,7 @@ class MCAController(QWidget):
         self._psd_capture = psd_capture
         self.ui = Ui_MCAView()
         self.ui.setupUi(self)
+        self._responsive_layout = configure_mca_layout(self, self.ui)
         self._apply_control_tooltips()
 
         self._worker: MCAWorker | None = None
