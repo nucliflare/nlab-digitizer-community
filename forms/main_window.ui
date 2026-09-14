@@ -189,7 +189,7 @@
    <property name="text"><string>Load Settings...</string></property>
   </action>
   <action name="actionDmaSaveFolder">
-   <property name="text"><string>DMA Save Folder...</string></property>
+   <property name="text"><string>DMA Settings...</string></property>
   </action>
   <action name="actionExit">
    <property name="text"><string>Exit</string></property>

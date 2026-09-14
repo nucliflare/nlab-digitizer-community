@@ -23,6 +23,7 @@ dependencies = [
     "protobuf>=5.26",
     "pyzmq>=26.0",
     "h5py>=3.11",
+    "uproot>=5.7",
     "pyyaml>=6.0",
     "nlab-modbus",
     "pylibiio>=0.25",

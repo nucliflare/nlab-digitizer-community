@@ -206,6 +206,7 @@ class MainWindowController:
                     channel=ch,
                     event_buffer=event_buffer,
                     psd_capture=psd_ctrl,
+                    measurement_configuration=self.configuration_document,
                 )
                 self._mca_controllers.append(mca_ctrl)
                 mca_docks.append(self._make_dock(f"mca_ch{ch}", ch_label, mca_ctrl))
@@ -393,6 +394,11 @@ class MainWindowController:
             ctrl.reset_zoom()
         log.info("Zoom reset on all plots")
 
+    def refresh_dma_output_settings(self) -> None:
+        """Refresh format-dependent controls after the DMA settings dialog."""
+        for ctrl in self._mca_controllers:
+            ctrl.refresh_dma_output_settings()
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -551,11 +557,14 @@ class MainWindowController:
 
     def save_all_settings(self, path) -> None:
         """Save settings for all channels to a single YAML file."""
-        from nlab.utils.settings_io import (
-            FORMAT_VERSION,
-            collect_channel_hardware,
-            write_configuration,
-        )
+        from nlab.utils.settings_io import write_configuration
+
+        write_configuration(path, self.configuration_document())
+        log.info("All channel and application settings saved to %s", path)
+
+    def configuration_document(self) -> dict[str, object]:
+        """Snapshot the same complete document used by Save Settings."""
+        from nlab.utils.settings_io import FORMAT_VERSION, collect_channel_hardware
 
         hardware_channels: dict[str, object] = {}
         application_channels: dict[str, object] = {}
@@ -634,8 +643,7 @@ class MainWindowController:
                 "dock_layout": layout,
             },
         }
-        write_configuration(path, document)
-        log.info("All channel and application settings saved to %s", path)
+        return document
 
     def load_all_settings(self, path) -> None:
         """Load settings from YAML and apply to hardware, then refresh UI."""

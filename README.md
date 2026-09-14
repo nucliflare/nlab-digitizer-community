@@ -46,7 +46,8 @@ preserve the lifecycle required by each firmware generation.
 - Synchronized stop/write/restart when changing MCA settings during acquisition
 - List-mode IIO DMA using fixed 1,024-record frames
 - Live PSD classification from charge-comparison and energy measurements
-- NDMA recording with sidecar capture metadata and HDF5 conversion
+- Per-measurement MCA output as NDMA, ROOT TTree, HDF5, or online-only PSD
+- Incremental bounded-memory file writing with embedded/same-stem YAML settings
 
 ### Instrument control
 
@@ -245,10 +246,18 @@ Legacy gRPC channel numbers are one-based, matching the old service API.
 
 ## Capture files and analysis
 
-Scope and MCA recording produce binary files with an `NDMA` header. IIO MCA
-list-mode files use format version 2 to distinguish the opaque IIO record from
-the same-sized legacy gRPC/ZMQ event record. A JSON sidecar stores IIO capture
-geometry, schema, continuity, and driver diagnostics.
+Scope recording remains binary with an `NDMA` header. MCA list-mode output is
+selected under **Settings → DMA Settings...** and creates a new file for every
+measurement. Available modes are binary NDMA, a ROOT `TTree`, appendable HDF5
+with SWMR metadata, and online-only PSD with no file. All file formats are
+written incrementally through a bounded queue rather than accumulated in RAM.
+
+IIO MCA NDMA files use format version 2 to distinguish the opaque IIO record
+from the same-sized legacy gRPC/ZMQ event record. A JSON sidecar stores IIO
+capture geometry, schema, continuity, and driver diagnostics, while a
+same-stem YAML file stores the complete digitizer configuration. ROOT and
+HDF5 files embed that YAML snapshot and expose `timestamp`, `long_gate`, and
+`short_gate` fields for analysis.
 
 Use **File → Convert Binary to HDF5...** in the GUI for portable analysis
 files. Quarto examples are provided in:

@@ -22,6 +22,7 @@ from nlab.hardware.digitizer.dma import (
     McaEventBuffer,
     ScopeDmaStreamer,
 )
+from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
 from nlab.workers.base_worker import BaseWorker
 
 log = logging.getLogger(__name__)
@@ -146,11 +147,15 @@ class McaDmaWorker(BaseWorker):
         streamer: McaDmaStreamer,
         filepath: Path | None = None,
         event_buffer: McaEventBuffer | tuple[list[np.ndarray], threading.Lock] | None = None,
+        output_mode: McaDmaOutputMode = McaDmaOutputMode.BINARY,
+        configuration_yaml: str = "",
     ) -> None:
         super().__init__()
         self._streamer = streamer
         self._filepath = filepath
         self._event_buffer = event_buffer
+        self._output_mode = output_mode
+        self._configuration_yaml = configuration_yaml
         self._stop_event = threading.Event()
 
     def run(self) -> None:
@@ -162,6 +167,8 @@ class McaDmaWorker(BaseWorker):
                 event_buffer=self._event_buffer,
                 on_ready=lambda: self.ready.emit(),
                 on_progress=lambda n: self.progress.emit(n),
+                output_mode=self._output_mode,
+                configuration_yaml=self._configuration_yaml,
             )
             log.info("McaDmaWorker: completed, %d events received", total)
         except Exception:
@@ -192,11 +199,15 @@ class IIOMcaDmaWorker(BaseWorker):
         streamer: IIOMcaDmaStreamer,
         filepath: Path | None = None,
         event_buffer: McaEventBuffer | tuple[list[np.ndarray], threading.Lock] | None = None,
+        output_mode: McaDmaOutputMode = McaDmaOutputMode.BINARY,
+        configuration_yaml: str = "",
     ) -> None:
         super().__init__()
         self._streamer = streamer
         self._filepath = filepath
         self._event_buffer = event_buffer
+        self._output_mode = output_mode
+        self._configuration_yaml = configuration_yaml
         self._stop_event = threading.Event()
 
     def run(self) -> None:
@@ -208,6 +219,8 @@ class IIOMcaDmaWorker(BaseWorker):
                 event_buffer=self._event_buffer,
                 on_ready=lambda: self.ready.emit(),
                 on_progress=lambda n: self.progress.emit(n),
+                output_mode=self._output_mode,
+                configuration_yaml=self._configuration_yaml,
             )
             log.info("IIOMcaDmaWorker: completed, %d records received", total)
         except Exception:

@@ -9,11 +9,17 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBo
 
 from nlab import __version__
 from nlab.controllers.main_window_controller import MainWindowController
+from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
 from nlab.ui.ui_main_window import Ui_MainWindow
 from nlab.utils.remote_board_power import (
     BoardPowerCommand,
     power_command_was_delivered,
     ssh_arguments,
+)
+from nlab.views.dma_settings_dialog import (
+    DMA_FOLDER_KEY,
+    MCA_DMA_OUTPUT_MODE_KEY,
+    DmaSettingsDialog,
 )
 from nlab.views.license_dialog import LicenseDialog
 
@@ -32,7 +38,8 @@ Source: <a href="https://github.com/ewt/nlab-community">github.com/ewt/nlab-comm
 
 _KEY_SHOW_LOG = "developer/show_system_log"
 _KEY_DEBUG_MODE = "developer/debug_mode"
-_KEY_DMA_FOLDER = "dma/save_folder"
+_KEY_DMA_FOLDER = DMA_FOLDER_KEY
+_KEY_MCA_DMA_OUTPUT_MODE = MCA_DMA_OUTPUT_MODE_KEY
 _KEY_SHOW_ROI = "view/show_roi"
 _KEY_LOG_Y = "view/log_y"
 
@@ -102,7 +109,7 @@ class MainAppWindow(QMainWindow):
         self.ui.actionLogY.toggled.connect(self._on_log_y_toggled)
         self.ui.actionSaveSettings.triggered.connect(self._on_save_settings)
         self.ui.actionLoadSettings.triggered.connect(self._on_load_settings)
-        self.ui.actionDmaSaveFolder.triggered.connect(self._on_dma_save_folder)
+        self.ui.actionDmaSaveFolder.triggered.connect(self._on_dma_settings)
         self.ui.actionAbout.triggered.connect(self._on_about)
         self.ui.actionThirdPartyLicenses.triggered.connect(self._on_third_party_licenses)
         self.ui.actionShowSystemLog.toggled.connect(self._on_show_system_log_toggled)
@@ -193,6 +200,12 @@ class MainAppWindow(QMainWindow):
             "show_roi": self.ui.actionShowRoi.isChecked(),
             "log_y": self.ui.actionLogY.isChecked(),
             "dma_save_folder": str(QSettings().value(_KEY_DMA_FOLDER, "measurements")),
+            "mca_dma_output_mode": str(
+                QSettings().value(
+                    _KEY_MCA_DMA_OUTPUT_MODE,
+                    McaDmaOutputMode.BINARY.value,
+                )
+            ),
             "active_tab": self.ui.mainTabs.currentIndex(),
         }
 
@@ -211,12 +224,24 @@ class MainAppWindow(QMainWindow):
                 action.setChecked(bool(settings[name]))
         if "dma_save_folder" in settings:
             QSettings().setValue(_KEY_DMA_FOLDER, str(settings["dma_save_folder"]))
+        requested_mode = str(
+            settings.get("mca_dma_output_mode", McaDmaOutputMode.BINARY.value)
+        )
+        try:
+            mode = McaDmaOutputMode(requested_mode)
+        except ValueError:
+            logging.getLogger(__name__).warning(
+                "Unknown MCA DMA output mode %r; using binary", requested_mode
+            )
+            mode = McaDmaOutputMode.BINARY
+        QSettings().setValue(_KEY_MCA_DMA_OUTPUT_MODE, mode.value)
         if "active_tab" in settings:
             index = int(settings["active_tab"])
             if 0 <= index < self.ui.mainTabs.count():
                 self.ui.mainTabs.setCurrentIndex(index)
         self._save_developer_settings()
         self._apply_view_state()
+        self._controller.refresh_dma_output_settings()
 
     def _apply_view_state(self) -> None:
         """Re-apply persisted view toggles to the (re)built MCA controllers."""
@@ -531,12 +556,15 @@ class MainAppWindow(QMainWindow):
     def _on_reset_docks(self) -> None:
         self._controller.reset_dock_layout()
 
-    def _on_dma_save_folder(self) -> None:
-        current = QSettings().value(_KEY_DMA_FOLDER, "measurements")
-        folder = QFileDialog.getExistingDirectory(self, "DMA Save Folder", str(current))
-        if folder:
-            QSettings().setValue(_KEY_DMA_FOLDER, folder)
-            logging.getLogger(__name__).info("DMA save folder set to: %s", folder)
+    def _on_dma_settings(self) -> None:
+        if DmaSettingsDialog(self).exec():
+            self._controller.refresh_dma_output_settings()
+            settings = QSettings()
+            logging.getLogger(__name__).info(
+                "DMA settings updated: folder=%s, MCA output=%s",
+                settings.value(_KEY_DMA_FOLDER, "measurements"),
+                settings.value(_KEY_MCA_DMA_OUTPUT_MODE, McaDmaOutputMode.BINARY.value),
+            )
 
     def _on_about(self) -> None:
         QMessageBox.about(self, "About Nuclear Lab Digitizer", _ABOUT_TEXT)

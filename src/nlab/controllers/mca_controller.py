@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import QDoubleSpinBox, QFileDialog, QSlider, QSpinBox, QW
 
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaDmaStreamer, McaEventBuffer
 from nlab.hardware.digitizer.mca import MCA_PARAMETER_SPECS, MCAParam, MultiChannelAnalyzer
+from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
 from nlab.hardware.digitizer.scope import RangeSpec
 from nlab.ui.ui_mca_view import Ui_MCAView
 from nlab.views.plot_viewbox import ModifierZoomViewBox
@@ -105,12 +107,14 @@ class MCAController(QWidget):
         parent: QWidget | None = None,
         event_buffer: McaEventBuffer | None = None,
         psd_capture: _PsdCaptureSink | None = None,
+        measurement_configuration: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         super().__init__(parent)
         self._mca = mca
         self._mca_dma = mca_dma
         self._channel = channel
         self._psd_capture = psd_capture
+        self._measurement_configuration = measurement_configuration
         self.ui = Ui_MCAView()
         self.ui.setupUi(self)
         self._responsive_layout = configure_mca_layout(self, self.ui)
@@ -125,6 +129,7 @@ class MCAController(QWidget):
         self._dma_counter = 0
         self._event_buffer = event_buffer or McaEventBuffer()
         self._psd_capture_enabled = False
+        self._active_dma_mode = McaDmaOutputMode.BINARY
 
         self._last_histogram: np.ndarray | None = None
         self._last_elapsed_s: float = 0.0
@@ -142,6 +147,7 @@ class MCAController(QWidget):
         self._setup_histogram_plot()
         self._connect_signals()
         self.ui.btnStop.setEnabled(False)
+        self.refresh_dma_output_settings()
 
     # ------------------------------------------------------------------
     # Combo population
@@ -417,6 +423,22 @@ class MCAController(QWidget):
         self.ui.tabFilters.setEnabled(enabled)
         self.ui.spinTimeLimit.setEnabled(enabled)
         self.ui.spinRefreshRate.setEnabled(enabled)
+
+    def refresh_dma_output_settings(self) -> None:
+        """Reflect the application-wide output choice in this channel view."""
+        online = MCAController._output_mode() is McaDmaOutputMode.ONLINE
+        self.ui.btnDmaFile.setEnabled(not online and self._dma_worker is None)
+        if hasattr(self.ui.btnDmaFile, "setToolTip"):
+            self.ui.btnDmaFile.setToolTip(
+                "Online PSD mode does not create a measurement file."
+                if online
+                else (
+                    "Optionally choose the next measurement file; "
+                    "otherwise a name is generated."
+                )
+            )
+        if online:
+            self._dma_filepath = None
 
     # ------------------------------------------------------------------
     # Debug plot (scope-like, two curves)
@@ -904,7 +926,7 @@ class MCAController(QWidget):
             self.ui.btnStop.setChecked(False)
             self.ui.btnStop.setEnabled(False)
             self.ui.cbDmaEnable.setEnabled(True)
-            self.ui.btnDmaFile.setEnabled(True)
+            MCAController.refresh_dma_output_settings(self)
             self._finish_psd_capture()
 
     def _start_polling_only(self) -> None:
@@ -950,7 +972,7 @@ class MCAController(QWidget):
         self.ui.btnStart.setEnabled(True)
         self.ui.btnStop.setEnabled(False)
         self.ui.cbDmaEnable.setEnabled(True)
-        self.ui.btnDmaFile.setEnabled(True)
+        MCAController.refresh_dma_output_settings(self)
         log.info("MCA ch%d: measurement stopped", self._channel)
 
     def _on_measurement_done(self) -> None:
@@ -980,7 +1002,7 @@ class MCAController(QWidget):
         self.ui.btnStop.setChecked(True)
         self.ui.btnStop.setEnabled(False)
         self.ui.cbDmaEnable.setEnabled(True)
-        self.ui.btnDmaFile.setEnabled(True)
+        MCAController.refresh_dma_output_settings(self)
 
     def _on_clear_spectrum(self) -> None:
         self._mca.clear_spectrum()
@@ -1071,50 +1093,141 @@ class MCAController(QWidget):
     # DMA listmode recording
     # ------------------------------------------------------------------
 
-    def _generate_filepath(self) -> Path:
-        folder = Path(QSettings().value("dma/save_folder", "measurements"))
+    @staticmethod
+    def _output_mode() -> McaDmaOutputMode:
+        stored = str(QSettings().value("dma/mca_output_mode", McaDmaOutputMode.BINARY.value))
+        try:
+            return McaDmaOutputMode(stored)
+        except ValueError:
+            log.warning("Unknown MCA DMA output mode %r; using binary", stored)
+            return McaDmaOutputMode.BINARY
+
+    @staticmethod
+    def _available_filepath(path: Path, *, binary_yaml: bool) -> Path:
+        """Return a collision-free path without ever replacing a prior measurement."""
+        candidate = path
+        counter = 1
+        while candidate.exists() or (binary_yaml and candidate.with_suffix(".yaml").exists()):
+            candidate = path.with_name(f"{path.stem}_{counter:03d}{path.suffix}")
+            counter += 1
+        return candidate
+
+    def _generate_filepath(self, mode: McaDmaOutputMode) -> Path:
+        folder = Path(str(QSettings().value("dma/save_folder", "measurements")))
         folder.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
         self._dma_counter += 1
-        name = f"ch{self._channel}_{ts}_{self._dma_counter:03d}.bin"
-        filepath = folder / name
+        name = f"ch{self._channel}_{ts}_{self._dma_counter:03d}{mode.extension}"
+        filepath = self._available_filepath(
+            folder / name,
+            binary_yaml=mode is McaDmaOutputMode.BINARY,
+        )
         log.info("MCA DMA: auto-generated filepath: %s", filepath)
         return filepath
 
     def _on_dma_file(self) -> None:
+        mode = self._output_mode()
+        if mode is McaDmaOutputMode.ONLINE:
+            self.ui.lblDmaStatus.setText("Online PSD mode does not create a file.")
+            return
         default_dir = str(QSettings().value("dma/save_folder", "measurements"))
+        filters = {
+            McaDmaOutputMode.BINARY: "Binary NDMA files (*.bin)",
+            McaDmaOutputMode.ROOT: "ROOT files (*.root)",
+            McaDmaOutputMode.HDF5: "HDF5 files (*.h5)",
+        }
         path, _ = QFileDialog.getSaveFileName(
             self,
             "MCA DMA File",
             default_dir,
-            "Binary files (*.bin);;All files (*)",
+            f"{filters[mode]};;All files (*)",
         )
         if path:
-            self._dma_filepath = Path(path)
+            selected = Path(path)
+            if selected.suffix.lower() != mode.extension:
+                selected = selected.with_suffix(mode.extension)
+            self._dma_filepath = self._available_filepath(
+                selected,
+                binary_yaml=mode is McaDmaOutputMode.BINARY,
+            )
             log.info("MCA DMA: user selected filepath: %s", self._dma_filepath)
 
     def _start_with_dma(self) -> None:
-        filepath = self._dma_filepath or self._generate_filepath()
+        from nlab.utils.settings_io import configuration_yaml, write_configuration
+
+        mode = self._output_mode()
+        self._active_dma_mode = mode
+        filepath = None if mode is McaDmaOutputMode.ONLINE else (
+            self._dma_filepath or self._generate_filepath(mode)
+        )
+        if filepath is not None and filepath.suffix.lower() != mode.extension:
+            filepath = self._available_filepath(
+                filepath.with_suffix(mode.extension),
+                binary_yaml=mode is McaDmaOutputMode.BINARY,
+            )
         self._dma_filepath = None
         self._event_buffer.clear()
-        log.debug("MCA ch%d DMA [1/6]: creating worker, file=%s", self._channel, filepath)
+        log.debug(
+            "MCA ch%d DMA [1/6]: creating worker, mode=%s, file=%s",
+            self._channel,
+            mode.value,
+            filepath,
+        )
 
         # Both the pulse-processor configuration path and lm_buffer_preenable
         # require enable=0.  This also recovers a stale timed acquisition
         # before set_time_limit() below touches measurement_time_raw.
         self._mca.stop()
 
+        self._mca.set_time_limit(self.ui.spinTimeLimit.value())
         display_buffer = self._prepare_psd_capture()
+        if mode is McaDmaOutputMode.ONLINE and display_buffer is None:
+            raise RuntimeError(
+                "Online PSD mode requires Charge Comparison to be enabled and a PSD view"
+            )
+
+        configuration = (
+            self._measurement_configuration()
+            if mode is not McaDmaOutputMode.ONLINE
+            and self._measurement_configuration is not None
+            else {}
+        )
+        if configuration:
+            configuration["measurement"] = {
+                "kind": "mca_listmode",
+                "channel": self._channel,
+                "output_mode": mode.value,
+                "started_utc": datetime.now(UTC).isoformat(),
+            }
+            hardware = configuration.get("hardware")
+            if isinstance(hardware, dict):
+                channels = hardware.get("channels")
+                if isinstance(channels, dict):
+                    channel_settings = channels.get(str(self._channel))
+                    if isinstance(channel_settings, dict):
+                        mca_settings = channel_settings.get("mca")
+                        if isinstance(mca_settings, dict):
+                            acquisition = mca_settings.get("acquisition")
+                            if isinstance(acquisition, dict):
+                                # IIO reports the driver-owned list buffer gate,
+                                # which is necessarily still false at this safe
+                                # pre-arm snapshot boundary. Record the requested
+                                # measurement mode rather than that transient gate.
+                                acquisition["dma_enabled"] = True
+        embedded_configuration = configuration_yaml(configuration)
+        if filepath is not None and mode is McaDmaOutputMode.BINARY:
+            write_configuration(filepath.with_suffix(".yaml"), configuration)
 
         if isinstance(self._mca_dma, IIOMcaDmaStreamer):
             # Pulse-processor fields are immutable while list_buffer_active
             # is set, so apply the duration before the worker's first read
             # creates/arms the lm_frame buffer.
-            self._mca.set_time_limit(self.ui.spinTimeLimit.value())
             self._dma_worker = IIOMcaDmaWorker(
                 streamer=self._mca_dma,
                 filepath=filepath,
                 event_buffer=display_buffer,
+                output_mode=mode,
+                configuration_yaml=embedded_configuration,
             )
         else:
             assert isinstance(self._mca_dma, McaDmaStreamer)
@@ -1122,6 +1235,8 @@ class MCAController(QWidget):
                 streamer=self._mca_dma,
                 filepath=filepath,
                 event_buffer=display_buffer,
+                output_mode=mode,
+                configuration_yaml=embedded_configuration,
             )
         self._dma_thread = QThread(self)
         self._dma_worker.moveToThread(self._dma_thread)
@@ -1139,7 +1254,11 @@ class MCAController(QWidget):
         self._dma_thread.finished.connect(self._on_dma_finished)
 
         self._set_controls_enabled(False)
-        self.ui.lblDmaStatus.setText("Connecting...")
+        self.ui.lblDmaStatus.setText(
+            "Connecting (online PSD)..."
+            if mode is McaDmaOutputMode.ONLINE
+            else f"Connecting ({mode.value})..."
+        )
         if isinstance(self._mca_dma, IIOMcaDmaStreamer):
             log.debug(
                 "MCA ch%d DMA [2/6]: starting worker thread (IIO buffer arm)",
@@ -1194,7 +1313,6 @@ class MCAController(QWidget):
                 "(HW fires list_start_irq -> server sends StreamSTART)",
                 self._channel,
             )
-            self._mca.set_time_limit(self.ui.spinTimeLimit.value())
             self._mca.start()
         log.debug(
             "MCA ch%d DMA: starting polling worker (time_limit=%d s)",
@@ -1203,12 +1321,21 @@ class MCAController(QWidget):
         )
         self._start_worker()
         self.ui.btnStop.setEnabled(True)
-        self.ui.lblDmaStatus.setText("Recording...")
+        self.ui.lblDmaStatus.setText(
+            "Streaming to PSD..."
+            if self._active_dma_mode is McaDmaOutputMode.ONLINE
+            else "Recording..."
+        )
         log.info("MCA ch%d: DMA + measurement started", self._channel)
 
     def _on_dma_progress(self, event_count: int) -> None:
         unit = "records" if isinstance(self._mca_dma, IIOMcaDmaStreamer) else "events"
-        self.ui.lblDmaStatus.setText(f"Recording: {event_count} {unit}")
+        action = (
+            "PSD stream"
+            if self._active_dma_mode is McaDmaOutputMode.ONLINE
+            else "Recording"
+        )
+        self.ui.lblDmaStatus.setText(f"{action}: {event_count} {unit}")
 
     def _on_dma_error(self, message: str) -> None:
         log.error("MCA DMA error: %s", message)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -42,8 +42,13 @@ def read_configuration(path: Path) -> dict[str, Any]:
 def write_configuration(path: Path, settings: Mapping[str, Any]) -> None:
     """Write one complete configuration document."""
     with path.open("w", encoding="utf-8", newline="\n") as stream:
-        yaml.safe_dump(dict(settings), stream, sort_keys=False, allow_unicode=True)
+        stream.write(configuration_yaml(settings))
     log.info("Settings saved to %s", path)
+
+
+def configuration_yaml(settings: Mapping[str, Any]) -> str:
+    """Serialize a settings snapshot for a file or embedded capture metadata."""
+    return cast(str, yaml.safe_dump(dict(settings), sort_keys=False, allow_unicode=True))
 
 
 def validate_configuration_version(settings: Mapping[str, Any]) -> None:

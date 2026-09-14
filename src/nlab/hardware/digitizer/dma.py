@@ -23,6 +23,8 @@ from typing import BinaryIO, Protocol
 import numpy as np
 import zmq
 
+from nlab.hardware.digitizer.mca_capture import McaCaptureWriter, McaDmaOutputMode
+
 
 class _IIOScopeBackend(Protocol):
     def prepare_dma_capture(self) -> None: ...
@@ -173,6 +175,16 @@ def _write_file_header(
     )
     f.write(header)
     f.flush()
+
+
+def _file_header_bytes(
+    channel: int,
+    frame_samples: int = 0,
+    version: int = FILE_VERSION,
+) -> bytes:
+    return FILE_HEADER_STRUCT.pack(
+        FILE_MAGIC, version, channel, 0, time.time(), frame_samples,
+    )
 
 
 def _sha256_file(path: Path) -> str:
@@ -601,6 +613,8 @@ class IIOMcaDmaStreamer:
         event_buffer: McaEventBuffer | tuple[list[np.ndarray], threading.Lock] | None = None,
         on_ready: Callable[[], None] | None = None,
         on_progress: Callable[[int], None] | None = None,
+        output_mode: McaDmaOutputMode = McaDmaOutputMode.BINARY,
+        configuration_yaml: str = "",
     ) -> int:
         """Read complete 1024-record blocks until stopped.
 
@@ -613,17 +627,20 @@ class IIOMcaDmaStreamer:
         """
         total_records = 0
         frame_count = 0
-        file_handle = None
+        writer: McaCaptureWriter | None = None
         started_utc = datetime.now(UTC)
 
         if filepath is not None:
-            file_handle = open(filepath, "wb", buffering=IIO_LM_FRAME_BYTES * 8)
-            _write_file_header(
-                file_handle,
-                self._channel,
-                version=IIO_LM_FILE_VERSION,
+            writer = McaCaptureWriter(
+                path=filepath,
+                mode=output_mode,
+                configuration_yaml=configuration_yaml,
+                binary_header=_file_header_bytes(
+                    self._channel,
+                    version=IIO_LM_FILE_VERSION,
+                ),
             )
-            log.info("IIO MCA DMA: recording to %s", filepath)
+            log.info("IIO MCA DMA: recording %s to %s", output_mode.value, filepath)
 
         def consume(events: np.ndarray) -> None:
             nonlocal total_records, frame_count
@@ -635,8 +652,8 @@ class IIOMcaDmaStreamer:
                     f"unexpected IIO MCA event dtype {events.dtype!r}; "
                     f"expected {_LM_EVENT_DTYPE!r}"
                 )
-            if file_handle is not None:
-                file_handle.write(events.tobytes())
+            if writer is not None:
+                writer.append(events.tobytes(), events)
             if event_buffer is not None:
                 _append_mca_event_batch(event_buffer, events)
             frame_count += 1
@@ -681,20 +698,33 @@ class IIOMcaDmaStreamer:
                         "the capture error"
                     )
                 else:
+                    if writer is not None:
+                        writer.close(complete=False)
                     raise
-            finally:
-                if file_handle is not None:
-                    file_handle.close()
+            if capture_failed and writer is not None:
+                writer.close(complete=False)
             log.info(
                 "IIO MCA DMA: finished -- %d records in %d frames "
                 "(%d frame(s) received during close drain)",
                 total_records, frame_count, drained,
             )
 
-        dma_fault, dma_error_count, completed_frames, deadtime_records = (
-            self._backend.get_mca_dma_capture_diagnostics()
+        try:
+            dma_fault, dma_error_count, completed_frames, deadtime_records = (
+                self._backend.get_mca_dma_capture_diagnostics()
+            )
+        except BaseException:
+            if writer is not None:
+                writer.close(complete=False)
+            raise
+        continuity_valid = (
+            dma_fault == 0
+            and completed_frames == frame_count
+            and deadtime_records == 0
         )
-        if filepath is not None:
+        if writer is not None:
+            writer.close(complete=continuity_valid)
+        if filepath is not None and output_mode is McaDmaOutputMode.BINARY:
             metadata_path = _write_iio_mca_metadata(
                 filepath,
                 channel=self._channel,
@@ -765,6 +795,8 @@ class McaDmaStreamer:
         event_buffer: McaEventBuffer | tuple[list[np.ndarray], threading.Lock] | None = None,
         on_ready: Callable[[], None] | None = None,
         on_progress: Callable[[int], None] | None = None,
+        output_mode: McaDmaOutputMode = McaDmaOutputMode.BINARY,
+        configuration_yaml: str = "",
     ) -> int:
         """Connect, signal ready, wait for StreamSTART, read events until StreamEND or stop.
 
@@ -785,24 +817,29 @@ class McaDmaStreamer:
         poller = zmq.Poller()
         poller.register(socket, zmq.POLLIN)
 
-        log.debug("MCA DMA [worker 2a]: connecting ZMQ SUB to %s", self._endpoint)
-        socket.connect(self._endpoint)
-        time.sleep(0.2)
-        log.debug("MCA DMA [worker 2b]: ZMQ connected, emitting ready "
-                  "(controller will enable DMA + call start)")
-        if on_ready is not None:
-            on_ready()
-
         total_events = 0
         msg_count = 0
         started = False
-        file_handle = None
+        writer: McaCaptureWriter | None = None
+        capture_failed = False
 
         try:
             if filepath is not None:
-                file_handle = open(filepath, "wb")
-                log.info("MCA DMA: recording to %s", filepath)
-                _write_file_header(file_handle, self._channel)
+                writer = McaCaptureWriter(
+                    path=filepath,
+                    mode=output_mode,
+                    configuration_yaml=configuration_yaml,
+                    binary_header=_file_header_bytes(self._channel),
+                )
+                log.info("MCA DMA: recording %s to %s", output_mode.value, filepath)
+
+            log.debug("MCA DMA [worker 2a]: connecting ZMQ SUB to %s", self._endpoint)
+            socket.connect(self._endpoint)
+            time.sleep(0.2)
+            log.debug("MCA DMA [worker 2b]: ZMQ connected, emitting ready "
+                      "(controller will enable DMA + call start)")
+            if on_ready is not None:
+                on_ready()
 
             log.debug("MCA DMA [worker 6/6]: polling for StreamSTART "
                       "(waiting for HW list_start_irq after mca.start())")
@@ -836,15 +873,16 @@ class McaDmaStreamer:
                              "(HW list_stop_irq fired, mca.stop() was called)")
                     break
 
-                if file_handle is not None:
-                    file_handle.write(message)
-
                 n_events = len(message) // EVENT_SIZE
                 if len(message) % EVENT_SIZE != 0:
                     log.warning(
                         "MCA DMA: message size %d not aligned to event size %d, truncating",
                         len(message), EVENT_SIZE,
                     )
+
+                parsed = self.parse_events(message[:n_events * EVENT_SIZE])
+                if writer is not None:
+                    writer.append(message, parsed)
 
                 total_events += n_events
                 msg_count += 1
@@ -853,21 +891,21 @@ class McaDmaStreamer:
                               "(DMA transfers active)", len(message), n_events)
 
                 if event_buffer is not None and n_events > 0:
-                    parsed = self.parse_events(message[:n_events * EVENT_SIZE])
                     _append_mca_event_batch(event_buffer, parsed)
 
                 if on_progress is not None:
                     on_progress(total_events)
 
-        except zmq.ZMQError:
-            log.exception("MCA DMA: ZMQ error during streaming")
+        except BaseException:
+            capture_failed = True
+            log.exception("MCA DMA: error during streaming")
             raise
         finally:
             reason = "stop_event" if stop_event.is_set() else "StreamEND"
             log.info("MCA DMA: finished -- %d events from %d messages (reason: %s)",
                      total_events, msg_count, reason)
-            if file_handle is not None:
-                file_handle.close()
+            if writer is not None:
+                writer.close(complete=not capture_failed)
                 log.info("MCA DMA: file closed: %s", filepath)
             socket.close()
             ctx.term()
