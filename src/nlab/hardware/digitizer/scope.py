@@ -123,6 +123,14 @@ class Scope:
     def __init__(self, backend: ScopeBackend) -> None:
         self._b = backend
 
+    def create_isolated_client(self) -> Scope:
+        """Create a scope client whose transport belongs to a worker thread."""
+        return type(self)(self._b.create_isolated_scope_backend())
+
+    def close(self) -> None:
+        """Close this client's backend connection."""
+        self._b.close()
+
     # ---- read-only device info ----
 
     def get_ip_version(self) -> int:

@@ -6,7 +6,19 @@ from ..diagnostics import GlobalDiagnosticReading
 
 
 class ScopeBackend(ABC):
-    """Abstract interface for scope hardware access. All units are hardware-native (samples, ADC counts)."""
+    """Scope hardware access in hardware-native samples and ADC counts."""
+
+    def create_isolated_scope_backend(self) -> "ScopeBackend":
+        """Return a new connection suitable for a background scope operation.
+
+        Backends that support Scope Auto Setup override this. A separate
+        connection is required because remote hardware transports are not
+        generally safe to share between the GUI and worker threads.
+        """
+        raise NotImplementedError("this backend does not support isolated scope access")
+
+    def close(self) -> None:
+        """Close this backend's transport resources."""
 
     @abstractmethod
     def get_ip_version(self) -> int: ...

@@ -29,6 +29,10 @@ from nlab.views.plot_viewbox import ModifierZoomViewBox
 from nlab.views.responsive_layout import configure_scope_layout
 from nlab.views.time_axis import format_duration_ns, time_axis_scale
 from nlab.workers.dma_workers import IIOScopeDmaWorker, ScopeDmaWorker
+from nlab.workers.scope_auto_setup_worker import (
+    ScopeAutoSetupResult,
+    ScopeAutoSetupWorker,
+)
 from nlab.workers.scope_worker import ScopeWorker
 
 log = logging.getLogger(__name__)
@@ -49,6 +53,11 @@ _SCOPE_CONTROL_TOOLTIPS = {
     ),
     "comboDisplayMode": "Chooses a raw waveform trace or an accumulated persistence display.",
     "spinRefreshRate": "Sets how often the live waveform is requested and redrawn, in hertz.",
+    "btnAutoSetup": (
+        "Finds a unipolar pulse, moves its baseline near the opposite ADC rail "
+        "for maximum dynamic range, and selects a noise-aware edge trigger. "
+        "Click again to cancel."
+    ),
 }
 
 
@@ -98,6 +107,11 @@ class ScopeController(QWidget):
         self._dma_thread: QThread | None = None
         self._dma_filepath: Path | None = None
         self._dma_counter = 0
+
+        self._auto_setup_worker: ScopeAutoSetupWorker | None = None
+        self._auto_setup_thread: QThread | None = None
+        self._auto_setup_result: ScopeAutoSetupResult | None = None
+        self._auto_setup_error: str | None = None
 
         self._measurement_timer = QTimer(self)
         self._measurement_timer.setSingleShot(True)
@@ -356,6 +370,7 @@ class ScopeController(QWidget):
         self.ui.cbDmaEnable.toggled.connect(self._on_dma_toggled)
         self.ui.btnStart.clicked.connect(self._on_start)
         self.ui.btnStop.clicked.connect(self._on_stop)
+        self.ui.btnAutoSetup.clicked.connect(self._on_auto_setup)
         self.ui.btnAcquireFrame.clicked.connect(self._on_acquire_frame)
         self.ui.btnDmaFile.clicked.connect(self._on_dma_file)
 
@@ -405,6 +420,8 @@ class ScopeController(QWidget):
         self._update_viewer_transport_hint()
 
     def _on_start(self) -> None:
+        if self._auto_setup_thread is not None:
+            return
         if self._dma_worker is not None or self._dma_thread is not None:
             log.warning(
                 "Scope ch%d: refusing to start while the previous DMA worker is still closing",
@@ -417,6 +434,7 @@ class ScopeController(QWidget):
         self.ui.btnAcquireFrame.setEnabled(False)
         self.ui.cbDmaEnable.setEnabled(False)
         self.ui.btnDmaFile.setEnabled(False)
+        self.ui.btnAutoSetup.setEnabled(False)
 
         if self.ui.cbDmaEnable.isChecked() and self._scope_dma is not None:
             self._start_with_dma()
@@ -546,7 +564,107 @@ class ScopeController(QWidget):
         self.ui.btnAcquireFrame.setEnabled(True)
         self.ui.cbDmaEnable.setEnabled(True)
         self.ui.btnDmaFile.setEnabled(True)
+        self.ui.btnAutoSetup.setEnabled(True)
         log.info("Scope ch%d: acquisition stopped", self._channel)
+
+    # ------------------------------------------------------------------
+    # Auto Setup
+    # ------------------------------------------------------------------
+
+    def _on_auto_setup(self) -> None:
+        if self._auto_setup_worker is not None:
+            self._auto_setup_worker.stop()
+            self.ui.btnAutoSetup.setEnabled(False)
+            self.ui.lblRecordingStatus.setText("Cancelling Auto Setup...")
+            return
+        if self._dma_worker is not None or self._dma_thread is not None:
+            self.ui.lblRecordingStatus.setText("Stop DMA recording before Auto Setup")
+            return
+        if self._refresh_timer.isActive() or self._scope.get_enable():
+            self.ui.lblRecordingStatus.setText("Stop acquisition before Auto Setup")
+            return
+        if self.ui.cbDmaEnable.isChecked():
+            self.ui.lblRecordingStatus.setText("Disable Record DMA frames before Auto Setup")
+            return
+
+        self._auto_setup_result = None
+        self._auto_setup_error = None
+        worker = ScopeAutoSetupWorker(self._scope.create_isolated_client)
+        thread = QThread(self)
+        self._auto_setup_worker = worker
+        self._auto_setup_thread = thread
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.progress.connect(self.ui.lblRecordingStatus.setText)
+        worker.succeeded.connect(self._on_auto_setup_succeeded)
+        worker.error.connect(self._on_auto_setup_error)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_auto_setup_finished)
+
+        self._set_auto_setup_busy(True)
+        self.ui.lblRecordingStatus.setText("Auto Setup: connecting...")
+        thread.start()
+        log.info("Scope ch%d: Auto Setup started", self._channel)
+
+    def _set_auto_setup_busy(self, busy: bool) -> None:
+        self._set_controls_enabled(not busy)
+        self.ui.btnStart.setEnabled(not busy)
+        self.ui.btnStop.setEnabled(False)
+        self.ui.btnAcquireFrame.setEnabled(not busy)
+        self.ui.btnDmaFile.setEnabled(not busy)
+        self.ui.btnAutoSetup.setEnabled(True)
+        self.ui.btnAutoSetup.setText("Cancel Auto" if busy else "Auto Setup")
+
+    def _on_auto_setup_succeeded(self, result: ScopeAutoSetupResult) -> None:
+        self._auto_setup_result = result
+
+    def _on_auto_setup_error(self, message: str) -> None:
+        self._auto_setup_error = message
+
+    def _on_auto_setup_finished(self) -> None:
+        result = self._auto_setup_result
+        error = self._auto_setup_error
+        self._auto_setup_worker = None
+        self._auto_setup_thread = None
+        self._set_auto_setup_busy(False)
+
+        try:
+            self._load_hardware_state()
+            self._update_frame_gap_enabled()
+            self._update_axis_ranges()
+        except Exception as exc:
+            log.exception("Scope ch%d: failed to refresh after Auto Setup", self._channel)
+            self.ui.lblRecordingStatus.setText(f"Auto Setup refresh failed: {exc}")
+            return
+
+        if result is None:
+            self.ui.lblRecordingStatus.setText(f"Auto Setup failed: {error or 'unknown error'}")
+            return
+
+        frame = result.frame[: self._frame_samples_from_ui() // 4]
+        raw_time = np.arange(len(frame)) * self._VIEWER_POINT_PERIOD_NS
+        self._on_frame_received([raw_time, frame])
+        verification = "verified" if result.verified else "set; pulse not re-observed"
+        self.ui.lblRecordingStatus.setText(
+            f"Auto Setup {verification}: DAC {result.dac_value}, "
+            f"{result.trigger_mode.name.lower().replace('_', ' ')} at "
+            f"{result.trigger_level}"
+        )
+        log.info(
+            "Scope ch%d: Auto Setup complete: DAC=%d, mode=%s, level=%d, "
+            "baseline=%.1f, noise=%.1f, amplitude=%.1f, verified=%s",
+            self._channel,
+            result.dac_value,
+            result.trigger_mode.name,
+            result.trigger_level,
+            result.baseline,
+            result.noise_sigma,
+            result.pulse_amplitude,
+            result.verified,
+        )
 
     def _start_measurement_timer(self) -> None:
         time_s = self.ui.spinTime.value()
@@ -799,6 +917,7 @@ class ScopeController(QWidget):
         self.ui.btnAcquireFrame.setEnabled(True)
         self.ui.cbDmaEnable.setEnabled(True)
         self.ui.btnDmaFile.setEnabled(True)
+        self.ui.btnAutoSetup.setEnabled(True)
 
         if self._scope.dma_fault_is_latched():
             # A genuine EIO during the just-finished session latched a
@@ -846,6 +965,16 @@ class ScopeController(QWidget):
         memory just keeps showing whatever it last captured before the
         app closed, looking permanently frozen.
         """
+        auto_worker = self._auto_setup_worker
+        auto_thread = self._auto_setup_thread
+        if auto_worker is not None:
+            auto_worker.stop()
+        if auto_thread is not None and not auto_thread.wait(5000):
+            log.error(
+                "Scope Auto Setup thread did not stop within 5 seconds; "
+                "leaving it alive to finish rollback"
+            )
+
         worker = self._dma_worker
         thread = self._dma_thread
         self._ensure_disarmed()

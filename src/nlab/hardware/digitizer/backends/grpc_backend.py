@@ -4,18 +4,18 @@ Replaces VDPP_Engine_gRPC for the digitizer layer. Does not inherit from
 VDPP_Engine_Base — it implements DigitizerBackend directly.
 """
 
-from typing import Any
-
-import grpc
-import numpy as np
-
-import settings_pb2 as sp
-import settings_pb2_grpc
-import base_pb2 as bsp
-
-from .base import DigitizerBackend
+from __future__ import annotations
 
 import logging
+from typing import Any
+
+import base_pb2 as bsp
+import grpc
+import numpy as np
+import settings_pb2 as sp
+import settings_pb2_grpc
+
+from .base import DigitizerBackend
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +37,8 @@ class GrpcDigitizerBackend(DigitizerBackend):
         port: int = 50050,
     ) -> None:
         self._ch = channel
+        self._hostname = hostname
+        self._port = port
         self._gchannel = grpc.insecure_channel(f"{hostname}:{port}")
         self._stub = settings_pb2_grpc.EngineStub(self._gchannel)
         log.info("DPP gRPC backend: connected ch%d to %s:%d", channel, hostname, port)
@@ -44,6 +46,10 @@ class GrpcDigitizerBackend(DigitizerBackend):
     def close(self) -> None:
         log.info("DPP gRPC backend: closing ch%d", self._ch)
         self._gchannel.close()
+
+    def create_isolated_scope_backend(self) -> GrpcDigitizerBackend:
+        """Open a worker-owned gRPC channel for Scope Auto Setup."""
+        return type(self)(self._ch, self._hostname, self._port)
 
     # ------------------------------------------------------------------
     # Internal helpers — the only place gRPC types appear in this file

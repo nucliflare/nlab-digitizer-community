@@ -306,6 +306,13 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string>
             </property>
            </widget>
           </item>
+          <item>
+           <widget class="QPushButton" name="btnAutoSetup">
+            <property name="text">
+             <string>Auto Setup</string>
+            </property>
+           </widget>
+          </item>
          </layout>
         </item>
         <item>

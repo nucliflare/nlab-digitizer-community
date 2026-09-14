@@ -89,6 +89,7 @@ def test_scope_widgets_are_driven_from_hardware_specs(qapp: QApplication) -> Non
         "Periodic",
     ]
     assert ui.labelDacValue.text() == "DAC baseline:"
+    assert ui.btnAutoSetup.text() == "Auto Setup"
 
 
 def _scope_model_for_controller() -> MagicMock:

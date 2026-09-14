@@ -324,9 +324,14 @@ class IIODigitizerBackend(DigitizerBackend):
         uri: str = "ip:192.168.10.128:30431",
         dac_name: str | None = _DAC_DEVICE_NAME,
         dac_channel: int | None = None,
+        *,
+        _scope_only: bool = False,
     ) -> None:
         self._ch = channel
         self._uri = uri
+        self._dac_name = dac_name
+        self._dac_channel = dac_channel
+        self._scope_only = _scope_only
         self._ctx = iio.Context(uri)
 
         scopes = _devices_named(self._ctx, _SCOPE_DEVICE_NAME)
@@ -383,6 +388,18 @@ class IIODigitizerBackend(DigitizerBackend):
         # a close-time Buffer.cancel() produces) -- see its docstring and
         # acknowledge_dma_recovery()/dma_fault_is_latched().
         self._dma_fault_latched = False
+
+        # Auto Setup needs a worker-owned control/viewer connection but no
+        # DMA or MCA devices. Returning here avoids opening the backend's
+        # four additional role-specific IIO contexts, cutting seconds from
+        # a user-initiated setup while preserving the no-shared-context rule.
+        if self._scope_only:
+            log.info(
+                "IIO backend: connected lightweight scope worker ch%d to %s",
+                channel,
+                uri,
+            )
+            return
 
         # A single IIO network context is not safe for concurrent use from
         # multiple threads. Confirmed live, twice, independently: this is
@@ -563,8 +580,25 @@ class IIODigitizerBackend(DigitizerBackend):
 
     def close(self) -> None:
         log.info("IIO backend: closing ch%d", self._ch)
+        if self._scope_only:
+            self._close_dma_buffer()
+            return
         self._close_mca_dma_buffer()
         self._close_dma_buffer()
+
+    def create_isolated_scope_backend(self) -> IIODigitizerBackend:
+        """Open an independent IIO context set for Scope Auto Setup.
+
+        IIO contexts are intentionally not shared across threads; this is
+        the same isolation rule used by the scope viewer and DMA workers.
+        """
+        return type(self)(
+            self._ch,
+            self._uri,
+            dac_name=self._dac_name,
+            dac_channel=self._dac_channel,
+            _scope_only=True,
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
