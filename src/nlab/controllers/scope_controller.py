@@ -16,6 +16,8 @@ from nlab.hardware.digitizer.dma import (
     ScopeDmaStreamer,
 )
 from nlab.hardware.digitizer.scope import (
+    SCOPE_ADC_SAMPLE_PERIOD_NS,
+    SCOPE_DATAPATH_CLOCK_PERIOD_NS,
     ListSpec,
     RangeSpec,
     Scope,
@@ -35,10 +37,12 @@ _SCOPE_CONTROL_TOOLTIPS = {
     "comboTriggerMode": "Selects the condition that starts each scope frame.",
     "spinTriggerLevel": "Sets the raw ADC threshold used by the selected trigger mode.",
     "spinDacValue": "Sets the analog front-end baseline (DC offset) DAC code.",
-    "spinPretrigger": "Sets how many full-rate ADC samples are retained before the trigger.",
-    "spinFrameSamples": "Sets the number of full-rate ADC samples captured in each frame.",
+    "spinPretrigger": (
+        "Sets the pretrigger duration in nanoseconds (2 ns per full-rate ADC sample)."
+    ),
+    "spinFrameSamples": "Sets the frame duration in nanoseconds.",
     "spinFrameGap": (
-        "In Periodic mode, adds this many 8 ns clocks after each frame before the next frame."
+        "In Periodic mode, adds this delay in nanoseconds after each frame."
     ),
     "spinTime": (
         "Stops the acquisition automatically after this many seconds; 0 runs until stopped."
@@ -67,8 +71,8 @@ class ScopeController(QWidget):
     # lightweight viewer memory contains one four-sample boxcar average per
     # 125 MHz datapath beat, hence one displayed point every 8 ns.  See
     # hw_description/user-api.md, "Timebase" and "Viewer".
-    _SAMPLE_PERIOD_NS = 2
-    _VIEWER_POINT_PERIOD_NS = 8
+    _SAMPLE_PERIOD_NS = SCOPE_ADC_SAMPLE_PERIOD_NS
+    _VIEWER_POINT_PERIOD_NS = SCOPE_DATAPATH_CLOCK_PERIOD_NS
 
     def __init__(
         self,
@@ -132,15 +136,24 @@ class ScopeController(QWidget):
 
         spec = specs[ScopeParam.PRETRIGGER_SAMPLES]
         assert isinstance(spec, RangeSpec)
-        self._apply_range_to_spinbox(self.ui.spinPretrigger, spec)
+        self._apply_scaled_range_to_spinbox(
+            self.ui.spinPretrigger, spec, self._SAMPLE_PERIOD_NS
+        )
+        self.ui.labelPretrigger.setText("Pretrigger:")
 
         spec = specs[ScopeParam.FRAME_SAMPLES]
         assert isinstance(spec, RangeSpec)
-        self._apply_range_to_spinbox(self.ui.spinFrameSamples, spec)
+        self._apply_scaled_range_to_spinbox(
+            self.ui.spinFrameSamples, spec, self._SAMPLE_PERIOD_NS
+        )
+        self.ui.labelFrameSamples.setText("Frame:")
 
         spec = specs[ScopeParam.FRAME_PERIOD_CYCLES]
         assert isinstance(spec, RangeSpec)
-        self._apply_range_to_spinbox(self.ui.spinFrameGap, spec)
+        self._apply_scaled_range_to_spinbox(
+            self.ui.spinFrameGap, spec, self._VIEWER_POINT_PERIOD_NS
+        )
+        self.ui.labelFrameGap.setText("Periodic gap:")
 
         spec = specs[ScopeParam.EDGE_MODE]
         assert isinstance(spec, ListSpec)
@@ -157,6 +170,17 @@ class ScopeController(QWidget):
         spinbox.setMaximum(int(spec.max_val))
         spinbox.setSingleStep(int(spec.step) or 1)
         spinbox.setValue(int(spec.default))
+
+    @staticmethod
+    def _apply_scaled_range_to_spinbox(
+        spinbox: QSpinBox, spec: RangeSpec, scale: int
+    ) -> None:
+        """Apply a hardware range after converting its units to nanoseconds."""
+        spinbox.setMinimum(int(spec.min_val) * scale)
+        spinbox.setMaximum(int(spec.max_val) * scale)
+        spinbox.setSingleStep((int(spec.step) or 1) * scale)
+        spinbox.setValue(int(spec.default) * scale)
+        spinbox.setSuffix(" ns")
 
     @staticmethod
     def _apply_range_to_slider(slider: QSlider, spec: RangeSpec) -> None:
@@ -186,9 +210,15 @@ class ScopeController(QWidget):
         self.ui.sliderTriggerLevel.setValue(self._scope.get_trigger_level())
         self.ui.spinDacValue.setValue(self._scope.get_dac_value())
         self.ui.sliderDacValue.setValue(self._scope.get_dac_value())
-        self.ui.spinPretrigger.setValue(self._scope.get_pretrigger_samples())
-        self.ui.spinFrameSamples.setValue(self._scope.get_frame_samples())
-        self.ui.spinFrameGap.setValue(self._scope.get_frame_period_cycles())
+        self.ui.spinPretrigger.setValue(
+            self._scope.get_pretrigger_samples() * self._SAMPLE_PERIOD_NS
+        )
+        self.ui.spinFrameSamples.setValue(
+            self._scope.get_frame_samples() * self._SAMPLE_PERIOD_NS
+        )
+        self.ui.spinFrameGap.setValue(
+            self._scope.get_frame_period_cycles() * self._VIEWER_POINT_PERIOD_NS
+        )
         self.ui.comboTriggerMode.setCurrentIndex(self._scope.get_trigger_mode().value)
         self.ui.cbDmaEnable.setChecked(self._scope.get_dma_enable())
 
@@ -253,15 +283,19 @@ class ScopeController(QWidget):
     def _viewer_frame_limit(self) -> int | None:
         return self._scope.get_viewer_frame_samples_limit()
 
+    def _frame_samples_from_ui(self) -> int:
+        return self.ui.spinFrameSamples.value() // self._SAMPLE_PERIOD_NS
+
     def _frame_exceeds_viewer_limit(self) -> bool:
         limit = self._viewer_frame_limit()
-        return limit is not None and self.ui.spinFrameSamples.value() > limit
+        return limit is not None and self._frame_samples_from_ui() > limit
 
     def _viewer_limit_message(self) -> str:
         limit = self._viewer_frame_limit()
         assert limit is not None
         return (
-            f"Live preview is truncated above {limit} frame samples. "
+            f"Live preview is truncated above {limit * self._SAMPLE_PERIOD_NS} ns "
+            f"({limit} ADC samples). "
             "Enable Record DMA frames to save complete frames."
         )
 
@@ -274,11 +308,11 @@ class ScopeController(QWidget):
         return f"Live preview truncated: showing {displayed} of {expected} points. {suffix}"
 
     def _update_viewer_transport_hint(self) -> None:
-        frame_samples = self.ui.spinFrameSamples.value()
+        frame_ns = self.ui.spinFrameSamples.value()
+        frame_samples = self._frame_samples_from_ui()
         tip = (
-            f"Sets the frame length: {frame_samples} ADC samples at "
-            f"{self._SAMPLE_PERIOD_NS} ns/sample "
-            f"({format_duration_ns(frame_samples * self._SAMPLE_PERIOD_NS)} total). "
+            f"Sets the frame length: {format_duration_ns(frame_ns)} "
+            f"({frame_samples} ADC samples at {self._SAMPLE_PERIOD_NS} ns/sample). "
             f"The live viewer plots {self._VIEWER_POINT_PERIOD_NS} ns averages."
         )
         limit = self._viewer_frame_limit()
@@ -306,11 +340,15 @@ class ScopeController(QWidget):
         )
 
         self.ui.spinPretrigger.editingFinished.connect(
-            lambda: self._scope.set_pretrigger_samples(self.ui.spinPretrigger.value())
+            lambda: self._scope.set_pretrigger_samples(
+                self.ui.spinPretrigger.value() // self._SAMPLE_PERIOD_NS
+            )
         )
         self.ui.spinFrameSamples.editingFinished.connect(self._on_frame_samples_changed)
         self.ui.spinFrameGap.editingFinished.connect(
-            lambda: self._scope.set_frame_period_cycles(self.ui.spinFrameGap.value())
+            lambda: self._scope.set_frame_period_cycles(
+                self.ui.spinFrameGap.value() // self._VIEWER_POINT_PERIOD_NS
+            )
         )
         self.ui.comboTriggerMode.currentIndexChanged.connect(
             self._on_trigger_mode_changed
@@ -406,7 +444,7 @@ class ScopeController(QWidget):
                 filepath=filepath,
             )
         else:
-            frame_samples = self.ui.spinFrameSamples.value()
+            frame_samples = self._frame_samples_from_ui()
             log.debug(
                 "Scope ch%d DMA [1/6]: creating worker, file=%s, frame_samples=%d",
                 self._channel,
@@ -537,7 +575,7 @@ class ScopeController(QWidget):
         if data is None:
             return
         x_time, y_voltage = data
-        expected = self.ui.spinFrameSamples.value() // 4
+        expected = self._frame_samples_from_ui() // 4
         if len(y_voltage) < expected:
             self.ui.lblRecordingStatus.setText(
                 self._viewer_truncation_message(len(y_voltage), expected)
@@ -551,9 +589,9 @@ class ScopeController(QWidget):
             )
 
     def _on_frame_samples_changed(self) -> None:
-        value = self.ui.spinFrameSamples.value()
-        self._scope.set_frame_samples(value)
-        self._display_nx = value // 4
+        frame_samples = self._frame_samples_from_ui()
+        self._scope.set_frame_samples(frame_samples)
+        self._display_nx = frame_samples // 4
         self._display_ny = self._display_nx * self._Y_SCALE_FACTOR
         self._persistence_buffer = np.zeros((self._display_nx, self._display_ny), dtype=np.float32)
         self._update_axis_ranges()
@@ -573,9 +611,9 @@ class ScopeController(QWidget):
                 self._scope.stop()
             except Exception:
                 log.exception("Scope ch%d: failed to disarm after viewer read", self._channel)
-        value = self.ui.spinFrameSamples.value()
-        frame = raw_frame[: value // 4]
-        expected = value // 4
+        frame_samples = self._frame_samples_from_ui()
+        frame = raw_frame[: frame_samples // 4]
+        expected = frame_samples // 4
         if len(frame) < expected:
             self.ui.lblRecordingStatus.setText(
                 self._viewer_truncation_message(len(frame), expected)
@@ -643,7 +681,7 @@ class ScopeController(QWidget):
         self._time_axis_label = layout.addLabel("Time [ns]", col=1)
 
     def _setup_persistence_layer(self) -> None:
-        self._display_nx = self.ui.spinFrameSamples.value() // 4
+        self._display_nx = self._frame_samples_from_ui() // 4
         self._display_ny = self._display_nx * self._Y_SCALE_FACTOR
         self._persistence_buffer = np.zeros((self._display_nx, self._display_ny), dtype=np.float32)
         self._persistence_img = pg.ImageItem()
@@ -656,8 +694,8 @@ class ScopeController(QWidget):
         self._raw_curve.setVisible(False)
 
     def _update_axis_ranges(self) -> None:
-        frame = self.ui.spinFrameSamples.value()
-        duration_ns = frame * self._SAMPLE_PERIOD_NS
+        frame_samples = self._frame_samples_from_ui()
+        duration_ns = self.ui.spinFrameSamples.value()
         self._time_scale = time_axis_scale(duration_ns)
         duration = self._time_scale.from_nanoseconds(duration_ns)
         self._time_axis_label.setText(
@@ -667,7 +705,7 @@ class ScopeController(QWidget):
         )
         _, plotted_frame = self._raw_curve.getData()
         if plotted_frame is not None and len(plotted_frame) > 0:
-            plotted_frame = plotted_frame[: frame // 4]
+            plotted_frame = plotted_frame[: frame_samples // 4]
             plotted_time = (
                 np.arange(len(plotted_frame))
                 * self._VIEWER_POINT_PERIOD_NS

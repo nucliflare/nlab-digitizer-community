@@ -446,6 +446,10 @@ class GrpcDigitizerBackend(DigitizerBackend):
 
     # ---- pulse memory ----
 
+    def get_debug_signal_selectors(self) -> tuple[int, ...]:
+        """The legacy gRPC API exposes the original eight selector codes."""
+        return tuple(range(8))
+
     def get_mem1_sig_select(self) -> int:
         return self._int(_CMD.VDPP_dpp_get_mem1_sig_select)
 

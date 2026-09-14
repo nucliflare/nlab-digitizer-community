@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import TypedDict, Union
+from typing import TypedDict
 
 import numpy as np
 
 from .backends.base import ScopeBackend
+
+SCOPE_ADC_SAMPLE_PERIOD_NS = 2
+SCOPE_DATAPATH_CLOCK_PERIOD_NS = 8
 
 # ---------------------------------------------------------------------------
 # Parameter spec types — used for validation and GUI settings generation
@@ -38,7 +41,7 @@ class ListSpec:
             raise ValueError(f"{name}: '{val}' not in {self.items}")
 
 
-ParameterSpec = Union[RangeSpec, ListSpec]
+ParameterSpec = RangeSpec | ListSpec
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +263,10 @@ class Scope:
         """
         return [
             ScopeSettingEntry(id=int(ScopeParam.TRIGGER_LEVEL), value=self.get_trigger_level()),
-            ScopeSettingEntry(id=int(ScopeParam.PRETRIGGER_SAMPLES), value=self.get_pretrigger_samples()),
+            ScopeSettingEntry(
+                id=int(ScopeParam.PRETRIGGER_SAMPLES),
+                value=self.get_pretrigger_samples(),
+            ),
             ScopeSettingEntry(id=int(ScopeParam.FRAME_SAMPLES), value=self.get_frame_samples()),
             ScopeSettingEntry(
                 id=int(ScopeParam.FRAME_PERIOD_CYCLES),

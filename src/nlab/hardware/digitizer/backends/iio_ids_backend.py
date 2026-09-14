@@ -7,15 +7,20 @@ The device/attribute mapping comes from the small reference clients in
 * MCP3564(R) channels are selected by their ``label`` attribute and expose
   raw HV feedback and the ADC's internal temperature sensor;
 * TMP117 instances are selected by their device label and expose
-  ``temp.raw`` plus ``temp.scale``.
+  ``temp.raw`` plus ``temp.scale``. Channel-specific ``cha_temp`` and
+  ``chb_temp`` sensors are preferred but optional; newer boards with only
+  the shared ``HAT_temp`` sensor use that as the digital-temperature source.
 
 The legacy IDS service also exposed a SiPM supply. That hardware is no
 longer present, so the corresponding abstract-interface methods deliberately
 do not attempt to alias another DAC/ADC channel.
 
 Device discovery and all read paths were confirmed live on both channels on
-2026-08-10. DAC writes and software compensation were boundary/unit tested
-only; they were not exercised against live HV hardware during implementation.
+2026-08-10. The optional channel-temperature topology was confirmed on
+2026-09-14 against 192.168.10.128 (three TMP117s) and 192.168.10.135 plus
+10.7.0.121 (only HAT_temp). DAC writes and software compensation were
+boundary/unit tested only; they were not exercised against live HV hardware
+during implementation.
 """
 
 from __future__ import annotations
@@ -116,8 +121,8 @@ class _IDSDevices:
     adc_temperature: iio.Channel
     dac: iio.Device
     hv_output: iio.Channel
-    channel_temp: iio.Device
-    channel_temp_input: iio.Channel
+    digital_temp_input: iio.Channel | None
+    digital_temp_label: str | None
     ads_temp_input: iio.Channel | None
 
 
@@ -201,18 +206,23 @@ def _discover_devices(
             f"voltage{dac_channel}"
         )
 
-    temp_label = _TMP_LABELS[channel]
-    channel_temp = _find_labelled_device(context, _TMP_DEVICE_NAME, temp_label)
-    if channel_temp is None:
-        raise IIOIDSUnavailableError(
-            f"IIO IDS backend: no {_TMP_DEVICE_NAME} device labelled "
-            f"'{temp_label}'"
+    # Live audit on 2026-09-14: 192.168.10.128 exposes cha_temp/chb_temp and
+    # HAT_temp, while 192.168.10.135 and 10.7.0.121 expose only HAT_temp.
+    # The HV DAC and ADC paths are complete on all three boards, so a missing
+    # per-channel thermometer must not suppress the entire PSU backend.
+    preferred_temp_label = _TMP_LABELS[channel]
+    digital_temp = _find_labelled_device(
+        context, _TMP_DEVICE_NAME, preferred_temp_label,
+    )
+    digital_temp_label: str | None = preferred_temp_label
+    if digital_temp is None:
+        digital_temp = _find_labelled_device(
+            context, _TMP_DEVICE_NAME, _GLOBAL_TMP_LABEL,
         )
-    channel_temp_input = channel_temp.find_channel("temp")
-    if channel_temp_input is None:
-        raise IIOIDSUnavailableError(
-            f"IIO IDS backend: {_TMP_DEVICE_NAME} '{temp_label}' has no temp channel"
-        )
+        digital_temp_label = _GLOBAL_TMP_LABEL if digital_temp is not None else None
+    digital_temp_input = digital_temp.find_channel("temp") if digital_temp is not None else None
+    if digital_temp_input is None:
+        digital_temp_label = None
 
     ads = _find_device(context, _ADS_DEVICE_NAME)
     ads_temp_input = ads.find_channel("temp") if ads is not None else None
@@ -223,8 +233,8 @@ def _discover_devices(
         adc_temperature=adc_temperature,
         dac=dac,
         hv_output=hv_output,
-        channel_temp=channel_temp,
-        channel_temp_input=channel_temp_input,
+        digital_temp_input=digital_temp_input,
+        digital_temp_label=digital_temp_label,
         ads_temp_input=ads_temp_input,
     )
 
@@ -290,6 +300,21 @@ class IIOIDSBackend(IDSBackend):
         self._nominal_hv_voltage = self._read_dac_voltage(self._devices)
         self._compensated_hv_voltage = self._nominal_hv_voltage
 
+        digital_temp_label = self._devices.digital_temp_label
+        if digital_temp_label == _GLOBAL_TMP_LABEL:
+            log.warning(
+                "IIO IDS backend ch%d: no %s TMP117; using shared %s sensor",
+                channel,
+                _TMP_LABELS[channel],
+                _GLOBAL_TMP_LABEL,
+            )
+        elif digital_temp_label is None:
+            log.warning(
+                "IIO IDS backend ch%d: no channel or shared TMP117; digital "
+                "temperature is unavailable but HV control remains available",
+                channel,
+            )
+
         log.info(
             "IIO IDS backend: connected ch%d (DAC voltage%d, %s, %s) to %s",
             channel,
@@ -326,10 +351,12 @@ class IIOIDSBackend(IDSBackend):
 
     @staticmethod
     def _read_digital_temperature(devices: _IDSDevices) -> float:
-        raw = int(devices.channel_temp_input.attrs["raw"].value)
+        if devices.digital_temp_input is None:
+            return float("nan")
+        raw = int(devices.digital_temp_input.attrs["raw"].value)
         # The TMP117 IIO scale is millidegrees Celsius per raw count.
         scale_millidegrees = float(
-            devices.channel_temp_input.attrs["scale"].value
+            devices.digital_temp_input.attrs["scale"].value
         )
         return raw * scale_millidegrees / 1000.0
 
@@ -356,6 +383,11 @@ class IIOIDSBackend(IDSBackend):
         if self._hv_compens_mode == 0:
             return None
         if self._hv_compens_mode == 1:
+            if devices.digital_temp_input is None:
+                raise RuntimeError(
+                    "IIO IDS backend: digital HV temperature compensation "
+                    "requires a channel-specific or HAT_temp TMP117 sensor"
+                )
             return self._read_digital_temperature(devices)
         if self._hv_compens_mode == 2:
             return self._read_analog_temperature(devices)
@@ -545,9 +577,9 @@ class IIOIDSBackend(IDSBackend):
         self._temp_digital_mode = int(val)
 
     def get_temp_digital_status(self) -> int:
-        # Successful labelled-device discovery is the only communication
-        # status made available by iio_tmp117.c.
-        return 1
+        # iio_tmp117.c exposes no communication-status attribute. Presence
+        # of a usable labelled temp channel is the only available status.
+        return int(self._monitor_devices.digital_temp_input is not None)
 
     def get_temp_digital(self) -> float:
         with self._monitor_lock:

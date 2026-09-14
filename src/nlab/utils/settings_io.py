@@ -1,8 +1,9 @@
 """Versioned, human-readable YAML persistence for GUI and hardware settings.
 
-Version 2 stores every connected channel in one document. Hardware-backed
-values live under ``hardware``; presentation and worker values live under
-``application`` so non-hardware state is explicit.
+Version 3 stores every connected channel in one document and names Scope and
+MCA time values with an explicit ``_ns`` suffix. Hardware-backed values live
+under ``hardware``; presentation and worker values live under ``application``
+so non-hardware state is explicit.
 """
 
 from __future__ import annotations
@@ -16,10 +17,15 @@ import yaml
 
 from nlab.hardware.digitizer.hv import HVSupply
 from nlab.hardware.digitizer.mca import MultiChannelAnalyzer
-from nlab.hardware.digitizer.scope import Scope, TriggerMode
+from nlab.hardware.digitizer.scope import (
+    SCOPE_ADC_SAMPLE_PERIOD_NS,
+    SCOPE_DATAPATH_CLOCK_PERIOD_NS,
+    Scope,
+    TriggerMode,
+)
 
 log = logging.getLogger(__name__)
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 
 
 def read_configuration(path: Path) -> dict[str, Any]:
@@ -40,6 +46,24 @@ def write_configuration(path: Path, settings: Mapping[str, Any]) -> None:
     log.info("Settings saved to %s", path)
 
 
+def validate_configuration_version(settings: Mapping[str, Any]) -> None:
+    """Reject full GUI settings written with an incompatible schema.
+
+    The unversioned, single-channel mapping used by ``save_settings`` remains
+    supported. Documents containing the full ``hardware`` section must match
+    the current format so renamed/unit-bearing fields cannot be silently
+    ignored.
+    """
+    if "hardware" not in settings:
+        return
+    version = settings.get("format_version")
+    if version != FORMAT_VERSION:
+        raise ValueError(
+            f"Unsupported settings format_version {version!r}; "
+            f"expected {FORMAT_VERSION}"
+        )
+
+
 def connection_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
     value = settings.get("connection", {})
     return dict(value) if isinstance(value, Mapping) else {}
@@ -51,7 +75,7 @@ def _mapping(parent: Mapping[str, Any], key: str) -> Mapping[str, Any]:
 
 
 def channel_entry(settings: Mapping[str, Any], channel: int) -> dict[str, Any] | None:
-    """Find a v2 hardware channel, accepting YAML string or integer keys."""
+    """Find a hardware channel, accepting YAML string or integer keys."""
     channels = _mapping(_mapping(settings, "hardware"), "channels")
     value = channels.get(str(channel))
     return dict(value) if isinstance(value, Mapping) else None
@@ -82,9 +106,13 @@ def collect_channel_hardware(
     settings: dict[str, Any] = {
         "scope": {
             "trigger_level": scope.get_trigger_level(),
-            "pretrigger_samples": scope.get_pretrigger_samples(),
-            "frame_samples": scope.get_frame_samples(),
-            "frame_period_cycles": scope.get_frame_period_cycles(),
+            "pretrigger_ns": (
+                scope.get_pretrigger_samples() * SCOPE_ADC_SAMPLE_PERIOD_NS
+            ),
+            "frame_ns": scope.get_frame_samples() * SCOPE_ADC_SAMPLE_PERIOD_NS,
+            "frame_gap_ns": (
+                scope.get_frame_period_cycles() * SCOPE_DATAPATH_CLOCK_PERIOD_NS
+            ),
             "edge_mode": scope.get_trigger_mode().value,
             "dac_value": scope.get_dac_value(),
             "dma_enabled": scope.get_dma_enable(),
@@ -96,8 +124,8 @@ def collect_channel_hardware(
                 "pulse_polarity": mca.get_pulse_polarity(),
                 "trigger_level": mca.get_trigger_level(),
                 "baseline_window": mca.get_baseline_window(),
-                "pretrigger_samples": mca.get_pretrigger_samples(),
-                "frame_samples": mca.get_frame_samples(),
+                "pretrigger_ns": mca.get_pretrigger_samples(),
+                "frame_ns": mca.get_frame_samples(),
                 "trg_source": mca.get_trg_source(),
                 "ext_trig_enable": mca.get_ext_trig_enable(),
                 "edge_det_coeff": mca.get_edge_det_coeff(),
@@ -113,34 +141,34 @@ def collect_channel_hardware(
                 "mem2_sig_select": mca.get_mem2_sig_select(),
             },
             "crrc2": {
-                "cdelay": mca.filters.crrc2.get_Cdelay(),
-                "fdelay": mca.filters.crrc2.get_Fdelay(),
+                "cdelay_ns": mca.filters.crrc2.get_Cdelay(),
+                "fdelay_ns": mca.filters.crrc2.get_Fdelay(),
                 "pzc": mca.filters.crrc2.get_pzc_coeff(),
             },
             "cfd": {
                 "enable": mca.filters.cfd.get_enable(),
                 "factor": mca.filters.cfd.get_factor(),
-                "delay": mca.filters.cfd.get_delay(),
-                "tw_low": mca.filters.cfd.get_time_window_low(),
-                "tw_high": mca.filters.cfd.get_time_window_high(),
+                "delay_ns": mca.filters.cfd.get_delay(),
+                "tw_low_ns": mca.filters.cfd.get_time_window_low(),
+                "tw_high_ns": mca.filters.cfd.get_time_window_high(),
             },
             "trapezoid": {
                 "enable": mca.filters.trapezoid.get_enable(),
-                "r": mca.filters.trapezoid.get_R(),
-                "m": mca.filters.trapezoid.get_M(),
-                "t": mca.filters.trapezoid.get_T(),
-                "e": mca.filters.trapezoid.get_E(),
+                "rise_ns": mca.filters.trapezoid.get_R(),
+                "flat_top_ns": mca.filters.trapezoid.get_M(),
+                "pole_zero_ns": mca.filters.trapezoid.get_T(),
+                "energy_time_ns": mca.filters.trapezoid.get_E(),
                 "ft": mca.filters.trapezoid.get_FT(),
             },
             "charge_comparison": {
                 "enable": mca.filters.charge_comparison.get_enable(),
-                "time": mca.filters.charge_comparison.get_time(),
+                "time_ns": mca.filters.charge_comparison.get_time(),
             },
             "psd_zc": {
                 "enable": mca.filters.psd_zc.get_enable(),
                 "mode": mca.filters.psd_zc.get_mode(),
-                "low": mca.filters.psd_zc.get_time_window_low(),
-                "high": mca.filters.psd_zc.get_time_window_high(),
+                "low_ns": mca.filters.psd_zc.get_time_window_low(),
+                "high_ns": mca.filters.psd_zc.get_time_window_high(),
             },
         }
         if mca_lp_preset is not None:
@@ -175,6 +203,23 @@ def _apply_bools(
             setter(bool(settings[key]))
 
 
+def _apply_time_ns(
+    settings: Mapping[str, Any],
+    key: str,
+    hardware_unit_ns: int,
+    setter: Callable[[int], None],
+) -> None:
+    if key not in settings:
+        return
+    value_ns = int(settings[key])
+    if value_ns % hardware_unit_ns:
+        raise ValueError(
+            f"{key}: {value_ns} ns is not aligned to the "
+            f"{hardware_unit_ns} ns hardware step"
+        )
+    setter(value_ns // hardware_unit_ns)
+
+
 def _apply_mca(mca: MultiChannelAnalyzer, settings: Mapping[str, Any]) -> None:
     signal = _mapping(settings, "signal")
     _apply_ints(
@@ -183,8 +228,8 @@ def _apply_mca(mca: MultiChannelAnalyzer, settings: Mapping[str, Any]) -> None:
             ("pulse_polarity", mca.set_pulse_polarity),
             ("trigger_level", mca.set_trigger_level),
             ("baseline_window", mca.set_baseline_window),
-            ("pretrigger_samples", mca.set_pretrigger_samples),
-            ("frame_samples", mca.set_frame_samples),
+            ("pretrigger_ns", mca.set_pretrigger_samples),
+            ("frame_ns", mca.set_frame_samples),
             ("trg_source", mca.set_trg_source),
             ("edge_det_coeff", mca.set_edge_det_coeff),
         ),
@@ -214,8 +259,8 @@ def _apply_mca(mca: MultiChannelAnalyzer, settings: Mapping[str, Any]) -> None:
 
     crrc2 = _mapping(settings, "crrc2")
     for key, setter in (
-        ("cdelay", mca.filters.crrc2.set_Cdelay),
-        ("fdelay", mca.filters.crrc2.set_Fdelay),
+        ("cdelay_ns", mca.filters.crrc2.set_Cdelay),
+        ("fdelay_ns", mca.filters.crrc2.set_Fdelay),
         ("pzc", mca.filters.crrc2.set_pzc_coeff),
     ):
         if key in crrc2:
@@ -227,9 +272,9 @@ def _apply_mca(mca: MultiChannelAnalyzer, settings: Mapping[str, Any]) -> None:
     _apply_ints(
         cfd,
         (
-            ("delay", mca.filters.cfd.set_delay),
-            ("tw_low", mca.filters.cfd.set_time_window_low),
-            ("tw_high", mca.filters.cfd.set_time_window_high),
+            ("delay_ns", mca.filters.cfd.set_delay),
+            ("tw_low_ns", mca.filters.cfd.set_time_window_low),
+            ("tw_high_ns", mca.filters.cfd.set_time_window_high),
         ),
     )
 
@@ -238,10 +283,10 @@ def _apply_mca(mca: MultiChannelAnalyzer, settings: Mapping[str, Any]) -> None:
     _apply_ints(
         trapezoid,
         (
-            ("r", mca.filters.trapezoid.set_R),
-            ("m", mca.filters.trapezoid.set_M),
-            ("t", mca.filters.trapezoid.set_T),
-            ("e", mca.filters.trapezoid.set_E),
+            ("rise_ns", mca.filters.trapezoid.set_R),
+            ("flat_top_ns", mca.filters.trapezoid.set_M),
+            ("pole_zero_ns", mca.filters.trapezoid.set_T),
+            ("energy_time_ns", mca.filters.trapezoid.set_E),
             ("ft", mca.filters.trapezoid.set_FT),
         ),
     )
@@ -249,8 +294,8 @@ def _apply_mca(mca: MultiChannelAnalyzer, settings: Mapping[str, Any]) -> None:
     charge = _mapping(settings, "charge_comparison")
     if "enable" in charge:
         mca.filters.charge_comparison.set_enable(bool(charge["enable"]))
-    if "time" in charge:
-        mca.filters.charge_comparison.set_time(int(charge["time"]))
+    if "time_ns" in charge:
+        mca.filters.charge_comparison.set_time(int(charge["time_ns"]))
 
     psd = _mapping(settings, "psd_zc")
     _apply_bools(psd, (("enable", mca.filters.psd_zc.set_enable),))
@@ -258,8 +303,8 @@ def _apply_mca(mca: MultiChannelAnalyzer, settings: Mapping[str, Any]) -> None:
         psd,
         (
             ("mode", mca.filters.psd_zc.set_mode),
-            ("low", mca.filters.psd_zc.set_time_window_low),
-            ("high", mca.filters.psd_zc.set_time_window_high),
+            ("low_ns", mca.filters.psd_zc.set_time_window_low),
+            ("high_ns", mca.filters.psd_zc.set_time_window_high),
         ),
     )
 
@@ -283,11 +328,26 @@ def apply_channel_hardware(
         scope_settings,
         (
             ("trigger_level", scope.set_trigger_level),
-            ("pretrigger_samples", scope.set_pretrigger_samples),
-            ("frame_samples", scope.set_frame_samples),
-            ("frame_period_cycles", scope.set_frame_period_cycles),
             ("dac_value", scope.set_dac_value),
         ),
+    )
+    _apply_time_ns(
+        scope_settings,
+        "pretrigger_ns",
+        SCOPE_ADC_SAMPLE_PERIOD_NS,
+        scope.set_pretrigger_samples,
+    )
+    _apply_time_ns(
+        scope_settings,
+        "frame_ns",
+        SCOPE_ADC_SAMPLE_PERIOD_NS,
+        scope.set_frame_samples,
+    )
+    _apply_time_ns(
+        scope_settings,
+        "frame_gap_ns",
+        SCOPE_DATAPATH_CLOCK_PERIOD_NS,
+        scope.set_frame_period_cycles,
     )
     _apply_bools(scope_settings, (("dma_enabled", scope.set_dma_enable),))
     if "edge_mode" in scope_settings:

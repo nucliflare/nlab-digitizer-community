@@ -346,6 +346,11 @@ class MCABackend(ABC):
 
     # ---- pulse memory ----
     @abstractmethod
+    def get_debug_signal_selectors(self) -> tuple[int, ...]:
+        """Return debug-memory selector codes supported by this backend."""
+        ...
+
+    @abstractmethod
     def get_mem1_sig_select(self) -> int: ...
 
     @abstractmethod

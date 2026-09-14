@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 from typing import cast
 
@@ -118,6 +119,22 @@ def _make_context() -> _Context:
     return _Context([temp_b, dac, temp_hat, adc, ads, temp_a, xadc, clock])
 
 
+def _without_channel_temperatures() -> _Context:
+    context = _make_context()
+    context.devices = [
+        device
+        for device in context.devices
+        if device.label not in ("cha_temp", "chb_temp")
+    ]
+    return context
+
+
+def _without_any_tmp117() -> _Context:
+    context = _make_context()
+    context.devices = [device for device in context.devices if device.name != "tmp117"]
+    return context
+
+
 @pytest.fixture
 def backend(monkeypatch: pytest.MonkeyPatch) -> IIOIDSBackend:
     contexts: list[_Context] = []
@@ -141,6 +158,32 @@ def test_labelled_discovery_and_scaled_readback(backend: IIOIDSBackend) -> None:
     assert backend.get_ads_temp() == pytest.approx(71.0)
     assert backend.get_temp_digital_status() == 1
     assert backend.get_ads_temp_for_correction() == pytest.approx(71.0)
+
+
+def test_channel_tmp117_is_optional_and_hat_sensor_is_shared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(iio, "Context", lambda uri: _without_channel_temperatures())
+
+    backend = IIOIDSBackend(1, "ip:test")
+
+    assert backend._devices.digital_temp_label == "HAT_temp"
+    assert backend.get_temp_digital_status() == 1
+    assert backend.get_temp_digital() == pytest.approx(46.875)
+
+
+def test_psu_remains_available_without_any_tmp117(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(iio, "Context", lambda uri: _without_any_tmp117())
+
+    backend = IIOIDSBackend(0, "ip:test")
+
+    assert backend.get_temp_digital_status() == 0
+    assert math.isnan(backend.get_temp_digital())
+    assert backend.get_hv_adc_voltage() == pytest.approx(50.0)
+    with pytest.raises(RuntimeError, match="requires.*TMP117"):
+        backend.set_hv_compens_mode(1)
 
 
 def test_global_diagnostics_use_dedicated_context_and_physical_units(
@@ -278,7 +321,7 @@ def test_factory_continues_when_channel_ids_devices_are_absent(
 
     def unavailable(channel: int, uri: str) -> IDSBackend:
         raise IIOIDSUnavailableError(
-            "IIO IDS backend: no tmp117 device labelled 'cha_temp'"
+            "IIO IDS backend: no mcp3564/mcp3564r device found"
         )
 
     monkeypatch.setattr(iio_ids_backend, "IIOIDSBackend", unavailable)

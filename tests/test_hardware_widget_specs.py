@@ -60,17 +60,26 @@ def test_scope_widgets_are_driven_from_hardware_specs(qapp: QApplication) -> Non
         ui=ui,
         _scope=SimpleNamespace(specs=PARAMETER_SPECS),
         _apply_range_to_spinbox=ScopeController._apply_range_to_spinbox,
+        _apply_scaled_range_to_spinbox=ScopeController._apply_scaled_range_to_spinbox,
         _apply_range_to_slider=ScopeController._apply_range_to_slider,
+        _SAMPLE_PERIOD_NS=ScopeController._SAMPLE_PERIOD_NS,
+        _VIEWER_POINT_PERIOD_NS=ScopeController._VIEWER_POINT_PERIOD_NS,
     )
 
     ScopeController._apply_parameter_specs(controller)
 
-    assert (ui.spinPretrigger.minimum(), ui.spinPretrigger.maximum()) == (0, 1020)
-    assert ui.spinPretrigger.singleStep() == 4
-    assert (ui.spinFrameSamples.minimum(), ui.spinFrameSamples.maximum()) == (4, 8188)
-    assert ui.spinFrameSamples.singleStep() == 4
-    assert (ui.spinFrameGap.minimum(), ui.spinFrameGap.maximum()) == (0, 65535)
-    assert ui.spinFrameGap.singleStep() == 1
+    assert (ui.spinPretrigger.minimum(), ui.spinPretrigger.maximum()) == (0, 2040)
+    assert ui.spinPretrigger.singleStep() == 8
+    assert ui.spinPretrigger.suffix() == " ns"
+    assert (ui.spinFrameSamples.minimum(), ui.spinFrameSamples.maximum()) == (8, 16376)
+    assert ui.spinFrameSamples.singleStep() == 8
+    assert ui.spinFrameSamples.suffix() == " ns"
+    assert (ui.spinFrameGap.minimum(), ui.spinFrameGap.maximum()) == (0, 524280)
+    assert ui.spinFrameGap.singleStep() == 8
+    assert ui.spinFrameGap.suffix() == " ns"
+    assert ui.labelPretrigger.text() == "Pretrigger:"
+    assert ui.labelFrameSamples.text() == "Frame:"
+    assert ui.labelFrameGap.text() == "Periodic gap:"
     assert (ui.spinDacValue.minimum(), ui.spinDacValue.maximum()) == (0, 1023)
     assert [ui.comboTriggerMode.itemText(i) for i in range(5)] == [
         "Any above",
@@ -107,7 +116,9 @@ def test_scope_viewer_scales_time_axis_and_explains_sample_period(qtbot: QtBot) 
     assert "2 ns/ADC sample" in controller._time_axis_label.text
     assert "8 ns/viewer point" in controller._time_axis_label.text
     assert controller.ui.plotWaveform.toolTip() == ""
-    assert "2 ns/sample" in controller.ui.spinFrameSamples.toolTip()
+    assert controller.ui.spinPretrigger.value() == 64
+    assert controller.ui.spinFrameSamples.value() == 2048
+    assert "1024 ADC samples at 2 ns/sample" in controller.ui.spinFrameSamples.toolTip()
     _assert_all_spinboxes_and_combos_have_tooltips(controller)
 
     controller._set_display_mode(DisplayMode.RAW)
@@ -117,16 +128,37 @@ def test_scope_viewer_scales_time_axis_and_explains_sample_period(qtbot: QtBot) 
     x_data, _ = controller._raw_curve.getData()
     np.testing.assert_allclose(x_data, [0.0, 0.008, 0.016])
 
-    controller.ui.spinFrameSamples.setValue(256)
+    controller.ui.spinFrameSamples.setValue(512)
     controller._on_frame_samples_changed()
 
     assert controller._time_scale.unit == "ns"
     assert "Time [ns]" in controller._time_axis_label.text
-    assert "256 ADC samples at 2 ns/sample (512 ns total)" in (
+    assert "Sets the frame length: 512 ns (256 ADC samples at 2 ns/sample)" in (
         controller.ui.spinFrameSamples.toolTip()
     )
+    scope.set_frame_samples.assert_called_with(256)
     x_data, _ = controller._raw_curve.getData()
     np.testing.assert_allclose(x_data, [0.0, 8.0, 16.0])
+
+
+def test_scope_timing_controls_convert_nanoseconds_to_hardware_units(
+    qtbot: QtBot,
+) -> None:
+    scope = _scope_model_for_controller()
+    controller = ScopeController(scope, scope_dma=None, channel=0)
+    qtbot.addWidget(controller)
+    scope.reset_mock()
+
+    controller.ui.spinPretrigger.setValue(80)
+    controller.ui.spinPretrigger.editingFinished.emit()
+    controller.ui.spinFrameSamples.setValue(512)
+    controller._on_frame_samples_changed()
+    controller.ui.spinFrameGap.setValue(24)
+    controller.ui.spinFrameGap.editingFinished.emit()
+
+    scope.set_pretrigger_samples.assert_called_once_with(40)
+    scope.set_frame_samples.assert_called_once_with(256)
+    scope.set_frame_period_cycles.assert_called_once_with(3)
 
 
 def test_scope_status_message_cannot_widen_controls_panel(qtbot: QtBot) -> None:
@@ -138,7 +170,7 @@ def test_scope_status_message_cannot_widen_controls_panel(qtbot: QtBot) -> None:
     assert status.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Ignored
 
     status.setText(controller._viewer_limit_message())
-    assert "truncated above 2328 frame samples" in status.text()
+    assert "truncated above 4656 ns (2328 ADC samples)" in status.text()
 
 
 def test_scope_frame_gap_is_enabled_only_for_periodic_trigger(qtbot: QtBot) -> None:
@@ -180,7 +212,7 @@ def test_scope_allows_truncated_long_viewer_only_start(qtbot: QtBot) -> None:
     controller = ScopeController(scope, scope_dma=None, channel=0)
     qtbot.addWidget(controller)
     scope.reset_mock()
-    controller.ui.spinFrameSamples.setValue(4096)
+    controller.ui.spinFrameSamples.setValue(8192)
 
     controller._on_start()
 
@@ -198,7 +230,7 @@ def test_binary_viewer_allows_long_viewer_only_start(qtbot: QtBot) -> None:
     controller = ScopeController(scope, scope_dma=None, channel=0)
     qtbot.addWidget(controller)
     scope.reset_mock()
-    controller.ui.spinFrameSamples.setValue(4096)
+    controller.ui.spinFrameSamples.setValue(8192)
 
     controller._on_start()
 
@@ -214,11 +246,11 @@ def test_scope_accepts_long_frame_change_during_viewer_readout(qtbot: QtBot) -> 
     scope.reset_mock()
     scope.get_frame_samples.return_value = 1024
     controller._refresh_timer.start(1000)
-    controller.ui.spinFrameSamples.setValue(4096)
+    controller.ui.spinFrameSamples.setValue(8192)
 
     controller._on_frame_samples_changed()
 
-    assert controller.ui.spinFrameSamples.value() == 4096
+    assert controller.ui.spinFrameSamples.value() == 8192
     scope.set_frame_samples.assert_called_once_with(4096)
     assert "Live preview is truncated" in controller.ui.lblRecordingStatus.text()
     controller._refresh_timer.stop()
@@ -229,7 +261,7 @@ def test_long_dma_capture_keeps_truncated_text_viewer_polling(qtbot: QtBot) -> N
     controller = ScopeController(scope, scope_dma=None, channel=0)
     qtbot.addWidget(controller)
     controller._scope_dma = object()  # type: ignore[assignment]
-    controller.ui.spinFrameSamples.setValue(4096)
+    controller.ui.spinFrameSamples.setValue(8192)
 
     controller._on_dma_ready()
 
@@ -242,7 +274,7 @@ def test_scope_displays_partial_frame_with_explicit_warning(qtbot: QtBot) -> Non
     scope = _scope_model_for_controller()
     controller = ScopeController(scope, scope_dma=None, channel=0)
     qtbot.addWidget(controller)
-    controller.ui.spinFrameSamples.setValue(4096)
+    controller.ui.spinFrameSamples.setValue(8192)
     controller._set_display_mode(DisplayMode.RAW)
 
     controller._on_frame_received(
@@ -265,7 +297,10 @@ def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> No
     widget = QWidget()
     ui = Ui_MCAView()
     ui.setupUi(widget)
-    mca = SimpleNamespace(edge_det_coeff_is_hardware_backed=lambda: False)
+    mca = SimpleNamespace(
+        edge_det_coeff_is_hardware_backed=lambda: False,
+        get_debug_signal_selectors=lambda: tuple(range(9)),
+    )
     controller = SimpleNamespace(
         ui=ui,
         _mca=mca,
@@ -335,16 +370,37 @@ def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> No
         "256 ns",
         "512 ns",
     ]
-    assert [ui.comboDebug1.itemText(i) for i in range(8)] == [
+    assert [ui.comboDebug1.itemText(i) for i in range(9)] == [
         "Input signal",
         "Trigger signal",
         "Trapezoid signal",
         "Trapezoid energy",
         "CFD signal",
         "CFD window",
+        "Charge comparison window",
         "PSD ZC window",
         "Logic trigger",
     ]
+    assert [ui.comboDebug1.itemData(i) for i in range(9)] == list(range(9))
+
+    for control in (
+        ui.spinPretrigger,
+        ui.spinFrameSamples,
+        ui.spinCrrc2Cdelay,
+        ui.spinCrrc2Fdelay,
+        ui.spinCfdDelay,
+        ui.spinCfdTwLow,
+        ui.spinCfdTwHigh,
+        ui.spinTrapR,
+        ui.spinTrapM,
+        ui.spinTrapT,
+        ui.spinTrapE,
+        ui.spinCcTime,
+        ui.spinPsdZcLow,
+        ui.spinPsdZcHigh,
+    ):
+        assert control.suffix() == " ns"
+    assert ui.labelTrapT.text() == "Pole-zero time:"
     assert [ui.comboBinning.itemText(i) for i in range(10)] == [
         "1",
         "2",
@@ -373,6 +429,62 @@ def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> No
     ]
     assert ui.spinEdgeDetCoeff.isHidden()
     _assert_all_spinboxes_and_combos_have_tooltips(widget)
+
+
+def test_iio_mca_raw_registers_are_exposed_as_physical_nanoseconds() -> None:
+    backend = object.__new__(IIODigitizerBackend)
+    values = {
+        "crrc2_cdelay": "16",
+        "trapezoid_beta_raw": "1975780336",
+    }
+    backend._pp_attr_get = lambda name: values[name]  # type: ignore[method-assign]
+    backend._pp_attr_set = (  # type: ignore[method-assign]
+        lambda name, value: values.__setitem__(name, value)
+    )
+
+    assert backend.get_crrc2_Cdelay() == 128
+    backend.set_crrc2_Cdelay(64)
+    assert values["crrc2_cdelay"] == "8"
+
+    assert backend.get_trapez_T() == 96
+    backend.set_trapez_T(96)
+    assert values["trapezoid_beta_raw"] == "1975780336"
+    backend.set_trapez_T(0)
+    assert values["trapezoid_beta_raw"] == "0"
+
+
+def test_iio_mca_reads_debug_selector_capability_from_driver() -> None:
+    backend = object.__new__(IIODigitizerBackend)
+    backend._pp = SimpleNamespace(
+        attrs={
+            "debug_signal1_available": SimpleNamespace(
+                value=(
+                    "0 input 1 trigger 2 trapezoid 3 trapezoid-energy "
+                    "4 cfd 5 cfd-window 6 cc-window 7 psd-zc-window "
+                    "8 logic-trigger"
+                )
+            )
+        }
+    )
+
+    assert backend.get_debug_signal_selectors() == tuple(range(9))
+
+
+def test_old_debug_capability_uses_corrected_hardware_labels(qapp: QApplication) -> None:
+    widget = QWidget()
+    ui = Ui_MCAView()
+    ui.setupUi(widget)
+    controller = SimpleNamespace(
+        ui=ui,
+        _mca=SimpleNamespace(get_debug_signal_selectors=lambda: tuple(range(8))),
+    )
+
+    MCAController._populate_combos(controller)
+
+    assert [ui.comboDebug1.itemText(i) for i in range(8)][-2:] == [
+        "Charge comparison window",
+        "PSD ZC window",
+    ]
 
 
 def test_psd_widgets_reflect_unsigned_16_bit_event_energy(qapp: QApplication) -> None:

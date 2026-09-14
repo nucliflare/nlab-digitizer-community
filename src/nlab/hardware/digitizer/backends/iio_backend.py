@@ -39,7 +39,10 @@ silently writing a roughly-halved-or-eighthed value to hardware while
 still round-tripping correctly through get_*() (a symmetric bug, invisible
 to a get-after-set check) -- see the NOTE at the top of the MCABackend
 section for the full account and get_trapez_R()'s docstring for the
-clearest single example.
+clearest single example. Two fields that the driver explicitly exposes as
+PP_FMT_RAW are converted here to preserve the legacy physical API:
+crrc2_cdelay uses 8 ns ticks and trapezoid_beta_raw is derived from the
+pole-zero time constant.
 
 read_waveform_banks() and read_histogram() are confirmed live over the IIO
 network transport after the driver began registering the binary attributes
@@ -55,6 +58,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -65,6 +69,9 @@ import numpy as np
 from .base import DigitizerBackend
 
 log = logging.getLogger(__name__)
+
+_MCA_DECIMATED_TICK_NS = 8
+_TRAPEZOID_BETA_SCALE = 1 << 31
 
 # Registers genuinely do not exist in the MCA driver sources (checked
 # against every #define/PP_F_* in vdpp-pulse-processor.c and every attribute
@@ -2278,8 +2285,10 @@ class IIODigitizerBackend(DigitizerBackend):
     # symmetric and invisible to a get-after-set check, only surfacing
     # when the double-converted value happened to fall outside a field's
     # valid range (crrc2_fdelay's minimum, confirmed live as an -ERANGE).
-    # Every one of these fields is a plain passthrough now, same as RAW
-    # fields -- see get_trapez_R()'s docstring for the fullest example.
+    # Every one of these formatted fields is a plain passthrough now. Raw
+    # fields remain raw unless the public legacy API promises a physical
+    # value; crrc2_cdelay and trapezoid_beta_raw are the two such conversions.
+    # See get_trapez_R()'s docstring for the fullest passthrough example.
     # ------------------------------------------------------------------
 
     def mca_hardware_present(self) -> bool:
@@ -2350,10 +2359,10 @@ class IIODigitizerBackend(DigitizerBackend):
     def get_dpp_pretrigger_samples(self) -> int:
         """PP_FMT_X2 -- but pp_field_show()/pp_field_store() already apply
         the raw<->user (x2) conversion inside the kernel; the sysfs value
-        IS the sample count, confirmed live (writing "24" reads back "24",
-        not "12"). No client-side conversion here -- see the NOTE at the
-        top of the MCABackend section for the double-conversion bug this
-        used to have.
+        is the legacy nanosecond value despite the attribute's stale
+        ``_samples`` suffix. Confirmed live: writing "24" reads back "24",
+        not "12". No client-side conversion here -- see the NOTE above for
+        the double-conversion bug this used to have.
         """
         return int(self._pp_attr_get("pretrigger_samples"))
 
@@ -2362,7 +2371,7 @@ class IIODigitizerBackend(DigitizerBackend):
 
     def get_dpp_frame_samples(self) -> int:
         """See get_dpp_pretrigger_samples()'s docstring -- same PP_FMT_X2
-        field, same already-converted-by-the-kernel sysfs value.
+        field and same already-converted legacy nanosecond value.
         """
         return int(self._pp_attr_get("frame_samples"))
 
@@ -2633,10 +2642,21 @@ class IIODigitizerBackend(DigitizerBackend):
         return False
 
     def get_crrc2_Cdelay(self) -> int:
-        return int(self._pp_attr_get("crrc2_cdelay"))
+        """Return physical C-stage delay in ns.
+
+        Unlike the other MCA timing fields, the current driver deliberately
+        exposes ``crrc2_cdelay`` as ``PP_FMT_RAW``. The legacy API accepted a
+        nanosecond value and divided it by the 8 ns decimated clock before
+        writing this register, so restore that public API conversion here.
+        """
+        return int(self._pp_attr_get("crrc2_cdelay")) * _MCA_DECIMATED_TICK_NS
 
     def set_crrc2_Cdelay(self, val: int) -> None:
-        self._pp_attr_set("crrc2_cdelay", str(val))
+        if val % _MCA_DECIMATED_TICK_NS:
+            raise ValueError(
+                f"crrc2 C delay must align to {_MCA_DECIMATED_TICK_NS} ns"
+            )
+        self._pp_attr_set("crrc2_cdelay", str(val // _MCA_DECIMATED_TICK_NS))
 
     def get_crrc2_Fdelay(self) -> int:
         """PP_FMT_PLUS1_X8 -- pp_field_show()/pp_field_store() apply the
@@ -2690,23 +2710,38 @@ class IIODigitizerBackend(DigitizerBackend):
         self._pp_attr_set("trapezoid_m", str(val))
 
     def get_trapez_T(self) -> int:
-        """Maps to trapezoid_beta_raw, not a "trapezoid_time"-named
-        attribute -- despite the "_T" suffix. Confirmed by numeric range:
-        mca.py's MCAParam.TRAPEZ_T spec is a full-range uint32 (min 0, max
-        4294967295, step 1), which only trapezoid_beta_raw's PP_FMT_RAW
-        uint32 field matches; the driver's actual "trapezoid_time"
-        attribute (PP_F_TRAPEZOID_TIME) is a 0..16376 step-8 field and
-        matches MCAParam.TRAPEZ_E's spec instead (see get_trapez_E()).
-        This is consistent with mca-architecture.md's own legacy-mapping
-        note: "the floating-point legacy mapping for the pole-zero time is
-        left in userspace: write trapezoid_beta_raw = round(exp(-8 / T) *
-        2^31)" -- i.e. the legacy "T" register a caller writes has always
-        been the precomputed beta value itself, raw and unscaled.
+        """Return the trapezoid pole-zero time constant in ns.
+
+        ``trapezoid_beta_raw`` is intentionally a raw IIO coefficient. Per
+        the current user-api.md and the legacy VDPP API, userspace restores
+        the physical value with ``T = -8 / log(beta / 2^31)``. A zero
+        coefficient is retained as the legacy zero/unconfigured sentinel.
         """
-        return int(self._pp_attr_get("trapezoid_beta_raw"))
+        beta = int(self._pp_attr_get("trapezoid_beta_raw"))
+        if beta == 0:
+            return 0
+        if beta < 0 or beta >= _TRAPEZOID_BETA_SCALE:
+            raise RuntimeError(
+                "trapezoid_beta_raw cannot represent a positive pole-zero "
+                f"time: {beta}"
+            )
+        return round(
+            -_MCA_DECIMATED_TICK_NS
+            / math.log(beta / _TRAPEZOID_BETA_SCALE)
+        )
 
     def set_trapez_T(self, val: int) -> None:
-        self._pp_attr_set("trapezoid_beta_raw", str(val))
+        if val < 0:
+            raise ValueError("trapezoid pole-zero time cannot be negative")
+        beta = (
+            0
+            if val == 0
+            else round(
+                math.exp(-_MCA_DECIMATED_TICK_NS / val)
+                * _TRAPEZOID_BETA_SCALE
+            )
+        )
+        self._pp_attr_set("trapezoid_beta_raw", str(beta))
 
     def get_trapez_E(self) -> int:
         """Maps to the driver's "trapezoid_time" attribute (PP_FMT_X8) --
@@ -2811,6 +2846,30 @@ class IIODigitizerBackend(DigitizerBackend):
 
     def get_mem1_sig_select(self) -> int:
         return int(self._pp_attr_get("debug_signal1"))
+
+    def get_debug_signal_selectors(self) -> tuple[int, ...]:
+        """Read selector capability from the deployed pulse driver.
+
+        The corrected driver advertises 0..8. Older drivers advertise 0..7;
+        their names for codes 6 and 7 were wrong, so callers use this method
+        only for capability and apply the canonical hardware labels.
+        """
+        if self._pp is None:
+            self._require_mca_pp()
+        assert self._pp is not None
+        attr = self._pp.attrs.get("debug_signal1_available")
+        if attr is None:
+            return tuple(range(8))
+        tokens = str(attr.value).split()
+        try:
+            selectors = tuple(int(tokens[index], 0) for index in range(0, len(tokens), 2))
+        except (ValueError, IndexError) as exc:
+            raise RuntimeError(
+                "invalid debug_signal1_available value: " + str(attr.value)
+            ) from exc
+        if not selectors:
+            raise RuntimeError("debug_signal1_available contains no selector codes")
+        return selectors
 
     def set_mem1_sig_select(self, val: int) -> None:
         self._pp_attr_set("debug_signal1", str(val))

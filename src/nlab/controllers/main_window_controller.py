@@ -644,9 +644,11 @@ class MainWindowController:
             channel_application_entry,
             channel_entry,
             read_configuration,
+            validate_configuration_version,
         )
 
         document = read_configuration(path)
+        validate_configuration_version(document)
         if "hardware" not in document:
             # Original files contained one channel directly at the root.
             apply_channel_hardware(

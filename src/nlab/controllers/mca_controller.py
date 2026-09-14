@@ -30,6 +30,7 @@ _DEBUG_SIGNAL_NAMES = [
     "Trapezoid energy",
     "CFD signal",
     "CFD window",
+    "Charge comparison window",
     "PSD ZC window",
     "Logic trigger",
 ]
@@ -61,27 +62,27 @@ _MCA_CONTROL_TOOLTIPS = {
     "spinTimeLimit": "Sets the acquisition duration in seconds; 0 runs until stopped.",
     "spinRefreshRate": "Sets the requested rate for waveform, spectrum, and statistics updates.",
     "spinTriggerLevel": "Sets the raw signal threshold used by the selected trigger source.",
-    "spinFrameSamples": "Sets the diagnostic waveform capture-window length.",
-    "spinPretrigger": "Sets the diagnostic waveform window offset before the trigger.",
+    "spinFrameSamples": "Sets the diagnostic waveform capture-window duration in nanoseconds.",
+    "spinPretrigger": "Sets the diagnostic waveform offset before the trigger in nanoseconds.",
     "comboTriggerSource": "Selects threshold, CR-RC2, or CR2-RC2 pulse triggering.",
     "spinEdgeDetCoeff": "Sets the legacy edge-detector coefficient when supported by hardware.",
     "comboLpPreset": "Selects the input FIR low-pass response or moving-average filter.",
-    "spinCrrc2Cdelay": "Sets the C-stage delay of the CR-RC2 shaping filter.",
-    "spinCrrc2Fdelay": "Sets the F-stage delay of the CR-RC2 shaping filter.",
+    "spinCrrc2Cdelay": "Sets the C-stage delay of the CR-RC2 shaping filter in nanoseconds.",
+    "spinCrrc2Fdelay": "Sets the F-stage delay of the CR-RC2 shaping filter in nanoseconds.",
     "spinCrrc2Pzc": "Sets the raw pole-zero correction coefficient for CR-RC2 shaping.",
     "spinCfdFactor": "Sets the constant-fraction multiplier used to form the CFD signal.",
-    "spinCfdDelay": "Sets the delay applied when forming the constant-fraction signal.",
-    "spinCfdTwLow": "Sets the lower accepted CFD time-walk window boundary.",
-    "spinCfdTwHigh": "Sets the upper accepted CFD time-walk window boundary.",
-    "spinTrapR": "Sets the rise-time parameter of the trapezoidal shaping filter.",
-    "spinTrapM": "Sets the second timing parameter of the trapezoidal shaping filter.",
-    "spinTrapT": "Sets the raw beta coefficient used for exponential decay compensation.",
-    "spinTrapE": "Sets when the trapezoidal-filter energy estimate is sampled.",
+    "spinCfdDelay": "Sets the CFD signal delay in nanoseconds.",
+    "spinCfdTwLow": "Sets the lower CFD time-walk boundary in nanoseconds.",
+    "spinCfdTwHigh": "Sets the upper CFD time-walk boundary in nanoseconds.",
+    "spinTrapR": "Sets the trapezoidal-filter rise time in nanoseconds.",
+    "spinTrapM": "Sets the trapezoidal-filter flat-top time in nanoseconds.",
+    "spinTrapT": "Sets the pole-zero time constant in nanoseconds; IIO converts it to beta.",
+    "spinTrapE": "Sets the trapezoidal-filter energy sampling time in nanoseconds.",
     "comboTrapFt": "Selects the trapezoidal filter's flat-top window duration.",
-    "spinCcTime": "Sets the integration time used by the charge-comparison estimator.",
+    "spinCcTime": "Sets the charge-comparison integration time in nanoseconds.",
     "comboPsdZcMode": "Selects hardware mode 0 or 1 for PSD zero-crossing analysis.",
-    "spinPsdZcLow": "Sets the lower accepted PSD zero-crossing time boundary.",
-    "spinPsdZcHigh": "Sets the upper accepted PSD zero-crossing time boundary.",
+    "spinPsdZcLow": "Sets the lower PSD zero-crossing boundary in nanoseconds.",
+    "spinPsdZcHigh": "Sets the upper PSD zero-crossing boundary in nanoseconds.",
 }
 
 
@@ -156,10 +157,16 @@ class MCAController(QWidget):
         self.ui.comboBaseline.clear()
         self.ui.comboBaseline.addItems(_WINDOW_LABELS)
 
-        for name in _DEBUG_SIGNAL_NAMES:
-            self.ui.comboDebug1.addItem(name)
-            self.ui.comboDebug2.addItem(name)
-        self.ui.comboDebug2.setCurrentIndex(1)
+        self.ui.comboDebug1.clear()
+        self.ui.comboDebug2.clear()
+        for selector in self._mca.get_debug_signal_selectors():
+            if not 0 <= selector < len(_DEBUG_SIGNAL_NAMES):
+                log.warning("Ignoring unknown MCA debug selector %d", selector)
+                continue
+            name = _DEBUG_SIGNAL_NAMES[selector]
+            self.ui.comboDebug1.addItem(name, selector)
+            self.ui.comboDebug2.addItem(name, selector)
+        self.ui.comboDebug2.setCurrentIndex(self.ui.comboDebug2.findData(1))
 
         for label in _BINNING_LABELS:
             self.ui.comboBinning.addItem(label)
@@ -222,6 +229,26 @@ class MCAController(QWidget):
             spec = MCA_PARAMETER_SPECS[parameter]
             assert isinstance(spec, RangeSpec)
             self._apply_range_to_double_spinbox(double_spinbox, spec)
+
+        for control in (
+            self.ui.spinPretrigger,
+            self.ui.spinFrameSamples,
+            self.ui.spinCrrc2Cdelay,
+            self.ui.spinCrrc2Fdelay,
+            self.ui.spinCfdDelay,
+            self.ui.spinCfdTwLow,
+            self.ui.spinCfdTwHigh,
+            self.ui.spinTrapR,
+            self.ui.spinTrapM,
+            self.ui.spinTrapT,
+            self.ui.spinTrapE,
+            self.ui.spinCcTime,
+            self.ui.spinPsdZcLow,
+            self.ui.spinPsdZcHigh,
+        ):
+            control.setSuffix(" ns")
+        # Keep runtime-generated UI modules made before the form update correct.
+        self.ui.labelTrapT.setText("Pole-zero time:")
 
         # There is no edge-detector-coefficient attribute in the current
         # IIO pulse processor. Hide the legacy-only compatibility control so
@@ -333,8 +360,12 @@ class MCAController(QWidget):
         self.ui.spinTimeLimit.setValue(self._mca.get_time_limit())
         self.ui.comboTriggerSource.setCurrentIndex(self._mca.get_trg_source())
         self.ui.cbExtTrigger.setChecked(self._mca.get_ext_trig_enable())
-        self.ui.comboDebug1.setCurrentIndex(self._mca.get_mem1_sig_select())
-        self.ui.comboDebug2.setCurrentIndex(self._mca.get_mem2_sig_select())
+        self.ui.comboDebug1.setCurrentIndex(
+            self.ui.comboDebug1.findData(self._mca.get_mem1_sig_select())
+        )
+        self.ui.comboDebug2.setCurrentIndex(
+            self.ui.comboDebug2.findData(self._mca.get_mem2_sig_select())
+        )
         self.ui.spinEdgeDetCoeff.setValue(self._mca.get_edge_det_coeff())
 
         # CR-RC2 (LP preset is write-only on the device, no readback)
@@ -652,8 +683,12 @@ class MCAController(QWidget):
         self.ui.comboBaseline.currentIndexChanged.connect(
             lambda i: self._apply_hardware_setting(lambda: self._mca.set_baseline_window(i))
         )
-        self.ui.comboDebug1.currentIndexChanged.connect(lambda i: self._mca.set_mem1_sig_select(i))
-        self.ui.comboDebug2.currentIndexChanged.connect(lambda i: self._mca.set_mem2_sig_select(i))
+        self.ui.comboDebug1.currentIndexChanged.connect(
+            lambda i: self._mca.set_mem1_sig_select(int(self.ui.comboDebug1.itemData(i)))
+        )
+        self.ui.comboDebug2.currentIndexChanged.connect(
+            lambda i: self._mca.set_mem2_sig_select(int(self.ui.comboDebug2.itemData(i)))
+        )
         self.ui.spinPileupWindow.editingFinished.connect(
             lambda: self._apply_hardware_setting(
                 lambda: self._mca.set_pileup_window(self.ui.spinPileupWindow.value())

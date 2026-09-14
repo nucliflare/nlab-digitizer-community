@@ -67,9 +67,9 @@ MCA_PARAMETER_SPECS: dict[MCAParam, ParameterSpec] = {
     MCAParam.PULSE_POLARITY: ListSpec(items=(0, 1), default=0),
     # VDPP_BSLN_WIND enum (hw_def: 0–6); 0–6 map to 8/16/32/64/128/256/512 ns
     MCAParam.BASELINE_WINDOW: ListSpec(items=(0, 1, 2, 3, 4, 5, 6), default=3),
-    # uint16_t (hw_def: 0–4094, step 2)
+    # Physical diagnostic-window offset [ns]; kernel converts register = value / 2.
     MCAParam.PRETRIGGER_SAMPLES: RangeSpec(min_val=0, max_val=4094, step=2, default=24),
-    # uint16_t (hw_def: 0–8190, step 2)
+    # Physical diagnostic-window duration [ns]; kernel converts register = value / 2.
     MCAParam.FRAME_SAMPLES: RangeSpec(min_val=0, max_val=8190, step=2, default=256),
     # VDPP_HIST_BIN enum (hw_def: 0–9); index → divisor: 0=1, 1=2, 2=4, ..., 9=512
     MCAParam.ENERGY_BIN: ListSpec(items=(0, 1, 2, 3, 4, 5, 6, 7, 8, 9), default=0),
@@ -86,11 +86,12 @@ MCA_PARAMETER_SPECS: dict[MCAParam, ParameterSpec] = {
     MCAParam.TRAPEZ_ENABLE: ListSpec(items=(False, True), default=False),
     # vdpp-pulse-processor.c rejects 0 and 8: the dependent reciprocal
     # calculation is undefined at 8 (Rdelay would be zero).
-    MCAParam.TRAPEZ_R: RangeSpec(min_val=16, max_val=4088, step=8, default=64),
-    MCAParam.TRAPEZ_M: RangeSpec(min_val=0, max_val=4088, step=8, default=64),
-    # uint32_t (hw_def: MIN–MAX, step 1)
-    MCAParam.TRAPEZ_T: RangeSpec(min_val=0, max_val=4294967295, step=1, default=96),
-    # uint16_t (hw_def: 0–16376, step 8)
+    MCAParam.TRAPEZ_R: RangeSpec(min_val=16, max_val=4088, step=8, default=64),  # ns
+    MCAParam.TRAPEZ_M: RangeSpec(min_val=0, max_val=4088, step=8, default=64),  # ns
+    # Physical pole-zero time [ns]. IIO converts this to trapezoid_beta_raw;
+    # the range and step retain the legacy GUI/API contract.
+    MCAParam.TRAPEZ_T: RangeSpec(min_val=0, max_val=16777216, step=8, default=96),
+    # Physical energy sampling time [ns].
     MCAParam.TRAPEZ_E: RangeSpec(min_val=0, max_val=16376, step=8, default=256),
     # VDPP_TRAPEZ_WINDOW enum (hw_def: 0–6)
     MCAParam.TRAPEZ_FT: ListSpec(items=(0, 1, 2, 3, 4, 5, 6), default=0),
@@ -103,29 +104,30 @@ MCA_PARAMETER_SPECS: dict[MCAParam, ParameterSpec] = {
         step=0.000030517578125,
         default=0.4,
     ),
-    # uint16_t (hw_def: 0–254, step 2)
+    # Physical CFD delay [ns].
     MCAParam.CFD_DELAY: RangeSpec(min_val=0, max_val=254, step=2, default=2),
     MCAParam.CC_ENABLE: ListSpec(items=(False, True), default=False),
-    # uint16_t (hw_def: 0–65534, step 2)
+    # Physical charge-comparison integration time [ns].
     MCAParam.CC_TIME: RangeSpec(min_val=0, max_val=65534, step=2, default=8),
     # trigger_source_available: 0=threshold, 1=CR-RC2, 2=CR2-RC2
     MCAParam.TRG_SOURCE: ListSpec(items=(0, 1, 2), default=0),
-    # uint16_t (hw_def: 8–504, step 8)
-    MCAParam.CRRC2_CDELAY: RangeSpec(min_val=8, max_val=504, step=8, default=8),
-    # uint16_t (hw_def: 8–1016, step 8)
+    # Physical delay [ns]. The IIO register is raw 8 ns ticks with an
+    # additional raw alignment of 8, hence 64 ns public steps.
+    MCAParam.CRRC2_CDELAY: RangeSpec(min_val=64, max_val=4032, step=64, default=64),
+    # Physical F-stage delay [ns]; the kernel applies value / 8 - 1.
     MCAParam.CRRC2_FDELAY: RangeSpec(min_val=8, max_val=1016, step=8, default=8),
     # int16_t (hw_def: MIN–MAX, step 1)
     MCAParam.CRRC2_PZC: RangeSpec(min_val=-32768, max_val=32767, step=1, default=32761),
-    # uint16_t (hw_def: 0–65534, step 2)
+    # Physical CFD time-walk boundaries [ns].
     MCAParam.CFD_TW_LOW: RangeSpec(min_val=0, max_val=65534, step=2, default=8),
     MCAParam.CFD_TW_HIGH: RangeSpec(min_val=0, max_val=65534, step=2, default=64),
-    # debug_signalX_available exposes selectors 0..7 on pulse-processor v101.
-    MCAParam.MEM1_SIG_SELECT: ListSpec(items=(0, 1, 2, 3, 4, 5, 6, 7), default=0),
-    MCAParam.MEM2_SIG_SELECT: ListSpec(items=(0, 1, 2, 3, 4, 5, 6, 7), default=1),
+    # Corrected pulse-processor v101 drivers expose the complete 0..8 mux.
+    MCAParam.MEM1_SIG_SELECT: ListSpec(items=(0, 1, 2, 3, 4, 5, 6, 7, 8), default=0),
+    MCAParam.MEM2_SIG_SELECT: ListSpec(items=(0, 1, 2, 3, 4, 5, 6, 7, 8), default=1),
     MCAParam.EXT_TRIG_ENABLE: ListSpec(items=(False, True), default=False),
     # uint32_t (hw_def: not present; using full C type range)
     MCAParam.EDGE_DET_COEFF: RangeSpec(min_val=0, max_val=4294967295, step=1, default=1),
-    # psd_zc registers not in hw_def.json; ranges from FPGA register headers (1-bit / 16-bit)
+    # PSD controls; low/high are physical nanosecond boundaries converted x2 by the kernel.
     MCAParam.PSD_ZC_ENABLE: ListSpec(items=(False, True), default=False),
     MCAParam.PSD_ZC_MODE: ListSpec(items=(0, 1), default=0),
     MCAParam.PSD_ZC_LOW: RangeSpec(min_val=0, max_val=65534, step=2, default=8),
@@ -173,7 +175,9 @@ class Trapezoid:
         return self._b.get_trapez_T()
 
     def set_T(self, val: int) -> None:
-        MCA_PARAMETER_SPECS[MCAParam.TRAPEZ_T].validate(val, "trapezoid_beta_raw")
+        MCA_PARAMETER_SPECS[MCAParam.TRAPEZ_T].validate(
+            val, "trapezoid_pole_zero_time_ns"
+        )
         self._b.set_trapez_T(val)
 
     def get_E(self) -> int:
@@ -240,7 +244,9 @@ class CRRC2:
         return self._b.get_crrc2_Cdelay()
 
     def set_Cdelay(self, val: int) -> None:
-        MCA_PARAMETER_SPECS[MCAParam.CRRC2_CDELAY].validate(val, "crrc2_cdelay")
+        MCA_PARAMETER_SPECS[MCAParam.CRRC2_CDELAY].validate(
+            val, "crrc2_cdelay_ns"
+        )
         self._b.set_crrc2_Cdelay(val)
 
     def get_Fdelay(self) -> int:
@@ -645,6 +651,9 @@ class MultiChannelAnalyzer:
 
     def get_mem1_sig_select(self) -> int:
         return self._b.get_mem1_sig_select()
+
+    def get_debug_signal_selectors(self) -> tuple[int, ...]:
+        return self._b.get_debug_signal_selectors()
 
     def set_mem1_sig_select(self, val: int) -> None:
         MCA_PARAMETER_SPECS[MCAParam.MEM1_SIG_SELECT].validate(val, "mem1_sig_select")

@@ -588,7 +588,7 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
             </item>
             <item row="3" column="0">
              <widget class="QLabel" name="labelTrapT">
-              <property name="text"><string>Beta coefficient (raw):</string></property>
+              <property name="text"><string>Pole-zero time:</string></property>
              </widget>
             </item>
             <item row="3" column="1">

@@ -150,7 +150,7 @@
         <item row="0" column="0">
          <widget class="QLabel" name="labelPretrigger">
           <property name="text">
-           <string>Pretrigger (samp):</string>
+           <string>Pretrigger:</string>
           </property>
          </widget>
         </item>
@@ -160,36 +160,42 @@
            <number>0</number>
           </property>
           <property name="maximum">
-           <number>1020</number>
+           <number>2040</number>
           </property>
           <property name="singleStep">
-           <number>4</number>
+           <number>8</number>
           </property>
           <property name="value">
-           <number>32</number>
+           <number>64</number>
+          </property>
+          <property name="suffix">
+           <string> ns</string>
           </property>
          </widget>
         </item>
         <item row="1" column="0">
          <widget class="QLabel" name="labelFrameSamples">
           <property name="text">
-           <string>Frame (samp):</string>
+           <string>Frame:</string>
           </property>
          </widget>
         </item>
         <item row="1" column="1">
          <widget class="QSpinBox" name="spinFrameSamples">
           <property name="minimum">
-           <number>4</number>
+           <number>8</number>
           </property>
           <property name="maximum">
-           <number>8188</number>
+           <number>16376</number>
           </property>
           <property name="singleStep">
-           <number>4</number>
+           <number>8</number>
           </property>
           <property name="value">
-           <number>1024</number>
+           <number>2048</number>
+          </property>
+          <property name="suffix">
+           <string> ns</string>
           </property>
          </widget>
         </item>
@@ -199,10 +205,10 @@
            <bool>false</bool>
           </property>
           <property name="toolTip">
-           <string>Gap after each frame. The complete periodic interval is (gap + frame samples / 4) × 8 ns.</string>
+           <string>Gap after each frame, in nanoseconds.</string>
           </property>
           <property name="text">
-           <string>Periodic gap (8 ns clocks):</string>
+           <string>Periodic gap:</string>
           </property>
          </widget>
         </item>
@@ -212,19 +218,22 @@
            <bool>false</bool>
           </property>
           <property name="toolTip">
-           <string>Gap after each frame. The complete periodic interval is (gap + frame samples / 4) × 8 ns.</string>
+           <string>Gap after each frame, in nanoseconds.</string>
           </property>
           <property name="minimum">
            <number>0</number>
           </property>
           <property name="maximum">
-           <number>65535</number>
+           <number>524280</number>
           </property>
           <property name="singleStep">
-           <number>1</number>
+           <number>8</number>
           </property>
           <property name="value">
            <number>0</number>
+          </property>
+          <property name="suffix">
+           <string> ns</string>
           </property>
          </widget>
         </item>

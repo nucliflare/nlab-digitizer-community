@@ -5,11 +5,11 @@ import logging
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from nlab.hardware.digitizer.scope import Scope
+from nlab.hardware.digitizer.scope import SCOPE_DATAPATH_CLOCK_PERIOD_NS, Scope
 
 log = logging.getLogger(__name__)
 
-_VIEWER_POINT_PERIOD_NS = 8
+_VIEWER_POINT_PERIOD_NS = SCOPE_DATAPATH_CLOCK_PERIOD_NS
 
 
 class _FrameSignals(QObject):
