@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QByteArray, QSettings, Qt, QThread, QThreadPool
 from PySide6.QtWidgets import QDockWidget, QMainWindow, QWidget
 
+from nlab.analysis.psd_file import inspect_psd_event_file
 from nlab.controllers.external_device_controller import ExternalDeviceController
 from nlab.controllers.global_controller import GlobalController
 from nlab.controllers.mca_controller import MCAController
@@ -15,6 +17,7 @@ from nlab.controllers.scope_controller import ScopeController
 from nlab.hardware.digitizer.digitizer import Digitizer
 from nlab.hardware.digitizer.dma import McaEventBuffer
 from nlab.hardware.modbus_devices import ExternalDevices
+from nlab.workers.psd_file_worker import PsdFileWorker
 
 if TYPE_CHECKING:
     from nlab.app import MainAppWindow
@@ -60,6 +63,8 @@ class MainWindowController:
         self._global_controller: GlobalController | None = None
         self._external_devices = ExternalDevices()
         self._thread: QThread | None = None
+        self._psd_file_thread: QThread | None = None
+        self._psd_file_worker: PsdFileWorker | None = None
 
         self._scope_dock_host = self._make_dock_host()
         self._mca_dock_host = self._make_dock_host()
@@ -399,6 +404,82 @@ class MainWindowController:
         for ctrl in self._mca_controllers:
             ctrl.refresh_dma_output_settings()
 
+    def load_psd_events(self, path: Path) -> None:
+        """Reconstruct one PSD view from a saved event file off the GUI thread."""
+        if self._psd_file_thread is not None:
+            raise RuntimeError("A PSD event file is already being processed")
+        if not self._psd_controllers:
+            raise RuntimeError("No PSD channel is available for displaying this file")
+
+        info = inspect_psd_event_file(path)
+        target = next(
+            (ctrl for ctrl in self._psd_controllers if ctrl.channel == info.channel),
+            None,
+        )
+        if target is None and len(self._psd_controllers) == 1:
+            target = self._psd_controllers[0]
+        if target is None:
+            channels = ", ".join(str(ctrl.channel) for ctrl in self._psd_controllers)
+            raise ValueError(
+                f"File channel {info.channel!r} does not match an available PSD "
+                f"channel ({channels})"
+            )
+
+        energy_bins, ratio_bins, energy_right_shift, ratio_range = (
+            target.file_analysis_settings()
+        )
+        worker = PsdFileWorker(
+            info,
+            energy_bins=energy_bins,
+            ratio_bins=ratio_bins,
+            energy_right_shift=energy_right_shift,
+            ratio_range=ratio_range,
+        )
+        thread = QThread()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(target.update_file_load_progress)
+        worker.loaded.connect(target.finish_file_load)
+        worker.cancelled.connect(target.cancel_file_load)
+        worker.error.connect(target.fail_file_load)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_psd_file_thread_finished)
+        target.begin_file_load(path)
+        self._psd_file_worker = worker
+        self._psd_file_thread = thread
+
+        self._window.ui.mainTabs.setCurrentWidget(self._window.ui.tabPSD)
+        for dock in self._psd_dock_host.findChildren(QDockWidget):
+            if dock.widget() is target:
+                dock.raise_()
+                break
+        thread.start()
+        log.info(
+            "PSD file load started: %s (%s, %d events, channel=%s)",
+            path,
+            info.format_name,
+            info.total_events,
+            info.channel,
+        )
+
+    def _on_psd_file_thread_finished(self) -> None:
+        self._psd_file_worker = None
+        self._psd_file_thread = None
+
+    def _stop_psd_file_load_sync(self) -> None:
+        worker = getattr(self, "_psd_file_worker", None)
+        thread = getattr(self, "_psd_file_thread", None)
+        if worker is not None:
+            worker.stop()
+        if thread is not None and not thread.wait(3000):
+            log.warning("PSD file worker did not stop in time, terminating")
+            thread.terminate()
+            thread.wait()
+        self._psd_file_worker = None
+        self._psd_file_thread = None
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -429,6 +510,8 @@ class MainWindowController:
             ctrl.request_monitor_stop()
         for ctrl in self._external_controllers:
             ctrl.request_polling_stop()
+        if worker := getattr(self, "_psd_file_worker", None):
+            worker.stop()
 
         if self._global_controller is not None:
             self._global_controller.disarm_sync()
@@ -447,6 +530,8 @@ class MainWindowController:
         # 3. Stop MCA polling workers (blocking)
         for ctrl in self._mca_controllers:
             ctrl.stop_worker_sync()
+
+        self._stop_psd_file_load_sync()
 
         # PSD timers consume only already-decoded display batches. Stop them
         # after MCA DMA tail drain has completed.

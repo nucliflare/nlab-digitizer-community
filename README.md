@@ -259,6 +259,11 @@ same-stem YAML file stores the complete digitizer configuration. ROOT and
 HDF5 files embed that YAML snapshot and expose `timestamp`, `long_gate`, and
 `short_gate` fields for analysis.
 
+Use **File → Open PSD Event File...** to reconstruct the PSD matrix and both
+projections from NDMA, HDF5, or ROOT events. The import runs in a background
+worker: NDMA is memory-mapped, HDF5 is read in dataset slices, and ROOT uses
+chunked tree iteration, so event memory does not grow with file size.
+
 Use **File → Convert Binary to HDF5...** in the GUI for portable analysis
 files. Quarto examples are provided in:
 

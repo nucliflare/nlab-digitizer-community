@@ -91,6 +91,8 @@ class PsdAccumulator:
             return events["trapezoid_energy"], events["charge_energy"]
         if {"energy", "short_energy"}.issubset(names):
             return events["energy"], events["short_energy"]
+        if {"long_gate", "short_gate"}.issubset(names):
+            return events["long_gate"], events["short_gate"]
         raise ValueError(f"unsupported MCA event fields: {', '.join(names)}")
 
     def add_events(self, events: np.ndarray) -> PsdStatistics:

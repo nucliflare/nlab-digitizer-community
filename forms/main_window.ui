@@ -119,6 +119,7 @@
    </property>
    <widget class="QMenu" name="menuFile">
     <property name="title"><string>File</string></property>
+    <addaction name="actionOpenPsdEvents"/>
     <addaction name="actionConvertToHdf5"/>
     <addaction name="separator"/>
     <addaction name="actionReconnectDevice"/>
@@ -190,6 +191,9 @@
   </action>
   <action name="actionDmaSaveFolder">
    <property name="text"><string>DMA Settings...</string></property>
+  </action>
+  <action name="actionOpenPsdEvents">
+   <property name="text"><string>Open PSD Event File...</string></property>
   </action>
   <action name="actionExit">
    <property name="text"><string>Exit</string></property>

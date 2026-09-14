@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
@@ -40,6 +41,7 @@ class PSDController(QWidget):
         self._capture_note = "Waiting for DMA with Charge Comparison enabled."
         self._last_dropped_records = 0
         self._energy_log_y = False
+        self._file_loading = False
 
         self.ui = Ui_PSDView()
         self.ui.setupUi(self)  # type: ignore[no-untyped-call]
@@ -164,6 +166,8 @@ class PSDController(QWidget):
 
     def begin_capture(self, enabled: bool, note: str = "") -> None:
         """Reset the live view and declare whether this capture feeds PSD."""
+        if self._file_loading:
+            raise RuntimeError("Wait for the PSD event file to finish loading")
         self._event_buffer.clear()
         self._accumulator.reset()
         self._last_dropped_records = 0
@@ -196,7 +200,78 @@ class PSDController(QWidget):
         self._last_dropped_records = 0
         self._render()
 
+    def file_analysis_settings(self) -> tuple[int, int, int, tuple[float, float]]:
+        """Freeze the current histogram geometry for a background file load."""
+        return (
+            self.ui.spinEnergyBins.value(),
+            self.ui.spinRatioBins.value(),
+            self.ui.spinEnergyShift.value(),
+            (self.ui.spinRatioMin.value(), self.ui.spinRatioMax.value()),
+        )
+
+    def begin_file_load(self, path: Path) -> None:
+        if self._capturing:
+            raise RuntimeError("Stop live MCA DMA before loading a PSD event file")
+        self._event_buffer.clear()
+        self._accumulator.reset()
+        self._last_dropped_records = 0
+        self._file_loading = True
+        self._capture_failed = False
+        self._capture_note = f"Loading {path.name}..."
+        self._set_analysis_controls_enabled(False)
+        self._render()
+
+    def update_file_load_progress(self, processed: int, total: int) -> None:
+        if not self._file_loading:
+            return
+        total_text = f"/{total:,}" if total else ""
+        self.ui.lblStatus.setText(
+            f"Loading events: {processed:,}{total_text} from file..."
+        )
+
+    @property
+    def channel(self) -> int:
+        return self._channel
+
+    def finish_file_load(self, accumulator: object, processed: int, source: str) -> None:
+        if not isinstance(accumulator, PsdAccumulator):
+            self.fail_file_load("PSD worker returned an invalid result")
+            return
+        self._accumulator = accumulator
+        self._file_loading = False
+        self._capture_note = f"Loaded {processed:,} events from {Path(source).name}."
+        self._set_analysis_controls_enabled(True)
+        self._reset_display_ranges()
+        self._render()
+
+    def fail_file_load(self, message: str) -> None:
+        self._file_loading = False
+        self._capture_failed = True
+        self._capture_note = f"File load error: {message}"
+        self._set_analysis_controls_enabled(True)
+        self._update_status()
+
+    def cancel_file_load(self) -> None:
+        self._file_loading = False
+        self._capture_note = "File load cancelled."
+        self._set_analysis_controls_enabled(True)
+        self._update_status()
+
+    def _set_analysis_controls_enabled(self, enabled: bool) -> None:
+        for control in (
+            self.ui.spinEnergyBins,
+            self.ui.spinRatioBins,
+            self.ui.spinEnergyShift,
+            self.ui.spinRatioMin,
+            self.ui.spinRatioMax,
+            self.ui.spinCut,
+            self.ui.btnClear,
+        ):
+            control.setEnabled(enabled)
+
     def process_pending_events(self) -> None:
+        if self._file_loading:
+            return
         batches, dropped_records = self._event_buffer.drain()
         self._last_dropped_records = dropped_records
         if not batches:
