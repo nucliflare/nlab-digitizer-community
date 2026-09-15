@@ -98,8 +98,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   functional HV control; the backend falls back to `HAT_temp` when available and marks
   digital temperature compensation unavailable when no TMP117 exists
 - Scope periodic mode omitted the hardware frame-gap setting
-- Linux CI runners omitted the `libdbus-1-3` runtime required to import PySide6 during
-  pytest initialization
+- Linux CI runners omitted the native `libdbus-1-3` and `libiio0` runtimes required to
+  import PySide6 and the locked `pylibiio` binding during pytest initialization
 
 ### Known limitations
 
