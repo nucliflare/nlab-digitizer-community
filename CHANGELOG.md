@@ -18,11 +18,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **IIO MCA support** — pulse-processor and input-filter configuration, statistics,
   synchronized live reconfiguration, debug waveform banks, and 16,384-bin histogram
   readout through both monolithic and four-chunk firmware ABIs
-- **IIO MCA list-mode client** — fixed v121 frame validation, all-five-channel scan
-  setup, 16-byte event parsing, stop/drain/close lifecycle, NDMA v2 recording, HDF5
-  conversion, and GUI worker integration
+- **IIO MCA list-mode client** — fixed v121 frame validation, the current single-channel
+  `opaque[16]` transport ABI, application-selected 16-byte event parsing,
+  stop/drain/close lifecycle, NDMA v2 recording, HDF5 conversion, and GUI worker
+  integration
 - **PSD workspace** — live charge-comparison analysis, energy ROI and ratio cut controls,
   classified histograms, counters, and capture integration with MCA list-mode events
+- **Scope Auto Setup** — cancellable, background pulse detection that adjusts the
+  baseline DAC for dynamic range, selects a noise-aware rising or falling edge trigger,
+  verifies the result, and restores the original settings on failure or cancellation
+- **Configurable MCA capture output** — one file per measurement in binary NDMA,
+  ROOT `TTree`, or appendable HDF5/SWMR format, plus an online-only PSD mode; file
+  writers use bounded queues and include the measurement configuration in embedded or
+  same-stem YAML metadata
+- **Saved-event PSD analysis** — reconstruct PSD matrices and projections from legacy
+  and IIO NDMA, CAEN CoMPASS and legacy `caen.py`, HDF5, or ROOT event files using
+  background, bounded-memory readers
+- **Waveform file browser** — inspect native NLab scope NDMA and waveform-bearing CAEN
+  CoMPASS captures in the Scope view, including multi-board/channel selection, frame
+  navigation, background indexing, memory-mapped reads, and adjustable CAEN sample time
 - **Global workspace** — shared trigger controls, board diagnostics, temperature
   correction, and support for firmware where IDS/HV hardware is absent
 - **Application-wide settings workflow** — hardware and UI state can be saved and
@@ -35,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Reviewed PyInstaller build script** with development-only module exclusions,
   Windows version resources, input validation, optional clean builds, and artifact
   size/hash reporting
+- **IIO hardware audit** documenting the scope, MCA, list-mode, HV, and temperature
+  devices discovered across three deployed boards
 
 ### Changed
 
@@ -49,6 +65,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stop/write/restart sequence required by the pulse-processor driver
 - Scope viewer frame length and periodic timing controls now follow the current driver
   geometry and register behavior
+- Scope and MCA timing controls now display physical nanoseconds, and settings format
+  version 3 stores timing fields with explicit `_ns` names and rejects incompatible
+  full-document schema versions instead of silently ignoring renamed values
+- Current IIO MCA pulse-processor and list-mode devices are paired by their stable
+  firmware `channel_index`; older firmware retains deterministic device-index fallback
+- IIO MCA CR-RC2 C-stage delay and trapezoid pole-zero controls now preserve the public
+  physical-time API while converting the two driver attributes that remain raw
+- MCA debug-signal choices now follow the capabilities advertised by each backend,
+  including the corrected Charge Comparison Window label and ninth IIO selector
 - MCA debug-source selections no longer perform an unrelated hardware reset
 - DMA conversion distinguishes legacy gRPC list-mode records from the IIO event layout
   through NDMA format version 2
@@ -66,27 +91,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gates were released
 - IIO deployments without an IDS device could fail application construction instead
   of disabling unavailable diagnostics and power-supply controls
+- IIO boards without per-channel `cha_temp`/`chb_temp` sensors no longer lose otherwise
+  functional HV control; the backend falls back to `HAT_temp` when available and marks
+  digital temperature compensation unavailable when no TMP117 exists
 - Scope periodic mode omitted the hardware frame-gap setting
 
 ### Known limitations
 
-- **IIO MCA list-mode DMA is blocked on the currently tested target firmware.** The
-  `vdpp_lm_frame` device reports the documented v121 geometry and all five scan
-  channels correctly, but buffer allocation fails immediately with target-side
-  `EINVAL` (`Open unlocked: -22`). The same failure occurs with the official
-  `iio_readdev` utility using the complete channel mask and multiple requested buffer
-  lengths, before acquisition starts. Client geometry should not be changed as a
-  workaround; target kernel diagnostics from `lm_buffer_preenable()` or the DMA buffer
-  core are required. Consequently, discovery, format, and lifecycle behavior are
-  source-derived and unit-tested, but event refill and final tail draining have not
-  yet been confirmed live.
+- Superseded `vdpp_lm_frame` firmware with five semantic scan channels cannot allocate
+  a list-mode buffer on the target Linux 5.15 IIO stack and returns `EINVAL`. Compatible
+  targets must provide the current single-channel `opaque[16]` ABI; changing the Python
+  frame length or requesting a partial scan mask is not a valid workaround.
 - Sustained IIO scope DMA on the tested channel 0 can encounter target-side Xilinx VDMA
   `DMA_INT_ERR`/`EOF_EARLY_ERR`. The client now preserves complete frames, releases all
   gates, and supports a clean recovery acknowledgement, but the underlying target
   fault remains.
-- Current firmware does not expose stable labels for same-name scope, pulse-processor,
-  input-filter, and list-mode IIO instances; physical channel identity can therefore
-  still depend on device probe order.
+- Current firmware still does not expose stable channel identifiers for same-name scope
+  and input-filter IIO instances; those two device types can therefore still depend on
+  probe order. Pulse-processor and list-mode instances now use `channel_index`.
 
 ---
 
