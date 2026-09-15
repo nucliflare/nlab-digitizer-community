@@ -69,7 +69,9 @@ jobs:
       - name: Test
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ${{ matrix.venv-python }} -m pytest
+        # Match Gitea's workspace-local temp root so both CI providers exercise
+        # the same test invocation on Windows and Linux.
+        run: ${{ matrix.venv-python }} -m pytest --basetemp=.pytest-tmp
 
       - name: Build
         run: ${{ matrix.venv-python }} scripts/build_pyinstaller_reviewed.py --clean

@@ -100,6 +100,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scope periodic mode omitted the hardware frame-gap setting
 - Linux CI runners omitted the native `libdbus-1-3` and `libiio0` runtimes required to
   import PySide6 and the locked `pylibiio` binding during pytest initialization
+- Windows self-hosted CI could fail every `tmp_path`-using test when pytest's shared
+  user temp directory had incompatible permissions; CI now uses a workspace-local
+  temporary root
 
 ### Known limitations
 

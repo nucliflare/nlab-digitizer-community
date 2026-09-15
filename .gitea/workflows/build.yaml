@@ -77,7 +77,9 @@ jobs:
       - name: Test
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ${{ matrix.venv-python }} -m pytest
+        # Self-hosted Windows runners can inherit an inaccessible shared pytest
+        # temp root. Keep test isolation inside the checked-out workspace.
+        run: ${{ matrix.venv-python }} -m pytest --basetemp=.pytest-tmp
 
       - name: Build
         run: ${{ matrix.venv-python }} scripts/build_pyinstaller_reviewed.py --clean
