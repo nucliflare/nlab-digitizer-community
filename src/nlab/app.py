@@ -102,6 +102,7 @@ class MainAppWindow(QMainWindow):
 
         self.ui.actionExit.triggered.connect(self.close)
         self.ui.actionOpenPsdEvents.triggered.connect(self._on_open_psd_events)
+        self.ui.actionOpenWaveformFile.triggered.connect(self._on_open_waveform_file)
         self.ui.actionConvertToHdf5.triggered.connect(self._on_convert_to_hdf5)
         self.ui.actionReconnectDevice.triggered.connect(self._on_reconnect_device)
         self.ui.actionResetDocks.triggered.connect(self._on_reset_docks)
@@ -264,7 +265,7 @@ class MainAppWindow(QMainWindow):
             str(QSettings().value(_KEY_DMA_FOLDER, "measurements")),
             (
                 "PSD event files (*.bin *.h5 *.hdf5 *.root);;"
-                "NDMA binary (*.bin);;HDF5 (*.h5 *.hdf5);;ROOT (*.root);;"
+                "Binary event files (*.bin);;HDF5 (*.h5 *.hdf5);;ROOT (*.root);;"
                 "All files (*)"
             ),
         )
@@ -275,6 +276,21 @@ class MainAppWindow(QMainWindow):
         except Exception as exc:
             logging.getLogger(__name__).exception("Failed to open PSD event file")
             QMessageBox.critical(self, "PSD File Load Failed", str(exc))
+
+    def _on_open_waveform_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Waveform File",
+            str(QSettings().value(_KEY_DMA_FOLDER, "measurements")),
+            "Waveform binaries (*.bin *.BIN);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            self._controller.load_waveform_file(Path(path))
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Failed to open waveform file")
+            QMessageBox.critical(self, "Waveform File Load Failed", str(exc))
 
     def _on_show_system_log_toggled(self, checked: bool) -> None:
         self._set_log_tab_visible(checked)

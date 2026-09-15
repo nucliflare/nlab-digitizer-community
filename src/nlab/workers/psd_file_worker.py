@@ -54,7 +54,13 @@ class PsdFileWorker(BaseWorker):
                 accumulator.add_events(events)
                 processed += len(events)
                 self.progress.emit(processed, self._info.total_events)
-            self.loaded.emit(accumulator, processed, str(self._info.path))
+            channel = (
+                f", source channel {self._info.channel}"
+                if self._info.channel is not None
+                else ""
+            )
+            source = f"{self._info.path.name} ({self._info.format_name}{channel})"
+            self.loaded.emit(accumulator, processed, source)
         except Exception as exc:
             log.exception("PSD file processing failed for %s", self._info.path)
             self.error.emit(str(exc))

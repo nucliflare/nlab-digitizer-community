@@ -10,6 +10,11 @@ import pyqtgraph as pg
 from PySide6.QtCore import QRectF, QSettings, Qt, QThread, QThreadPool, QTimer
 from PySide6.QtWidgets import QFileDialog, QSlider, QSpinBox, QWidget
 
+from nlab.analysis.waveform_file import (
+    MappedWaveformFile,
+    WaveformFileIndex,
+    WaveformFrame,
+)
 from nlab.hardware.digitizer.dma import (
     FILE_HEADER_STRUCT,
     IIOScopeDmaStreamer,
@@ -34,6 +39,7 @@ from nlab.workers.scope_auto_setup_worker import (
     ScopeAutoSetupWorker,
 )
 from nlab.workers.scope_worker import ScopeWorker
+from nlab.workers.waveform_file_worker import WaveformFileIndexWorker
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +64,14 @@ _SCOPE_CONTROL_TOOLTIPS = {
         "for maximum dynamic range, and selects a noise-aware edge trigger. "
         "Click again to cancel."
     ),
+    "spinFileSamplePeriod": (
+        "CAEN binary files do not store their ADC sample period. Set it here "
+        "to obtain the correct time axis."
+    ),
+    "comboFileChannel": (
+        "Selects the CAEN board and channel whose waveform events are displayed."
+    ),
+    "spinFileFrame": "Selects the waveform event or NDMA scope frame to display.",
 }
 
 
@@ -113,6 +127,18 @@ class ScopeController(QWidget):
         self._auto_setup_result: ScopeAutoSetupResult | None = None
         self._auto_setup_error: str | None = None
 
+        self._waveform_index_worker: WaveformFileIndexWorker | None = None
+        self._waveform_index_thread: QThread | None = None
+        self._waveform_index_result: WaveformFileIndex | None = None
+        self._waveform_index_error: str | None = None
+        self._waveform_index_abandon = False
+        self._waveform_file: MappedWaveformFile | None = None
+        self._file_previous_display_mode = DisplayMode.RAW
+        self._file_frame_timer = QTimer(self)
+        self._file_frame_timer.setSingleShot(True)
+        self._file_frame_timer.setInterval(30)
+        self._file_frame_timer.timeout.connect(self._render_file_frame)
+
         self._measurement_timer = QTimer(self)
         self._measurement_timer.setSingleShot(True)
         self._measurement_timer.timeout.connect(self._on_measurement_timeout)
@@ -126,6 +152,11 @@ class ScopeController(QWidget):
         self._update_frame_gap_enabled()
         self._update_viewer_transport_hint()
         self.ui.btnStop.setEnabled(False)
+        self.ui.groupFileBrowser.hide()
+
+    @property
+    def channel(self) -> int:
+        return self._channel
 
     # ------------------------------------------------------------------
     # Spec application
@@ -283,6 +314,9 @@ class ScopeController(QWidget):
 
     def reset_zoom(self) -> None:
         """Reset the waveform plot to its default fixed range."""
+        if self._waveform_file is not None:
+            self._render_file_frame()
+            return
         self._update_axis_ranges()
 
     # ------------------------------------------------------------------
@@ -373,6 +407,20 @@ class ScopeController(QWidget):
         self.ui.btnAutoSetup.clicked.connect(self._on_auto_setup)
         self.ui.btnAcquireFrame.clicked.connect(self._on_acquire_frame)
         self.ui.btnDmaFile.clicked.connect(self._on_dma_file)
+        self.ui.btnCloseWaveformFile.clicked.connect(self._on_close_waveform_file)
+        self.ui.comboFileChannel.currentIndexChanged.connect(
+            self._on_file_channel_changed
+        )
+        self.ui.sliderFileFrame.valueChanged.connect(self.ui.spinFileFrame.setValue)
+        self.ui.spinFileFrame.valueChanged.connect(self.ui.sliderFileFrame.setValue)
+        self.ui.spinFileFrame.valueChanged.connect(self._queue_file_frame)
+        self.ui.btnPreviousFileFrame.clicked.connect(
+            lambda: self.ui.spinFileFrame.setValue(self.ui.spinFileFrame.value() - 1)
+        )
+        self.ui.btnNextFileFrame.clicked.connect(
+            lambda: self.ui.spinFileFrame.setValue(self.ui.spinFileFrame.value() + 1)
+        )
+        self.ui.spinFileSamplePeriod.editingFinished.connect(self._render_file_frame)
 
         self.ui.comboDisplayMode.currentIndexChanged.connect(self._on_display_mode_changed)
         self.ui.dialPersistence.valueChanged.connect(self._on_persistence_changed)
@@ -420,6 +468,11 @@ class ScopeController(QWidget):
         self._update_viewer_transport_hint()
 
     def _on_start(self) -> None:
+        if self._waveform_file is not None or self._waveform_index_thread is not None:
+            self.ui.lblRecordingStatus.setText(
+                "Close the waveform file before starting live acquisition"
+            )
+            return
         if self._auto_setup_thread is not None:
             return
         if self._dma_worker is not None or self._dma_thread is not None:
@@ -572,6 +625,11 @@ class ScopeController(QWidget):
     # ------------------------------------------------------------------
 
     def _on_auto_setup(self) -> None:
+        if self._waveform_file is not None or self._waveform_index_thread is not None:
+            self.ui.lblRecordingStatus.setText(
+                "Close the waveform file before running Auto Setup"
+            )
+            return
         if self._auto_setup_worker is not None:
             self._auto_setup_worker.stop()
             self.ui.btnAutoSetup.setEnabled(False)
@@ -717,6 +775,11 @@ class ScopeController(QWidget):
             self.ui.lblRecordingStatus.setText(self._viewer_limit_message())
 
     def _on_acquire_frame(self) -> None:
+        if self._waveform_file is not None or self._waveform_index_thread is not None:
+            self.ui.lblRecordingStatus.setText(
+                "Close the waveform file before acquiring a live frame"
+            )
+            return
         try:
             self._scope.start()
             raw_frame = self._scope.acquire_frame()
@@ -856,6 +919,264 @@ class ScopeController(QWidget):
     def _on_persistence_changed(self, value: int) -> None:
         self.ui.labelPersistenceValue.setText(f"{value / 1000:.3f}")
 
+    # ------------------------------------------------------------------
+    # File waveform browser
+    # ------------------------------------------------------------------
+
+    def open_waveform_file(self, path: Path) -> None:
+        """Index a CAEN or NLab scope binary without blocking the GUI."""
+        if self._refresh_timer.isActive() or self._scope.get_enable():
+            raise RuntimeError("Stop live scope acquisition before opening a waveform file")
+        if self._dma_worker is not None or self._dma_thread is not None:
+            raise RuntimeError("Stop scope DMA before opening a waveform file")
+        if self._auto_setup_thread is not None:
+            raise RuntimeError("Wait for Auto Setup before opening a waveform file")
+        if self._waveform_index_thread is not None:
+            raise RuntimeError("A waveform file is already being indexed")
+
+        self._close_mapped_waveform()
+        self._waveform_index_result = None
+        self._waveform_index_error = None
+        self._waveform_index_abandon = False
+        worker = WaveformFileIndexWorker(path)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_waveform_index_progress)
+        worker.loaded.connect(self._on_waveform_index_loaded)
+        worker.error.connect(self._on_waveform_index_error)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_waveform_index_finished)
+        self._waveform_index_worker = worker
+        self._waveform_index_thread = thread
+        self.ui.labelFileChannel.hide()
+        self.ui.comboFileChannel.hide()
+        self.ui.groupFileBrowser.show()
+        self._set_file_browser_busy(True)
+        self.ui.lblFileFrameInfo.setText(f"Indexing {path.name}...")
+        thread.start()
+
+    def _set_file_browser_busy(self, busy: bool) -> None:
+        self._set_controls_enabled(not busy)
+        self.ui.groupDisplay.setEnabled(not busy)
+        self.ui.btnStart.setEnabled(not busy)
+        self.ui.btnStop.setEnabled(False)
+        self.ui.btnAcquireFrame.setEnabled(not busy)
+        self.ui.btnDmaFile.setEnabled(not busy)
+        self.ui.btnAutoSetup.setEnabled(not busy)
+        self.ui.btnCloseWaveformFile.setEnabled(busy)
+
+    def _on_waveform_index_progress(self, processed: int, total: int) -> None:
+        percent = 100.0 * processed / total if total else 0.0
+        self.ui.lblFileFrameInfo.setText(f"Indexing waveform records: {percent:.1f}%")
+
+    def _on_waveform_index_loaded(self, index: object) -> None:
+        if self._waveform_index_abandon:
+            return
+        if isinstance(index, WaveformFileIndex):
+            self._waveform_index_result = index
+        else:
+            self._waveform_index_error = "Waveform index worker returned invalid data"
+
+    def _on_waveform_index_error(self, message: str) -> None:
+        self._waveform_index_error = message
+
+    def _on_waveform_index_finished(self) -> None:
+        abandoned = self._waveform_index_abandon
+        index = None if abandoned else self._waveform_index_result
+        error = None if abandoned else self._waveform_index_error
+        self._waveform_index_worker = None
+        self._waveform_index_thread = None
+        self._waveform_index_result = None
+        self._waveform_index_error = None
+        self._waveform_index_abandon = False
+        if index is None:
+            self._set_file_browser_busy(False)
+            if abandoned:
+                self.ui.btnCloseWaveformFile.setEnabled(False)
+                self.ui.lblFileFrameInfo.setText("No waveform file loaded.")
+                self.ui.groupFileBrowser.hide()
+                return
+            self.ui.btnCloseWaveformFile.setEnabled(True)
+            self.ui.lblFileFrameInfo.setText(
+                f"Waveform file error: {error}" if error else "Waveform indexing cancelled."
+            )
+            return
+
+        try:
+            self._waveform_file = MappedWaveformFile(index)
+        except Exception as exc:
+            self._set_file_browser_busy(False)
+            self.ui.btnCloseWaveformFile.setEnabled(True)
+            self.ui.lblFileFrameInfo.setText(f"Waveform file error: {exc}")
+            return
+
+        self.ui.comboFileChannel.blockSignals(True)
+        try:
+            self.ui.comboFileChannel.clear()
+            for source in index.channels:
+                label = f"Channel {source.channel}"
+                if source.board is not None:
+                    label = f"Board {source.board} / {label}"
+                self.ui.comboFileChannel.addItem(label)
+            initial_source_index = next(
+                (
+                    source_index
+                    for source_index, source in enumerate(index.channels)
+                    if source.channel == self._channel
+                ),
+                0,
+            )
+            self.ui.comboFileChannel.setCurrentIndex(initial_source_index)
+        finally:
+            self.ui.comboFileChannel.blockSignals(False)
+        has_multiple_sources = len(index.channels) > 1
+        self.ui.labelFileChannel.setVisible(has_multiple_sources)
+        self.ui.comboFileChannel.setVisible(has_multiple_sources)
+        self.ui.comboFileChannel.setEnabled(has_multiple_sources)
+        self.ui.spinFileSamplePeriod.setValue(index.sample_period_ns or 2.0)
+        self.ui.spinFileSamplePeriod.setEnabled(index.sample_period_ns is None)
+        self._file_previous_display_mode = self._display_mode
+        self.ui.comboDisplayMode.setCurrentIndex(DisplayMode.RAW)
+        self._set_file_browser_busy(True)
+        self._on_file_channel_changed(initial_source_index)
+
+    def _on_file_channel_changed(self, source_index: int) -> None:
+        source_file = self._waveform_file
+        if source_file is None or not 0 <= source_index < len(source_file.index.channels):
+            return
+        self._file_frame_timer.stop()
+        source = source_file.index.channels[source_index]
+        maximum = source.frame_count - 1
+        self.ui.sliderFileFrame.blockSignals(True)
+        self.ui.spinFileFrame.blockSignals(True)
+        try:
+            self.ui.sliderFileFrame.setRange(0, maximum)
+            self.ui.spinFileFrame.setRange(0, maximum)
+            self.ui.sliderFileFrame.setValue(0)
+            self.ui.spinFileFrame.setValue(0)
+            self.ui.spinFileFrame.setSuffix(f" / {maximum}")
+        finally:
+            self.ui.sliderFileFrame.blockSignals(False)
+            self.ui.spinFileFrame.blockSignals(False)
+        self.ui.sliderFileFrame.setEnabled(True)
+        self.ui.spinFileFrame.setEnabled(True)
+        self.ui.btnPreviousFileFrame.setEnabled(maximum > 0)
+        self.ui.btnNextFileFrame.setEnabled(maximum > 0)
+        self._render_file_frame()
+
+    def _queue_file_frame(self) -> None:
+        if self._waveform_file is not None:
+            self._file_frame_timer.start()
+
+    def _render_file_frame(self) -> None:
+        source = self._waveform_file
+        if source is None:
+            return
+        try:
+            frame_index = self.ui.spinFileFrame.value()
+            source_index = self.ui.comboFileChannel.currentIndex()
+            frame = source.frame(frame_index, source_index)
+            sample_period_ns = self.ui.spinFileSamplePeriod.value()
+            duration_ns = max(sample_period_ns, len(frame.samples) * sample_period_ns)
+            scale = time_axis_scale(duration_ns)
+            x_time = (
+                np.arange(len(frame.samples), dtype=np.float64)
+                * sample_period_ns
+                / scale.ns_per_unit
+            )
+            self._raw_curve.setData(x_time, frame.samples)
+            # Match pyqtgraph's ``A`` action for every selected file frame:
+            # the waveform may occupy only a small part of the ADC's full
+            # signed range, so fixed hardware limits make it look flat.
+            self._plot_item.getViewBox().autoRange(
+                items=[self._raw_curve],
+                padding=0.02,
+            )
+            self._time_axis_label.setText(
+                f"Time [{scale.unit}] ({sample_period_ns:g} ns/file sample)"
+            )
+            self.ui.lblFileFrameInfo.setText(self._file_frame_description(frame_index, frame))
+        except Exception as exc:
+            log.exception("Failed to display waveform file frame")
+            self.ui.lblFileFrameInfo.setText(f"Waveform frame error: {exc}")
+
+    def _file_frame_description(self, frame_index: int, frame: WaveformFrame) -> str:
+        source = self._waveform_file
+        assert source is not None
+        if source.index.caen_info is None:
+            return (
+                f"{source.index.path.name} | frame {frame_index:,} | "
+                f"timestamp {frame.timestamp} (8 ns ticks) | {len(frame.samples):,} samples"
+            )
+        ratio = (
+            (frame.long_gate - frame.short_gate) / frame.long_gate
+            if frame.long_gate and frame.short_gate is not None
+            else float("nan")
+        )
+        return (
+            f"{source.index.path.name} | event {frame_index:,} | board {frame.board}, "
+            f"channel {frame.channel} | timestamp {frame.timestamp} ps | "
+            f"long {frame.long_gate}, short {frame.short_gate}, PSD {ratio:.4f} | "
+            f"flags 0x{(frame.flags or 0):08X} | {len(frame.samples):,} samples"
+        )
+
+    def _on_close_waveform_file(self) -> None:
+        if self._waveform_index_worker is not None:
+            self._waveform_index_abandon = True
+            self._waveform_index_worker.stop()
+            self.ui.lblFileFrameInfo.setText("Cancelling waveform indexing...")
+            return
+        self._close_mapped_waveform()
+
+    def _close_mapped_waveform(self) -> None:
+        self._file_frame_timer.stop()
+        source = self._waveform_file
+        had_source = source is not None
+        if source is not None:
+            self._raw_curve.setData([], [])
+            source.close()
+            self._waveform_file = None
+        if not hasattr(self, "ui"):
+            return
+        self.ui.sliderFileFrame.setEnabled(False)
+        self.ui.spinFileFrame.setEnabled(False)
+        self.ui.btnPreviousFileFrame.setEnabled(False)
+        self.ui.btnNextFileFrame.setEnabled(False)
+        self.ui.spinFileSamplePeriod.setEnabled(False)
+        self.ui.comboFileChannel.blockSignals(True)
+        try:
+            self.ui.comboFileChannel.clear()
+        finally:
+            self.ui.comboFileChannel.blockSignals(False)
+        self.ui.comboFileChannel.setEnabled(False)
+        self.ui.comboFileChannel.hide()
+        self.ui.labelFileChannel.hide()
+        self.ui.btnCloseWaveformFile.setEnabled(False)
+        self.ui.lblFileFrameInfo.setText("No waveform file loaded.")
+        self._set_file_browser_busy(False)
+        self.ui.groupFileBrowser.hide()
+        if had_source:
+            self.ui.comboDisplayMode.setCurrentIndex(self._file_previous_display_mode)
+            self._update_axis_ranges()
+
+    def _stop_waveform_file_sync(self) -> None:
+        worker = self._waveform_index_worker
+        thread = self._waveform_index_thread
+        if worker is not None:
+            self._waveform_index_abandon = True
+            worker.stop()
+        if thread is not None and not thread.wait(5000):
+            log.error("Waveform index thread did not stop within 5 seconds")
+        else:
+            self._waveform_index_worker = None
+            self._waveform_index_thread = None
+        self._waveform_index_result = None
+        self._waveform_index_error = None
+        self._close_mapped_waveform()
+
     @property
     def persistence(self) -> float:
         return self.ui.dialPersistence.value() / 1000.0
@@ -965,6 +1286,8 @@ class ScopeController(QWidget):
         memory just keeps showing whatever it last captured before the
         app closed, looking permanently frozen.
         """
+        self._stop_waveform_file_sync()
+
         auto_worker = self._auto_setup_worker
         auto_thread = self._auto_setup_thread
         if auto_worker is not None:

@@ -5,9 +5,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QByteArray, QSettings, Qt, QThread, QThreadPool
-from PySide6.QtWidgets import QDockWidget, QMainWindow, QWidget
+from PySide6.QtWidgets import QDockWidget, QInputDialog, QMainWindow, QWidget
 
 from nlab.analysis.psd_file import inspect_psd_event_file
+from nlab.analysis.waveform_file import inspect_waveform_file
 from nlab.controllers.external_device_controller import ExternalDeviceController
 from nlab.controllers.global_controller import GlobalController
 from nlab.controllers.mca_controller import MCAController
@@ -419,11 +420,18 @@ class MainWindowController:
         if target is None and len(self._psd_controllers) == 1:
             target = self._psd_controllers[0]
         if target is None:
-            channels = ", ".join(str(ctrl.channel) for ctrl in self._psd_controllers)
-            raise ValueError(
-                f"File channel {info.channel!r} does not match an available PSD "
-                f"channel ({channels})"
+            choices = [f"PSD channel {ctrl.channel}" for ctrl in self._psd_controllers]
+            selected, accepted = QInputDialog.getItem(
+                self._window,
+                "Select PSD Display",
+                f"Source channel {info.channel!r} has no matching display. Load into:",
+                choices,
+                0,
+                False,
             )
+            if not accepted:
+                return
+            target = self._psd_controllers[choices.index(selected)]
 
         energy_bins, ratio_bins, energy_right_shift, ratio_range = (
             target.file_analysis_settings()
@@ -462,6 +470,45 @@ class MainWindowController:
             info.format_name,
             info.total_events,
             info.channel,
+        )
+
+    def load_waveform_file(self, path: Path) -> None:
+        """Route a CAEN or NLab DMA waveform file to a Scope panel."""
+        if not self._scope_controllers:
+            raise RuntimeError("No Scope channel is available for displaying this file")
+        info = inspect_waveform_file(path)
+        target = next(
+            (ctrl for ctrl in self._scope_controllers if ctrl.channel == info.channel),
+            None,
+        )
+        if target is None and len(self._scope_controllers) == 1:
+            target = self._scope_controllers[0]
+        if target is None:
+            choices = [f"Scope channel {ctrl.channel}" for ctrl in self._scope_controllers]
+            selected, accepted = QInputDialog.getItem(
+                self._window,
+                "Select Scope Display",
+                f"Source channel {info.channel} has no matching display. Load into:",
+                choices,
+                0,
+                False,
+            )
+            if not accepted:
+                return
+            target = self._scope_controllers[choices.index(selected)]
+
+        target.open_waveform_file(path)
+        self._window.ui.mainTabs.setCurrentWidget(self._window.ui.tabScope)
+        for dock in self._scope_dock_host.findChildren(QDockWidget):
+            if dock.widget() is target:
+                dock.raise_()
+                break
+        log.info(
+            "Waveform file load started: %s (%s, source channel=%d, display channel=%d)",
+            path,
+            info.format_name,
+            info.channel,
+            target.channel,
         )
 
     def _on_psd_file_thread_finished(self) -> None:

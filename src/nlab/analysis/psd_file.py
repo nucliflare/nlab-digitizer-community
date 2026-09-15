@@ -13,10 +13,12 @@ import h5py
 import numpy as np
 import yaml
 
+from nlab.analysis.caen_file import inspect_caen_file, iter_caen_psd_batches
 from nlab.hardware.digitizer.dma import (
     _EVENT_DTYPE,
     _LM_EVENT_DTYPE,
     FILE_HEADER_STRUCT,
+    FILE_MAGIC,
     FILE_VERSION,
     IIO_LM_FILE_VERSION,
     IIO_LM_FRAME_BYTES,
@@ -70,6 +72,21 @@ def inspect_psd_event_file(path: Path) -> PsdEventFileInfo:
     """Read only lightweight metadata needed to select the target PSD view."""
     suffix = path.suffix.lower()
     if suffix == ".bin":
+        with path.open("rb") as stream:
+            prefix = stream.read(len(FILE_MAGIC))
+        if prefix != FILE_MAGIC:
+            info = inspect_caen_file(path)
+            if not info.psd_compatible:
+                raise ValueError(
+                    "The CAEN file does not contain both raw Energy and Energy "
+                    "Short and cannot be used for PSD reconstruction"
+                )
+            return PsdEventFileInfo(
+                path,
+                info.format_name,
+                info.channel,
+                info.total_events,
+            )
         with path.open("rb") as stream:
             header = read_file_header(stream)
         if header["frame_samples"]:
@@ -238,7 +255,15 @@ def iter_psd_event_batches(path: Path) -> Iterator[np.ndarray]:
     """Yield bounded event batches without retaining prior batches in memory."""
     suffix = path.suffix.lower()
     if suffix == ".bin":
-        yield from _iter_ndma(path)
+        with path.open("rb") as stream:
+            prefix = stream.read(len(FILE_MAGIC))
+        if prefix == FILE_MAGIC:
+            yield from _iter_ndma(path)
+        else:
+            yield from iter_caen_psd_batches(
+                path,
+                target_batch_bytes=_TARGET_BATCH_BYTES,
+            )
     elif suffix in {".h5", ".hdf5"}:
         yield from _iter_hdf5(path)
     elif suffix == ".root":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
@@ -8,6 +9,40 @@ import pytest
 from nlab.controllers import main_window_controller as main_window_module
 from nlab.controllers.global_controller import GlobalController
 from nlab.controllers.main_window_controller import MainWindowController
+
+
+def test_waveform_file_routes_to_matching_scope_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _bare_controller()
+    scope_0 = SimpleNamespace(channel=0, open_waveform_file=Mock())
+    scope_1 = SimpleNamespace(channel=1, open_waveform_file=Mock())
+    controller._scope_controllers = [scope_0, scope_1]
+    controller._scope_dock_host = SimpleNamespace(findChildren=Mock(return_value=[]))
+    tab_scope = object()
+    controller._window = SimpleNamespace(
+        ui=SimpleNamespace(
+            mainTabs=SimpleNamespace(setCurrentWidget=Mock()),
+            tabScope=tab_scope,
+        )
+    )
+    path = Path("channel-1.bin")
+    monkeypatch.setattr(
+        main_window_module,
+        "inspect_waveform_file",
+        Mock(
+            return_value=SimpleNamespace(
+                channel=1,
+                format_name="NLab scope NDMA",
+            )
+        ),
+    )
+
+    controller.load_waveform_file(path)
+
+    scope_0.open_waveform_file.assert_not_called()
+    scope_1.open_waveform_file.assert_called_once_with(path)
+    controller._window.ui.mainTabs.setCurrentWidget.assert_called_once_with(tab_scope)
 
 
 def _bare_controller(*, backend: str = "iio") -> MainWindowController:

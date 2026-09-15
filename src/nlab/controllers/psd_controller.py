@@ -239,7 +239,7 @@ class PSDController(QWidget):
             return
         self._accumulator = accumulator
         self._file_loading = False
-        self._capture_note = f"Loaded {processed:,} events from {Path(source).name}."
+        self._capture_note = f"Loaded {processed:,} events from {source}."
         self._set_analysis_controls_enabled(True)
         self._reset_display_ranges()
         self._render()

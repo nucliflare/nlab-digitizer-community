@@ -260,9 +260,19 @@ HDF5 files embed that YAML snapshot and expose `timestamp`, `long_gate`, and
 `short_gate` fields for analysis.
 
 Use **File → Open PSD Event File...** to reconstruct the PSD matrix and both
-projections from NDMA, HDF5, or ROOT events. The import runs in a background
-worker: NDMA is memory-mapped, HDF5 is read in dataset slices, and ROOT uses
-chunked tree iteration, so event memory does not grow with file size.
+projections from NDMA, CAEN CoMPASS, legacy `caen.py`, HDF5, or ROOT events.
+The import runs in a background worker: binary files are memory-mapped, HDF5
+is read in dataset slices, and ROOT uses chunked tree iteration, so event
+memory does not grow with file size. CAEN PSD import requires raw Energy and
+Energy Short fields; waveform samples are skipped.
+
+Use **File → Open Waveform File...** to browse native NLab scope NDMA captures
+or waveform-bearing CAEN CoMPASS binaries. The selected Scope panel reveals a
+file-browser panel below its plot while the file is open and hides it again on
+Close. Variable-length CAEN events are indexed in a background worker, and
+only the selected frame is mapped. NLab DMA files use their known 8 ns point
+period. CoMPASS binaries do not store the ADC sample period, so set that value
+in the browser to obtain the correct time axis.
 
 Use **File → Convert Binary to HDF5...** in the GUI for portable analysis
 files. Quarto examples are provided in:
