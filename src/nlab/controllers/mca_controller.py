@@ -50,8 +50,8 @@ _LP_PRESET_LABELS = ["200 MHz", "70 MHz", "Moving average"]
 _MAX_GUI_RENDER_HZ = 15
 
 # The diagnostic memories publish one entry per 125 MHz datapath beat.  The
-# board timebase is therefore 8 ns per displayed debug sample; see
-# hw_description/user-api.md, "Timebase" and "Diagnostic memories".
+# board timebase is therefore 8 ns per displayed debug sample; see the
+# PetaLinux project's user API, "Timebase" and "Diagnostic memories".
 _DEBUG_SAMPLE_PERIOD_NS = 8
 
 _MCA_CONTROL_TOOLTIPS = {

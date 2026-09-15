@@ -92,8 +92,8 @@ class ScopeController(QWidget):
     _Y_MAX = 32_000
     # The scope captures raw ADC samples at 500 MSPS (2 ns/sample).  Its
     # lightweight viewer memory contains one four-sample boxcar average per
-    # 125 MHz datapath beat, hence one displayed point every 8 ns.  See
-    # hw_description/user-api.md, "Timebase" and "Viewer".
+    # 125 MHz datapath beat, hence one displayed point every 8 ns. See the
+    # PetaLinux project's user API, "Timebase" and "Viewer".
     _SAMPLE_PERIOD_NS = SCOPE_ADC_SAMPLE_PERIOD_NS
     _VIEWER_POINT_PERIOD_NS = SCOPE_DATAPATH_CLOCK_PERIOD_NS
 

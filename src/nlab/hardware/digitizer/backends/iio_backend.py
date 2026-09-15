@@ -247,8 +247,8 @@ def _disable_mca_dma_client_timeout(context: iio.Context) -> None:
 def _device_number(device: iio.Device) -> int:
     """Return the numeric part of an ``iio:deviceN`` identifier.
 
-    This matches hw_description/scope_backend_iio.py and makes index-based
-    selection deterministic. It does *not* turn probe order into physical
+    This matches the PetaLinux reference client and makes index-based selection
+    deterministic. It does *not* turn probe order into physical
     channel identity: user-api.md explicitly says that A/B pairing requires
     platform-device links and the ewt,pulse-processor phandle, neither of
     which is exposed by the tested remote IIO context.

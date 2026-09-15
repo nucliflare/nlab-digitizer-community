@@ -6,9 +6,9 @@ __pycache__/
 .eggs/
 *.bin
 dist/
+dist_standalone/
 build/
 measurements/
-hw_description/
 wiki/
 docs/.quarto/
 

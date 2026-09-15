@@ -14,12 +14,12 @@ jobs:
             runs-on: windows-local
             python-exe: python
             venv-python: .venv/Scripts/python.exe
-            artifact: dist/main.dist
+            package: dist/nlab-windows.zip
           - name: ubuntu
             runs-on: ubuntu-local
             python-exe: python3
             venv-python: .venv/bin/python
-            artifact: dist/main.dist
+            package: dist/nlab-ubuntu.tar.gz
     runs-on: ${{ matrix.runs-on }}
     steps:
       - uses: actions/checkout@v4
@@ -52,10 +52,10 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           uv venv --python 3.12 --seed .venv
 
-      - name: Install
+      - name: Install locked dependencies
         run: |
           ${{ matrix.venv-python }} -m pip install --upgrade pip uv
-          ${{ matrix.venv-python }} -m uv pip install -e ".[dev]"
+          ${{ matrix.venv-python }} -m uv sync --locked --extra dev
 
       - name: Generate UI modules
         run: ${{ matrix.venv-python }} scripts/build_ui.py
@@ -71,7 +71,6 @@ jobs:
           ${{ matrix.venv-python }} -m mypy src/nlab
 
       - name: Test
-        if: false
         env:
           QT_QPA_PLATFORM: offscreen
         run: ${{ matrix.venv-python }} -m pytest
@@ -79,23 +78,41 @@ jobs:
       - name: Build
         run: ${{ matrix.venv-python }} scripts/build_nuitka.py
 
+      - name: Package build (Windows)
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/main.dist -DestinationPath ${{ matrix.package }} -Force
+
+      - name: Package build (Linux)
+        if: matrix.name == 'ubuntu'
+        run: tar -czf ${{ matrix.package }} -C dist main.dist
+
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        # Gitea uses the v3 artifact protocol; pin Node 20 to match the other
+        # actions used by the self-hosted runners instead of floating to Node 24.
+        uses: actions/upload-artifact@v3-node20
         with:
           name: nlab-${{ matrix.name }}
-          path: ${{ matrix.artifact }}
+          path: ${{ matrix.package }}
+          if-no-files-found: error
 
   release:
     needs: build
     if: github.event_name == 'push'
     runs-on: ubuntu-local
+    permissions:
+      actions: read
+      releases: write
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v3-node20
         with:
           path: dist
 
       - name: Create Gitea Release
-        uses: akkuman/gitea-release-action@v1
+        uses: https://gitea.com/actions/gitea-release-action@v1
         with:
-          files: dist/**/*
+          token: ${{ secrets.GITEA_TOKEN }}
+          files: |
+            dist/**/*.zip
+            dist/**/*.tar.gz

@@ -49,9 +49,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Reviewed PyInstaller build script** with development-only module exclusions,
   Windows version resources, input validation, optional clean builds, and artifact
   size/hash reporting
-- **IIO hardware audit** documenting the scope, MCA, list-mode, HV, and temperature
-  devices discovered across three deployed boards
-
 ### Changed
 
 - The desktop layout now fits 720p displays by sizing the main window against

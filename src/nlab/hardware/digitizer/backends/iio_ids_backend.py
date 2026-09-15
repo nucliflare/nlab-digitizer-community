@@ -1,7 +1,7 @@
 """IIO backend for the high-voltage control and temperature hardware.
 
-The device/attribute mapping comes from the small reference clients in
-``hw_description/iio_mcp3564.c``, ``iio_ad5686r.c`` and ``iio_tmp117.c``:
+The device/attribute mapping comes from the PetaLinux project's small reference
+clients ``iio_mcp3564.c``, ``iio_ad5686r.c`` and ``iio_tmp117.c``:
 
 * AD5686R output ``voltageN.raw`` programs the HV set point;
 * MCP3564(R) channels are selected by their ``label`` attribute and expose

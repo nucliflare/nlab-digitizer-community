@@ -127,11 +127,6 @@ buffer allocation fails immediately with target-side `EINVAL` (`Open unlocked:
 driver/firmware to the opaque-record ABI; do not change the Python frame length
 or request a partial scan mask as a workaround.
 
-The authoritative target ABI and capture lifecycle are documented in
-[`hw_description/user-api.md`](hw_description/user-api.md),
-[`hw_description/scope-architecture.md`](hw_description/scope-architecture.md),
-and [`hw_description/mca-architecture.md`](hw_description/mca-architecture.md).
-
 ## Installation from source
 
 ### Prerequisites
@@ -152,8 +147,7 @@ by Qt.
 git clone https://github.com/nucliflare/nlab-digitizer-community.git
 cd nlab-digitizer-community
 
-uv venv
-uv pip install -e ".[dev]"
+uv sync --locked --extra dev
 
 python scripts/build_ui.py
 python scripts/generate_proto.py
@@ -312,7 +306,6 @@ Important source locations:
 | `src/nlab/hardware/digitizer/dma.py` | IIO and legacy capture streamers and NDMA formats |
 | `src/nlab/controllers/` | GUI coordination and acquisition state |
 | `src/nlab/workers/` | Background polling and DMA workers |
-| `hw_description/` | Driver sources, target API, architecture notes, and reference tools |
 | `tests/` | Unit, lifecycle, format, settings, and GUI tests |
 
 ## Development
@@ -342,7 +335,8 @@ $env:QT_QPA_PLATFORM = "offscreen"
 uv run pytest
 ```
 
-Static checks used by the project are:
+Local static checks are currently advisory while the existing findings are
+being baselined:
 
 ```bash
 uv run ruff check .
@@ -364,6 +358,9 @@ Nuitka is used for release-style standalone directory builds:
 python scripts/build_nuitka.py
 ```
 
+Its executable is written to `dist/main.dist/nlab.exe` on Windows or
+`dist/main.dist/nlab-app` on Linux.
+
 The reviewed PyInstaller script produces a convenient single-file executable,
 retains the required SciPy, Matplotlib, and Pillow stacks, embeds Windows
 version information, and reports the artifact hash:
@@ -372,12 +369,14 @@ version information, and reports the artifact hash:
 python scripts/build_pyinstaller_reviewed.py --clean
 ```
 
-Output is `dist/nlab.exe` on Windows or `dist/nlab` on Linux. The original
+The reviewed PyInstaller output is `dist/nlab.exe` on Windows or `dist/nlab`
+on Linux. The original
 [`scripts/build_pyinstaller.py`](scripts/build_pyinstaller.py) remains as a
 fallback while the reviewed build is adopted.
 
 Tagged releases trigger Windows and Ubuntu builds through the repository's
-GitHub and Gitea workflows. Published artifacts are available from the
+GitHub and Gitea workflows. The standalone directories are published as
+platform-specific archives; GitHub artifacts are available from the
 [Releases page](https://github.com/nucliflare/nlab-digitizer-community/releases).
 
 ## Known target-side limitations
@@ -404,9 +403,8 @@ are welcome. Please include the backend, firmware/IP version, device discovery
 output, host operating system, and whether a result was reproduced with an
 official libiio utility when reporting transport or DMA failures.
 
-Submit changes against `main`, add focused tests where practical, and keep
-driver-derived claims linked to the checked-in sources under
-[`hw_description/`](hw_description/).
+Submit changes against `main`, add focused tests where practical, and cite the
+corresponding authoritative source for driver-derived claims.
 
 ## License
 
