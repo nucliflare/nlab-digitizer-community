@@ -86,7 +86,9 @@ jobs:
 
       - name: Package build (Windows)
         if: matrix.name == 'windows'
-        shell: pwsh
+        # Windows self-hosted runners are only required to provide the built-in
+        # Windows PowerShell, not the separately installed PowerShell Core (pwsh).
+        shell: powershell
         run: Compress-Archive -Path dist/nlab.exe -DestinationPath ${{ matrix.package }} -Force
 
       - name: Package build (Linux)

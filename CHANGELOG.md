@@ -103,6 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Windows self-hosted CI could fail every `tmp_path`-using test when pytest's shared
   user temp directory had incompatible permissions; CI now uses a workspace-local
   temporary root
+- Windows release packaging no longer requires PowerShell Core (`pwsh`) and runs with
+  the built-in Windows PowerShell available on self-hosted runners
 
 ### Known limitations
 

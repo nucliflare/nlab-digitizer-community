@@ -78,7 +78,7 @@ jobs:
 
       - name: Package build (Windows)
         if: matrix.name == 'windows'
-        shell: pwsh
+        shell: powershell
         run: Compress-Archive -Path dist/nlab.exe -DestinationPath ${{ matrix.package }} -Force
 
       - name: Package build (Linux)
