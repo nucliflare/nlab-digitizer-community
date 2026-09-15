@@ -79,6 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - DMA conversion distinguishes legacy gRPC list-mode records from the IIO event layout
   through NDMA format version 2
 - PySide6 compatibility was widened for supported older Linux deployments
+- Release workflows now package the reviewed PyInstaller single-file executable instead
+  of the larger Nuitka standalone directory
 
 ### Fixed
 
@@ -96,6 +98,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   functional HV control; the backend falls back to `HAT_temp` when available and marks
   digital temperature compensation unavailable when no TMP117 exists
 - Scope periodic mode omitted the hardware frame-gap setting
+- Linux CI runners omitted the `libdbus-1-3` runtime required to import PySide6 during
+  pytest initialization
 
 ### Known limitations
 

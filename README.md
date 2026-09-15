@@ -352,30 +352,29 @@ tests. When running hardware checks, always stop an armed MCA/Scope in a
 Install the development dependencies and generate the UI/protobuf modules
 before packaging.
 
-Nuitka is used for release-style standalone directory builds:
-
-```bash
-python scripts/build_nuitka.py
-```
-
-Its executable is written to `dist/main.dist/nlab.exe` on Windows or
-`dist/main.dist/nlab-app` on Linux.
-
-The reviewed PyInstaller script produces a convenient single-file executable,
-retains the required SciPy, Matplotlib, and Pillow stacks, embeds Windows
-version information, and reports the artifact hash:
+The reviewed PyInstaller script is used for release builds. It produces a
+single-file executable, retains the required SciPy, Matplotlib, and Pillow
+stacks, embeds Windows version information, and reports the artifact hash:
 
 ```bash
 python scripts/build_pyinstaller_reviewed.py --clean
 ```
 
-The reviewed PyInstaller output is `dist/nlab.exe` on Windows or `dist/nlab`
-on Linux. The original
+The release executable is written to `dist/nlab.exe` on Windows or `dist/nlab`
+on Linux.
+
+Nuitka remains available as an optional standalone-directory build:
+
+```bash
+python scripts/build_nuitka.py
+```
+
+The original
 [`scripts/build_pyinstaller.py`](scripts/build_pyinstaller.py) remains as a
-fallback while the reviewed build is adopted.
+minimal fallback.
 
 Tagged releases trigger Windows and Ubuntu builds through the repository's
-GitHub and Gitea workflows. The standalone directories are published as
+GitHub and Gitea workflows. The single-file executables are published in
 platform-specific archives; GitHub artifacts are available from the
 [Releases page](https://github.com/nucliflare/nlab-digitizer-community/releases).
 

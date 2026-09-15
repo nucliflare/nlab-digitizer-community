@@ -40,7 +40,7 @@ jobs:
         if: matrix.name == 'ubuntu'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1 libegl1 libxkbcommon0 libxcb-cursor0 libxcb-icccm4 \
+          sudo apt-get install -y libdbus-1-3 libgl1 libegl1 libxkbcommon0 libxcb-cursor0 libxcb-icccm4 \
             libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
             libxcb-xinerama0 patchelf
 
@@ -68,16 +68,16 @@ jobs:
         run: ${{ matrix.venv-python }} -m pytest
 
       - name: Build
-        run: ${{ matrix.venv-python }} scripts/build_nuitka.py
+        run: ${{ matrix.venv-python }} scripts/build_pyinstaller_reviewed.py --clean
 
       - name: Package build (Windows)
         if: matrix.name == 'windows'
         shell: pwsh
-        run: Compress-Archive -Path dist/main.dist -DestinationPath ${{ matrix.package }} -Force
+        run: Compress-Archive -Path dist/nlab.exe -DestinationPath ${{ matrix.package }} -Force
 
       - name: Package build (Linux)
         if: matrix.name == 'ubuntu'
-        run: tar -czf ${{ matrix.package }} -C dist main.dist
+        run: tar -czf ${{ matrix.package }} -C dist nlab
 
       - uses: actions/upload-artifact@v7
         with:
