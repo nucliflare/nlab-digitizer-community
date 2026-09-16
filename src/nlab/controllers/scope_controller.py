@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
 
@@ -31,7 +32,7 @@ from nlab.hardware.digitizer.scope import (
     TriggerMode,
 )
 from nlab.ui.ui_scope_view import Ui_ScopeView
-from nlab.views.plot_viewbox import ModifierZoomViewBox
+from nlab.views.plot_viewbox import DraggableScopeCurve, ModifierZoomViewBox
 from nlab.views.responsive_layout import configure_scope_layout
 from nlab.views.time_axis import format_duration_ns, time_axis_scale
 from nlab.workers.dma_workers import IIOScopeDmaWorker, ScopeDmaWorker
@@ -81,6 +82,24 @@ class DisplayMode(IntEnum):
     RAW = 1
 
 
+@dataclass(frozen=True)
+class _WaveformDragState:
+    x: np.ndarray
+    y: np.ndarray
+    dac_value: int
+    pretrigger_ns: int
+    adc_per_dac: float
+    status_text: str
+
+
+@dataclass(frozen=True)
+class _PretriggerLineDragState:
+    x: np.ndarray | None
+    y: np.ndarray | None
+    pretrigger_ns: int
+    status_text: str
+
+
 class ScopeController(QWidget):
     """View + controller for a single Scope channel.
 
@@ -97,6 +116,8 @@ class ScopeController(QWidget):
     # PetaLinux project's user API, "Timebase" and "Viewer".
     _SAMPLE_PERIOD_NS = SCOPE_ADC_SAMPLE_PERIOD_NS
     _VIEWER_POINT_PERIOD_NS = SCOPE_DATAPATH_CLOCK_PERIOD_NS
+    _THRESHOLD_MARKER_COLOR = "#a66f6f"
+    _PRETRIGGER_MARKER_COLOR = "#648b71"
 
     def __init__(
         self,
@@ -131,6 +152,10 @@ class ScopeController(QWidget):
         self._auto_setup_thread: QThread | None = None
         self._auto_setup_result: ScopeAutoSetupResult | None = None
         self._auto_setup_error: str | None = None
+        self._dac_adc_slope: float | None = None
+        self._waveform_drag: _WaveformDragState | None = None
+        self._pretrigger_line_drag: _PretriggerLineDragState | None = None
+        self._waveform_pending_status: str | None = None
 
         self._waveform_index_worker: WaveformFileIndexWorker | None = None
         self._waveform_index_thread: QThread | None = None
@@ -329,10 +354,13 @@ class ScopeController(QWidget):
     # ------------------------------------------------------------------
 
     def _set_controls_enabled(self, enabled: bool) -> None:
+        if not enabled:
+            self._cancel_pretrigger_line_drag()
         self.ui.groupTrigger.setEnabled(enabled)
         self.ui.groupTiming.setEnabled(enabled)
         self.ui.cbDmaEnable.setEnabled(enabled)
         self._threshold_line.setMovable(enabled)
+        self._update_waveform_drag_enabled()
 
     def _viewer_frame_limit(self) -> int | None:
         return self._scope.get_viewer_frame_samples_limit()
@@ -397,11 +425,23 @@ class ScopeController(QWidget):
             self.ui.spinDacValue,
             lambda v: self._scope.set_dac_value(v),
         )
+        self._raw_curve.drag_started.connect(self._on_waveform_drag_started)
+        self._raw_curve.drag_moved.connect(self._on_waveform_drag_moved)
+        self._raw_curve.drag_finished.connect(self._on_waveform_drag_finished)
 
         self.ui.spinPretrigger.editingFinished.connect(
             lambda: self._scope.set_pretrigger_samples(
                 self.ui.spinPretrigger.value() // self._SAMPLE_PERIOD_NS
             )
+        )
+        self.ui.spinPretrigger.valueChanged.connect(
+            self._sync_pretrigger_line_from_widget
+        )
+        self._pretrigger_line.sigPositionChanged.connect(
+            self._on_pretrigger_line_changed
+        )
+        self._pretrigger_line.sigPositionChangeFinished.connect(
+            self._on_pretrigger_line_drag_finished
         )
         self.ui.spinFrameSamples.editingFinished.connect(self._on_frame_samples_changed)
         self.ui.spinFrameGap.editingFinished.connect(
@@ -454,6 +494,242 @@ class ScopeController(QWidget):
         if self._threshold_line.movable:
             self._scope.set_trigger_level(self.ui.spinTriggerLevel.value())
 
+    def _sync_pretrigger_line_from_widget(self) -> None:
+        scale = self._time_scale.ns_per_unit
+        line = self._pretrigger_line
+        line.blockSignals(True)
+        try:
+            line.setBounds(
+                (
+                    self.ui.spinPretrigger.minimum() / scale,
+                    self.ui.spinPretrigger.maximum() / scale,
+                )
+            )
+            line.setValue(self.ui.spinPretrigger.value() / scale)
+        finally:
+            line.blockSignals(False)
+        line.label.setFormat(f"Pretrigger {self.ui.spinPretrigger.value()} ns")
+
+    def _on_pretrigger_line_changed(self) -> None:
+        line = self._pretrigger_line
+        spin = self.ui.spinPretrigger
+        if line.moving and self._pretrigger_line_drag is None:
+            x, y = self._raw_curve.getData()
+            self._pretrigger_line_drag = _PretriggerLineDragState(
+                x=np.array(x, copy=True) if x is not None else None,
+                y=np.array(y, copy=True) if y is not None else None,
+                pretrigger_ns=spin.value(),
+                status_text=self.ui.lblRecordingStatus.text(),
+            )
+            self._update_waveform_drag_enabled()
+        target_ns = line.value() * self._time_scale.ns_per_unit
+        step = spin.singleStep()
+        value = spin.minimum() + round((target_ns - spin.minimum()) / step) * step
+        spin.setValue(max(spin.minimum(), min(spin.maximum(), value)))
+        self._sync_pretrigger_line_from_widget()
+        state = self._pretrigger_line_drag
+        if state is not None:
+            if state.x is not None and state.y is not None:
+                shift = (spin.value() - state.pretrigger_ns) / self._time_scale.ns_per_unit
+                self._raw_curve.setData(state.x + shift, state.y)
+            self.ui.lblRecordingStatus.setText(
+                f"Pretrigger preview: {spin.value()} ns"
+            )
+
+    def _cancel_pretrigger_line_drag(self) -> None:
+        state = self._pretrigger_line_drag
+        if state is None:
+            return
+        self._pretrigger_line_drag = None
+        self._restore_pretrigger_line_drag(state)
+
+    def _on_pretrigger_line_drag_finished(self) -> None:
+        state = self._pretrigger_line_drag
+        if state is None:
+            return
+        self._pretrigger_line_drag = None
+        value_ns = self.ui.spinPretrigger.value()
+        if not self._pretrigger_line.movable or value_ns == state.pretrigger_ns:
+            self._restore_pretrigger_line_drag(state)
+            return
+        try:
+            # vdpp-scope.c accepts live pretrigger writes. Commit once on
+            # release, matching the raw-waveform drag path.
+            self._scope.set_pretrigger_samples(value_ns // self._SAMPLE_PERIOD_NS)
+        except Exception as exc:
+            log.exception("Scope ch%d: pretrigger marker update failed", self._channel)
+            try:
+                self.ui.spinPretrigger.setValue(
+                    self._scope.get_pretrigger_samples() * self._SAMPLE_PERIOD_NS
+                )
+                detail = ""
+            except Exception:
+                log.exception("Scope ch%d: pretrigger marker readback failed", self._channel)
+                detail = "; hardware state unknown—reconnect"
+            self._sync_pretrigger_line_from_widget()
+            if state.x is not None and state.y is not None:
+                self._raw_curve.setData(state.x, state.y)
+            self.ui.lblRecordingStatus.setText(f"Pretrigger update failed: {exc}{detail}")
+            self._update_waveform_drag_enabled()
+            return
+
+        self._waveform_pending_status = state.status_text
+        self._update_waveform_drag_enabled()
+        if self._refresh_timer.isActive():
+            self.ui.lblRecordingStatus.setText(
+                "Pretrigger applied; showing preview until the next live frame"
+            )
+            self._request_frame()
+        else:
+            if state.x is not None and state.y is not None:
+                self._raw_curve.setData(state.x, state.y)
+            self.ui.lblRecordingStatus.setText(
+                "Pretrigger applied; acquire a frame to see the actual waveform"
+            )
+
+    def _restore_pretrigger_line_drag(self, state: _PretriggerLineDragState) -> None:
+        self.ui.spinPretrigger.setValue(state.pretrigger_ns)
+        self._sync_pretrigger_line_from_widget()
+        if state.x is not None and state.y is not None:
+            self._raw_curve.setData(state.x, state.y)
+        self.ui.lblRecordingStatus.setText(state.status_text)
+        self._update_waveform_drag_enabled()
+
+    def _update_waveform_drag_enabled(self) -> None:
+        marker_enabled = (
+            self.ui.groupTiming.isEnabled()
+            and self._waveform_file is None
+            and self._waveform_index_thread is None
+            and self._dma_worker is None
+            and self._auto_setup_thread is None
+            and self._waveform_pending_status is None
+            and self._waveform_drag is None
+        )
+        self._pretrigger_line.setMovable(marker_enabled)
+        enabled = (
+            self._display_mode == DisplayMode.RAW
+            and self.ui.groupTrigger.isEnabled()
+            and self.ui.groupTiming.isEnabled()
+            and self._waveform_file is None
+            and self._waveform_index_thread is None
+            and self._dma_worker is None
+            and self._auto_setup_thread is None
+            and self._waveform_pending_status is None
+            and self._pretrigger_line_drag is None
+        )
+        self._raw_curve.setDragEnabled(enabled)
+        self._raw_curve.setToolTip(
+            "Drag the live waveform: horizontal = pretrigger, vertical = DAC baseline"
+            if enabled else ""
+        )
+
+    def _on_waveform_drag_started(self) -> None:
+        x, y = self._raw_curve.getData()
+        if x is None or y is None or len(x) == 0:
+            self._raw_curve.cancelDrag()
+            return
+        dac_spec = self._scope.specs[ScopeParam.DAC_VALUE]
+        adc_spec = self._scope.specs[ScopeParam.TRIGGER_LEVEL]
+        assert isinstance(dac_spec, RangeSpec)
+        assert isinstance(adc_spec, RangeSpec)
+        # The AFE DAC driver does not define an analogue ADC-counts/code scale.
+        # Operator observation on the current board (2026-09-16): increasing
+        # the DAC moves the signal down. Auto Setup measures the real slope;
+        # until then only the negative sign is observed, and the full ADC span
+        # per DAC span is an approximate UI preview sensitivity.
+        fallback_slope = -(adc_spec.max_val - adc_spec.min_val) / (
+            dac_spec.max_val - dac_spec.min_val
+        )
+        self._waveform_drag = _WaveformDragState(
+            x=np.array(x, copy=True),
+            y=np.array(y, copy=True),
+            dac_value=self.ui.spinDacValue.value(),
+            pretrigger_ns=self.ui.spinPretrigger.value(),
+            adc_per_dac=self._dac_adc_slope or fallback_slope,
+            status_text=self.ui.lblRecordingStatus.text(),
+        )
+        self._pretrigger_line.setMovable(False)
+
+    def _on_waveform_drag_moved(self, dx: float, dy: float) -> None:
+        state = self._waveform_drag
+        if state is None:
+            return
+        pre_spin = self.ui.spinPretrigger
+        pre_step = pre_spin.singleStep()
+        target_ns = state.pretrigger_ns + dx * self._time_scale.ns_per_unit
+        pre_ns = pre_spin.minimum() + round(
+            (target_ns - pre_spin.minimum()) / pre_step
+        ) * pre_step
+        pre_ns = max(pre_spin.minimum(), min(pre_spin.maximum(), pre_ns))
+        dac_spin = self.ui.spinDacValue
+        dac_value = state.dac_value + round(dy / state.adc_per_dac)
+        dac_value = max(dac_spin.minimum(), min(dac_spin.maximum(), dac_value))
+        pre_spin.setValue(pre_ns)
+        dac_spin.setValue(dac_value)
+        x_shift = (pre_ns - state.pretrigger_ns) / self._time_scale.ns_per_unit
+        y_shift = (dac_value - state.dac_value) * state.adc_per_dac
+        self._raw_curve.setData(state.x + x_shift, state.y + y_shift)
+        calibration = "" if self._dac_adc_slope is not None else " (DAC preview approximate)"
+        self.ui.lblRecordingStatus.setText(
+            f"Drag preview: DAC {dac_value}, pretrigger {pre_ns} ns{calibration}"
+        )
+
+    def _on_waveform_drag_finished(self, cancelled: bool) -> None:
+        state = self._waveform_drag
+        if state is None:
+            return
+        self._waveform_drag = None
+        dac_value = self.ui.spinDacValue.value()
+        pretrigger_ns = self.ui.spinPretrigger.value()
+        if cancelled or (
+            dac_value == state.dac_value and pretrigger_ns == state.pretrigger_ns
+        ):
+            self.ui.spinDacValue.setValue(state.dac_value)
+            self.ui.spinPretrigger.setValue(state.pretrigger_ns)
+            self._raw_curve.setData(state.x, state.y)
+            self.ui.lblRecordingStatus.setText(state.status_text)
+            self._update_waveform_drag_enabled()
+            return
+
+        try:
+            # vdpp-scope.c permits live pretrigger writes, and the AFE DAC is
+            # a separate IIO device. Commit once on release, never per pixel.
+            if pretrigger_ns != state.pretrigger_ns:
+                self._scope.set_pretrigger_samples(
+                    pretrigger_ns // self._SAMPLE_PERIOD_NS
+                )
+            if dac_value != state.dac_value:
+                self._scope.set_dac_value(dac_value)
+        except Exception as exc:
+            log.exception("Scope ch%d: waveform drag update failed", self._channel)
+            readback_failed = False
+            try:
+                self.ui.spinPretrigger.setValue(
+                    self._scope.get_pretrigger_samples() * self._SAMPLE_PERIOD_NS
+                )
+                self.ui.spinDacValue.setValue(self._scope.get_dac_value())
+            except Exception:
+                readback_failed = True
+                log.exception("Scope ch%d: waveform drag readback failed", self._channel)
+            self._raw_curve.setData(state.x, state.y)
+            detail = "; hardware state unknown—reconnect" if readback_failed else ""
+            self.ui.lblRecordingStatus.setText(f"Waveform drag failed: {exc}{detail}")
+            self._update_waveform_drag_enabled()
+            return
+
+        self._waveform_pending_status = state.status_text
+        self._update_waveform_drag_enabled()
+        if self._refresh_timer.isActive():
+            self.ui.lblRecordingStatus.setText(
+                "DAC/pretrigger applied; showing preview until the next live frame"
+            )
+            self._request_frame()
+        else:
+            self._raw_curve.setData(state.x, state.y)
+            self.ui.lblRecordingStatus.setText(
+                "DAC/pretrigger applied; acquire a frame to see the actual waveform"
+            )
+
     def _on_trigger_mode_changed(self, index: int) -> None:
         self._scope.set_trigger_mode(TriggerMode(index))
         self._update_frame_gap_enabled()
@@ -496,6 +772,12 @@ class ScopeController(QWidget):
         self._update_viewer_transport_hint()
 
     def _on_start(self) -> None:
+        self._raw_curve.cancelDrag()
+        self._cancel_pretrigger_line_drag()
+        if self._waveform_pending_status is not None:
+            self._raw_curve.setData([], [])
+            self._waveform_pending_status = None
+            self._update_waveform_drag_enabled()
         if self._waveform_file is not None or self._waveform_index_thread is not None:
             self.ui.lblRecordingStatus.setText(
                 "Close the waveform file before starting live acquisition"
@@ -614,6 +896,12 @@ class ScopeController(QWidget):
         log.info("Scope ch%d: DMA + acquisition started (socket was ready)", self._channel)
 
     def _on_stop(self) -> None:
+        self._raw_curve.cancelDrag()
+        self._cancel_pretrigger_line_drag()
+        if self._waveform_pending_status is not None:
+            self._raw_curve.setData([], [])
+            self._waveform_pending_status = None
+            self._update_waveform_drag_enabled()
         self._refresh_timer.stop()
         self._measurement_timer.stop()
         self._discard_inflight_frame = True
@@ -736,6 +1024,8 @@ class ScopeController(QWidget):
             self.ui.lblRecordingStatus.setText(f"Auto Setup failed: {error or 'unknown error'}")
             return
 
+        self._dac_adc_slope = result.dac_slope
+
         frame = result.frame[: self._frame_samples_from_ui() // 4]
         raw_time = np.arange(len(frame)) * self._VIEWER_POINT_PERIOD_NS
         self._on_frame_received([raw_time, frame])
@@ -809,6 +1099,12 @@ class ScopeController(QWidget):
 
     def _on_frame_received(self, data: list[np.ndarray]) -> None:
         self._acquiring = False
+        if self._waveform_drag is not None or self._pretrigger_line_drag is not None:
+            return
+        pending_status = self._waveform_pending_status
+        if pending_status is not None:
+            self.ui.lblRecordingStatus.setText(pending_status)
+            self._waveform_pending_status = None
         x_time, y_voltage = data
         expected = self._frame_samples_from_ui() // 4
         if len(y_voltage) < expected:
@@ -822,8 +1118,16 @@ class ScopeController(QWidget):
             self._persistence_img.setImage(
                 self._persistence_buffer, autoLevels=False, levels=(0, 1)
             )
+        if pending_status is not None:
+            self._update_waveform_drag_enabled()
 
     def _on_frame_samples_changed(self) -> None:
+        self._raw_curve.cancelDrag()
+        self._cancel_pretrigger_line_drag()
+        if self._waveform_pending_status is not None:
+            self._raw_curve.setData([], [])
+            self._waveform_pending_status = None
+            self._update_waveform_drag_enabled()
         frame_samples = self._frame_samples_from_ui()
         self._scope.set_frame_samples(frame_samples)
         self._display_nx = frame_samples // 4
@@ -834,6 +1138,8 @@ class ScopeController(QWidget):
             self.ui.lblRecordingStatus.setText(self._viewer_limit_message())
 
     def _on_acquire_frame(self) -> None:
+        self._raw_curve.cancelDrag()
+        self._cancel_pretrigger_line_drag()
         if self._waveform_file is not None or self._waveform_index_thread is not None:
             self.ui.lblRecordingStatus.setText(
                 "Close the waveform file before acquiring a live frame"
@@ -870,6 +1176,11 @@ class ScopeController(QWidget):
             self._persistence_img.setImage(
                 self._persistence_buffer, autoLevels=False, levels=(0, 1)
             )
+        pending_status = self._waveform_pending_status
+        if pending_status is not None:
+            self.ui.lblRecordingStatus.setText(pending_status)
+            self._waveform_pending_status = None
+            self._update_waveform_drag_enabled()
 
     def _rasterize_frame(self, frame: np.ndarray) -> None:
         self._persistence_buffer *= self.persistence
@@ -904,6 +1215,7 @@ class ScopeController(QWidget):
         self._setup_persistence_layer()
         self._setup_raw_layer()
         self._setup_threshold_line()
+        self._setup_pretrigger_line()
         self._update_axis_ranges()
         self._set_display_mode(DisplayMode(self.ui.comboDisplayMode.currentIndex()))
 
@@ -931,7 +1243,8 @@ class ScopeController(QWidget):
         self._plot_item.addItem(self._persistence_img)
 
     def _setup_raw_layer(self) -> None:
-        self._raw_curve = self._plot_item.plot(pen=pg.mkPen("#00bfff", width=1))
+        self._raw_curve = DraggableScopeCurve(pen=pg.mkPen("#00bfff", width=1))
+        self._plot_item.addItem(self._raw_curve)
         self._raw_curve.setVisible(False)
 
     def _setup_threshold_line(self) -> None:
@@ -941,18 +1254,41 @@ class ScopeController(QWidget):
             pos=self.ui.spinTriggerLevel.value(),
             angle=0,
             movable=True,
-            pen=pg.mkPen("#d1495b", width=2, style=Qt.PenStyle.DashLine),
-            hoverPen=pg.mkPen("#f07167", width=3, style=Qt.PenStyle.DashLine),
+            pen=pg.mkPen(self._THRESHOLD_MARKER_COLOR, width=1.5, style=Qt.PenStyle.DashLine),
+            hoverPen=pg.mkPen("#bd8b8b", width=2, style=Qt.PenStyle.DashLine),
+            label="Threshold {value:.0f}",
+            labelOpts={"color": self._THRESHOLD_MARKER_COLOR, "position": 0.98},
         )
         self._threshold_line.setBounds((int(spec.min_val), int(spec.max_val)))
         self._threshold_line.setZValue(10)
         self._threshold_line.setToolTip("Drag to set the Scope trigger threshold")
         self._plot_item.addItem(self._threshold_line)
+        self.ui.labelTriggerLevel.setStyleSheet(
+            f"color: {self._THRESHOLD_MARKER_COLOR};"
+        )
+
+    def _setup_pretrigger_line(self) -> None:
+        self._pretrigger_line = pg.InfiniteLine(
+            pos=0,
+            angle=90,
+            movable=True,
+            pen=pg.mkPen(self._PRETRIGGER_MARKER_COLOR, width=1.5, style=Qt.PenStyle.DashLine),
+            hoverPen=pg.mkPen("#7ea28a", width=2, style=Qt.PenStyle.DashLine),
+            label="Pretrigger",
+            labelOpts={"color": self._PRETRIGGER_MARKER_COLOR, "position": 0.98},
+        )
+        self._pretrigger_line.setZValue(10)
+        self._pretrigger_line.setToolTip("Drag to shift the Scope pretrigger position")
+        self._plot_item.addItem(self._pretrigger_line)
+        self.ui.labelPretrigger.setStyleSheet(
+            f"color: {self._PRETRIGGER_MARKER_COLOR};"
+        )
 
     def _update_axis_ranges(self) -> None:
         frame_samples = self._frame_samples_from_ui()
         duration_ns = self.ui.spinFrameSamples.value()
         self._time_scale = time_axis_scale(duration_ns)
+        self._sync_pretrigger_line_from_widget()
         duration = self._time_scale.from_nanoseconds(duration_ns)
         self._time_axis_label.setText(
             f"Time [{self._time_scale.unit}]  "
@@ -987,6 +1323,7 @@ class ScopeController(QWidget):
         self._raw_curve.setVisible(not is_persistence)
         self.ui.dialPersistence.setEnabled(is_persistence)
         self.ui.labelPersistenceValue.setEnabled(is_persistence)
+        self._update_waveform_drag_enabled()
 
     def _on_display_mode_changed(self, index: int) -> None:
         self._set_display_mode(DisplayMode(index))
@@ -1037,6 +1374,7 @@ class ScopeController(QWidget):
         self._set_controls_enabled(not busy)
         # Imported CAEN waveforms need not share this Scope's ADC threshold scale.
         self._threshold_line.setVisible(not busy)
+        self._pretrigger_line.setVisible(not busy)
         self.ui.groupDisplay.setEnabled(not busy)
         self.ui.btnStart.setEnabled(not busy)
         self.ui.btnStop.setEnabled(False)

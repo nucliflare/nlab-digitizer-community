@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A draggable Scope trigger-threshold marker that follows the threshold
   controls and updates the hardware when released.
+- A draggable green Scope pretrigger marker that previews horizontal waveform
+  shifts and commits on release; matching, lower-contrast marker and label colors.
+- Two-axis raw Scope waveform dragging previews pretrigger and DAC baseline
+  changes, then commits both on release and resumes measured display.
 - A headless direct-IIO Scope DMA example records raw NDMA frames with the
   tested periodic maximum-frame defaults, optional GUI/minimal YAML
   calibration, Auto Setup when no YAML is provided, a bounded duration, and
@@ -20,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The uncalibrated Scope waveform-drag DAC preview now uses the board-observed
+  direction: decreasing DAC moves the signal up. Auto Setup calibration still
+  overrides the approximate fallback.
 - Remote IIO Scope DMA now uses the queue capability advertised by the current
   PetaLinux driver: four exact-frame kernel blocks and bounded 32-frame iiod
   `READBUF` batches. Older or capability-unknown firmware remains on the safe

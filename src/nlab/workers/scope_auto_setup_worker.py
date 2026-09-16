@@ -28,6 +28,7 @@ class ScopeAutoSetupResult:
     pulse_amplitude: float
     verified: bool
     frame: np.ndarray
+    dac_slope: float | None = None  # Measured raw ADC counts per baseline DAC unit.
 
 
 @dataclass(frozen=True)
@@ -206,6 +207,7 @@ class ScopeAutoSetupProcedure:
 
             return ScopeAutoSetupResult(
                 dac_value=dac_value,
+                dac_slope=slope,
                 trigger_level=trigger_level,
                 trigger_mode=trigger_mode,
                 baseline=adjusted.baseline,

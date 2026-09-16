@@ -88,6 +88,7 @@ def test_auto_setup_centers_pulse_and_selects_edge(
     result = ScopeAutoSetupProcedure(scope, sleep=lambda _seconds: None).run()  # type: ignore[arg-type]
 
     assert result.trigger_mode == expected_mode
+    assert result.dac_slope == pytest.approx(64.0, abs=1.0)
     assert scope.trigger_mode == expected_mode
     assert scope.dac_value == result.dac_value
     expected_baseline = 29_490 * -polarity

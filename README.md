@@ -36,6 +36,15 @@ preserve the lifecycle required by each firmware generation.
 - A draggable dashed trigger-threshold line on the Scope plot, synchronized
   with the threshold slider and spin box; the hardware value is committed
   when the line is released
+- A muted green dashed pretrigger marker, synchronized with the nanosecond
+  control. Dragging it previews the horizontal waveform shift in 8 ns steps;
+  releasing it updates hardware. The marker and threshold labels match their
+  respective line colors.
+- In the live raw waveform view, grab the trace to adjust pretrigger time
+  horizontally (8 ns steps) and DAC baseline vertically. The trace is a
+  frozen preview while dragging; settings are written on release, then the
+  next acquired frame shows the actual signal. Auto Setup supplies a measured
+  DAC sensitivity; without it, the vertical preview is approximate.
 - Configurable frame length, pretrigger position, frame gap, and analogue offset
 - Persistence and raw display modes
 - Full-resolution IIO DMA recording with capability-gated queued buffers,
