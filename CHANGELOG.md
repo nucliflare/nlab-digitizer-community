@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Matching launch and connection-progress splash screens; the latter reports
+  device and workspace initialization stages until the main window is ready.
+
 ### Fixed
 
 - Windows CI artifacts now contain the executable directly instead of a ZIP

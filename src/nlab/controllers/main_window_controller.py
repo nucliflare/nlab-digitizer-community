@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -41,6 +42,7 @@ class MainWindowController:
         host: str = "",
         port: int = 50050,
         channels: int = 2,
+        on_progress: Callable[[str], None] | None = None,
     ) -> None:
         self._window = window
         self._backend = backend
@@ -48,9 +50,11 @@ class MainWindowController:
         self._port = port
         self._channels = channels
         self._devices: list[Digitizer] = []
+        self._on_progress = on_progress
 
         log.info("Connecting via %s to %s:%d, %d channel(s)", backend, host, port, channels)
         for ch in range(1, 1 + self._channels):
+            self._report_progress(f"Connecting channel {ch} of {self._channels}...")
             self._devices.append(self._connect_channel(ch))
         log.info("All %d device(s) connected", len(self._devices))
 
@@ -73,9 +77,13 @@ class MainWindowController:
         self._psu_dock_host = self._make_dock_host()
         self._global_dock_host = self._make_dock_host()
         self._external_dock_host = self._make_dock_host()
+        self._report_progress("Preparing global controls...")
         self._build_global_tab()
+        self._report_progress("Preparing channel views...")
         self._build_channel_docks()
+        self._report_progress("Discovering external devices...")
         self._build_external_docks()
+        self._report_progress("Restoring dock layout...")
         self._restore_dock_state()
         self._connect_signals()
         log.info(
@@ -86,6 +94,11 @@ class MainWindowController:
             len(self._psu_controllers),
             len(self._external_controllers),
         )
+
+    def _report_progress(self, message: str) -> None:
+        callback = getattr(self, "_on_progress", None)
+        if callback is not None:
+            callback(message)
 
     def _connect_channel(self, ch: int) -> Digitizer:
         """Connect one channel using the selected backend.
@@ -191,6 +204,7 @@ class MainWindowController:
 
         for idx, device in enumerate(self._devices):
             ch = self._display_channel(idx)
+            self._report_progress(f"Initializing channel {ch} controls...")
             ch_label = f"Ch {ch}"
 
             scope_ctrl = ScopeController(device.scope, scope_dma=device.scope_dma, channel=ch)

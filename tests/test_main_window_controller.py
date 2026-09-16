@@ -11,6 +11,42 @@ from nlab.controllers.global_controller import GlobalController
 from nlab.controllers.main_window_controller import MainWindowController
 
 
+def test_startup_reports_connection_and_view_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    progress: list[str] = []
+    connected: list[int] = []
+
+    def connect(_self: MainWindowController, channel: int) -> object:
+        connected.append(channel)
+        return object()
+
+    monkeypatch.setattr(MainWindowController, "_connect_channel", connect)
+    monkeypatch.setattr(MainWindowController, "_make_dock_host", staticmethod(object))
+    for name in (
+        "_build_global_tab",
+        "_build_channel_docks",
+        "_build_external_docks",
+        "_restore_dock_state",
+        "_connect_signals",
+    ):
+        monkeypatch.setattr(MainWindowController, name, lambda _self: None)
+    monkeypatch.setattr(main_window_module, "ExternalDevices", Mock())
+
+    MainWindowController(
+        SimpleNamespace(), backend="iio", host="192.0.2.10", port=30431,
+        channels=2, on_progress=progress.append,
+    )
+
+    assert connected == [1, 2]
+    assert progress == [
+        "Connecting channel 1 of 2...",
+        "Connecting channel 2 of 2...",
+        "Preparing global controls...",
+        "Preparing channel views...",
+        "Discovering external devices...",
+        "Restoring dock layout...",
+    ]
+
+
 def test_waveform_file_routes_to_matching_scope_panel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

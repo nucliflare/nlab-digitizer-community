@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, QSettings, QStandardPaths, QTimer
@@ -54,6 +55,7 @@ class MainAppWindow(QMainWindow):
         port: int = 50050,
         channels: int = 2,
         config_path: Path | None = None,
+        on_progress: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__()
         self._host = host
@@ -61,6 +63,8 @@ class MainAppWindow(QMainWindow):
         self._board_power_process: QProcess | None = None
         self._board_power_command: BoardPowerCommand | None = None
         self._board_power_phase: str | None = None
+        if on_progress is not None:
+            on_progress("Preparing the main window...")
         self._setup_ui()
         self.setWindowIcon(QIcon(":/icons/ewt.ico"))
         # apply_taskbar_icon is intentionally deferred to after show() via
@@ -74,9 +78,14 @@ class MainAppWindow(QMainWindow):
             host=host,
             port=port,
             channels=channels,
+            on_progress=on_progress,
         )
         if config_path is not None:
+            if on_progress is not None:
+                on_progress("Applying saved settings...")
             self._controller.load_all_settings(config_path)
+        if on_progress is not None:
+            on_progress("Restoring the workspace...")
         self._apply_view_state()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802

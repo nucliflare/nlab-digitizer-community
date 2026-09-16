@@ -3,9 +3,9 @@ import logging
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtWidgets import QApplication, QSplashScreen
+from PySide6.QtCore import QEventLoop, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtWidgets import QApplication, QMessageBox, QSplashScreen
 
 from nlab import __version__
 from nlab.app import MainAppWindow
@@ -81,8 +81,7 @@ def main() -> None:
         backend=config_backend,
         channels=config_channels,
     )
-    if splash is not None:
-        splash.finish(dialog)  # splash closes as soon as the dialog is shown
+    splash.finish(dialog)  # splash closes as soon as the dialog is shown
 
     if dialog.exec() != ConnectionDialog.DialogCode.Accepted:
         sys.exit(0)
@@ -95,15 +94,24 @@ def main() -> None:
         dialog.port,
         dialog.channels,
     )
-    window = MainAppWindow(
-        backend=dialog.backend,
-        host=dialog.ip,
-        port=dialog.port,
-        channels=dialog.channels,
-        config_path=args.config,
-    )
-
-    window.show()
+    connection_splash = _show_connection_splash()
+    try:
+        window = MainAppWindow(
+            backend=dialog.backend,
+            host=dialog.ip,
+            port=dialog.port,
+            channels=dialog.channels,
+            config_path=args.config,
+            on_progress=lambda message: _update_splash(connection_splash, message),
+        )
+        window.show()
+        QApplication.processEvents()
+    except Exception as exc:
+        connection_splash.close()
+        log.exception("Device connection or setup failed")
+        QMessageBox.critical(None, "Connection Failed", str(exc))
+        sys.exit(1)
+    connection_splash.finish(window)
     # Apply the native taskbar icon after the event loop starts so Qt has
     # fully settled the QMainWindow's native HWND (dock layout, DWM
     # composition, etc.) before we target it with WM_SETICON. The in-__init__
@@ -132,14 +140,56 @@ def _set_windows_app_user_model_id() -> None:
         log.warning("Could not set Windows AppUserModelID — taskbar icon may be wrong")
 
 
-def _show_splash() -> QSplashScreen | None:
-    pixmap = QPixmap(":/ewt.png")
-    if pixmap.isNull():
-        return None
+def _show_splash() -> QSplashScreen:
+    return _create_splash("Launching Application", "Launching application")
+
+
+def _show_connection_splash() -> QSplashScreen:
+    """Show visible progress before synchronous device setup begins."""
+    return _create_splash("Connecting to Device", "Connecting to device...")
+
+
+def _create_splash(title: str, message: str) -> QSplashScreen:
+    pixmap = QPixmap(520, 320)
+    pixmap.fill(QColor("#20252b"))
+    logo = QPixmap(":/ewt.png")
+    painter = QPainter(pixmap)
+    try:
+        if logo.isNull():
+            painter.setPen(QColor("#e9f0f6"))
+            painter.setFont(QFont("Sans Serif", 22, QFont.Weight.Bold))
+            painter.drawText(
+                0,
+                35,
+                pixmap.width(),
+                210,
+                Qt.AlignmentFlag.AlignCenter,
+                "Nuclear Lab Digitizer",
+            )
+        else:
+            scaled = logo.scaled(
+                220,
+                220,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap((pixmap.width() - scaled.width()) // 2, 24, scaled)
+    finally:
+        painter.end()
     splash = QSplashScreen(pixmap, Qt.WindowType.WindowStaysOnTopHint)
+    splash.setWindowTitle(title)
     splash.show()
-    QApplication.processEvents()
+    _update_splash(splash, message)
     return splash
+
+
+def _update_splash(splash: QSplashScreen, message: str) -> None:
+    splash.showMessage(
+        message,
+        Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
+        QColor("#e9f0f6"),
+    )
+    QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
 
 if __name__ == "__main__":

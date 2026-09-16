@@ -79,6 +79,8 @@ preserve the lifecycle required by each firmware generation.
 
 - Dockable and floatable channel panels, including multi-monitor layouts
 - Scope, MCA, PSD, PSU, Global, External, and System Log workspaces
+- Matching launch and connection-progress splashes, showing startup stages
+  while channels and instrument views are initialized
 - Save and restore hardware plus application settings in YAML
 - Convert Scope and MCA binary captures to HDF5 from the File menu
 - Remote board reboot and shutdown controls
