@@ -14,7 +14,7 @@ import numpy as np
 from nlab.utils.dma_converter import read_file_header
 
 # Change this path to inspect another scope DMA capture.
-FILENAME = Path(r"D:\work\measurements\scope_ch0_20260915_133802_001.bin")
+FILENAME = Path(r"D:\work\measurements\test_periodic.bin")
 
 # The scope timestamp is the raw 125 MHz datapath-clock counter: 8 ns/tick.
 TIMESTAMP_TICK_NS = 8
