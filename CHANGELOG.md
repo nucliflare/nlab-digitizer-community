@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.3.1] — 2026-09-16
+
 ### Added
 
 - Draggable threshold and pretrigger-offset markers in the MCA debug viewer,
@@ -229,7 +233,8 @@ Initial open-source release of the Nuclear Lab Digitizer Community Edition.
 
 ---
 
-[Unreleased]: https://github.com/nucliflare/nlab-digitizer-community/compare/v0.3.0...HEAD
+[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.3.1...main
+[0.3.1]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nucliflare/nlab-digitizer-community/releases/tag/v0.3.0
 [0.2.0]: https://github.com/nucliflare/nlab-digitizer-community/releases/tag/v0.2.0
 [0.1.0]: https://github.com/nucliflare/nlab-digitizer-community/releases/tag/v0.1.0
