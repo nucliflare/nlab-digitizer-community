@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from enum import IntEnum
 from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QRectF, QSettings, Qt, QThread, QThreadPool, QTimer
+from PySide6.QtCore import QRectF, QSettings, Qt, QThread, QThreadPool, QTimer, Slot
 from PySide6.QtWidgets import QFileDialog, QSlider, QSpinBox, QWidget
 
 from nlab.analysis.waveform_file import (
@@ -114,13 +115,17 @@ class ScopeController(QWidget):
         self._apply_control_tooltips()
 
         self._acquiring = False
+        self._discard_inflight_frame = False
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._request_frame)
+        self._viewer_scope: Scope | None = None
+        self._viewer_scope_lock = threading.Lock()
 
         self._dma_worker: ScopeDmaWorker | IIOScopeDmaWorker | None = None
         self._dma_thread: QThread | None = None
         self._dma_filepath: Path | None = None
         self._dma_counter = 0
+        self._dma_stopping = False
 
         self._auto_setup_worker: ScopeAutoSetupWorker | None = None
         self._auto_setup_thread: QThread | None = None
@@ -481,6 +486,8 @@ class ScopeController(QWidget):
                 self._channel,
             )
             return
+        self._discard_inflight_frame = False
+        self._dma_stopping = False
         self.ui.btnStart.setChecked(True)
         self.ui.btnStart.setEnabled(False)
         self.ui.btnStop.setChecked(False)
@@ -539,7 +546,6 @@ class ScopeController(QWidget):
             Qt.ConnectionType.DirectConnection,
         )
         self._dma_worker.finished.connect(self._dma_worker.deleteLater)
-        self._dma_thread.finished.connect(self._dma_thread.deleteLater)
         self._dma_thread.finished.connect(self._on_dma_finished)
 
         self._set_controls_enabled(False)
@@ -550,7 +556,10 @@ class ScopeController(QWidget):
         self._dma_thread.start()
         log.info("Scope DMA: worker started, waiting for socket ready, file=%s", filepath)
 
+    @Slot()
     def _on_dma_ready(self) -> None:
+        if self._dma_stopping:
+            return
         if isinstance(self._scope_dma, IIOScopeDmaStreamer):
             # The backend's first read starts the blocking refill and then
             # writes enable=1 in that order. The queued ready signal is only
@@ -584,9 +593,11 @@ class ScopeController(QWidget):
     def _on_stop(self) -> None:
         self._refresh_timer.stop()
         self._measurement_timer.stop()
+        self._discard_inflight_frame = True
         self.ui.btnStop.setChecked(True)
 
         if self._dma_worker is not None:
+            self._dma_stopping = True
             log.debug("Scope ch%d: stopping with DMA", self._channel)
             if isinstance(self._scope_dma, IIOScopeDmaStreamer):
                 # Current vdpp_scope explicitly accepts enable=0 while a
@@ -742,14 +753,39 @@ class ScopeController(QWidget):
         if self._acquiring:
             return
         self._acquiring = True
-        worker = ScopeWorker(self._scope)
-        worker.signals.ready.connect(self._on_frame_received)
+        scope_source = (
+            self._viewer_scope_for_worker
+            if isinstance(self._scope_dma, IIOScopeDmaStreamer)
+            else self._scope
+        )
+        worker = ScopeWorker(scope_source)
+        worker.signals.ready.connect(self._on_viewer_frame_received)
         QThreadPool.globalInstance().start(worker)
+
+    def _viewer_scope_for_worker(self) -> Scope:
+        """Lazily open a viewer-only IIO connection on the worker thread."""
+        with self._viewer_scope_lock:
+            if self._viewer_scope is None:
+                self._viewer_scope = self._scope.create_isolated_client()
+            return self._viewer_scope
+
+    def close_viewer_client(self) -> None:
+        """Call only after the pool's in-flight viewer work has finished."""
+        with self._viewer_scope_lock:
+            viewer_scope = self._viewer_scope
+            self._viewer_scope = None
+        if viewer_scope is not None:
+            viewer_scope.close()
+
+    @Slot(object)
+    def _on_viewer_frame_received(self, data: list[np.ndarray] | None) -> None:
+        self._acquiring = False
+        if data is None or self._discard_inflight_frame:
+            return
+        self._on_frame_received(data)
 
     def _on_frame_received(self, data: list[np.ndarray]) -> None:
         self._acquiring = False
-        if data is None:
-            return
         x_time, y_voltage = data
         expected = self._frame_samples_from_ui() // 4
         if len(y_voltage) < expected:
@@ -1207,7 +1243,10 @@ class ScopeController(QWidget):
             self._dma_filepath = Path(path)
             log.info("Scope DMA: user selected filepath: %s", self._dma_filepath)
 
+    @Slot(int)
     def _on_dma_progress(self, bytes_written: int) -> None:
+        if self._dma_stopping or self._dma_thread is None:
+            return
         # Both scope formats prepend the same 24-byte NDMA header. The
         # streamer progress value counts payload only, so add the header to
         # make the displayed number equal the actual file size.
@@ -1222,48 +1261,66 @@ class ScopeController(QWidget):
                 f"Recording: {file_bytes / (1024 * 1024):.1f} MiB{suffix}"
             )
 
+    @Slot(str)
     def _on_dma_error(self, message: str) -> None:
         log.error("Scope DMA error: %s", message)
         self.ui.lblRecordingStatus.setText(f"Error: {message}")
 
+    @Slot()
     def _on_dma_finished(self) -> None:
-        self._dma_worker = None
-        self._dma_thread = None
-        log.info("Scope DMA: worker finished")
-
-        self._set_controls_enabled(True)
-        self.ui.btnStart.setChecked(False)
-        self.ui.btnStart.setEnabled(True)
-        self.ui.btnStop.setEnabled(False)
-        self.ui.btnAcquireFrame.setEnabled(True)
-        self.ui.cbDmaEnable.setEnabled(True)
-        self.ui.btnDmaFile.setEnabled(True)
-        self.ui.btnAutoSetup.setEnabled(True)
-
-        if self._scope.dma_fault_is_latched():
-            # A genuine EIO during the just-finished session latched a
-            # fault (see IIODigitizerBackend._refill_dma_buffer()'s
-            # docstring) -- automatic DMA rearm is now blocked until this
-            # is cleared. acknowledge_dma_recovery() is purely a passive
-            # readback check (never writes dma_enable), so attempting it
-            # right away is safe: either the fault was transient and this
-            # clears it, or the channel is genuinely wedged and it raises
-            # again, in which case a board restart is needed regardless.
-            try:
-                self._scope.acknowledge_dma_recovery()
-            except RuntimeError:
-                log.error(
-                    "Scope ch%d: DMA fault did not clear -- board restart likely required",
-                    self._channel,
-                    exc_info=True,
-                )
-                self.ui.lblRecordingStatus.setText("DMA fault -- restart the board, then reconnect")
-                return
-            log.info("Scope ch%d: DMA fault cleared, DMA capture is usable again", self._channel)
-            self.ui.lblRecordingStatus.setText("Stopped (recovered from DMA fault)")
+        thread = self._dma_thread
+        if thread is None:
+            return  # synchronous shutdown already reaped this worker
+        if not thread.wait(2000):
+            log.error("Scope ch%d: DMA thread emitted finished but did not exit", self._channel)
+            QTimer.singleShot(100, self._on_dma_finished)
             return
 
-        self.ui.lblRecordingStatus.setText("Stopped")
+        # Keep both wrappers alive through GUI restoration. The thread's
+        # finished signal can be queued alongside earlier worker callbacks.
+        worker = self._dma_worker
+        log.info("Scope DMA: worker finished; restoring controls")
+        try:
+            self._set_controls_enabled(True)
+            self.ui.btnStart.setChecked(False)
+            self.ui.btnStart.setEnabled(True)
+            self.ui.btnStop.setEnabled(False)
+            self.ui.btnAcquireFrame.setEnabled(True)
+            self.ui.cbDmaEnable.setEnabled(True)
+            self.ui.btnDmaFile.setEnabled(True)
+            self.ui.btnAutoSetup.setEnabled(True)
+
+            if self._scope.dma_fault_is_latched():
+                # A genuine EIO blocks rearm until the passive recovery check.
+                try:
+                    self._scope.acknowledge_dma_recovery()
+                except RuntimeError:
+                    log.error(
+                        "Scope ch%d: DMA fault did not clear -- board restart likely required",
+                        self._channel,
+                        exc_info=True,
+                    )
+                    self.ui.lblRecordingStatus.setText(
+                        "DMA fault -- restart the board, then reconnect"
+                    )
+                    return
+                log.info(
+                    "Scope ch%d: DMA fault cleared, DMA capture is usable again",
+                    self._channel,
+                )
+                self.ui.lblRecordingStatus.setText("Stopped (recovered from DMA fault)")
+                return
+
+            self.ui.lblRecordingStatus.setText("Stopped")
+        except Exception:
+            log.exception("Scope ch%d: failed to restore GUI after DMA stop", self._channel)
+            self.ui.lblRecordingStatus.setText("DMA stopped; GUI refresh failed")
+        finally:
+            self._dma_worker = None
+            self._dma_thread = None
+            self._dma_stopping = False
+            thread.deleteLater()
+            del worker
 
     def stop_dma_sync(self) -> None:
         """Blocking stop for use during application shutdown/reconnect only.
@@ -1315,6 +1372,7 @@ class ScopeController(QWidget):
             else:
                 self._dma_thread = None
                 self._dma_worker = None
+                thread.deleteLater()
 
         self._ensure_disarmed()
 

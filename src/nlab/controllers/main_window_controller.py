@@ -586,7 +586,14 @@ class MainWindowController:
             ctrl.stop_processing()
 
         # 4. Wait for in-flight scope workers to finish
-        QThreadPool.globalInstance().waitForDone(3000)
+        viewer_pool_idle = QThreadPool.globalInstance().waitForDone(3000)
+        if viewer_pool_idle:
+            for scope_controller in self._scope_controllers:
+                scope_controller.close_viewer_client()
+        else:
+            # An in-flight worker still owns its isolated context. Do not
+            # close that context out from under a native libiio read.
+            log.warning("Scope viewer workers did not stop within 3 seconds")
 
         # 5. Stop PSU workers (blocking)
         for ctrl in self._psu_controllers:

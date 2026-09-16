@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A headless direct-IIO Scope DMA example records raw NDMA frames with the
+  tested periodic maximum-frame defaults, optional GUI/minimal YAML
+  calibration, Auto Setup when no YAML is provided, a bounded duration, and
+  live progress showing written frames and file size.
+
 ### Changed
 
 - Remote IIO Scope DMA now uses the queue capability advertised by the current
@@ -19,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file-writer queue instead of decoding and reconstructing every record, and
   uses the immutable armed geometry instead of making a remote attribute read
   before every frame.
+- The IIO Scope live viewer now uses its own worker-only connection, and DMA
+  recording progress is coalesced to at most ten GUI updates per second.
+- The Scope DMA checker now reports nominal stored-sample time coverage from
+  valid frame timestamps and supports a user-supplied trigger-mode label.
+
+### Fixed
+
+- Scope DMA timed stop now waits for its Qt worker thread to exit before
+  restoring controls and releasing the thread wrapper. This addresses a
+  native PySide teardown crash observed after a high-rate 20-second capture.
 
 ---
 

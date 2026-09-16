@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+from PySide6.QtCore import QThreadPool
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -17,6 +18,7 @@ from pytestqt.qtbot import QtBot
 from nlab.controllers.mca_controller import MCAController
 from nlab.controllers.scope_controller import DisplayMode, ScopeController
 from nlab.hardware.digitizer.backends.iio_backend import IIODigitizerBackend
+from nlab.hardware.digitizer.dma import IIOScopeDmaStreamer
 from nlab.hardware.digitizer.mca import MCA_PARAMETER_SPECS, MCAParam
 from nlab.hardware.digitizer.scope import (
     PARAMETER_SPECS,
@@ -292,6 +294,84 @@ def test_scope_displays_partial_frame_with_explicit_warning(qtbot: QtBot) -> Non
     controller._rasterize_frame(np.array([10, 20, 30], dtype=np.int16))
     occupied_x = np.nonzero(controller._persistence_buffer)[0]
     assert occupied_x.max() <= 2
+
+
+def test_iio_scope_viewer_uses_one_isolated_client(qtbot: QtBot) -> None:
+    scope = _scope_model_for_controller()
+    viewer_scope = MagicMock(spec=Scope)
+    viewer_scope.get_frame_samples.return_value = 1024
+    viewer_scope.acquire_frame.return_value = np.zeros(256, dtype=np.int16)
+    scope.create_isolated_client.return_value = viewer_scope
+    controller = ScopeController(scope, scope_dma=None, channel=0)
+    qtbot.addWidget(controller)
+    controller._scope_dma = object.__new__(IIOScopeDmaStreamer)
+
+    controller._request_frame()
+    qtbot.waitUntil(lambda: not controller._acquiring, timeout=5000)
+    controller._request_frame()
+    qtbot.waitUntil(lambda: not controller._acquiring, timeout=5000)
+
+    scope.create_isolated_client.assert_called_once_with()
+    scope.acquire_frame.assert_not_called()
+    assert viewer_scope.acquire_frame.call_count == 2
+    assert QThreadPool.globalInstance().waitForDone(3000)
+    controller.close_viewer_client()
+    viewer_scope.close.assert_called_once_with()
+
+
+def test_scope_timed_dma_stop_restores_controls(qtbot: QtBot, tmp_path) -> None:
+    scope = _scope_model_for_controller()
+    scope.dma_fault_is_latched.return_value = False
+    viewer_scope = MagicMock(spec=Scope)
+    viewer_scope.get_frame_samples.return_value = 1024
+    viewer_scope.acquire_frame.return_value = np.zeros(256, dtype=np.int16)
+    scope.create_isolated_client.return_value = viewer_scope
+    controller = ScopeController(scope, scope_dma=None, channel=0)
+    qtbot.addWidget(controller)
+
+    streamer = object.__new__(IIOScopeDmaStreamer)
+
+    def stream_to_file(*, stop_event, on_ready, on_progress, **_kwargs):
+        on_ready()
+        for count in range(5000):
+            if stop_event.is_set():
+                break
+            on_progress(count * 2048)
+        assert stop_event.wait(3)
+        return count
+
+    streamer.stream_to_file = stream_to_file
+    streamer.request_stop = lambda: None
+    controller._scope_dma = streamer
+    controller._dma_filepath = tmp_path / "simulated.bin"
+    controller.ui.cbDmaEnable.setChecked(True)
+    controller.ui.spinRefreshRate.setValue(1)
+    controller.ui.spinTime.setValue(1)
+
+    controller._on_start()
+    qtbot.waitUntil(lambda: controller._measurement_timer.isActive(), timeout=3000)
+    qtbot.waitUntil(lambda: controller._dma_thread is None, timeout=4000)
+
+    assert controller.ui.lblRecordingStatus.text() == "Stopped"
+    assert controller.ui.btnStart.isEnabled()
+    assert not controller.ui.btnStop.isEnabled()
+    assert controller.ui.groupTrigger.isEnabled()
+    scope.stop.assert_called()
+    assert QThreadPool.globalInstance().waitForDone(3000)
+    controller.close_viewer_client()
+
+
+def test_late_viewer_frame_does_not_replace_stopped_status(qtbot: QtBot) -> None:
+    controller = ScopeController(_scope_model_for_controller(), scope_dma=None, channel=0)
+    qtbot.addWidget(controller)
+    controller._discard_inflight_frame = True
+    controller.ui.lblRecordingStatus.setText("Stopped")
+
+    controller._on_viewer_frame_received(
+        [np.arange(3, dtype=np.int64), np.ones(3, dtype=np.int16)]
+    )
+
+    assert controller.ui.lblRecordingStatus.text() == "Stopped"
 
 
 def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> None:

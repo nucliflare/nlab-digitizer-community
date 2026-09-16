@@ -226,6 +226,33 @@ Pass `with_ids=False` to `Digitizer.from_iio()` when only Scope/MCA access is
 needed. If required IDS devices are missing, construction logs a warning and
 continues with `digitizer.hv` set to `None`.
 
+For a headless periodic Scope DMA recording, use the direct-IIO example:
+
+```bash
+uv run python examples/dma_scope_periodic.py capture.bin --duration-s 10
+```
+
+It defaults to channel 0 at `192.168.10.128:30431`, Periodic trigger,
+16,376 ns frames (8,188 samples), 1,000 ns gap, Raw NDMA output, and DMA on.
+Without `--config`, it runs Scope Auto Setup to calibrate the DAC and trigger
+threshold before switching to the requested trigger mode. A GUI v3 settings
+YAML or a single-channel YAML with `scope.dac_value` and
+`scope.trigger_level` skips Auto Setup; YAML frame/gap/mode values apply unless
+overridden by `--frame-ns`, `--gap-ns`, or `--trigger-mode`. For example:
+
+```bash
+uv run python examples/dma_scope_periodic.py capture.bin --config scope.yaml --frame-ns 16376 --gap-ns 1000 --trigger-mode periodic
+```
+
+The example records for 10 seconds by default, refuses to overwrite an
+existing file or take over an active Scope, and restores the original Scope
+settings after capture. A time-based progress bar shows complete frames
+written and the current logical file size (including the NDMA header).
+It has no GUI display; `--display-mode raw` and
+`--dma on` name the only supported output path. A 10-second maximum-frame
+recording may use roughly 330 MB. Inspect the NDMA result with
+`notebooks/check_dma.py`.
+
 For an older firmware board, the legacy factory remains available:
 
 ```python
@@ -269,6 +296,14 @@ only the selected frame is mapped. NLab DMA files use their known 8 ns point
 period. CoMPASS binaries do not store the ADC sample period, so set that value
 in the browser to obtain the correct time axis.
 
+For Scope NDMA timing checks, edit `FILENAME` in
+[`notebooks/check_dma.py`](notebooks/check_dma.py) and run it from the repository
+root. Its sample fill factor is the stored waveform duration
+(`(frame_samples - 4) * 2 ns`) divided by the mean interval between valid
+frame timestamps. This is nominal observed time coverage, not the fraction of
+trigger opportunities accepted. NDMA v1 does not record trigger mode; set the
+optional `TRIGGER_MODE_LABEL` when comparing files from different modes.
+
 Use **File → Convert Binary to HDF5...** in the GUI for portable analysis
 files. Quarto examples are provided in:
 
@@ -297,6 +332,9 @@ External workspace
 The IIO implementation uses separate libiio contexts for GUI operations,
 background polling, and blocking DMA reads. This is intentional: a blocking
 refill and a control write must not share one remote context.
+The Scope live viewer also owns a separate IIO connection while it is active;
+recording progress is displayed at up to ten updates per second so high frame
+rates do not flood the GUI event queue.
 
 On current Scope firmware, the driver advertises a qualified four-block DMA
 queue. Remote Scope recording uses a bounded 32-frame iiod request to amortize

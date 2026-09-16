@@ -11,13 +11,22 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
+from nlab.hardware.digitizer.dma import SCOPE_TIMESTAMP_WORDS
+from nlab.hardware.digitizer.scope import (
+    SCOPE_ADC_SAMPLE_PERIOD_NS,
+    SCOPE_DATAPATH_CLOCK_PERIOD_NS,
+)
 from nlab.utils.dma_converter import read_file_header
 
 # Change this path to inspect another scope DMA capture.
-FILENAME = Path(r"D:\work\measurements\test_periodic.bin")
+FILENAME = Path(r"D:\work\measurements\test_final.bin")
+# Optional user-supplied label for comparing captures. NDMA v1 does not store
+# the trigger mode, so the script cannot infer it from the file.
+TRIGGER_MODE_LABEL: str | None = None
 
-# The scope timestamp is the raw 125 MHz datapath-clock counter: 8 ns/tick.
-TIMESTAMP_TICK_NS = 8
+# vdpp-scope.c: four 500 MSPS samples per 125 MHz clock. The DMA timestamp
+# is the raw datapath-clock counter, not a nanosecond value.
+TIMESTAMP_TICK_NS = SCOPE_DATAPATH_CLOCK_PERIOD_NS
 SHOW_PLOTS = True
 PREVIEW_FRAMES = 10
 
@@ -44,6 +53,28 @@ def _print_frame_preview(
         )
 
 
+def _sample_fill_factor(timestamps: np.ndarray, waveform_samples: int) -> float | None:
+    """Nominal fraction of the first-to-last trigger span covered by stored samples.
+
+    Use one waveform for each of the N-1 inter-trigger intervals. This is a
+    ratio of total stored-sample time to total elapsed time, not the arithmetic
+    mean of per-gap percentages, which would overweight short intervals. The
+    four int16 slots overwritten by the timestamp are excluded. Invalid
+    timestamp ordering cannot give a meaningful time-coverage estimate.
+    """
+    if timestamps.size < 2 or waveform_samples <= 0:
+        return None
+    if np.any(timestamps[1:] <= timestamps[:-1]):
+        return None
+    span_ticks = int(timestamps[-1]) - int(timestamps[0])
+    if span_ticks <= 0:
+        return None
+    stored_time_ns = (
+        int(timestamps.size - 1) * waveform_samples * SCOPE_ADC_SAMPLE_PERIOD_NS
+    )
+    return float(stored_time_ns / (span_ticks * TIMESTAMP_TICK_NS))
+
+
 def inspect_scope_dma(path: Path) -> None:
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -54,18 +85,23 @@ def inspect_scope_dma(path: Path) -> None:
         header_bytes = handle.tell()
 
     frame_samples = header["frame_samples"]
-    if frame_samples <= 4:
+    if frame_samples <= SCOPE_TIMESTAMP_WORDS:
         raise ValueError(
             "This is not a valid scope capture: "
-            f"frame_samples={frame_samples}; expected more than 4"
+            f"frame_samples={frame_samples}; expected more than "
+            f"{SCOPE_TIMESTAMP_WORDS}"
         )
 
     frame_bytes = frame_samples * np.dtype("<i2").itemsize
-    waveform_samples = frame_samples - 4
+    waveform_samples = frame_samples - SCOPE_TIMESTAMP_WORDS
     payload_bytes = file_bytes - header_bytes
     complete_frames, trailing_bytes = divmod(payload_bytes, frame_bytes)
 
     print(f"File:                  {path}")
+    print(
+        "Trigger mode label:    "
+        f"{TRIGGER_MODE_LABEL or 'unknown (not stored in NDMA v1)'}"
+    )
     print(f"File size:             {file_bytes:,} bytes")
     print(f"Header:                {header}")
     print(f"Header size:           {header_bytes:,} bytes")
@@ -160,6 +196,21 @@ def inspect_scope_dma(path: Path) -> None:
     if span_seconds_8ns > 0:
         rate = (valid_timestamps.size - 1) / span_seconds_8ns
         print(f"  Overall frame rate:          {rate:.6f} frames/s")
+
+    waveform_duration_ns = waveform_samples * SCOPE_ADC_SAMPLE_PERIOD_NS
+    fill_factor = _sample_fill_factor(valid_timestamps, waveform_samples)
+    print(f"  Stored waveform duration:    {waveform_duration_ns / 1_000:.6f} us/frame")
+    if fill_factor is None:
+        print("  Sample fill factor:          unavailable (timestamps not ordered)")
+    else:
+        mean_interval_ns = (
+            timestamp_span * TIMESTAMP_TICK_NS / (valid_timestamps.size - 1)
+        )
+        print(f"  Mean valid-frame interval:   {mean_interval_ns / 1_000:.6f} us")
+        print(f"  Sample fill factor:          {fill_factor * 100:.3f}%")
+        print("  (nominal stored waveform time / first-to-last valid trigger span)")
+        if fill_factor > 1:
+            print("  Note: above 100% implies overlapping nominal windows or bad timestamps.")
 
     if positive_deltas.size:
         median_ticks = float(np.median(positive_deltas))

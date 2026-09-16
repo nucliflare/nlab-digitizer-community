@@ -24,6 +24,7 @@ from nlab.hardware.digitizer.dma import (
     IIOScopeDmaStreamer,
 )
 from nlab.utils.dma_converter import convert_scope
+from nlab.workers.dma_workers import IIOScopeDmaWorker
 
 
 def test_binary_viewer_returns_complete_4096_sample_frame(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,6 +110,25 @@ class _TwoFrameScopeBackend(_BlockingScopeBackend):
         if self.read_calls == 2:
             self.second_refill_started.set()
         return struct.pack("<Q", self.read_calls) + np.arange(4, dtype="<i2").tobytes()
+
+
+def test_iio_scope_worker_coalesces_frame_progress(tmp_path: Path) -> None:
+    def stream_to_file(*, on_ready, on_progress, **_kwargs):
+        on_ready()
+        for value in range(1000):
+            on_progress(value)
+        return 1000
+
+    worker = IIOScopeDmaWorker(
+        SimpleNamespace(stream_to_file=stream_to_file),
+        tmp_path / "simulated.bin",
+    )
+    updates: list[int] = []
+    worker.progress.connect(updates.append)
+
+    worker.run()
+
+    assert updates == [0, 999]
 
 
 def test_streamer_stop_interrupts_blocked_refill(tmp_path: Path) -> None:

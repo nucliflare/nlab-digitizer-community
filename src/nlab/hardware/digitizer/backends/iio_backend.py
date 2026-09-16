@@ -400,10 +400,10 @@ class IIODigitizerBackend(DigitizerBackend):
         # acknowledge_dma_recovery()/dma_fault_is_latched().
         self._dma_fault_latched = False
 
-        # Auto Setup needs a worker-owned control/viewer connection but no
-        # DMA or MCA devices. Returning here avoids opening the backend's
-        # four additional role-specific IIO contexts, cutting seconds from
-        # a user-initiated setup while preserving the no-shared-context rule.
+        # Auto Setup and the live Scope viewer need worker-owned connections
+        # but no DMA or MCA devices. Returning here avoids opening the
+        # backend's other role-specific contexts while preserving the
+        # no-shared-context rule.
         if self._scope_only:
             log.info(
                 "IIO backend: connected lightweight scope worker ch%d to %s",
@@ -598,10 +598,10 @@ class IIODigitizerBackend(DigitizerBackend):
         self._close_dma_buffer()
 
     def create_isolated_scope_backend(self) -> IIODigitizerBackend:
-        """Open an independent IIO context set for Scope Auto Setup.
+        """Open an independent IIO context for a Scope background worker.
 
         IIO contexts are intentionally not shared across threads; this is
-        the same isolation rule used by the scope viewer and DMA workers.
+        the same isolation rule used by Auto Setup, the viewer, and DMA.
         """
         return type(self)(
             self._ch,

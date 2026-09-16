@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,7 @@ from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
 from nlab.workers.base_worker import BaseWorker
 
 log = logging.getLogger(__name__)
+_SCOPE_PROGRESS_INTERVAL_S = 0.1
 
 
 class ScopeDmaWorker(BaseWorker):
@@ -108,19 +110,34 @@ class IIOScopeDmaWorker(BaseWorker):
 
     def run(self) -> None:
         log.info("IIOScopeDmaWorker: starting, file=%s", self._filepath)
+        last_progress: int | None = None
+        last_reported: int | None = None
+        last_report_at = float("-inf")
+
+        def report_progress(value: int) -> None:
+            nonlocal last_progress, last_reported, last_report_at
+            last_progress = value
+            now = time.monotonic()
+            if now - last_report_at >= _SCOPE_PROGRESS_INTERVAL_S:
+                self.progress.emit(value)
+                last_reported = value
+                last_report_at = now
+
         try:
             total = self._streamer.stream_to_file(
                 filepath=self._filepath,
                 stop_event=self._stop_event,
                 n_frames=self._n_frames,
                 on_ready=lambda: self.ready.emit(),
-                on_progress=lambda n: self.progress.emit(n),
+                on_progress=report_progress,
             )
             log.info("IIOScopeDmaWorker: completed, %d frames written", total)
         except Exception:
             log.exception("IIOScopeDmaWorker: streaming failed")
             self.error.emit("IIO scope DMA streaming failed")
         finally:
+            if last_progress is not None and last_progress != last_reported:
+                self.progress.emit(last_progress)
             self.finished.emit()
 
     def stop(self) -> None:
