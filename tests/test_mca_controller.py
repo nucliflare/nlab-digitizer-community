@@ -318,6 +318,8 @@ def test_mca_debug_viewer_scales_time_axis_and_explains_sample_period() -> None:
     controller._debug_time_axis_label = label
     controller._debug1_curve = debug1_curve
     controller._debug2_curve = debug2_curve
+    controller._pretrigger_line_drag = None
+    controller._sync_debug_pretrigger_line = Mock()
 
     MCAController._update_debug_time_axis(controller)
     label.setText.assert_called_with("Time [\N{MICRO SIGN}s]  (8 ns/debug sample)")

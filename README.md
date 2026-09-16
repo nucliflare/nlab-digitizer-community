@@ -53,6 +53,10 @@ preserve the lifecycle required by each firmware generation.
 
 ### MCA and PSD
 
+- The MCA debug viewer has draggable, dashed trigger-threshold and pretrigger-
+  offset markers. Their muted red/green labels match the corresponding controls;
+  the offset marker previews a horizontal shift of both debug traces, and
+  hardware settings are applied on release.
 - Pulse-processor, input-filter, CFD, charge-comparison, and trapezoid controls
 - Live 16,384-bin spectra with logarithmic display and ROI statistics
 - Debug waveform-bank readout

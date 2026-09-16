@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Draggable threshold and pretrigger-offset markers in the MCA debug viewer,
+  with matching muted control-label colors and release-to-commit behavior.
 - A draggable Scope trigger-threshold marker that follows the threshold
   controls and updates the hardware when released.
 - A draggable green Scope pretrigger marker that previews horizontal waveform

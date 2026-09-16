@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -53,6 +54,8 @@ _MAX_GUI_RENDER_HZ = 15
 # board timebase is therefore 8 ns per displayed debug sample; see the
 # PetaLinux project's user API, "Timebase" and "Diagnostic memories".
 _DEBUG_SAMPLE_PERIOD_NS = 8
+_THRESHOLD_MARKER_COLOR = "#a66f6f"
+_PRETRIGGER_MARKER_COLOR = "#648b71"
 
 _MCA_CONTROL_TOOLTIPS = {
     "comboPulsePolarity": "Selects whether pulses are expected to be negative or positive.",
@@ -96,6 +99,12 @@ class _PsdCaptureSink(Protocol):
     def set_capture_error(self, message: str) -> None: ...
 
 
+@dataclass(frozen=True)
+class _DebugOffsetDragState:
+    traces: tuple[tuple[np.ndarray, np.ndarray] | None, ...]
+    offset_ns: int
+
+
 class MCAController(QWidget):
     """View + controller for a single MultiChannelAnalyzer channel."""
 
@@ -137,6 +146,8 @@ class MCAController(QWidget):
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._render_pending_readback)
+        self._threshold_drag_start: int | None = None
+        self._pretrigger_line_drag: _DebugOffsetDragState | None = None
 
         self._populate_combos()
         self._apply_parameter_specs()
@@ -418,11 +429,15 @@ class MCAController(QWidget):
     # ------------------------------------------------------------------
 
     def _set_controls_enabled(self, enabled: bool) -> None:
+        if not enabled:
+            self._cancel_debug_marker_drags()
         self.ui.groupMca.setEnabled(enabled)
         self.ui.groupSignal.setEnabled(enabled)
         self.ui.tabFilters.setEnabled(enabled)
         self.ui.spinTimeLimit.setEnabled(enabled)
         self.ui.spinRefreshRate.setEnabled(enabled)
+        self._debug_threshold_line.setMovable(enabled)
+        self._debug_pretrigger_line.setMovable(enabled)
 
     def refresh_dma_output_settings(self) -> None:
         """Reflect the application-wide output choice in this channel view."""
@@ -467,7 +482,169 @@ class MCAController(QWidget):
             pen=pg.mkPen("#ff8c00", width=1),
             name="Debug 2",
         )
+        self._setup_debug_markers()
         self._update_debug_time_axis()
+
+    def _setup_debug_markers(self) -> None:
+        threshold_spec = MCA_PARAMETER_SPECS[MCAParam.TRIGGER_LEVEL]
+        assert isinstance(threshold_spec, RangeSpec)
+        self._debug_threshold_line = pg.InfiniteLine(
+            pos=self.ui.spinTriggerLevel.value(),
+            angle=0,
+            movable=True,
+            pen=pg.mkPen(_THRESHOLD_MARKER_COLOR, width=1.5, style=Qt.PenStyle.DashLine),
+            hoverPen=pg.mkPen("#bd8b8b", width=2, style=Qt.PenStyle.DashLine),
+            label="Threshold {value:.0f}",
+            labelOpts={"color": _THRESHOLD_MARKER_COLOR, "position": 0.98},
+        )
+        self._debug_threshold_line.setBounds(
+            (int(threshold_spec.min_val), int(threshold_spec.max_val))
+        )
+        self._debug_threshold_line.setZValue(10)
+        self._debug_threshold_line.setToolTip("Drag to set the MCA trigger threshold")
+        self._debug_plot.addItem(self._debug_threshold_line)
+
+        self._debug_pretrigger_line = pg.InfiniteLine(
+            pos=0,
+            angle=90,
+            movable=True,
+            pen=pg.mkPen(_PRETRIGGER_MARKER_COLOR, width=1.5, style=Qt.PenStyle.DashLine),
+            hoverPen=pg.mkPen("#7ea28a", width=2, style=Qt.PenStyle.DashLine),
+            label="Pretrigger offset",
+            labelOpts={"color": _PRETRIGGER_MARKER_COLOR, "position": 0.98},
+        )
+        self._debug_pretrigger_line.setZValue(10)
+        self._debug_pretrigger_line.setToolTip("Drag to shift the MCA debug window offset")
+        self._debug_plot.addItem(self._debug_pretrigger_line)
+
+        self.ui.labelTriggerLevel.setStyleSheet(f"color: {_THRESHOLD_MARKER_COLOR};")
+        self.ui.labelPretrigger.setText("Pretrigger offset:")
+        self.ui.labelPretrigger.setStyleSheet(f"color: {_PRETRIGGER_MARKER_COLOR};")
+
+    def _sync_debug_pretrigger_line(self) -> None:
+        scale = self._debug_time_scale.ns_per_unit
+        spin = self.ui.spinPretrigger
+        line = self._debug_pretrigger_line
+        line.blockSignals(True)
+        try:
+            line.setBounds((spin.minimum() / scale, spin.maximum() / scale))
+            line.setValue(spin.value() / scale)
+        finally:
+            line.blockSignals(False)
+        line.label.setFormat(f"Pretrigger offset {spin.value()} ns")
+
+    def _on_debug_threshold_line_changed(self) -> None:
+        line = self._debug_threshold_line
+        spin = self.ui.spinTriggerLevel
+        if line.moving and self._threshold_drag_start is None:
+            self._threshold_drag_start = spin.value()
+        value = max(spin.minimum(), min(spin.maximum(), round(line.value())))
+        spin.setValue(value)
+        if line.value() != value:
+            line.blockSignals(True)
+            try:
+                line.setValue(value)
+            finally:
+                line.blockSignals(False)
+
+    def _on_debug_threshold_line_finished(self) -> None:
+        original = self._threshold_drag_start
+        self._threshold_drag_start = None
+        if original is None:
+            return
+        value = self.ui.spinTriggerLevel.value()
+        if not self._debug_threshold_line.movable or value == original:
+            self.ui.spinTriggerLevel.setValue(original)
+            return
+        try:
+            self._apply_hardware_setting(lambda: self._mca.set_trigger_level(value))
+        except Exception as exc:
+            log.exception("MCA ch%d: threshold marker update failed", self._channel)
+            try:
+                actual = self._mca.get_trigger_level()
+                detail = ""
+            except Exception:
+                log.exception("MCA ch%d: threshold marker readback failed", self._channel)
+                actual = original
+                detail = "; hardware state unknown—reconnect"
+            self.ui.spinTriggerLevel.setValue(actual)
+            self.ui.lblDmaStatus.setText(f"Threshold update failed: {exc}{detail}")
+
+    def _on_debug_pretrigger_line_changed(self) -> None:
+        line = self._debug_pretrigger_line
+        spin = self.ui.spinPretrigger
+        if line.moving and self._pretrigger_line_drag is None:
+            traces: list[tuple[np.ndarray, np.ndarray] | None] = []
+            for curve in (self._debug1_curve, self._debug2_curve):
+                x, y = curve.getData()
+                traces.append(
+                    (np.array(x, copy=True), np.array(y, copy=True))
+                    if x is not None and y is not None else None
+                )
+            self._pretrigger_line_drag = _DebugOffsetDragState(
+                traces=tuple(traces), offset_ns=spin.value()
+            )
+        target_ns = line.value() * self._debug_time_scale.ns_per_unit
+        step = spin.singleStep()
+        value = spin.minimum() + round((target_ns - spin.minimum()) / step) * step
+        spin.setValue(max(spin.minimum(), min(spin.maximum(), value)))
+        self._sync_debug_pretrigger_line()
+        state = self._pretrigger_line_drag
+        if state is not None:
+            # A larger pretrigger offset is previewed as a later trigger in
+            # the window. This is a UI-only estimate until the next readback.
+            shift = (spin.value() - state.offset_ns) / self._debug_time_scale.ns_per_unit
+            for curve, trace in zip((self._debug1_curve, self._debug2_curve), state.traces):
+                if trace is not None:
+                    curve.setData(trace[0] + shift, trace[1])
+
+    def _restore_debug_offset_traces(self, state: _DebugOffsetDragState) -> None:
+        for curve, trace in zip((self._debug1_curve, self._debug2_curve), state.traces):
+            if trace is not None:
+                curve.setData(*trace)
+
+    def _on_debug_pretrigger_line_finished(self) -> None:
+        state = self._pretrigger_line_drag
+        if state is None:
+            return
+        self._pretrigger_line_drag = None
+        value = self.ui.spinPretrigger.value()
+        if not self._debug_pretrigger_line.movable or value == state.offset_ns:
+            self.ui.spinPretrigger.setValue(state.offset_ns)
+            self._restore_debug_offset_traces(state)
+            return
+        try:
+            # vdpp-pulse-processor.c accepts physical ns in 2 ns steps and
+            # rejects configuration writes while enabled; the helper pauses
+            # and restarts ordinary polling acquisition exactly once.
+            self._apply_hardware_setting(lambda: self._mca.set_pretrigger_samples(value))
+        except Exception as exc:
+            log.exception("MCA ch%d: window-offset marker update failed", self._channel)
+            try:
+                actual = self._mca.get_pretrigger_samples()
+                detail = ""
+            except Exception:
+                log.exception("MCA ch%d: window-offset marker readback failed", self._channel)
+                actual = state.offset_ns
+                detail = "; hardware state unknown—reconnect"
+            self.ui.spinPretrigger.setValue(actual)
+            self.ui.lblDmaStatus.setText(f"Window offset update failed: {exc}{detail}")
+        finally:
+            self._restore_debug_offset_traces(state)
+
+    def _cancel_debug_marker_drags(self) -> None:
+        if self._threshold_drag_start is not None:
+            self.ui.spinTriggerLevel.setValue(self._threshold_drag_start)
+            self._threshold_drag_start = None
+        state = self._pretrigger_line_drag
+        if state is not None:
+            self._pretrigger_line_drag = None
+            self.ui.spinPretrigger.setValue(state.offset_ns)
+            self._restore_debug_offset_traces(state)
+
+    def _on_debug_frame_length_changed(self, frame_samples: int) -> None:
+        self._cancel_debug_marker_drags()
+        self._update_debug_time_axis(frame_samples)
 
     def _update_debug_time_axis(self, frame_samples: int | None = None) -> None:
         if frame_samples is None:
@@ -475,21 +652,23 @@ class MCAController(QWidget):
         displayed_samples = frame_samples // _DEBUG_SAMPLE_PERIOD_NS
         duration_ns = displayed_samples * _DEBUG_SAMPLE_PERIOD_NS
         self._debug_time_scale = time_axis_scale(duration_ns)
+        self._sync_debug_pretrigger_line()
         self._debug_time_axis_label.setText(
             f"Time [{self._debug_time_scale.unit}]  "
             f"({_DEBUG_SAMPLE_PERIOD_NS} ns/debug sample)"
         )
-        for curve in (self._debug1_curve, self._debug2_curve):
-            _, plotted_samples = curve.getData()
-            if plotted_samples is None or len(plotted_samples) == 0:
-                continue
-            plotted_samples = plotted_samples[:displayed_samples]
-            plotted_time = (
-                np.arange(len(plotted_samples))
-                * _DEBUG_SAMPLE_PERIOD_NS
-                / self._debug_time_scale.ns_per_unit
-            )
-            curve.setData(plotted_time, plotted_samples)
+        if self._pretrigger_line_drag is None:
+            for curve in (self._debug1_curve, self._debug2_curve):
+                _, plotted_samples = curve.getData()
+                if plotted_samples is None or len(plotted_samples) == 0:
+                    continue
+                plotted_samples = plotted_samples[:displayed_samples]
+                plotted_time = (
+                    np.arange(len(plotted_samples))
+                    * _DEBUG_SAMPLE_PERIOD_NS
+                    / self._debug_time_scale.ns_per_unit
+                )
+                curve.setData(plotted_time, plotted_samples)
         tip = (
             "Sets the diagnostic waveform capture-window length. "
             f"Debug sample period: {_DEBUG_SAMPLE_PERIOD_NS} ns "
@@ -741,16 +920,30 @@ class MCAController(QWidget):
             self.ui.spinTriggerLevel,
             lambda v: self._mca.set_trigger_level(v),
         )
+        self.ui.spinTriggerLevel.valueChanged.connect(self._debug_threshold_line.setValue)
+        self._debug_threshold_line.sigPositionChanged.connect(
+            self._on_debug_threshold_line_changed
+        )
+        self._debug_threshold_line.sigPositionChangeFinished.connect(
+            self._on_debug_threshold_line_finished
+        )
         self._wire_slider_spinbox(
             self.ui.sliderFrameSamples,
             self.ui.spinFrameSamples,
             lambda v: self._mca.set_frame_samples(v),
         )
-        self.ui.spinFrameSamples.valueChanged.connect(self._update_debug_time_axis)
+        self.ui.spinFrameSamples.valueChanged.connect(self._on_debug_frame_length_changed)
         self._wire_slider_spinbox(
             self.ui.sliderPretrigger,
             self.ui.spinPretrigger,
             lambda v: self._mca.set_pretrigger_samples(v),
+        )
+        self.ui.spinPretrigger.valueChanged.connect(self._sync_debug_pretrigger_line)
+        self._debug_pretrigger_line.sigPositionChanged.connect(
+            self._on_debug_pretrigger_line_changed
+        )
+        self._debug_pretrigger_line.sigPositionChangeFinished.connect(
+            self._on_debug_pretrigger_line_finished
         )
         self.ui.comboTriggerSource.currentIndexChanged.connect(
             lambda i: self._apply_hardware_setting(lambda: self._mca.set_trg_source(i))
@@ -895,6 +1088,7 @@ class MCAController(QWidget):
     # ------------------------------------------------------------------
 
     def _on_start(self) -> None:
+        self._cancel_debug_marker_drags()
         self.ui.btnStart.setChecked(True)
         self.ui.btnStart.setEnabled(False)
         self.ui.btnStop.setChecked(False)
@@ -946,6 +1140,7 @@ class MCAController(QWidget):
         )
 
     def _on_stop(self) -> None:
+        self._cancel_debug_marker_drags()
         self.ui.btnStop.setChecked(True)
 
         if self._dma_worker is not None:
@@ -1442,6 +1637,8 @@ class MCAController(QWidget):
         self._update_histogram(rb.histogram)
 
     def _update_debug_plot(self, raw_debug1: np.ndarray, raw_debug2: np.ndarray) -> None:
+        if self._pretrigger_line_drag is not None:
+            return
         samples = self.ui.sliderFrameSamples.value()
         self._update_debug_time_axis(samples)
         if raw_debug1 is not None and len(raw_debug1) > 0:
