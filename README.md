@@ -35,7 +35,8 @@ preserve the lifecycle required by each firmware generation.
 - Live waveform viewer with level, edge, and periodic trigger modes
 - Configurable frame length, pretrigger position, frame gap, and analogue offset
 - Persistence and raw display modes
-- Full-resolution IIO DMA recording with bounded stop, tail drain, and recovery
+- Full-resolution IIO DMA recording with capability-gated queued buffers,
+  batched remote reads, bounded stop, tail drain, and recovery
 - Independent viewing while a DMA capture is active
 
 ### MCA and PSD
@@ -296,6 +297,11 @@ External workspace
 The IIO implementation uses separate libiio contexts for GUI operations,
 background polling, and blocking DMA reads. This is intentional: a blocking
 refill and a control write must not share one remote context.
+
+On current Scope firmware, the driver advertises a qualified four-block DMA
+queue. Remote Scope recording uses a bounded 32-frame iiod request to amortize
+Ethernet round trips while preserving one exact hardware frame per IIO block.
+Firmware without that capability stays on the conservative one-block path.
 
 Important source locations:
 

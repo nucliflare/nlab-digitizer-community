@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Remote IIO Scope DMA now uses the queue capability advertised by the current
+  PetaLinux driver: four exact-frame kernel blocks and bounded 32-frame iiod
+  `READBUF` batches. Older or capability-unknown firmware remains on the safe
+  one-block libiio path.
+- Scope recording now passes validated raw DMA frames directly to the bounded
+  file-writer queue instead of decoding and reconstructing every record, and
+  uses the immutable armed geometry instead of making a remote attribute read
+  before every frame.
+
 ---
 
 ## [0.3.0] — 2026-09-15

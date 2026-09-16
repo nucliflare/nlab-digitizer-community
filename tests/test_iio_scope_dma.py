@@ -14,6 +14,7 @@ import iio
 import numpy as np
 import pytest
 
+import nlab.hardware.digitizer.backends.iio_backend as iio_backend_module
 import nlab.hardware.digitizer.dma as dma_module
 from nlab.hardware.digitizer.backends.iio_backend import IIODigitizerBackend
 from nlab.hardware.digitizer.dma import (
@@ -79,7 +80,7 @@ class _BlockingScopeBackend:
     def get_frame_samples(self) -> int:
         return 8
 
-    def read_dma_frame(self) -> tuple[int, np.ndarray]:
+    def read_dma_raw_frame(self) -> bytes:
         self.reading.set()
         assert self.release.wait(2)
         raise InterruptedError(errno.ECANCELED, "test stop")
@@ -93,8 +94,8 @@ class _BlockingScopeBackend:
 
 
 class _IncompleteScopeBackend(_BlockingScopeBackend):
-    def read_dma_frame(self) -> tuple[int, np.ndarray]:
-        return 123, np.zeros(3, dtype="<i2")
+    def read_dma_raw_frame(self) -> bytes:
+        return b"incomplete"
 
 
 class _TwoFrameScopeBackend(_BlockingScopeBackend):
@@ -103,11 +104,11 @@ class _TwoFrameScopeBackend(_BlockingScopeBackend):
         self.read_calls = 0
         self.second_refill_started = threading.Event()
 
-    def read_dma_frame(self) -> tuple[int, np.ndarray]:
+    def read_dma_raw_frame(self) -> bytes:
         self.read_calls += 1
         if self.read_calls == 2:
             self.second_refill_started.set()
-        return self.read_calls, np.arange(4, dtype="<i2")
+        return struct.pack("<Q", self.read_calls) + np.arange(4, dtype="<i2").tobytes()
 
 
 def test_streamer_stop_interrupts_blocked_refill(tmp_path: Path) -> None:
@@ -140,7 +141,7 @@ def test_streamer_rejects_incomplete_waveform(tmp_path: Path) -> None:
     streamer = IIOScopeDmaStreamer(backend, channel=0)
     output = tmp_path / "incomplete.bin"
 
-    with pytest.raises(RuntimeError, match="incomplete waveform"):
+    with pytest.raises(RuntimeError, match="incomplete raw frame"):
         streamer.stream_to_file(output, threading.Event(), n_frames=1)
 
     assert backend.closed == 1
@@ -230,7 +231,7 @@ def test_streamer_refills_while_separate_writer_is_blocked(
     assert len(flush_calls) == 1
 
 
-def test_backend_selects_one_kernel_buffer_before_scope_buffer_creation(
+def test_backend_uses_queue_capability_before_scope_buffer_creation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = object.__new__(IIODigitizerBackend)
@@ -241,12 +242,28 @@ def test_backend_selects_one_kernel_buffer_before_scope_buffer_creation(
     order: list[str] = []
 
     backend._dma_scope = SimpleNamespace(
+        attrs={
+            "dma_queue_mode": SimpleNamespace(value="dmaengine"),
+            "dma_kernel_buffers_max": SimpleNamespace(value="4"),
+            "dma_kernel_buffers_recommended": SimpleNamespace(value="4"),
+        },
+        id="iio:device15",
         set_kernel_buffers_count=lambda count: order.append(f"kernel:{count}"),
     )
+    backend._uri = "local:"
     monkeypatch.setattr(backend, "_close_dma_buffer", lambda: order.append("close"))
     monkeypatch.setattr(backend, "_dma_get_enable", lambda: False)
     monkeypatch.setattr(backend, "_dma_get_dma_enable", lambda: False)
-    monkeypatch.setattr(backend, "_dma_attr_get", lambda name: "0")
+    capability_values = {
+        "dma_queue_mode": "dmaengine",
+        "dma_kernel_buffers_max": "4",
+        "dma_kernel_buffers_recommended": "4",
+    }
+    monkeypatch.setattr(
+        backend,
+        "_dma_attr_get",
+        lambda name: capability_values.get(name, "0"),
+    )
 
     def make_buffer(device: object, length: int, cyclic: bool) -> object:
         assert device is backend._dma_scope
@@ -259,8 +276,99 @@ def test_backend_selects_one_kernel_buffer_before_scope_buffer_creation(
 
     backend._create_dma_buffer(8)
 
-    assert order == ["close", "kernel:1", "buffer"]
+    assert order == ["close", "kernel:4", "buffer"]
     assert backend._dma_buf_frame_samples == 8
+
+
+def test_backend_uses_batched_iiod_for_qualified_remote_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = object.__new__(IIODigitizerBackend)
+    backend._ch = 0
+    backend._uri = "ip:192.168.10.128:30431"
+    backend._dma_fault_latched = False
+    backend._dma_stop_requested = threading.Event()
+    backend._dma_buf = None
+    selected: list[int] = []
+    backend._dma_scope = SimpleNamespace(
+        id="iio:device15",
+        attrs={
+            "dma_queue_mode": object(),
+            "dma_kernel_buffers_max": object(),
+            "dma_kernel_buffers_recommended": object(),
+        },
+        set_kernel_buffers_count=selected.append,
+    )
+    values = {
+        "dma_queue_mode": "dmaengine",
+        "dma_kernel_buffers_max": "4",
+        "dma_kernel_buffers_recommended": "4",
+        "dma_buffer_active": "0",
+    }
+    monkeypatch.setattr(backend, "_close_dma_buffer", lambda: None)
+    monkeypatch.setattr(backend, "_dma_get_enable", lambda: False)
+    monkeypatch.setattr(backend, "_dma_get_dma_enable", lambda: False)
+    monkeypatch.setattr(backend, "_dma_attr_get", values.__getitem__)
+    created: list[tuple[str, str, int, int, int]] = []
+    fake_buffer = object()
+
+    def create_stream(
+        uri: str,
+        device: str,
+        samples: int,
+        buffers: int,
+        batch_frames: int,
+    ) -> object:
+        created.append((uri, device, samples, buffers, batch_frames))
+        return fake_buffer
+
+    monkeypatch.setattr(iio_backend_module, "IiodScopeStream", create_stream)
+
+    backend._create_dma_buffer(1024)
+
+    assert selected == [4]
+    assert created == [
+        ("ip:192.168.10.128:30431", "iio:device15", 1024, 4, 32),
+    ]
+    assert backend._dma_buf is fake_buffer
+    assert backend._dma_capture_transport == "iiod-batched"
+    assert backend._dma_capture_kernel_buffers == 4
+
+
+def test_backend_keeps_one_block_without_queue_capability() -> None:
+    backend = object.__new__(IIODigitizerBackend)
+    backend._dma_scope = SimpleNamespace(attrs={})
+
+    assert backend._scope_dma_kernel_buffers() == 1
+
+
+def test_backend_rejects_invalid_queue_capability() -> None:
+    backend = object.__new__(IIODigitizerBackend)
+    backend._dma_scope = SimpleNamespace(
+        attrs={
+            "dma_queue_mode": object(),
+            "dma_kernel_buffers_max": object(),
+            "dma_kernel_buffers_recommended": object(),
+        }
+    )
+    values = {
+        "dma_queue_mode": "dmaengine",
+        "dma_kernel_buffers_max": "8",
+        "dma_kernel_buffers_recommended": "8",
+    }
+    backend._dma_attr_get = values.__getitem__
+
+    with pytest.raises(RuntimeError, match="invalid Scope DMA queue capability"):
+        backend._scope_dma_kernel_buffers()
+
+
+def test_backend_rejects_uninitialized_scope_geometry_before_arm() -> None:
+    backend = object.__new__(IIODigitizerBackend)
+    backend._dma_fault_latched = False
+    backend._dma_stop_requested = threading.Event()
+
+    with pytest.raises(ValueError, match="invalid Scope DMA frame geometry 0"):
+        backend._create_dma_buffer(0)
 
 
 def test_backend_releases_faulted_buffer_before_cleanup(
@@ -301,6 +409,62 @@ def test_backend_releases_faulted_buffer_before_cleanup(
     assert caught.value.errno == errno.EIO
     assert backend._dma_fault_latched
     assert cleanup == [False]
+
+
+def test_backend_latches_batched_protocol_error_before_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = object.__new__(IIODigitizerBackend)
+    backend._ch = 0
+    backend._dma_fault_latched = False
+    backend._dma_stop_requested = threading.Event()
+    backend._dma_buf_frame_samples = 8
+    backend._dma_buf = object.__new__(iio_backend_module.IiodScopeStream)
+    monkeypatch.setattr(backend, "_dma_get_frame_samples", lambda: 8)
+    monkeypatch.setattr(
+        backend,
+        "_refill_once",
+        lambda _buf, _first: (_ for _ in ()).throw(
+            OSError(errno.EPROTO, "bad batch boundary")
+        ),
+    )
+    cleanup: list[bool] = []
+
+    def close_buffer(*, drain: bool = True) -> None:
+        backend._dma_buf = None
+        cleanup.append(drain)
+
+    monkeypatch.setattr(backend, "_close_dma_buffer", close_buffer)
+
+    with pytest.raises(OSError) as caught:
+        backend._refill_dma_buffer()
+
+    assert caught.value.errno == errno.EPROTO
+    assert backend._dma_fault_latched
+    assert cleanup == [False]
+
+
+def test_backend_uses_armed_geometry_without_per_frame_attribute_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = object.__new__(IIODigitizerBackend)
+    backend._ch = 0
+    backend._dma_fault_latched = False
+    backend._dma_stop_requested = threading.Event()
+    backend._dma_buf_frame_samples = 8
+    backend._dma_last_timestamp = None
+    raw = struct.pack("<Q", 123) + np.arange(4, dtype="<i2").tobytes()
+    buffer = object.__new__(iio_backend_module.IiodScopeStream)
+    buffer.read = lambda: raw
+    backend._dma_buf = buffer
+    monkeypatch.setattr(
+        backend,
+        "_dma_get_frame_samples",
+        lambda: pytest.fail("frame_samples was read again while the buffer was armed"),
+    )
+    monkeypatch.setattr(backend, "_refill_once", lambda _buf, _first: len(raw))
+
+    assert backend._refill_dma_buffer() == raw
 
 
 def test_backend_rejects_short_refill_before_copy(

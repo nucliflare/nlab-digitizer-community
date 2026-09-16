@@ -134,7 +134,7 @@ class Digitizer:
         NotImplementedError, since that's a firmware/device-tree gap on a
         specific board, not a gap in this backend.
         d.scope_dma is an IIOScopeDmaStreamer (see dma.py) — pulls
-        full-resolution frames by looping read_dma_frame() rather than
+        full-resolution frames by looping read_dma_raw_frame() rather than
         subscribing to a continuous push like the gRPC ZMQ streamers, since
         the IIO scope core has no continuous-streaming hardware path.
         """

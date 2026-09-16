@@ -66,6 +66,7 @@ from collections.abc import Callable
 import iio
 import numpy as np
 
+from ..iio_scope_stream import IiodScopeStream
 from .base import DigitizerBackend
 
 log = logging.getLogger(__name__)
@@ -106,6 +107,8 @@ _SCOPE_VIEWER_SAFE_ENTRIES = (
     _SCOPE_VIEWER_PAGE_BYTES - _SCOPE_VIEWER_TAIL_BYTES
 ) // _SCOPE_VIEWER_MAX_ENTRY_BYTES
 _SCOPE_VIEWER_SAFE_FRAME_SAMPLES = _SCOPE_VIEWER_SAFE_ENTRIES * 4
+_SCOPE_MIN_FRAME_SAMPLES = 4
+_SCOPE_MAX_FRAME_SAMPLES = 8188
 
 # The AFE DAC now has a real driver: vdpp_afe_dac, added to the device tree
 # after this backend was first written (the ad5686r device present on the
@@ -146,7 +149,11 @@ _LM_RECORD_BYTES = 16
 _LM_FRAME_BYTES = _LM_FRAME_RECORDS * _LM_RECORD_BYTES
 _LM_IP_VERSION = 121
 _LM_KERNEL_BUFFER_COUNT = 8
-_SCOPE_KERNEL_BUFFER_COUNT = 1
+# Old or capability-unknown Scope images must retain one block.  The current
+# provider-qualified driver advertises a recommended/max depth through IIO;
+# use that only after validating the complete capability tuple.
+_SCOPE_FALLBACK_KERNEL_BUFFER_COUNT = 1
+_SCOPE_IIOD_BATCH_FRAMES = 32
 _LM_RECORD_LAYOUT = "opaque[16]"
 _LM_EVENT_DTYPE = np.dtype([
     ("flags", "<u2"),
@@ -374,10 +381,14 @@ class IIODigitizerBackend(DigitizerBackend):
         # frame_samples (the dmaengine buffer core splitting the request
         # into two double-buffered blocks, with one refill() delivering
         # both), but the driver's required_length formula changed at some
-        # point and one refill() now delivers exactly one frame. No more
-        # per-frame pending queue needed on the client side.
-        self._dma_buf: iio.Buffer | None = None
+        # point and one refill() now delivers exactly one frame. The current
+        # remote transport batches requests, but each returned chunk and each
+        # kernel DMA block remain exactly one frame.
+        self._dma_buf: iio.Buffer | IiodScopeStream | None = None
         self._dma_buf_frame_samples: int | None = None
+        self._dma_capture_transport: str | None = None
+        self._dma_capture_kernel_buffers: int | None = None
+        self._dma_last_timestamp: int | None = None
         # Set by IIOScopeDmaWorker.stop() through the streamer. Buffer.cancel()
         # is the libiio-supported way to interrupt a refill blocked in another
         # thread; this event lets that expected cancellation be distinguished
@@ -617,18 +628,15 @@ class IIODigitizerBackend(DigitizerBackend):
         n = iio._d_read_attr(self._scope._device, name.encode("ascii"), buf, size)
         return buf.raw[:n]
 
-    def _drain_for_close(self, buf: iio.Buffer) -> int:
+    def _drain_for_close(self, buf: iio.Buffer | IiodScopeStream) -> int:
         """Keep refilling *buf* for a short window before cancelling it,
         instead of cancelling immediately.
 
         Ported from the reference stub's (scope_backend_iio.py)
-        _drain_for_close() -- our own close path was missing this step
-        entirely. ADI file-I/O owns one DMA block, and per the stub's own
-        comment, if a frame the core already started sending is not
-        consumed before the DMA receiver disappears, the core can be left
-        blocked in its AXI send state -- not just for DMA, but for the
-        shared state machine that viewer-only frames also depend on to
-        return to idle.
+        _drain_for_close(). If a frame the core already started sending is
+        not consumed before the DMA receiver disappears, the core can be left
+        blocked in its AXI send state -- not just for DMA, but for the shared
+        state machine that viewer-only frames also depend on to return idle.
 
         A background thread keeps calling refill() (discarding the
         result -- this is drain, not read) until cancelled, while this
@@ -646,7 +654,7 @@ class IIODigitizerBackend(DigitizerBackend):
             entered.set()
             while not stop.is_set():
                 try:
-                    buf.refill()
+                    self._refill_scope_buffer(buf)
                 except Exception as exc:
                     # cancel() is expected to interrupt the final
                     # blocking refill -- only an earlier failure is a
@@ -733,15 +741,20 @@ class IIODigitizerBackend(DigitizerBackend):
 
         self._dma_buf = None
         self._dma_buf_frame_samples = None
-        # Do not depend on Buffer.__del__ timing here. In pylibiio 0.25 a
-        # cancelled refill can leave Python/threading references alive long
-        # enough for the complete gate wait to expire. Destroy the native
-        # buffer explicitly after every reader has stopped, then null the
-        # wrapper pointer so its eventual __del__ is idempotent.
-        native_buffer = buf._buffer
-        buf._buffer = None
-        if native_buffer is not None:
-            iio._buffer_destroy(native_buffer)
+        if isinstance(buf, IiodScopeStream):
+            # Closing the dedicated data connection makes iiod destroy the
+            # remote IIO buffer. Control/gate polling remains on _dma_ctx.
+            buf.close()
+        else:
+            # Do not depend on Buffer.__del__ timing here. In pylibiio 0.25 a
+            # cancelled refill can leave Python/threading references alive
+            # long enough for the complete gate wait to expire. Destroy the
+            # native buffer explicitly after every reader has stopped, then
+            # null the wrapper pointer so its eventual __del__ is idempotent.
+            native_buffer = buf._buffer
+            buf._buffer = None
+            if native_buffer is not None:
+                iio._buffer_destroy(native_buffer)
         del buf
 
         try:
@@ -1967,10 +1980,19 @@ class IIODigitizerBackend(DigitizerBackend):
         sign-extends on any negative-looking sample word and silently
         corrupts the packing).
         """
-        raw = self._refill_dma_buffer()
+        raw = self.read_dma_raw_frame()
         timestamp = int.from_bytes(raw[:8], "little")
         samples = np.frombuffer(raw[8:], dtype="<i2")
         return timestamp, samples
+
+    def read_dma_raw_frame(self) -> bytes:
+        """Return one validated, exact raw frame without decoding/repacking.
+
+        The file streamer uses this hot path directly. The immutable byte
+        string remains independent of either the native libiio buffer or the
+        batched iiod receive buffer when the next refill starts.
+        """
+        return self._refill_dma_buffer()
 
     def _refill_dma_buffer(self) -> bytes:
         """Shared by read_dma_frame() and capture_to_file(): ensure the
@@ -1983,9 +2005,10 @@ class IIODigitizerBackend(DigitizerBackend):
         must be 512 for a 512 sample frame") that scope_buffer_preenable()
         now requires the buffer's sample count to be exactly
         frame_samples, not 2 * frame_samples like an earlier driver
-        revision needed -- one refill() delivers exactly one frame now,
-        no client-side splitting/queuing required. The buffer is recreated
-        automatically if frame_samples changes between calls.
+        revision needed -- one refill() delivers exactly one frame now. The
+        current remote path batches multiple complete refills into one iiod
+        request without splitting or enlarging a DMA block. The buffer is
+        recreated automatically if frame_samples changes between calls.
 
         Deliberately reads the exact byte count iio_buffer_refill()
         reports rather than trusting the public Buffer.read(), which
@@ -2003,12 +2026,9 @@ class IIODigitizerBackend(DigitizerBackend):
         the older revision (no-op), False needing an explicit write on the
         newer one.
 
-        The refill() itself is wrapped in the same retry-on-transient-error
-        helper (this time for EINVAL, errno 22): confirmed live that the
-        very first refill() right after set_enable(True) can fail this way
-        if issued too soon -- the older driver revision never had this gap
-        since ENABLE was set synchronously inside postenable(), before
-        control ever returned to userspace, so no refill() could race it.
+        Native libiio fallback refills retain the bounded retry for transient
+        EINVAL (errno 22). The batched iiod transport never retries a socket
+        or protocol error because its response boundary is then unknown.
 
         A persistent EINVAL after the bounded transient retries ends the
         session. An earlier implementation tried to recreate the buffer and
@@ -2016,7 +2036,7 @@ class IIODigitizerBackend(DigitizerBackend):
         after a framing fault and retained the old Buffer through the caught
         exception's traceback while waiting for its driver gates to clear.
 
-        A genuine EIO (errno 5) is handled differently from both cases
+        A genuine native EIO (errno 5) is handled differently from both cases
         above: per user-api.md, "An EIO returned by a normal capture
         refill() latches a fault in the Python backend. Cleanup is
         attempted exactly once, automatic rearm is blocked, and a second
@@ -2025,7 +2045,9 @@ class IIODigitizerBackend(DigitizerBackend):
         Buffer.cancel() produces when it interrupts _drain_for_close()'s
         blocked refill -- that one is normal cancellation noise, not a
         session fault, and _drain_for_close() already only treats a
-        refill failure as an error when it happens before stop.is_set().
+        refill failure as an error when it happens before stop.is_set(). Any
+        batched-iio socket/protocol failure is likewise latched because the
+        stream cannot safely issue a new request after a partial response.
 
         The first refill() after any (re)arm goes through
         _start_reader_then_enable() instead of a plain refill -- see its
@@ -2045,13 +2067,24 @@ class IIODigitizerBackend(DigitizerBackend):
         if self._dma_stop_requested.is_set():
             raise InterruptedError(errno.ECANCELED, "scope DMA stop requested")
 
-        n = self._dma_get_frame_samples()
-        first = self._dma_buf is None or self._dma_buf_frame_samples != n
+        # Frame geometry is immutable for the lifetime of an armed buffer:
+        # vdpp-scope rejects frame_samples writes while buffer_active is set,
+        # and set_frame_samples() closes our buffer before writing. Reading the
+        # remote attribute on every frame adds one iiod control round trip and
+        # defeats much of READBUF batching, so only read it for the initial arm.
+        first = self._dma_buf is None
         if first:
+            n = self._dma_get_frame_samples()
             self._create_dma_buffer(n)
+        else:
+            if self._dma_buf_frame_samples is None:
+                raise RuntimeError("armed Scope DMA buffer has no cached geometry")
+            n = self._dma_buf_frame_samples
 
         buf = self._dma_buf
         assert buf is not None
+        batched_iiod = isinstance(buf, IiodScopeStream)
+        refill_failed = False
         failure_errno: int | None = None
         failure_text = ""
         try:
@@ -2060,10 +2093,11 @@ class IIODigitizerBackend(DigitizerBackend):
             # Store scalar diagnostics only. Keeping ``exc`` outside this
             # block would retain its traceback, including _refill_once()'s
             # local Buffer reference, and prevent native buffer destruction.
+            refill_failed = True
             failure_errno = exc.errno
             failure_text = str(exc)
 
-        if failure_errno is not None:
+        if refill_failed:
             del buf
             if self._dma_stop_requested.is_set():
                 self._close_dma_buffer(drain=False)
@@ -2071,10 +2105,14 @@ class IIODigitizerBackend(DigitizerBackend):
                     errno.ECANCELED, "scope DMA refill cancelled by Stop"
                 ) from None
 
-            if failure_errno in (errno.EIO, errno.EINVAL):
+            # Any batched socket error leaves the READBUF response boundary
+            # indeterminate, so that transport is terminal even when the
+            # errno is a timeout or protocol error. Native libiio retains its
+            # established EIO/EINVAL latch policy.
+            if batched_iiod or failure_errno in (errno.EIO, errno.EINVAL):
                 self._dma_fault_latched = True
                 log.error(
-                    "IIO backend ch%d: DMA session fault (errno %d) during "
+                    "IIO backend ch%d: DMA session fault (errno %s) during "
                     "refill -- latching and closing the buffer",
                     self._ch,
                     failure_errno,
@@ -2088,10 +2126,10 @@ class IIODigitizerBackend(DigitizerBackend):
                         self._ch,
                         exc_info=True,
                     )
-                raise OSError(failure_errno, failure_text) from None
+                raise OSError(failure_errno or errno.EIO, failure_text) from None
 
             self._close_dma_buffer(drain=False)
-            raise OSError(failure_errno, failure_text) from None
+            raise OSError(failure_errno or errno.EIO, failure_text) from None
 
         expected_bytes = n * np.dtype("<i2").itemsize
         if nbytes != expected_bytes:
@@ -2111,10 +2149,41 @@ class IIODigitizerBackend(DigitizerBackend):
                 f"scope DMA returned {nbytes} bytes, expected {expected_bytes}",
             )
 
-        start = iio._buffer_start(buf._buffer)
-        return ctypes.string_at(start, nbytes)
+        if isinstance(buf, IiodScopeStream):
+            raw = buf.read()
+        else:
+            start = iio._buffer_start(buf._buffer)
+            raw = ctypes.string_at(start, nbytes)
 
-    def _refill_once(self, buf: iio.Buffer, first: bool) -> int:
+        timestamp = int.from_bytes(raw[:8], "little")
+        previous = getattr(self, "_dma_last_timestamp", None)
+        if not timestamp or (previous is not None and timestamp <= previous):
+            del buf
+            self._dma_fault_latched = True
+            try:
+                self._close_dma_buffer(drain=False)
+            except Exception:
+                log.warning(
+                    "IIO backend ch%d: cleanup after an invalid DMA timestamp "
+                    "raised its own error",
+                    self._ch,
+                    exc_info=True,
+                )
+            raise OSError(
+                errno.EIO,
+                "scope DMA returned a zero, stale, or non-increasing timestamp",
+            )
+        self._dma_last_timestamp = timestamp
+        return raw
+
+    @staticmethod
+    def _refill_scope_buffer(buf: iio.Buffer | IiodScopeStream) -> int:
+        """Refill either transport and return its exact completed byte count."""
+        if isinstance(buf, IiodScopeStream):
+            return buf.refill()
+        return iio._buffer_refill(buf._buffer)  # type: ignore[no-any-return]
+
+    def _refill_once(self, buf: iio.Buffer | IiodScopeStream, first: bool) -> int:
         """Refill *buf* once. *first* selects _start_reader_then_enable()
         (buffer was just (re)armed, enable is not known to be 1 yet) vs a
         plain retry-tolerant refill (steady-state reuse of an already-
@@ -2123,11 +2192,15 @@ class IIODigitizerBackend(DigitizerBackend):
         """
         if first:
             return self._start_reader_then_enable(buf)
+        if isinstance(buf, IiodScopeStream):
+            # A socket/protocol error makes the batch boundary indeterminate;
+            # IiodScopeStream marks itself failed and must never be retried.
+            return self._refill_scope_buffer(buf)
         return self._retry_errno(  # type: ignore[no-any-return]
-            lambda: iio._buffer_refill(buf._buffer), (22,)
+            lambda: self._refill_scope_buffer(buf), (22,)
         )
 
-    def _start_reader_then_enable(self, buf: iio.Buffer) -> int:
+    def _start_reader_then_enable(self, buf: iio.Buffer | IiodScopeStream) -> int:
         """Issue the first blocking refill() on a freshly armed buffer
         *before* writing enable=1, per user-api.md's "Running a
         measurement" step 6: "start the blocking reader, then write
@@ -2163,7 +2236,7 @@ class IIODigitizerBackend(DigitizerBackend):
         def reader() -> None:
             entered.set()
             try:
-                result.append(iio._buffer_refill(buf._buffer))
+                result.append(self._refill_scope_buffer(buf))
             except BaseException as exc:
                 errors.append(exc)
 
@@ -2195,8 +2268,8 @@ class IIODigitizerBackend(DigitizerBackend):
 
     def _create_dma_buffer(self, n: int) -> None:
         """Close any existing buffer and open a fresh one sized for n
-        samples -- shared by _refill_dma_buffer()'s normal path and its
-        EINVAL/EIO recovery paths. Does not touch enable itself; see
+        samples for _refill_dma_buffer()'s initial arm. Does not touch enable
+        itself; see
         _start_reader_then_enable()'s docstring for why that write moved
         out of here and into the caller, ordered after the first refill()
         has already started.
@@ -2222,6 +2295,15 @@ class IIODigitizerBackend(DigitizerBackend):
             )
         if self._dma_stop_requested.is_set():
             raise InterruptedError(errno.ECANCELED, "scope DMA stop requested")
+        if (
+            n < _SCOPE_MIN_FRAME_SAMPLES
+            or n > _SCOPE_MAX_FRAME_SAMPLES
+            or n % 4
+        ):
+            raise ValueError(
+                f"invalid Scope DMA frame geometry {n}; expected a multiple "
+                f"of 4 in {_SCOPE_MIN_FRAME_SAMPLES}..{_SCOPE_MAX_FRAME_SAMPLES}"
+            )
 
         self._close_dma_buffer()
 
@@ -2247,19 +2329,69 @@ class IIODigitizerBackend(DigitizerBackend):
                 "prior session was not fully torn down"
             )
 
-        # user-api.md and scope-architecture.md require exactly one mmap
-        # block for this Xilinx 5.15 Direct Register DMA path. Libiio 0.25's
-        # default of four can report pending-but-never-executed descriptors as
-        # completed, producing stale, duplicate, or zero-filled full-size
-        # frames without a DMA error. This call works through iiod and must be
-        # made after the old buffer is closed and before the new one is opened.
-        self._dma_scope.set_kernel_buffers_count(_SCOPE_KERNEL_BUFFER_COUNT)
-        self._dma_buf = iio.Buffer(self._dma_scope, n, False)
-        self._dma_buf_frame_samples = n
-        log.debug(
-            "IIO backend ch%d: DMA buffer armed, frame_samples=%d",
-            self._ch, n,
+        kernel_buffers = self._scope_dma_kernel_buffers()
+        use_batched_iiod = (
+            self._uri.startswith("ip:")
+            and "dma_queue_mode" in self._dma_scope.attrs
+            and self._dma_attr_get("dma_queue_mode") == "dmaengine"
         )
+        try:
+            self._dma_scope.set_kernel_buffers_count(kernel_buffers)
+        except AttributeError as exc:
+            raise RuntimeError(
+                "the Python libiio binding cannot select the required Scope "
+                "DMA kernel-buffer depth"
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError(
+                "failed to select Scope DMA kernel-buffer depth before arming"
+            ) from exc
+
+        if use_batched_iiod:
+            self._dma_buf = IiodScopeStream(
+                self._uri,
+                self._dma_scope.id,
+                n,
+                kernel_buffers,
+                _SCOPE_IIOD_BATCH_FRAMES,
+            )
+            self._dma_capture_transport = "iiod-batched"
+        else:
+            self._dma_buf = iio.Buffer(self._dma_scope, n, False)
+            self._dma_capture_transport = "libiio"
+        self._dma_buf_frame_samples = n
+        self._dma_capture_kernel_buffers = kernel_buffers
+        log.debug(
+            "IIO backend ch%d: DMA buffer armed, frame_samples=%d, "
+            "transport=%s, kernel_buffers=%d",
+            self._ch,
+            n,
+            self._dma_capture_transport,
+            kernel_buffers,
+        )
+
+    def _scope_dma_kernel_buffers(self) -> int:
+        """Select queue depth only from the provider-qualified driver ABI."""
+        attrs = self._dma_scope.attrs
+        maximum = recommended = _SCOPE_FALLBACK_KERNEL_BUFFER_COUNT
+        if (
+            "dma_queue_mode" in attrs
+            and self._dma_attr_get("dma_queue_mode") == "dmaengine"
+        ):
+            capability_names = (
+                "dma_kernel_buffers_max",
+                "dma_kernel_buffers_recommended",
+            )
+            if all(name in attrs for name in capability_names):
+                maximum = int(self._dma_attr_get("dma_kernel_buffers_max"))
+                recommended = int(self._dma_attr_get("dma_kernel_buffers_recommended"))
+                if (
+                    maximum not in (2, 4)
+                    or recommended not in (1, 2, 4)
+                    or recommended > maximum
+                ):
+                    raise RuntimeError("invalid Scope DMA queue capability")
+        return recommended
 
     def capture_to_file(
         self, path: str, duration_s: float | None = None, max_frames: int | None = None,

@@ -82,7 +82,7 @@ class IIOScopeDmaWorker(BaseWorker):
     Not interchangeable with ScopeDmaWorker: IIOScopeDmaStreamer.
     stream_to_file() takes n_frames instead of frame_samples (it reads
     frame_samples itself from the backend at capture time) and has no
-    connect-then-arm step -- the first read_dma_frame() call both creates
+    connect-then-arm step -- the first read_dma_raw_frame() call both creates
     the DMA buffer and arms the hardware (see IIOScopeDmaStreamer's
     docstring). ``ready`` is kept for interface parity with ScopeDmaWorker
     but the controller must NOT call scope.start() in response to it for

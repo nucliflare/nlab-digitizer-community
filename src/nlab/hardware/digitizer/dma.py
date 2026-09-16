@@ -31,7 +31,7 @@ class _IIOScopeBackend(Protocol):
 
     def get_frame_samples(self) -> int: ...
 
-    def read_dma_frame(self) -> tuple[int, np.ndarray]: ...
+    def read_dma_raw_frame(self) -> bytes: ...
 
     def request_dma_stop(self) -> None: ...
 
@@ -395,7 +395,7 @@ class IIOScopeDmaStreamer:
         queued for writing (None = unbounded). *on_ready* is called once the
         writer has created and flushed the one-time NDMA header, right before
         the first capture attempt. At that point no DMA buffer exists yet
-        (it's created lazily by the first read_dma_frame() call), and that
+        (it's created lazily by the first read_dma_raw_frame() call), and that
         first call arms DMA, starts its blocking reader and then writes
         ``enable=1`` in the backend-defined order. There is no separate
         hardware-arm operation for the controller.
@@ -437,7 +437,7 @@ class IIOScopeDmaStreamer:
         """
         self._backend.prepare_dma_capture()
         frame_samples = self._backend.get_frame_samples()
-        expected_waveform_samples = frame_samples - SCOPE_TIMESTAMP_WORDS
+        expected_frame_bytes = frame_samples * np.dtype("<i2").itemsize
         frame_count = 0
         write_queue: queue.Queue[bytes | object] = queue.Queue(
             maxsize=_IIO_SCOPE_WRITE_QUEUE_FRAMES,
@@ -550,23 +550,22 @@ class IIOScopeDmaStreamer:
 
                 raise_writer_error()
                 try:
-                    timestamp, samples = self._backend.read_dma_frame()
+                    record = self._backend.read_dma_raw_frame()
                 except InterruptedError:
                     if writer_failed.is_set():
                         raise_writer_error()
                     if stop_event.is_set():
                         break
                     raise
-                if samples.ndim != 1 or samples.size != expected_waveform_samples:
+                if len(record) != expected_frame_bytes:
                     raise RuntimeError(
-                        "scope DMA returned an incomplete waveform: "
-                        f"{samples.size} samples, expected "
-                        f"{expected_waveform_samples}"
+                        "scope DMA returned an incomplete raw frame: "
+                        f"{len(record)} bytes, expected {expected_frame_bytes}"
                     )
 
-                # struct.pack() and ndarray.tobytes() make this record wholly
-                # independent of the IIO buffer before the next refill starts.
-                record = struct.pack("<Q", timestamp) + samples.tobytes()
+                # The backend has already copied this exact immutable frame
+                # out of the transport buffer, so no decode/repack is needed
+                # before the next refill starts.
                 if not enqueue_record(record):
                     raise RuntimeError("scope DMA writer stopped unexpectedly")
                 frame_count += 1
