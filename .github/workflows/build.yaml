@@ -17,7 +17,7 @@ jobs:
             runs-on: windows-latest
             python-exe: python
             venv-python: .venv/Scripts/python.exe
-            package: dist/nlab-windows.zip
+            package: dist/nlab.exe
           - name: ubuntu
             runs-on: ubuntu-latest
             python-exe: python3
@@ -76,11 +76,6 @@ jobs:
       - name: Build
         run: ${{ matrix.venv-python }} scripts/build_pyinstaller_reviewed.py --clean
 
-      - name: Package build (Windows)
-        if: matrix.name == 'windows'
-        shell: powershell
-        run: Compress-Archive -Path dist/nlab.exe -DestinationPath ${{ matrix.package }} -Force
-
       - name: Package build (Linux)
         if: matrix.name == 'ubuntu'
         run: tar -czf ${{ matrix.package }} -C dist nlab
@@ -102,6 +97,11 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: dist
+
+      - name: Package Windows release archive
+        run: |
+          cd dist/nlab-windows
+          python3 -m zipfile -c nlab-windows.zip nlab.exe
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3

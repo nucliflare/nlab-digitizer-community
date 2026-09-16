@@ -437,6 +437,9 @@ Tagged releases trigger Windows and Ubuntu builds through the repository's
 GitHub and Gitea workflows. The single-file executables are published in
 platform-specific archives; GitHub artifacts are available from the
 [Releases page](https://github.com/nucliflare/nlab-digitizer-community/releases).
+The Windows Actions artifact contains `nlab.exe` directly, so extracting its
+download ZIP once is enough. The Windows Release asset remains a single ZIP
+containing `nlab.exe`.
 
 ## Known target-side limitations
 

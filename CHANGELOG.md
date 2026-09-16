@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows CI artifacts now contain the executable directly instead of a ZIP
+  inside the Actions download ZIP; tagged Release assets remain single ZIPs.
+
 ---
 
 ## [0.3.1] — 2026-09-16

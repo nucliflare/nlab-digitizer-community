@@ -14,7 +14,7 @@ jobs:
             runs-on: windows-local
             python-exe: python
             venv-python: .venv/Scripts/python.exe
-            package: dist/nlab-windows.zip
+            package: dist/nlab.exe
           - name: ubuntu
             runs-on: ubuntu-local
             python-exe: python3
@@ -84,13 +84,6 @@ jobs:
       - name: Build
         run: ${{ matrix.venv-python }} scripts/build_pyinstaller_reviewed.py --clean
 
-      - name: Package build (Windows)
-        if: matrix.name == 'windows'
-        # Windows self-hosted runners are only required to provide the built-in
-        # Windows PowerShell, not the separately installed PowerShell Core (pwsh).
-        shell: powershell
-        run: Compress-Archive -Path dist/nlab.exe -DestinationPath ${{ matrix.package }} -Force
-
       - name: Package build (Linux)
         if: matrix.name == 'ubuntu'
         run: tar -czf ${{ matrix.package }} -C dist nlab
@@ -116,6 +109,14 @@ jobs:
         uses: actions/download-artifact@v3-node20
         with:
           path: dist
+
+      - name: Package Windows release archive
+        # Actions artifacts are ZIPs already. Upload the raw EXE above so
+        # downloading the Windows build artifact needs only one extraction;
+        # create the single-ZIP release asset after downloading artifacts.
+        run: |
+          cd dist/nlab-windows
+          python3 -m zipfile -c nlab-windows.zip nlab.exe
 
       - name: Create Gitea Release
         uses: https://gitea.com/actions/gitea-release-action@v1
