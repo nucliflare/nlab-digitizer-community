@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A draggable Scope trigger-threshold marker that follows the threshold
+  controls and updates the hardware when released.
 - A headless direct-IIO Scope DMA example records raw NDMA frames with the
   tested periodic maximum-frame defaults, optional GUI/minimal YAML
   calibration, Auto Setup when no YAML is provided, a bounded duration, and

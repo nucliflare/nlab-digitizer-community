@@ -332,6 +332,7 @@ class ScopeController(QWidget):
         self.ui.groupTrigger.setEnabled(enabled)
         self.ui.groupTiming.setEnabled(enabled)
         self.ui.cbDmaEnable.setEnabled(enabled)
+        self._threshold_line.setMovable(enabled)
 
     def _viewer_frame_limit(self) -> int | None:
         return self._scope.get_viewer_frame_samples_limit()
@@ -386,6 +387,11 @@ class ScopeController(QWidget):
             self.ui.spinTriggerLevel,
             lambda v: self._scope.set_trigger_level(v),
         )
+        self.ui.spinTriggerLevel.valueChanged.connect(self._threshold_line.setValue)
+        self._threshold_line.sigPositionChanged.connect(self._on_threshold_line_changed)
+        self._threshold_line.sigPositionChangeFinished.connect(
+            self._on_threshold_line_drag_finished
+        )
         self._wire_slider_spinbox(
             self.ui.sliderDacValue,
             self.ui.spinDacValue,
@@ -430,6 +436,23 @@ class ScopeController(QWidget):
         self.ui.comboDisplayMode.currentIndexChanged.connect(self._on_display_mode_changed)
         self.ui.dialPersistence.valueChanged.connect(self._on_persistence_changed)
         self.ui.spinRefreshRate.valueChanged.connect(self._on_refresh_rate_changed)
+
+    def _on_threshold_line_changed(self) -> None:
+        """Keep the plot marker and integer-valued threshold widgets in sync."""
+        value = round(self._threshold_line.value())
+        value = max(self.ui.spinTriggerLevel.minimum(), value)
+        value = min(self.ui.spinTriggerLevel.maximum(), value)
+        if self._threshold_line.value() != value:
+            self._threshold_line.blockSignals(True)
+            try:
+                self._threshold_line.setValue(value)
+            finally:
+                self._threshold_line.blockSignals(False)
+        self.ui.spinTriggerLevel.setValue(value)
+
+    def _on_threshold_line_drag_finished(self) -> None:
+        if self._threshold_line.movable:
+            self._scope.set_trigger_level(self.ui.spinTriggerLevel.value())
 
     def _on_trigger_mode_changed(self, index: int) -> None:
         self._scope.set_trigger_mode(TriggerMode(index))
@@ -880,6 +903,7 @@ class ScopeController(QWidget):
         self._setup_plot_layout()
         self._setup_persistence_layer()
         self._setup_raw_layer()
+        self._setup_threshold_line()
         self._update_axis_ranges()
         self._set_display_mode(DisplayMode(self.ui.comboDisplayMode.currentIndex()))
 
@@ -909,6 +933,21 @@ class ScopeController(QWidget):
     def _setup_raw_layer(self) -> None:
         self._raw_curve = self._plot_item.plot(pen=pg.mkPen("#00bfff", width=1))
         self._raw_curve.setVisible(False)
+
+    def _setup_threshold_line(self) -> None:
+        spec = self._scope.specs[ScopeParam.TRIGGER_LEVEL]
+        assert isinstance(spec, RangeSpec)
+        self._threshold_line = pg.InfiniteLine(
+            pos=self.ui.spinTriggerLevel.value(),
+            angle=0,
+            movable=True,
+            pen=pg.mkPen("#d1495b", width=2, style=Qt.PenStyle.DashLine),
+            hoverPen=pg.mkPen("#f07167", width=3, style=Qt.PenStyle.DashLine),
+        )
+        self._threshold_line.setBounds((int(spec.min_val), int(spec.max_val)))
+        self._threshold_line.setZValue(10)
+        self._threshold_line.setToolTip("Drag to set the Scope trigger threshold")
+        self._plot_item.addItem(self._threshold_line)
 
     def _update_axis_ranges(self) -> None:
         frame_samples = self._frame_samples_from_ui()
@@ -996,6 +1035,8 @@ class ScopeController(QWidget):
 
     def _set_file_browser_busy(self, busy: bool) -> None:
         self._set_controls_enabled(not busy)
+        # Imported CAEN waveforms need not share this Scope's ADC threshold scale.
+        self._threshold_line.setVisible(not busy)
         self.ui.groupDisplay.setEnabled(not busy)
         self.ui.btnStart.setEnabled(not busy)
         self.ui.btnStop.setEnabled(False)

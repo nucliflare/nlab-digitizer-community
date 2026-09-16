@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QThreadPool
+from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -142,6 +142,52 @@ def test_scope_viewer_scales_time_axis_and_explains_sample_period(qtbot: QtBot) 
     scope.set_frame_samples.assert_called_with(256)
     x_data, _ = controller._raw_curve.getData()
     np.testing.assert_allclose(x_data, [0.0, 8.0, 16.0])
+
+
+def test_scope_threshold_line_tracks_widgets_and_commits_at_drag_end(
+    qtbot: QtBot,
+) -> None:
+    scope = _scope_model_for_controller()
+    scope.get_trigger_level.return_value = 125
+    controller = ScopeController(scope, scope_dma=None, channel=0)
+    qtbot.addWidget(controller)
+    line = controller._threshold_line
+    scope.set_trigger_level.reset_mock()
+
+    assert line.value() == 125
+    assert line.pen.style() == Qt.PenStyle.DashLine
+    assert line.bounds() == (-32768, 32767)
+
+    line.setValue(301.7)
+    assert line.value() == 302
+    assert controller.ui.spinTriggerLevel.value() == 302
+    assert controller.ui.sliderTriggerLevel.value() == 302
+    scope.set_trigger_level.assert_not_called()
+
+    line.sigPositionChangeFinished.emit(line)
+    scope.set_trigger_level.assert_called_once_with(302)
+
+    scope.set_trigger_level.reset_mock()
+    controller.ui.sliderTriggerLevel.setValue(-500)
+    assert controller.ui.spinTriggerLevel.value() == -500
+    assert line.value() == -500
+    scope.set_trigger_level.assert_not_called()
+    controller.ui.sliderTriggerLevel.sliderReleased.emit()
+    scope.set_trigger_level.assert_called_once_with(-500)
+
+    controller.ui.spinTriggerLevel.setValue(800)
+    assert controller.ui.sliderTriggerLevel.value() == 800
+    assert line.value() == 800
+    controller.ui.spinTriggerLevel.editingFinished.emit()
+    scope.set_trigger_level.assert_called_with(800)
+
+    scope.get_trigger_level.return_value = 42
+    controller._load_hardware_state()
+    assert line.value() == 42
+    controller._set_controls_enabled(False)
+    assert not line.movable
+    line.sigPositionChangeFinished.emit(line)
+    scope.set_trigger_level.assert_called_with(800)
 
 
 def test_scope_timing_controls_convert_nanoseconds_to_hardware_units(

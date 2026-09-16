@@ -33,6 +33,9 @@ preserve the lifecycle required by each firmware generation.
 ### Scope
 
 - Live waveform viewer with level, edge, and periodic trigger modes
+- A draggable dashed trigger-threshold line on the Scope plot, synchronized
+  with the threshold slider and spin box; the hardware value is committed
+  when the line is released
 - Configurable frame length, pretrigger position, frame gap, and analogue offset
 - Persistence and raw display modes
 - Full-resolution IIO DMA recording with capability-gated queued buffers,
