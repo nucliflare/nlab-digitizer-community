@@ -600,6 +600,7 @@ class IIOMcaDmaStreamer:
     def __init__(self, backend: _IIOMcaBackend, channel: int) -> None:
         self._backend = backend
         self._channel = channel
+        self.last_capture_diagnostics: dict[str, int | bool] | None = None
 
     def request_stop(self) -> None:
         """Stop production while leaving the reader armed for tail drain."""
@@ -626,6 +627,7 @@ class IIOMcaDmaStreamer:
         """
         total_records = 0
         frame_count = 0
+        self.last_capture_diagnostics = None
         writer: McaCaptureWriter | None = None
         started_utc = datetime.now(UTC)
 
@@ -721,6 +723,20 @@ class IIOMcaDmaStreamer:
             and completed_frames == frame_count
             and deadtime_records == 0
         )
+        # vdpp-lm-frame.c exposes completed_frames, dma_fault,
+        # dma_error_count (cumulative since driver initialization), and
+        # list_deadtime_raw directly through its IIO attributes.
+        # Preserve the final driver readback for every output mode, including
+        # online-only, instead of treating a clean worker exit as proof of
+        # continuity.
+        self.last_capture_diagnostics = {
+            "dma_fault": dma_fault,
+            "dma_error_count": dma_error_count,
+            "completed_frames": completed_frames,
+            "streamed_frames": frame_count,
+            "list_deadtime_raw": deadtime_records,
+            "continuity_valid": continuity_valid,
+        }
         if writer is not None:
             writer.close(complete=continuity_valid)
         if filepath is not None and output_mode is McaDmaOutputMode.BINARY:

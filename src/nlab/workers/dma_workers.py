@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -23,11 +25,48 @@ from nlab.hardware.digitizer.dma import (
     McaEventBuffer,
     ScopeDmaStreamer,
 )
-from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
+from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode, McaRunSummary
 from nlab.workers.base_worker import BaseWorker
 
 log = logging.getLogger(__name__)
 _SCOPE_PROGRESS_INTERVAL_S = 0.1
+
+
+def _finish_mca_run(
+    *,
+    channel: int,
+    mode: McaDmaOutputMode,
+    path: Path | None,
+    started_utc: datetime,
+    started_monotonic: float,
+    records: int,
+    diagnostics: dict[str, int | bool] | None,
+    error: str | None,
+) -> McaRunSummary:
+    if error is not None or (diagnostics is not None and not diagnostics.get("continuity_valid")):
+        continuity = "invalid"
+    elif diagnostics is not None:
+        continuity = "verified"
+    else:
+        continuity = "unverified"
+    summary = McaRunSummary(
+        channel=channel,
+        mode=mode,
+        path=path,
+        started_utc=started_utc.isoformat(),
+        finished_utc=datetime.now(UTC).isoformat(),
+        duration_s=max(0.0, time.monotonic() - started_monotonic),
+        records=records,
+        continuity=continuity,
+        diagnostics=diagnostics or {},
+        error=error,
+    )
+    try:
+        summary.write_sidecar()
+    except OSError as exc:
+        log.exception("Could not save MCA run summary for %s", path)
+        summary = replace(summary, metadata_error=str(exc))
+    return summary
 
 
 class ScopeDmaWorker(BaseWorker):
@@ -157,7 +196,8 @@ class McaDmaWorker(BaseWorker):
     """
 
     ready = Signal()
-    progress = Signal(int)
+    progress = Signal(object)
+    summary = Signal(object)
 
     def __init__(
         self,
@@ -166,6 +206,7 @@ class McaDmaWorker(BaseWorker):
         event_buffer: McaEventBuffer | tuple[list[np.ndarray], threading.Lock] | None = None,
         output_mode: McaDmaOutputMode = McaDmaOutputMode.BINARY,
         configuration_yaml: str = "",
+        channel: int = 0,
     ) -> None:
         super().__init__()
         self._streamer = streamer
@@ -173,25 +214,50 @@ class McaDmaWorker(BaseWorker):
         self._event_buffer = event_buffer
         self._output_mode = output_mode
         self._configuration_yaml = configuration_yaml
+        self._channel = channel
         self._stop_event = threading.Event()
 
     def run(self) -> None:
         log.info("McaDmaWorker: starting, file=%s", self._filepath)
+        started_utc = datetime.now(UTC)
+        started_monotonic = time.monotonic()
+        records = 0
+        error: str | None = None
+
+        def report_progress(count: int) -> None:
+            nonlocal records
+            records = count
+            self.progress.emit(count)
+
         try:
             total = self._streamer.stream_events(
                 stop_event=self._stop_event,
                 filepath=self._filepath,
                 event_buffer=self._event_buffer,
                 on_ready=lambda: self.ready.emit(),
-                on_progress=lambda n: self.progress.emit(n),
+                on_progress=report_progress,
                 output_mode=self._output_mode,
                 configuration_yaml=self._configuration_yaml,
             )
+            records = total
             log.info("McaDmaWorker: completed, %d events received", total)
-        except Exception:
+        except Exception as exc:
+            error = str(exc)
             log.exception("McaDmaWorker: streaming failed")
-            self.error.emit("MCA DMA streaming failed")
+            self.error.emit(f"MCA DMA streaming failed: {error}")
         finally:
+            self.summary.emit(
+                _finish_mca_run(
+                    channel=self._channel,
+                    mode=self._output_mode,
+                    path=self._filepath,
+                    started_utc=started_utc,
+                    started_monotonic=started_monotonic,
+                    records=records,
+                    diagnostics=None,
+                    error=error,
+                )
+            )
             self.finished.emit()
 
     def stop(self) -> None:
@@ -209,7 +275,8 @@ class IIOMcaDmaWorker(BaseWorker):
     """
 
     ready = Signal()
-    progress = Signal(int)
+    progress = Signal(object)
+    summary = Signal(object)
 
     def __init__(
         self,
@@ -218,6 +285,7 @@ class IIOMcaDmaWorker(BaseWorker):
         event_buffer: McaEventBuffer | tuple[list[np.ndarray], threading.Lock] | None = None,
         output_mode: McaDmaOutputMode = McaDmaOutputMode.BINARY,
         configuration_yaml: str = "",
+        channel: int = 0,
     ) -> None:
         super().__init__()
         self._streamer = streamer
@@ -225,25 +293,50 @@ class IIOMcaDmaWorker(BaseWorker):
         self._event_buffer = event_buffer
         self._output_mode = output_mode
         self._configuration_yaml = configuration_yaml
+        self._channel = channel
         self._stop_event = threading.Event()
 
     def run(self) -> None:
         log.info("IIOMcaDmaWorker: starting, file=%s", self._filepath)
+        started_utc = datetime.now(UTC)
+        started_monotonic = time.monotonic()
+        records = 0
+        error: str | None = None
+
+        def report_progress(count: int) -> None:
+            nonlocal records
+            records = count
+            self.progress.emit(count)
+
         try:
             total = self._streamer.stream_events(
                 stop_event=self._stop_event,
                 filepath=self._filepath,
                 event_buffer=self._event_buffer,
                 on_ready=lambda: self.ready.emit(),
-                on_progress=lambda n: self.progress.emit(n),
+                on_progress=report_progress,
                 output_mode=self._output_mode,
                 configuration_yaml=self._configuration_yaml,
             )
+            records = total
             log.info("IIOMcaDmaWorker: completed, %d records received", total)
-        except Exception:
+        except Exception as exc:
+            error = str(exc)
             log.exception("IIOMcaDmaWorker: streaming failed")
-            self.error.emit("IIO MCA DMA streaming failed")
+            self.error.emit(f"IIO MCA DMA streaming failed: {error}")
         finally:
+            self.summary.emit(
+                _finish_mca_run(
+                    channel=self._channel,
+                    mode=self._output_mode,
+                    path=self._filepath,
+                    started_utc=started_utc,
+                    started_monotonic=started_monotonic,
+                    records=records,
+                    diagnostics=self._streamer.last_capture_diagnostics,
+                    error=error,
+                )
+            )
             self.finished.emit()
 
     def stop(self) -> None:

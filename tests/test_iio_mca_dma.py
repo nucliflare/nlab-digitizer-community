@@ -408,6 +408,14 @@ def test_iio_streamer_writes_versioned_frames_and_preserves_tail(tmp_path: Path)
     assert metadata["driver_completed_frames"] == 2
     assert metadata["driver_dma_error_count"] == 0
     assert metadata["continuity_valid"] is True
+    assert streamer.last_capture_diagnostics == {
+        "dma_fault": 0,
+        "dma_error_count": 0,
+        "completed_frames": 2,
+        "streamed_frames": 2,
+        "list_deadtime_raw": 0,
+        "continuity_valid": True,
+    }
 
 
 def test_iio_streamer_forwards_initial_and_drained_frames_to_bounded_buffer() -> None:

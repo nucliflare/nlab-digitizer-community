@@ -1,5 +1,7 @@
 import threading
+from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock, call
 
 import numpy as np
@@ -7,8 +9,9 @@ import pyqtgraph as pg
 import pytest
 
 from nlab.controllers.mca_controller import MCAController
-from nlab.hardware.digitizer.dma import McaEventBuffer
+from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaEventBuffer
 from nlab.hardware.digitizer.mca import MultiChannelAnalyzer
+from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode, McaRunSummary
 from nlab.workers.mca_worker import MCAReadback
 
 
@@ -42,6 +45,35 @@ def test_live_reconfiguration_stops_writes_and_restarts() -> None:
     assert restarted is True
     assert backend.events == [("enable", False), "write", ("enable", True)]
     assert backend.enabled is True
+
+
+def test_dma_final_status_keeps_run_health_instead_of_stopped() -> None:
+    label = Mock()
+    controller = SimpleNamespace(
+        _dma_summary=None,
+        _dma_error=None,
+        _dma_worker=object(),
+        _dma_thread=object(),
+        ui=SimpleNamespace(lblDmaStatus=label),
+        _finish_psd_capture=Mock(),
+    )
+    summary = McaRunSummary(
+        channel=0,
+        mode=McaDmaOutputMode.ONLINE,
+        path=None,
+        started_utc="2026-09-17T10:00:00+00:00",
+        finished_utc="2026-09-17T10:00:02+00:00",
+        duration_s=2,
+        records=2048,
+        continuity="verified",
+        diagnostics={"continuity_valid": True},
+    )
+
+    MCAController._on_dma_summary(controller, summary)
+    MCAController._on_dma_finished(controller)
+
+    label.setText.assert_called_once_with("Verified: 2,048 records, 1,024/s avg")
+    controller._finish_psd_capture.assert_called_once_with()
 
 
 def test_live_reconfiguration_restarts_after_failed_write() -> None:
@@ -178,6 +210,72 @@ def test_psd_interception_requires_charge_comparison(
     assert controller._psd_capture_enabled is charge_comparison_enabled
     capture.begin_capture.assert_called_once()
     assert capture.begin_capture.call_args.args[0] is charge_comparison_enabled
+
+
+@pytest.mark.parametrize("mode", list(McaDmaOutputMode))
+@pytest.mark.parametrize("charge_comparison_enabled", [False, True])
+def test_dma_output_and_psd_interception_are_independent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mode: McaDmaOutputMode,
+    charge_comparison_enabled: bool,
+) -> None:
+    worker = Mock()
+    thread = Mock()
+    worker_factory = Mock(return_value=worker)
+    monkeypatch.setattr("nlab.controllers.mca_controller.IIOMcaDmaWorker", worker_factory)
+    monkeypatch.setattr("nlab.controllers.mca_controller.QThread", Mock(return_value=thread))
+    monkeypatch.setattr("nlab.utils.settings_io.write_configuration", Mock())
+
+    capture = Mock()
+    event_buffer = McaEventBuffer()
+    destination = tmp_path / f"measurement{mode.extension or '.bin'}"
+    label = Mock()
+    controller = SimpleNamespace(
+        _active_dma_mode=McaDmaOutputMode.BINARY,
+        _dma_error=None,
+        _dma_filepath=None,
+        _dma_summary=None,
+        _event_buffer=event_buffer,
+        _channel=0,
+        _mca=Mock(),
+        _mca_dma=IIOMcaDmaStreamer(backend=Mock(), channel=0),
+        _measurement_configuration=lambda: {},
+        _generate_filepath=Mock(return_value=destination),
+        _output_mode=lambda: mode,
+        _psd_capture=capture,
+        _psd_capture_enabled=False,
+        _set_controls_enabled=Mock(),
+        _on_dma_ready=Mock(),
+        _on_dma_progress=Mock(),
+        _on_dma_error=Mock(),
+        _on_dma_summary=Mock(),
+        _on_dma_finished=Mock(),
+        ui=SimpleNamespace(
+            cbCcEnable=SimpleNamespace(isChecked=lambda: charge_comparison_enabled),
+            spinTimeLimit=SimpleNamespace(value=lambda: 30),
+            lblDmaStatus=label,
+        ),
+    )
+    controller._prepare_psd_capture = lambda: MCAController._prepare_psd_capture(
+        cast(MCAController, controller)
+    )
+
+    MCAController._start_with_dma(cast(MCAController, controller))
+
+    worker_kwargs = worker_factory.call_args.kwargs
+    assert worker_kwargs["filepath"] == (
+        None if mode is McaDmaOutputMode.ONLINE else destination
+    )
+    assert worker_kwargs["event_buffer"] is (
+        event_buffer if charge_comparison_enabled else None
+    )
+    assert worker_kwargs["output_mode"] is mode
+    thread.start.assert_called_once_with()
+    if mode is McaDmaOutputMode.ONLINE:
+        assert "no file" in label.setText.call_args.args[0]
+    else:
+        assert "file" in label.setText.call_args.args[0]
 
 
 def test_hardware_completion_releases_enable_before_rearming_gui() -> None:

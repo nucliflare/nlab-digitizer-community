@@ -136,6 +136,7 @@
     <property name="title"><string>Developer</string></property>
     <addaction name="actionShowSystemLog"/>
     <addaction name="actionDebugMode"/>
+    <addaction name="actionValidateTiming"/>
     <addaction name="separator"/>
     <addaction name="actionRebootBoard"/>
     <addaction name="actionShutdownBoard"/>
@@ -198,6 +199,9 @@
   </action>
   <action name="actionOpenWaveformFile">
    <property name="text"><string>Open Waveform File...</string></property>
+  </action>
+  <action name="actionValidateTiming">
+   <property name="text"><string>Validate Two-Channel Timing...</string></property>
   </action>
   <action name="actionExit">
    <property name="text"><string>Exit</string></property>

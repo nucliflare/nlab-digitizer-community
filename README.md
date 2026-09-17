@@ -65,6 +65,8 @@ preserve the lifecycle required by each firmware generation.
 - Live PSD classification from charge-comparison and energy measurements
 - Per-measurement MCA output as NDMA, ROOT TTree, HDF5, or online-only PSD
 - Incremental bounded-memory file writing with embedded/same-stem YAML settings
+- Per-channel live record rate and end-of-run integrity summary; IIO driver
+  frame/loss diagnostics are retained for every list-mode output format
 
 ### Instrument control
 
@@ -289,8 +291,11 @@ Legacy gRPC channel numbers are one-based, matching the old service API.
 Scope recording remains binary with an `NDMA` header. MCA list-mode output is
 selected under **Settings → DMA Settings...** and creates a new file for every
 measurement. Available modes are binary NDMA, a ROOT `TTree`, appendable HDF5
-with SWMR metadata, and online-only PSD with no file. All file formats are
-written incrementally through a bounded queue rather than accumulated in RAM.
+with SWMR metadata, and online-only DMA with no file. Binary, ROOT, and HDF5
+save list-mode events whether or not Charge Comparison is enabled. With Charge
+Comparison enabled, DMA also feeds the live PSD view when available. Online-only
+DMA with Charge Comparison disabled discards events. All file formats are written
+incrementally through a bounded queue rather than accumulated in RAM.
 
 IIO MCA NDMA files use format version 2 to distinguish the opaque IIO record
 from the same-sized legacy gRPC/ZMQ event record. A JSON sidecar stores IIO
@@ -299,12 +304,34 @@ same-stem YAML file stores the complete digitizer configuration. ROOT and
 HDF5 files embed that YAML snapshot and expose `timestamp`, `long_gate`, and
 `short_gate` fields for analysis.
 
+Every recorded MCA run also writes a same-stem `.run.json` with channel,
+format, start/end time, record count, average rate, and continuity status.
+The MCA panel shows this outcome after stopping and its tooltip lists IIO
+driver counters (`dma_error_count` is cumulative since driver initialization).
+Legacy gRPC runs are marked **unverified** because that
+transport does not expose equivalent loss counters. IIO record counts include
+any zero-padded slots in the final complete frame; they are not an exact
+accepted-pulse count. Online-only DMA still creates no file and shows the
+summary only in the panel. A missing `.run.json` after a crash means the run
+was not finalized; it is not evidence that the capture is complete.
+
 Use **File → Open PSD Event File...** to reconstruct the PSD matrix and both
 projections from NDMA, CAEN CoMPASS, legacy `caen.py`, HDF5, or ROOT events.
 The import runs in a background worker: binary files are memory-mapped, HDF5
 is read in dataset slices, and ROOT uses chunked tree iteration, so event
 memory does not grow with file size. CAEN PSD import requires raw Energy and
 Energy Short fields; waveform samples are skipped.
+
+Use **Developer → Validate Two-Channel Timing...** with two native NLab MCA
+list-mode files from a known pulse split between channels (lower-index channel
+in A). The background
+check scans the full files for backwards timestamps, verifies that their time
+ranges overlap, and plots nearest-neighbor delays from bounded samples. A
+fixed channel-B offset in 8 ns steps is saved in application settings and
+YAML profiles. The dialog checks saved device identity where available, but
+neither matching metadata nor a histogram alone proves shared-clock timing;
+verify the observed peak against the known split-pulse setup. The plotted
+pairs are diagnostic and are **not** coincidence counts.
 
 Use **File → Open Waveform File...** to browse native NLab scope NDMA captures
 or waveform-bearing CAEN CoMPASS binaries. The selected Scope panel reveals a

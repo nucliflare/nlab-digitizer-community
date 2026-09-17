@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 from PySide6.QtCore import QProcess, QSettings, QStandardPaths, QTimer
 from PySide6.QtGui import QCloseEvent, QIcon, QScreen, QShowEvent
@@ -23,6 +24,7 @@ from nlab.views.dma_settings_dialog import (
     DmaSettingsDialog,
 )
 from nlab.views.license_dialog import LicenseDialog
+from nlab.views.timing_validation_dialog import TimingValidationDialog
 
 _ABOUT_TEXT = f"""\
 <b>Nuclear Lab Digitizer — Community Edition</b><br>
@@ -43,6 +45,7 @@ _KEY_DMA_FOLDER = DMA_FOLDER_KEY
 _KEY_MCA_DMA_OUTPUT_MODE = MCA_DMA_OUTPUT_MODE_KEY
 _KEY_SHOW_ROI = "view/show_roi"
 _KEY_LOG_Y = "view/log_y"
+_KEY_TIMING_OFFSET_NS = "timing/channel_b_offset_ns"
 
 
 class MainAppWindow(QMainWindow):
@@ -112,6 +115,7 @@ class MainAppWindow(QMainWindow):
         self.ui.actionExit.triggered.connect(self.close)
         self.ui.actionOpenPsdEvents.triggered.connect(self._on_open_psd_events)
         self.ui.actionOpenWaveformFile.triggered.connect(self._on_open_waveform_file)
+        self.ui.actionValidateTiming.triggered.connect(self._on_validate_timing)
         self.ui.actionConvertToHdf5.triggered.connect(self._on_convert_to_hdf5)
         self.ui.actionReconnectDevice.triggered.connect(self._on_reconnect_device)
         self.ui.actionResetDocks.triggered.connect(self._on_reset_docks)
@@ -217,6 +221,9 @@ class MainAppWindow(QMainWindow):
                     McaDmaOutputMode.BINARY.value,
                 )
             ),
+            "timing_channel_b_offset_ns": cast(
+                int, QSettings().value(_KEY_TIMING_OFFSET_NS, 0, type=int)
+            ),
             "active_tab": self.ui.mainTabs.currentIndex(),
         }
 
@@ -246,6 +253,21 @@ class MainAppWindow(QMainWindow):
             )
             mode = McaDmaOutputMode.BINARY
         QSettings().setValue(_KEY_MCA_DMA_OUTPUT_MODE, mode.value)
+        if "timing_channel_b_offset_ns" in settings:
+            try:
+                offset_ns = int(settings["timing_channel_b_offset_ns"])
+            except (TypeError, ValueError):
+                offset_ns = None
+            if (
+                offset_ns is not None
+                and -1_000_000 <= offset_ns <= 1_000_000
+                and offset_ns % 8 == 0
+            ):
+                QSettings().setValue(_KEY_TIMING_OFFSET_NS, offset_ns)
+            else:
+                logging.getLogger(__name__).warning(
+                    "Ignoring invalid timing offset %r", settings["timing_channel_b_offset_ns"]
+                )
         if "active_tab" in settings:
             index = int(settings["active_tab"])
             if 0 <= index < self.ui.mainTabs.count():
@@ -300,6 +322,9 @@ class MainAppWindow(QMainWindow):
         except Exception as exc:
             logging.getLogger(__name__).exception("Failed to open waveform file")
             QMessageBox.critical(self, "Waveform File Load Failed", str(exc))
+
+    def _on_validate_timing(self) -> None:
+        TimingValidationDialog(self).exec()
 
     def _on_show_system_log_toggled(self, checked: bool) -> None:
         self._set_log_tab_visible(checked)

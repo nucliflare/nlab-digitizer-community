@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- MCA list-mode runs show live average rate and a final health status. Binary,
+  HDF5, and ROOT files receive the same `.run.json` summary with IIO continuity
+  counters; online-only runs remain file-free.
+- Offline two-channel timing validation under Developer for native list-mode files, with
+  timestamp-order checks, overlap detection, a bounded-memory delay histogram,
+  and an 8 ns-step channel offset saved in application/YAML settings.
+
+### Fixed
+
+- MCA online-only DMA can start without Charge Comparison. Binary, ROOT, and
+  HDF5 recording remains independent of Charge Comparison; live PSD receives
+  events only when Charge Comparison is enabled.
+
 ---
 
 ## [0.3.2] — 2026-09-16

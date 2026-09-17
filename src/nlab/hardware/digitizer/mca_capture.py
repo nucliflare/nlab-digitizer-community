@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import threading
@@ -30,6 +31,83 @@ class McaDmaOutputMode(StrEnum):
             self.HDF5: ".h5",
             self.ONLINE: "",
         }[self]
+
+
+@dataclass(frozen=True)
+class McaRunSummary:
+    """Format-independent outcome of one MCA list-mode run.
+
+    A successful legacy transport is *unverified*, not lossless: only the
+    current IIO driver exposes completed-frame and list-deadtime counters.
+    """
+
+    channel: int
+    mode: McaDmaOutputMode
+    path: Path | None
+    started_utc: str
+    finished_utc: str
+    duration_s: float
+    records: int
+    continuity: str
+    diagnostics: dict[str, int | bool]
+    error: str | None = None
+    metadata_error: str | None = None
+
+    @property
+    def rate_hz(self) -> float:
+        return self.records / self.duration_s if self.duration_s > 0 else 0.0
+
+    @property
+    def sidecar_path(self) -> Path | None:
+        return self.path.with_suffix(".run.json") if self.path is not None else None
+
+    def status_text(self) -> str:
+        label = {"verified": "Verified", "invalid": "Incomplete", "unverified": "Unverified"}[
+            self.continuity
+        ]
+        detail = f"{label}: {self.records:,} records, {self.rate_hz:,.0f}/s avg"
+        dropped = int(self.diagnostics.get("list_deadtime_raw", 0))
+        fault = int(self.diagnostics.get("dma_fault", 0))
+        if dropped:
+            detail += f"; {dropped:,} dropped"
+        if fault:
+            detail += f"; DMA fault {fault}"
+        completed = self.diagnostics.get("completed_frames")
+        streamed = self.diagnostics.get("streamed_frames")
+        if completed is not None and streamed is not None and completed != streamed:
+            detail += f"; frame mismatch {streamed}/{completed}"
+        if self.error:
+            detail += f"; {self.error}"
+        if self.metadata_error:
+            detail += f"; summary not saved: {self.metadata_error}"
+        return detail
+
+    def write_sidecar(self) -> Path | None:
+        """Save the same summary beside binary, HDF5, and ROOT captures.
+
+        Online-only mode intentionally creates no file.
+        """
+        sidecar = self.sidecar_path
+        if sidecar is None or self.path is None or not self.path.exists():
+            return None
+        document = {
+            "format": "nlab-mca-run-summary-v1",
+            "capture_file": self.path.name,
+            "channel": self.channel,
+            "output_mode": self.mode.value,
+            "started_utc": self.started_utc,
+            "finished_utc": self.finished_utc,
+            "duration_s": self.duration_s,
+            "records": self.records,
+            "average_rate_hz": self.rate_hz,
+            "continuity": self.continuity,
+            "diagnostics": self.diagnostics,
+            "error": self.error,
+        }
+        with sidecar.open("x", encoding="utf-8") as stream:
+            json.dump(document, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+        return sidecar
 
 
 _CANONICAL_EVENT_DTYPE = np.dtype(

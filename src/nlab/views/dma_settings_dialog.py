@@ -47,7 +47,7 @@ class DmaSettingsDialog(QDialog):
         self._format.addItem("Binary NDMA + YAML settings", McaDmaOutputMode.BINARY.value)
         self._format.addItem("ROOT TTree", McaDmaOutputMode.ROOT.value)
         self._format.addItem("HDF5 (SWMR)", McaDmaOutputMode.HDF5.value)
-        self._format.addItem("Online PSD only (no file)", McaDmaOutputMode.ONLINE.value)
+        self._format.addItem("Online only (no file)", McaDmaOutputMode.ONLINE.value)
         stored_mode = str(
             settings.value(MCA_DMA_OUTPUT_MODE_KEY, McaDmaOutputMode.BINARY.value)
         )
@@ -59,8 +59,11 @@ class DmaSettingsDialog(QDialog):
         form.addRow("MCA list-mode output:", self._format)
 
         note = QLabel(
-            "A new file is created for every measurement. Online mode sends "
-            "events only to the live PSD view and does not retain them."
+            "Binary, ROOT, and HDF5 create a new file for every measurement, "
+            "with or without Charge Comparison. When Charge Comparison is on, "
+            "the live PSD view also receives the events when available. "
+            "Online-only never writes a file; "
+            "without Charge Comparison its events are discarded."
         )
         note.setWordWrap(True)
 

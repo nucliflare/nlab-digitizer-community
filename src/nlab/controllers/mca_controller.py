@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QDoubleSpinBox, QFileDialog, QSlider, QSpinBox, QW
 
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaDmaStreamer, McaEventBuffer
 from nlab.hardware.digitizer.mca import MCA_PARAMETER_SPECS, MCAParam, MultiChannelAnalyzer
-from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
+from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode, McaRunSummary
 from nlab.hardware.digitizer.scope import RangeSpec
 from nlab.ui.ui_mca_view import Ui_MCAView
 from nlab.views.plot_viewbox import ModifierZoomViewBox
@@ -139,6 +139,9 @@ class MCAController(QWidget):
         self._event_buffer = event_buffer or McaEventBuffer()
         self._psd_capture_enabled = False
         self._active_dma_mode = McaDmaOutputMode.BINARY
+        self._dma_summary: McaRunSummary | None = None
+        self._dma_error: str | None = None
+        self._dma_started_monotonic = 0.0
 
         self._last_histogram: np.ndarray | None = None
         self._last_elapsed_s: float = 0.0
@@ -445,7 +448,7 @@ class MCAController(QWidget):
         self.ui.btnDmaFile.setEnabled(not online and self._dma_worker is None)
         if hasattr(self.ui.btnDmaFile, "setToolTip"):
             self.ui.btnDmaFile.setToolTip(
-                "Online PSD mode does not create a measurement file."
+                "Online-only mode does not create a measurement file."
                 if online
                 else (
                     "Optionally choose the next measurement file; "
@@ -1302,7 +1305,11 @@ class MCAController(QWidget):
         """Return a collision-free path without ever replacing a prior measurement."""
         candidate = path
         counter = 1
-        while candidate.exists() or (binary_yaml and candidate.with_suffix(".yaml").exists()):
+        while (
+            candidate.exists()
+            or candidate.with_suffix(".run.json").exists()
+            or (binary_yaml and candidate.with_suffix(".yaml").exists())
+        ):
             candidate = path.with_name(f"{path.stem}_{counter:03d}{path.suffix}")
             counter += 1
         return candidate
@@ -1352,6 +1359,9 @@ class MCAController(QWidget):
 
         mode = self._output_mode()
         self._active_dma_mode = mode
+        self._dma_summary = None
+        self._dma_error = None
+        self._dma_started_monotonic = time.monotonic()
         filepath = None if mode is McaDmaOutputMode.ONLINE else (
             self._dma_filepath or self._generate_filepath(mode)
         )
@@ -1376,10 +1386,6 @@ class MCAController(QWidget):
 
         self._mca.set_time_limit(self.ui.spinTimeLimit.value())
         display_buffer = self._prepare_psd_capture()
-        if mode is McaDmaOutputMode.ONLINE and display_buffer is None:
-            raise RuntimeError(
-                "Online PSD mode requires Charge Comparison to be enabled and a PSD view"
-            )
 
         configuration = (
             self._measurement_configuration()
@@ -1423,6 +1429,7 @@ class MCAController(QWidget):
                 event_buffer=display_buffer,
                 output_mode=mode,
                 configuration_yaml=embedded_configuration,
+                channel=self._channel,
             )
         else:
             assert isinstance(self._mca_dma, McaDmaStreamer)
@@ -1432,6 +1439,7 @@ class MCAController(QWidget):
                 event_buffer=display_buffer,
                 output_mode=mode,
                 configuration_yaml=embedded_configuration,
+                channel=self._channel,
             )
         self._dma_thread = QThread(self)
         self._dma_worker.moveToThread(self._dma_thread)
@@ -1440,6 +1448,7 @@ class MCAController(QWidget):
         self._dma_worker.ready.connect(self._on_dma_ready)
         self._dma_worker.progress.connect(self._on_dma_progress)
         self._dma_worker.error.connect(self._on_dma_error)
+        self._dma_worker.summary.connect(self._on_dma_summary)
         self._dma_worker.finished.connect(
             self._dma_thread.quit,
             Qt.ConnectionType.DirectConnection,
@@ -1449,11 +1458,15 @@ class MCAController(QWidget):
         self._dma_thread.finished.connect(self._on_dma_finished)
 
         self._set_controls_enabled(False)
-        self.ui.lblDmaStatus.setText(
-            "Connecting (online PSD)..."
-            if mode is McaDmaOutputMode.ONLINE
-            else f"Connecting ({mode.value})..."
-        )
+        if mode is McaDmaOutputMode.ONLINE:
+            status = (
+                "Connecting (online PSD, no file)..."
+                if self._psd_capture_enabled
+                else "Connecting (online-only: no file or PSD)..."
+            )
+        else:
+            status = f"Connecting ({mode.value} file)..."
+        self.ui.lblDmaStatus.setText(status)
         if isinstance(self._mca_dma, IIOMcaDmaStreamer):
             log.debug(
                 "MCA ch%d DMA [2/6]: starting worker thread (IIO buffer arm)",
@@ -1516,32 +1529,54 @@ class MCAController(QWidget):
         )
         self._start_worker()
         self.ui.btnStop.setEnabled(True)
-        self.ui.lblDmaStatus.setText(
-            "Streaming to PSD..."
-            if self._active_dma_mode is McaDmaOutputMode.ONLINE
-            else "Recording..."
-        )
+        if self._active_dma_mode is McaDmaOutputMode.ONLINE:
+            status = (
+                "Streaming to PSD (no file)..."
+                if self._psd_capture_enabled
+                else "DMA active: no file or PSD; select a file format to save events."
+            )
+        else:
+            status = f"Recording {self._active_dma_mode.value} file..."
+        self.ui.lblDmaStatus.setText(status)
         log.info("MCA ch%d: DMA + measurement started", self._channel)
 
     def _on_dma_progress(self, event_count: int) -> None:
         unit = "records" if isinstance(self._mca_dma, IIOMcaDmaStreamer) else "events"
-        action = (
-            "PSD stream"
-            if self._active_dma_mode is McaDmaOutputMode.ONLINE
-            else "Recording"
-        )
-        self.ui.lblDmaStatus.setText(f"{action}: {event_count} {unit}")
+        if self._active_dma_mode is McaDmaOutputMode.ONLINE:
+            action = "PSD stream (no file)" if self._psd_capture_enabled else "DMA (no file or PSD)"
+        else:
+            action = "Recording"
+        elapsed = max(0.0, time.monotonic() - self._dma_started_monotonic)
+        rate = f", {event_count / elapsed:,.0f} {unit}/s avg" if elapsed >= 0.5 else ""
+        self.ui.lblDmaStatus.setText(f"{action}: {event_count:,} {unit}{rate}")
 
     def _on_dma_error(self, message: str) -> None:
         log.error("MCA DMA error: %s", message)
+        self._dma_error = message
         self.ui.lblDmaStatus.setText(f"Error: {message}")
         if self._psd_capture is not None:
             self._psd_capture.set_capture_error(message)
 
+    def _on_dma_summary(self, summary: McaRunSummary) -> None:
+        self._dma_summary = summary
+        self.ui.lblDmaStatus.setText(summary.status_text())
+        details = [
+            f"Channel {summary.channel}; {summary.mode.value}; {summary.duration_s:.1f} s",
+            f"Continuity: {summary.continuity}",
+        ]
+        details.extend(
+            f"{name}{' (cumulative)' if name == 'dma_error_count' else ''}: {value}"
+            for name, value in summary.diagnostics.items()
+        )
+        if summary.sidecar_path is not None and summary.metadata_error is None:
+            details.append(f"Run summary: {summary.sidecar_path}")
+        self.ui.lblDmaStatus.setToolTip("\n".join(details))
+
     def _on_dma_finished(self) -> None:
         self._dma_worker = None
         self._dma_thread = None
-        self.ui.lblDmaStatus.setText("Stopped")
+        if self._dma_summary is None and self._dma_error is None:
+            self.ui.lblDmaStatus.setText("Stopped (run health unavailable)")
         self._finish_psd_capture()
         log.info("MCA DMA: worker finished")
 
