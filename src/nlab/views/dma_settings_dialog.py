@@ -62,8 +62,9 @@ class DmaSettingsDialog(QDialog):
             "Binary, ROOT, and HDF5 create a new file for every measurement, "
             "with or without Charge Comparison. When Charge Comparison is on, "
             "the live PSD view also receives the events when available. "
-            "Online-only never writes a file; "
-            "without Charge Comparison its events are discarded."
+            "The Coincidence tab records one raw stream per channel with a "
+            "shared session manifest. Online-only never writes a file; "
+            "its events can still feed live coincidence analysis."
         )
         note.setWordWrap(True)
 

@@ -130,6 +130,7 @@ class McaEventBuffer:
         self._batches: deque[np.ndarray] = deque()
         self._lock = threading.Lock()
         self._dropped_records = 0
+        self._subscribers: list[McaEventBuffer] = []
 
     def append(self, events: np.ndarray) -> None:
         copied = events.copy()
@@ -137,6 +138,24 @@ class McaEventBuffer:
             if len(self._batches) >= self._max_batches:
                 self._dropped_records += len(self._batches.popleft())
             self._batches.append(copied)
+            subscribers = tuple(self._subscribers)
+        # The producer never waits for a display consumer. Each subscriber
+        # owns its own bounded queue; PSD and coincidence cannot steal batches
+        # from one another by draining the same queue.
+        for subscriber in subscribers:
+            subscriber.append(events)
+
+    def subscribe(self, subscriber: McaEventBuffer) -> None:
+        if subscriber is self:
+            raise ValueError("an event buffer cannot subscribe to itself")
+        with self._lock:
+            if subscriber not in self._subscribers:
+                self._subscribers.append(subscriber)
+
+    def unsubscribe(self, subscriber: McaEventBuffer) -> None:
+        with self._lock:
+            if subscriber in self._subscribers:
+                self._subscribers.remove(subscriber)
 
     def clear(self) -> None:
         with self._lock:

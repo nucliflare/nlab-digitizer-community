@@ -10,7 +10,7 @@ from typing import Protocol
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QSettings, Qt, QThread, QTimer
+from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import QDoubleSpinBox, QFileDialog, QSlider, QSpinBox, QWidget
 
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaDmaStreamer, McaEventBuffer
@@ -108,6 +108,13 @@ class _DebugOffsetDragState:
 class MCAController(QWidget):
     """View + controller for a single MultiChannelAnalyzer channel."""
 
+    roi_changed = Signal()
+    roi_preview_changed = Signal()
+    coincidence_ready = Signal(int)
+    coincidence_finished = Signal(int)
+    coincidence_error = Signal(int, str)
+    coincidence_stop_requested = Signal()
+
     def __init__(
         self,
         mca: MultiChannelAnalyzer,
@@ -142,6 +149,10 @@ class MCAController(QWidget):
         self._dma_summary: McaRunSummary | None = None
         self._dma_error: str | None = None
         self._dma_started_monotonic = 0.0
+        self._coincidence_buffer: McaEventBuffer | None = None
+        self._coincidence_metadata: dict[str, object] | None = None
+        self._coincidence_session = False
+        self._coincidence_stopping = False
 
         self._last_histogram: np.ndarray | None = None
         self._last_elapsed_s: float = 0.0
@@ -720,10 +731,14 @@ class MCAController(QWidget):
         # moving. _update_histogram() consults this flag so none of those
         # readbacks trigger ROI calculations during the drag either.
         self._roi_dragging = True
+        if signal := getattr(self, "roi_preview_changed", None):
+            signal.emit()
 
     def _on_roi_change_finished(self) -> None:
         self._roi_dragging = False
         self._update_roi_stats()
+        if signal := getattr(self, "roi_changed", None):
+            signal.emit()
 
     def set_roi_visible(self, visible: bool) -> None:
         """Show/hide the ROI selection tool and its stats panel."""
@@ -733,6 +748,100 @@ class MCAController(QWidget):
             self._roi_dragging = False
         if visible:
             self._update_roi_stats()
+        self.roi_changed.emit()
+
+    def coincidence_roi(self) -> tuple[int, int] | None:
+        """Return MCA histogram bins selected by the visible ROI, inclusive."""
+        if not self._roi.isVisible():
+            return None
+        low, high = self._roi.getRegion()
+        values = sorted((int(np.clip(round(low), 0, 16_383)), int(np.clip(round(high), 0, 16_383))))
+        return values[0], values[1]
+
+    @property
+    def coincidence_energy_bin(self) -> int:
+        return self.ui.comboBinning.currentIndex()
+
+    @property
+    def coincidence_busy(self) -> bool:
+        return self._dma_worker is not None or self._worker is not None
+
+    @property
+    def coincidence_active(self) -> bool:
+        return self._coincidence_session
+
+    @property
+    def coincidence_run_summary(self) -> McaRunSummary | None:
+        return self._dma_summary
+
+    def start_coincidence_capture(
+        self,
+        event_buffer: McaEventBuffer,
+        filepath: Path | None,
+        metadata: dict[str, object],
+    ) -> None:
+        """Start this channel as one half of a coordinated IIO run."""
+        if self.coincidence_busy or self._coincidence_session:
+            raise RuntimeError(f"MCA ch{self._channel} is already in use")
+        if not isinstance(self._mca_dma, IIOMcaDmaStreamer):
+            raise RuntimeError("coincidence requires IIO MCA list-mode DMA")
+        event_buffer.clear()
+        self._event_buffer.subscribe(event_buffer)
+        self._coincidence_buffer = event_buffer
+        self._coincidence_metadata = metadata
+        self._coincidence_session = True
+        self._coincidence_stopping = False
+        self._dma_filepath = filepath
+        self.ui.cbDmaEnable.setChecked(True)
+        self.ui.cbDmaEnable.setEnabled(False)
+        self.ui.btnStart.setEnabled(False)
+        self.ui.btnDmaFile.setEnabled(False)
+        try:
+            self._start_with_dma()
+        except Exception:
+            if self._dma_thread is not None and self._dma_thread.isRunning():
+                # A late setup error must leave ownership intact so the
+                # paired-session coordinator can stop and drain this reader.
+                raise
+            self._event_buffer.unsubscribe(event_buffer)
+            self._coincidence_buffer = None
+            self._coincidence_metadata = None
+            self._coincidence_session = False
+            self._set_controls_enabled(True)
+            self.ui.cbDmaEnable.setEnabled(True)
+            self.ui.btnStart.setEnabled(True)
+            self.refresh_dma_output_settings()
+            raise
+
+    def stop_coincidence_capture(self) -> None:
+        if not self._coincidence_session:
+            return
+        self._coincidence_stopping = True
+        self._on_stop()
+        if self._dma_worker is None:
+            self._end_coincidence_capture()
+        else:
+            # The worker still owns list_buffer_active while its tail drains.
+            # Keep MCA configuration disabled until QThread.finished arrives.
+            self._set_controls_enabled(False)
+            self.ui.btnStart.setEnabled(False)
+            self.ui.cbDmaEnable.setEnabled(False)
+            self.ui.btnDmaFile.setEnabled(False)
+
+    def _end_coincidence_capture(self) -> None:
+        if not self._coincidence_session:
+            return
+        if self._coincidence_buffer is not None:
+            self._event_buffer.unsubscribe(self._coincidence_buffer)
+        self._coincidence_buffer = None
+        self._coincidence_metadata = None
+        self._coincidence_session = False
+        self._coincidence_stopping = False
+        self._set_controls_enabled(True)
+        self.ui.btnStart.setEnabled(True)
+        self.ui.cbDmaEnable.setEnabled(True)
+        self.refresh_dma_output_settings()
+        self.coincidence_finished.emit(self._channel)
 
     def set_log_y(self, enabled: bool) -> None:
         """Toggle logarithmic Y-axis on the histogram plot."""
@@ -769,6 +878,7 @@ class MCAController(QWidget):
         roi = settings.get("roi")
         if isinstance(roi, list) and len(roi) == 2:
             self._roi.setRegion((float(roi[0]), float(roi[1])))
+            self.roi_changed.emit()
 
     # ------------------------------------------------------------------
     # ROI statistics (gross counts, peak centroid/FWHM estimate — no curve fit)
@@ -1143,6 +1253,9 @@ class MCAController(QWidget):
         )
 
     def _on_stop(self) -> None:
+        if getattr(self, "_coincidence_session", False) and not self._coincidence_stopping:
+            self.coincidence_stop_requested.emit()
+            return
         self._cancel_debug_marker_drags()
         self.ui.btnStop.setChecked(True)
 
@@ -1182,6 +1295,9 @@ class MCAController(QWidget):
         explicitly before making Start available again.
         """
         log.info("MCA ch%d: measurement completed by hardware (time limit)", self._channel)
+        if getattr(self, "_coincidence_session", False) and not self._coincidence_stopping:
+            self.coincidence_stop_requested.emit()
+            return
         if self._dma_worker is not None:
             if isinstance(self._mca_dma, IIOMcaDmaStreamer):
                 # Match the manual-stop ordering: prevent another refill,
@@ -1400,6 +1516,8 @@ class MCAController(QWidget):
                 "output_mode": mode.value,
                 "started_utc": datetime.now(UTC).isoformat(),
             }
+            if metadata := getattr(self, "_coincidence_metadata", None):
+                configuration["measurement"]["coincidence"] = metadata
             hardware = configuration.get("hardware")
             if isinstance(hardware, dict):
                 channels = hardware.get("channels")
@@ -1460,9 +1578,13 @@ class MCAController(QWidget):
         self._set_controls_enabled(False)
         if mode is McaDmaOutputMode.ONLINE:
             status = (
-                "Connecting (online PSD, no file)..."
-                if self._psd_capture_enabled
-                else "Connecting (online-only: no file or PSD)..."
+                "Connecting (online coincidence, no file)..."
+                if getattr(self, "_coincidence_session", False)
+                else (
+                    "Connecting (online PSD, no file)..."
+                    if self._psd_capture_enabled
+                    else "Connecting (online-only: no file or PSD)..."
+                )
             )
         else:
             status = f"Connecting ({mode.value} file)..."
@@ -1499,7 +1621,9 @@ class MCAController(QWidget):
                     else "PSD inactive: enable Charge Comparison before starting DMA."
                 ),
             )
-        return self._event_buffer if self._psd_capture_enabled else None
+        if self._psd_capture_enabled:
+            return self._event_buffer
+        return getattr(self, "_coincidence_buffer", None)
 
     def _on_dma_ready(self) -> None:
         if isinstance(self._mca_dma, IIOMcaDmaStreamer):
@@ -1531,19 +1655,31 @@ class MCAController(QWidget):
         self.ui.btnStop.setEnabled(True)
         if self._active_dma_mode is McaDmaOutputMode.ONLINE:
             status = (
-                "Streaming to PSD (no file)..."
-                if self._psd_capture_enabled
-                else "DMA active: no file or PSD; select a file format to save events."
+                "Streaming to coincidence (no file)..."
+                if getattr(self, "_coincidence_session", False)
+                else (
+                    "Streaming to PSD (no file)..."
+                    if self._psd_capture_enabled
+                    else "DMA active: no file or PSD; select a file format to save events."
+                )
             )
         else:
             status = f"Recording {self._active_dma_mode.value} file..."
         self.ui.lblDmaStatus.setText(status)
         log.info("MCA ch%d: DMA + measurement started", self._channel)
+        if getattr(self, "_coincidence_session", False):
+            self.coincidence_ready.emit(self._channel)
 
     def _on_dma_progress(self, event_count: int) -> None:
         unit = "records" if isinstance(self._mca_dma, IIOMcaDmaStreamer) else "events"
         if self._active_dma_mode is McaDmaOutputMode.ONLINE:
-            action = "PSD stream (no file)" if self._psd_capture_enabled else "DMA (no file or PSD)"
+            action = (
+                "Coincidence stream (no file)"
+                if getattr(self, "_coincidence_session", False)
+                else "PSD stream (no file)"
+                if self._psd_capture_enabled
+                else "DMA (no file or PSD)"
+            )
         else:
             action = "Recording"
         elapsed = max(0.0, time.monotonic() - self._dma_started_monotonic)
@@ -1556,6 +1692,8 @@ class MCAController(QWidget):
         self.ui.lblDmaStatus.setText(f"Error: {message}")
         if self._psd_capture is not None:
             self._psd_capture.set_capture_error(message)
+        if getattr(self, "_coincidence_session", False):
+            self.coincidence_error.emit(self._channel, message)
 
     def _on_dma_summary(self, summary: McaRunSummary) -> None:
         self._dma_summary = summary
@@ -1578,6 +1716,11 @@ class MCAController(QWidget):
         if self._dma_summary is None and self._dma_error is None:
             self.ui.lblDmaStatus.setText("Stopped (run health unavailable)")
         self._finish_psd_capture()
+        if getattr(self, "_coincidence_session", False):
+            if not self._coincidence_stopping:
+                self.coincidence_stop_requested.emit()
+            if self._coincidence_stopping:
+                self._end_coincidence_capture()
         log.info("MCA DMA: worker finished")
 
     def _finish_psd_capture(self) -> None:
@@ -1623,6 +1766,7 @@ class MCAController(QWidget):
 
         self._ensure_disarmed(had_dma_worker)
         self._finish_psd_capture()
+        self._end_coincidence_capture()
 
     def _ensure_disarmed(self, had_dma_worker: bool) -> None:
         """Best-effort mca.stop()/set_dma_enable(False) for shutdown or

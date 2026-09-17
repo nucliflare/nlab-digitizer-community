@@ -63,10 +63,13 @@ preserve the lifecycle required by each firmware generation.
 - Synchronized stop/write/restart when changing MCA settings during acquisition
 - List-mode IIO DMA using fixed 1,024-record frames
 - Live PSD classification from charge-comparison and energy measurements
-- Per-measurement MCA output as NDMA, ROOT TTree, HDF5, or online-only PSD
+- Per-measurement MCA output as NDMA, ROOT TTree, HDF5, or online-only DMA
 - Incremental bounded-memory file writing with embedded/same-stem YAML settings
 - Per-channel live record rate and end-of-run integrity summary; IIO driver
   frame/loss diagnostics are retained for every list-mode output format
+- Two-channel IIO coincidence acquisition with automatic shared software
+  start, MCA ROI energy gates, AND/veto/OR/XOR logic, and live timing and
+  accepted-energy histograms
 
 ### Instrument control
 
@@ -80,7 +83,7 @@ preserve the lifecycle required by each firmware generation.
 ### Application workflow
 
 - Dockable and floatable channel panels, including multi-monitor layouts
-- Scope, MCA, PSD, PSU, Global, External, and System Log workspaces
+- Scope, MCA, PSD, Coincidence, PSU, Global, External, and System Log workspaces
 - Matching launch and connection-progress splashes, showing startup stages
   while channels and instrument views are initialized
 - Save and restore hardware plus application settings in YAML
@@ -294,8 +297,56 @@ measurement. Available modes are binary NDMA, a ROOT `TTree`, appendable HDF5
 with SWMR metadata, and online-only DMA with no file. Binary, ROOT, and HDF5
 save list-mode events whether or not Charge Comparison is enabled. With Charge
 Comparison enabled, DMA also feeds the live PSD view when available. Online-only
-DMA with Charge Comparison disabled discards events. All file formats are written
+DMA with Charge Comparison disabled feeds live coincidence analysis when a
+coincidence run owns the channels; otherwise the events are discarded. All file formats are written
 incrementally through a bounded queue rather than accumulated in RAM.
+
+### Live coincidence measurement
+
+The **Coincidence** tab requires two current-IIO MCA list-mode channels and
+the shared software-start core. Set the energy ROIs in the two MCA histograms,
+then select **Use CH0/CH1 MCA ROI** in the coincidence view. A hidden ROI, or
+an unchecked Use ROI option, accepts the channel's full MCA-channel range.
+Each accepted-energy plot shows its MCA ROI as a dashed, shaded band; an
+unchecked Use ROI option leaves a muted reference outline without applying
+the gate. The band follows MCA ROI dragging and disappears when that ROI is hidden.
+The ROI and accepted-energy plots use MCA histogram-bin units. Current IIO
+list-mode records map their 16-bit `trapezoid_energy` to a 14-bit MCA channel
+with `trapezoid_energy >> 2`, **not** by shifting again by the MCA binning
+selector. This fixed mapping matched paired saved captures with different
+binning settings, but is not specified by the opaque-record IIO driver and
+should be checked with a labelled-source capture on new firmware. The axes
+remain raw MCA channels, not calibrated keV.
+
+`CH0 AND CH1` counts one-to-one matched pairs. A channel's **NOT** checkbox
+with AND makes the other channel an anti-coincidence anchor: `NOT CH0 AND CH1`
+accepts a CH1 event only if no ROI-qualified CH0 event falls in its timing
+window. NOT does not invert the energy ROI. `OR` shows the union of eligible
+singles; `XOR` shows eligible singles with no opposite-channel event in their
+window. Both-NOT and NOT with OR/XOR are deliberately unavailable. AND's
+multiple-hit rule is nearest available CH1 event for each CH0 event in time
+order; one event cannot appear in two pairs, and ambiguous windows are counted.
+
+The signed time difference is `(CH1 timestamp + CH1 offset) - CH0 timestamp`.
+The timing controls have 8 ns steps; the default -48 to +48 ns is the closest
+representable window to ±50 ns, and both bounds can reach ±1 µs. AND plots the
+accepted pair-delay histogram. Veto, OR, and XOR have no delay for accepted
+unpaired events, so the top panel instead plots accepted counts versus elapsed
+time. The lower plots show accepted CH0 and CH1 MCA-channel histograms.
+Changing an ROI, rule, or timing bound resets only the live analysis; raw file
+recording continues.
+
+Start automatically sets external start on both MCAs, arms both IIO DMA
+readers, then raises the shared software-start level only after both report
+ready. Stop, timeout, or failure gates the start off and drains both channels.
+The selected MCA DMA output setting applies to both streams: each recorded
+run creates `..._ch0` and `..._ch1` raw files plus a common `_session.yaml`
+manifest. Binary files keep their per-channel YAML/JSON sidecars; HDF5 and
+ROOT files retain embedded settings. Online-only creates no files. The
+list-mode firmware publishes fixed 1024-record frames, so low-rate live
+updates, especially veto/XOR decisions, can wait for the next complete frame
+or stop. Zero timestamps in a final padded frame cannot be distinguished
+perfectly from real zero-time events and are reported as exclusions.
 
 IIO MCA NDMA files use format version 2 to distinguish the opaque IIO record
 from the same-sized legacy gRPC/ZMQ event record. A JSON sidecar stores IIO

@@ -444,6 +444,23 @@ class GlobalController(QWidget):
             "Software sync prepared at LOW. Arm every MCA channel, then press Start.",
         )
 
+    def set_coincidence_locked(self, locked: bool) -> None:
+        """Reserve manual shared-start controls for a two-channel session."""
+        for control in (
+            self.ui.comboSyncSource,
+            self.ui.cbSyncEnable,
+            self.ui.btnPrepareSoftware,
+            self.ui.btnSoftwareStart,
+            self.ui.btnSoftwareReset,
+        ):
+            control.setEnabled(not locked)
+        if not locked:
+            self._load_sync_state()
+
+    @property
+    def sync_available(self) -> bool:
+        return self._sync_available
+
     def _arming_errors(self) -> list[str]:
         errors: list[str] = []
         for label, device in zip(self._channel_labels, self._devices, strict=True):

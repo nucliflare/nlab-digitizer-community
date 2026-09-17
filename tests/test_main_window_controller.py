@@ -24,6 +24,7 @@ def test_startup_reports_connection_and_view_progress(monkeypatch: pytest.Monkey
     for name in (
         "_build_global_tab",
         "_build_channel_docks",
+        "_build_coincidence_tab",
         "_build_external_docks",
         "_restore_dock_state",
         "_connect_signals",
@@ -32,8 +33,12 @@ def test_startup_reports_connection_and_view_progress(monkeypatch: pytest.Monkey
     monkeypatch.setattr(main_window_module, "ExternalDevices", Mock())
 
     MainWindowController(
-        SimpleNamespace(), backend="iio", host="192.0.2.10", port=30431,
-        channels=2, on_progress=progress.append,
+        SimpleNamespace(),
+        backend="iio",
+        host="192.0.2.10",
+        port=30431,
+        channels=2,
+        on_progress=progress.append,
     )
 
     assert connected == [1, 2]
@@ -42,6 +47,7 @@ def test_startup_reports_connection_and_view_progress(monkeypatch: pytest.Monkey
         "Connecting channel 2 of 2...",
         "Preparing global controls...",
         "Preparing channel views...",
+        "Preparing coincidence view...",
         "Discovering external devices...",
         "Restoring dock layout...",
     ]
@@ -466,9 +472,7 @@ def test_shutdown_requests_all_pollers_before_waiting(
             stop_worker_sync=record("wait-mca-worker"),
         )
     ]
-    controller._psd_controllers = [
-        SimpleNamespace(stop_processing=record("stop-psd"))
-    ]
+    controller._psd_controllers = [SimpleNamespace(stop_processing=record("stop-psd"))]
     controller._psu_controllers = [
         SimpleNamespace(
             request_monitor_stop=record("request-psu"),

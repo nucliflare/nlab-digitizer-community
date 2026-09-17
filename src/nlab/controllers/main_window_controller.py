@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QDockWidget, QInputDialog, QMainWindow, QWidget
 
 from nlab.analysis.psd_file import inspect_psd_event_file
 from nlab.analysis.waveform_file import inspect_waveform_file
+from nlab.controllers.coincidence_controller import CoincidenceController
 from nlab.controllers.external_device_controller import ExternalDeviceController
 from nlab.controllers.global_controller import GlobalController
 from nlab.controllers.mca_controller import MCAController
@@ -17,7 +18,7 @@ from nlab.controllers.psd_controller import PSDController
 from nlab.controllers.psu_controller import PSUController
 from nlab.controllers.scope_controller import ScopeController
 from nlab.hardware.digitizer.digitizer import Digitizer
-from nlab.hardware.digitizer.dma import McaEventBuffer
+from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaEventBuffer
 from nlab.hardware.modbus_devices import ExternalDevices
 from nlab.workers.psd_file_worker import PsdFileWorker
 
@@ -66,6 +67,7 @@ class MainWindowController:
         self._psu_controller_by_device: dict[int, PSUController] = {}
         self._external_controllers: list[ExternalDeviceController] = []
         self._global_controller: GlobalController | None = None
+        self._coincidence_controller: CoincidenceController | None = None
         self._external_devices = ExternalDevices()
         self._thread: QThread | None = None
         self._psd_file_thread: QThread | None = None
@@ -81,6 +83,8 @@ class MainWindowController:
         self._build_global_tab()
         self._report_progress("Preparing channel views...")
         self._build_channel_docks()
+        self._report_progress("Preparing coincidence view...")
+        self._build_coincidence_tab()
         self._report_progress("Discovering external devices...")
         self._build_external_docks()
         self._report_progress("Restoring dock layout...")
@@ -289,6 +293,29 @@ class MainWindowController:
         if layout.indexOf(self._global_dock_host) < 0:
             layout.addWidget(self._global_dock_host)
 
+    def _build_coincidence_tab(self) -> None:
+        available = (
+            self._backend == "iio"
+            and len(self._mca_controllers) >= 2
+            and len(self._devices) >= 2
+            and all(isinstance(device.mca_dma, IIOMcaDmaStreamer) for device in self._devices[:2])
+            and self._global_controller is not None
+            and self._global_controller.sync_available
+        )
+        index = self._window.ui.mainTabs.indexOf(self._window.ui.tabCoincidence)
+        self._window.ui.mainTabs.setTabEnabled(index, available)
+        self._window.ui.tabCoincidence.setToolTip(
+            ""
+            if available
+            else "Coincidence requires two IIO MCA list-mode channels and shared software start."
+        )
+        if available:
+            assert self._global_controller is not None
+            self._coincidence_controller = CoincidenceController(
+                self._devices[:2], self._mca_controllers[:2], self._global_controller
+            )
+            self._window.ui.layoutTabCoincidence.addWidget(self._coincidence_controller)
+
     def _build_external_docks(self) -> None:
         """Discover Modbus devices on the digitizer host and dock one tab each.
 
@@ -418,6 +445,8 @@ class MainWindowController:
         """Refresh format-dependent controls after the DMA settings dialog."""
         for ctrl in self._mca_controllers:
             ctrl.refresh_dma_output_settings()
+        if self._coincidence_controller is not None:
+            self._coincidence_controller.refresh_dma_output_settings()
 
     def load_psd_events(self, path: Path) -> None:
         """Reconstruct one PSD view from a saved event file off the GUI thread."""
@@ -562,6 +591,9 @@ class MainWindowController:
 
     def _stop_all_workers(self) -> None:
         """Stop all running timers/workers (blocking). Devices stay open."""
+        coincidence = getattr(self, "_coincidence_controller", None)
+        if coincidence is not None:
+            coincidence.request_shutdown()
         # Broadcast the cheap stop requests before waiting for any individual
         # worker. Independent IIO/Modbus calls then finish concurrently rather
         # than making shutdown pay every transport timeout in series.
@@ -591,6 +623,9 @@ class MainWindowController:
         # 3. Stop MCA polling workers (blocking)
         for ctrl in self._mca_controllers:
             ctrl.stop_worker_sync()
+
+        if coincidence is not None:
+            coincidence.finish_shutdown_sync()
 
         self._stop_psd_file_load_sync()
 
@@ -767,6 +802,7 @@ class MainWindowController:
             if self._global_controller is not None
             else {}
         )
+        coincidence = getattr(self, "_coincidence_controller", None)
         layout = {
             "scope": self._scope_dock_host.saveState().toBase64().data().decode("ascii"),
             "mca": self._mca_dock_host.saveState().toBase64().data().decode("ascii"),
@@ -791,6 +827,9 @@ class MainWindowController:
             "application": {
                 "main_window": self._window.configuration_settings(),
                 "global": global_application,
+                "coincidence": (
+                    coincidence.configuration_settings() if coincidence is not None else {}
+                ),
                 "channels": application_channels,
                 "external_devices": external_application,
                 "dock_layout": layout,
@@ -800,6 +839,8 @@ class MainWindowController:
 
     def load_all_settings(self, path) -> None:
         """Load settings from YAML and apply to hardware, then refresh UI."""
+        if self._coincidence_controller is not None and self._coincidence_controller.active:
+            raise RuntimeError("Stop the coincidence measurement before loading settings")
         from nlab.utils.settings_io import (
             apply_channel_hardware,
             channel_application_entry,
@@ -863,6 +904,13 @@ class MainWindowController:
                 psd_ctrl = self._psd_controller_by_device.get(idx)
                 if psd_ctrl is not None:
                     psd_ctrl.apply_configuration_settings(app_channel.get("psd"))
+
+        if self._coincidence_controller is not None:
+            application = document.get("application", {})
+            if isinstance(application, dict):
+                self._coincidence_controller.apply_configuration_settings(
+                    application.get("coincidence")
+                )
 
         hardware_root = document.get("hardware", {})
         application = document.get("application", {})

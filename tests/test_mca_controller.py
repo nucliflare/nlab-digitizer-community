@@ -212,6 +212,23 @@ def test_psd_interception_requires_charge_comparison(
     assert capture.begin_capture.call_args.args[0] is charge_comparison_enabled
 
 
+def test_coincidence_can_receive_online_events_without_feeding_disabled_psd() -> None:
+    psd_buffer = McaEventBuffer()
+    coincidence_buffer = McaEventBuffer()
+    controller = SimpleNamespace(
+        _psd_capture=Mock(),
+        _psd_capture_enabled=False,
+        _event_buffer=psd_buffer,
+        _coincidence_buffer=coincidence_buffer,
+        ui=SimpleNamespace(cbCcEnable=SimpleNamespace(isChecked=lambda: False)),
+    )
+
+    result = MCAController._prepare_psd_capture(controller)
+
+    assert result is coincidence_buffer
+    assert result is not psd_buffer
+
+
 @pytest.mark.parametrize("mode", list(McaDmaOutputMode))
 @pytest.mark.parametrize("charge_comparison_enabled", [False, True])
 def test_dma_output_and_psd_interception_are_independent(

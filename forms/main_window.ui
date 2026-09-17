@@ -56,6 +56,17 @@
        </layout>
       </widget>
 
+      <!-- Two-channel synchronized list-mode coincidence analysis -->
+      <widget class="QWidget" name="tabCoincidence">
+       <attribute name="title"><string>Coincidence</string></attribute>
+       <layout class="QVBoxLayout" name="layoutTabCoincidence">
+        <property name="leftMargin"><number>0</number></property>
+        <property name="topMargin"><number>0</number></property>
+        <property name="rightMargin"><number>0</number></property>
+        <property name="bottomMargin"><number>0</number></property>
+       </layout>
+      </widget>
+
       <!-- Global digitizer controls and channel-independent diagnostics -->
       <widget class="QWidget" name="tabGlobal">
        <attribute name="title"><string>Global</string></attribute>

@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Two-channel IIO Coincidence tab with shared software-start coordination,
+  MCA ROI energy gates, AND/anti-coincidence/OR/XOR logic, configurable 8 ns
+  timing window and channel offset, and three live result plots. Recording
+  reuses the MCA binary, HDF5, ROOT, and online-only modes with paired raw
+  streams and a session manifest. Accepted-energy plots show the corresponding
+  MCA ROI bands, muted when the gate is not applied.
 - MCA list-mode runs show live average rate and a final health status. Binary,
   HDF5, and ROOT files receive the same `.run.json` summary with IIO continuity
   counters; online-only runs remain file-free.
@@ -20,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Coincidence IIO event energies now use the capture-validated fixed two-bit
+  conversion to MCA histogram channels instead of an extra shift by the MCA
+  binning selector. ROI gates and accepted-energy plots share the corrected scale.
 - MCA online-only DMA can start without Charge Comparison. Binary, ROOT, and
   HDF5 recording remains independent of Charge Comparison; live PSD receives
   events only when Charge Comparison is enabled.
