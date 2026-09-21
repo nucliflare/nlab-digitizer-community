@@ -115,6 +115,7 @@ class MainAppWindow(QMainWindow):
         self.ui.actionExit.triggered.connect(self.close)
         self.ui.actionOpenPsdEvents.triggered.connect(self._on_open_psd_events)
         self.ui.actionOpenWaveformFile.triggered.connect(self._on_open_waveform_file)
+        self.ui.actionEnergyCalibration.triggered.connect(self._on_energy_calibration)
         self.ui.actionValidateTiming.triggered.connect(self._on_validate_timing)
         self.ui.actionConvertToHdf5.triggered.connect(self._on_convert_to_hdf5)
         self.ui.actionReconnectDevice.triggered.connect(self._on_reconnect_device)
@@ -325,6 +326,9 @@ class MainAppWindow(QMainWindow):
 
     def _on_validate_timing(self) -> None:
         TimingValidationDialog(self).exec()
+
+    def _on_energy_calibration(self) -> None:
+        self._controller.show_energy_calibration()
 
     def _on_show_system_log_toggled(self, checked: bool) -> None:
         self._set_log_tab_visible(checked)

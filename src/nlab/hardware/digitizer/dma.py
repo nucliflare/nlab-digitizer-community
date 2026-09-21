@@ -23,7 +23,11 @@ from typing import BinaryIO, Protocol
 import numpy as np
 import zmq
 
-from nlab.hardware.digitizer.iio_listmode import IIO_LM_EVENT_DTYPE, cfd_interpolation_ticks
+from nlab.hardware.digitizer.iio_listmode import (
+    IIO_LM_EVENT_DTYPE,
+    VDPP_ZC_CALC_SCHEMA,
+    cfd_interpolation_samples,
+)
 from nlab.hardware.digitizer.mca_capture import McaCaptureWriter, McaDmaOutputMode
 
 
@@ -78,7 +82,8 @@ IIO_LM_FRAME_RECORDS = 1024
 IIO_LM_RECORD_BYTES = 16
 IIO_LM_FRAME_BYTES = IIO_LM_FRAME_RECORDS * IIO_LM_RECORD_BYTES
 IIO_LM_KERNEL_BUFFER_COUNT = 8
-IIO_LM_CLIENT_SCHEMA = "vdpp-pulse-processor-event-v2"
+IIO_LM_CLIENT_SCHEMA = VDPP_ZC_CALC_SCHEMA
+IIO_LM_UNQUALIFIED_SCHEMA = "unqualified-opaque[16]"
 
 # Each raw scope DMA frame is prefixed with a per-frame timestamp: the first
 # 4 int16 slots (8 bytes) are a little-endian uint64, the remaining
@@ -216,6 +221,7 @@ def _write_iio_mca_metadata(
     dma_error_count: int,
     completed_frames: int,
     deadtime_records: int,
+    client_record_schema: str,
 ) -> Path:
     """Write the auditable sidecar used by the reference capture workflow."""
     metadata_path = path.with_suffix(".json")
@@ -235,7 +241,7 @@ def _write_iio_mca_metadata(
         "record_layout": "opaque[16]",
         # The kernel intentionally promises only opaque[16]. Decoded PSD
         # fields belong to this explicitly named, replaceable client schema.
-        "client_record_schema": IIO_LM_CLIENT_SCHEMA,
+        "client_record_schema": client_record_schema,
         "record_bytes": IIO_LM_RECORD_BYTES,
         "frame_records": IIO_LM_FRAME_RECORDS,
         "frame_bytes": IIO_LM_FRAME_BYTES,
@@ -613,6 +619,29 @@ class IIOMcaDmaStreamer:
         self._channel = channel
         self.last_capture_diagnostics: dict[str, int | bool] | None = None
 
+    def transport_identity(self) -> dict[str, int | str]:
+        """Return read-only list-mode identity available from the bound backend."""
+        identity: dict[str, int | str] = {
+            "channel_index": self._channel,
+            "record_layout": "opaque[16]",
+        }
+        for key, getter_name in (
+            ("ip_version", "get_lm_ip_version"),
+            ("frame_records", "get_lm_frame_records"),
+            ("frame_bytes", "get_lm_frame_bytes"),
+        ):
+            getter = getattr(self._backend, getter_name, None)
+            if not callable(getter):
+                continue
+            try:
+                value = getter()
+            except Exception:
+                log.debug("Could not read MCA DMA %s", getter_name, exc_info=True)
+                continue
+            if isinstance(value, (int, np.integer)):
+                identity[key] = int(value)
+        return identity
+
     def request_stop(self) -> None:
         """Stop production while leaving the reader armed for tail drain."""
         self._backend.request_mca_dma_stop()
@@ -626,6 +655,7 @@ class IIOMcaDmaStreamer:
         on_progress: Callable[[int], None] | None = None,
         output_mode: McaDmaOutputMode = McaDmaOutputMode.BINARY,
         configuration_yaml: str = "",
+        client_record_schema: str | None = None,
     ) -> int:
         """Read complete 1024-record blocks until stopped.
 
@@ -641,6 +671,7 @@ class IIOMcaDmaStreamer:
         self.last_capture_diagnostics = None
         writer: McaCaptureWriter | None = None
         started_utc = datetime.now(UTC)
+        capture_schema = client_record_schema or IIO_LM_UNQUALIFIED_SCHEMA
 
         if filepath is not None:
             writer = McaCaptureWriter(
@@ -651,6 +682,7 @@ class IIOMcaDmaStreamer:
                     self._channel,
                     version=IIO_LM_FILE_VERSION,
                 ),
+                client_record_schema=capture_schema,
             )
             log.info("IIO MCA DMA: recording %s to %s", output_mode.value, filepath)
 
@@ -760,6 +792,7 @@ class IIOMcaDmaStreamer:
                 dma_error_count=dma_error_count,
                 completed_frames=completed_frames,
                 deadtime_records=deadtime_records,
+                client_record_schema=capture_schema,
             )
             log.info("IIO MCA DMA: capture metadata written to %s", metadata_path)
         if dma_fault:
@@ -797,13 +830,8 @@ class IIOMcaDmaStreamer:
 
     @staticmethod
     def compute_cfd_time(events: np.ndarray) -> np.ndarray:
-        """Return the selected CFD interpolation term in 8 ns ticks.
-
-        The origin of the copied coarse timestamp is not established by the
-        supplied HLS stage. This result must not be treated as an absolute
-        event time until that upstream relationship is validated.
-        """
-        return cfd_interpolation_ticks(events)
+        """Return the selected signed CFD interpolation in ADC-sample units."""
+        return cfd_interpolation_samples(events)
 
 
 class McaDmaStreamer:

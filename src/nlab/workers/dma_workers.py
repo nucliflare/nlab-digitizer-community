@@ -286,6 +286,7 @@ class IIOMcaDmaWorker(BaseWorker):
         output_mode: McaDmaOutputMode = McaDmaOutputMode.BINARY,
         configuration_yaml: str = "",
         channel: int = 0,
+        client_record_schema: str | None = None,
     ) -> None:
         super().__init__()
         self._streamer = streamer
@@ -294,6 +295,7 @@ class IIOMcaDmaWorker(BaseWorker):
         self._output_mode = output_mode
         self._configuration_yaml = configuration_yaml
         self._channel = channel
+        self._client_record_schema = client_record_schema
         self._stop_event = threading.Event()
 
     def run(self) -> None:
@@ -317,6 +319,7 @@ class IIOMcaDmaWorker(BaseWorker):
                 on_progress=report_progress,
                 output_mode=self._output_mode,
                 configuration_yaml=self._configuration_yaml,
+                client_record_schema=self._client_record_schema,
             )
             records = total
             log.info("IIOMcaDmaWorker: completed, %d records received", total)

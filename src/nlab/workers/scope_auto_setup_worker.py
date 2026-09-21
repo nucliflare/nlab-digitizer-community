@@ -13,6 +13,14 @@ from nlab.hardware.digitizer.scope import PARAMETER_SPECS, RangeSpec, Scope, Sco
 
 log = logging.getLogger(__name__)
 
+_NO_CLEAR_PULSE = (
+    "no clear unipolar pulse was found; check the input signal and try again"
+)
+_PULSE_SHAPE_MIN_POINTS = 2
+_SIGNAL_PROBE_ATTEMPTS = 8
+_SIGNAL_PROBE_WAIT_S = 1.0
+_VERIFICATION_WAIT_S = 2.0
+
 
 class AutoSetupCancelledError(RuntimeError):
     """Raised internally when an Auto Setup cancellation is observed."""
@@ -78,24 +86,39 @@ def _estimate_baseline(frames: list[np.ndarray]) -> tuple[float, float]:
 
 
 def _estimate_signal(frames: list[np.ndarray]) -> _SignalEstimate:
-    values = np.concatenate([np.asarray(frame, dtype=np.int16) for frame in frames])
     baseline, noise_sigma = _estimate_baseline(frames)
-    integer_values = values.astype(np.int32)
-
-    low, high = np.percentile(integer_values, [0.2, 99.8])
-    negative_excursion = baseline - float(low)
-    positive_excursion = float(high) - baseline
     detection_floor = max(256.0, 8.0 * noise_sigma)
-    if negative_excursion >= detection_floor and negative_excursion >= 1.35 * positive_excursion:
-        polarity = -1
-        amplitude = negative_excursion
-    elif positive_excursion >= detection_floor and positive_excursion >= 1.35 * negative_excursion:
-        polarity = 1
-        amplitude = positive_excursion
-    else:
-        raise RuntimeError(
-            "no clear unipolar pulse was found; check the input signal and try again"
-        )
+
+    amplitudes: dict[int, list[float]] = {-1: [], 1: []}
+    for frame in frames:
+        integer_values = np.asarray(frame, dtype=np.int16).astype(np.int32)
+        for polarity in (-1, 1):
+            deviation = polarity * (integer_values - baseline)
+            amplitude = float(np.max(deviation, initial=0))
+            opposite = float(np.max(-deviation, initial=0))
+            if amplitude < detection_floor or amplitude < 1.35 * opposite:
+                continue
+
+            # A real viewer pulse spans adjacent 8 ns averaged points. Test
+            # its shape below the peak-detection floor so a narrow genuine
+            # pulse is retained while a single corrupt sample is rejected.
+            shape_floor = max(64.0, 4.0 * noise_sigma, 0.20 * amplitude)
+            if _longest_true_run(deviation >= shape_floor) < _PULSE_SHAPE_MIN_POINTS:
+                continue
+            amplitudes[polarity].append(amplitude)
+
+    detected_polarities = [
+        polarity for polarity, values in amplitudes.items() if values
+    ]
+    if not detected_polarities:
+        raise RuntimeError(_NO_CLEAR_PULSE)
+    if len(detected_polarities) > 1:
+        raise RuntimeError("pulse polarity was inconsistent during Auto Setup")
+
+    polarity = detected_polarities[0]
+    amplitude = float(np.median(amplitudes[polarity]))
+    low = baseline - amplitude if polarity < 0 else baseline
+    high = baseline + amplitude if polarity > 0 else baseline
 
     return _SignalEstimate(
         baseline=baseline,
@@ -105,6 +128,14 @@ def _estimate_signal(frames: list[np.ndarray]) -> _SignalEstimate:
         polarity=polarity,
         amplitude=amplitude,
     )
+
+
+def _longest_true_run(mask: np.ndarray) -> int:
+    padded = np.pad(np.asarray(mask, dtype=np.int8), (1, 1))
+    transitions = np.diff(padded)
+    starts = np.flatnonzero(transitions == 1)
+    ends = np.flatnonzero(transitions == -1)
+    return max((int(end - start) for start, end in zip(starts, ends)), default=0)
 
 
 class ScopeAutoSetupProcedure:
@@ -144,7 +175,11 @@ class ScopeAutoSetupProcedure:
             self._progress("Auto Setup: measuring the baseline response...")
             initial_frames = self._capture_forced_frames(4, 0.03)
             initial_baseline, _initial_noise = _estimate_baseline(initial_frames)
-            slope = self._measure_dac_slope(state.dac_value, initial_baseline)
+            initial_estimate = self._try_estimate_signal(initial_frames)
+            slope, trial_frames = self._measure_dac_slope(
+                state.dac_value, initial_baseline
+            )
+            trial_estimate = self._try_estimate_signal(trial_frames)
             centered_dac = self._dac_for_baseline(
                 state.dac_value, initial_baseline, 0.0, slope
             )
@@ -153,7 +188,18 @@ class ScopeAutoSetupProcedure:
 
             self._progress("Auto Setup: searching for a signal...")
             survey_frames = self._capture_forced_frames(14, 0.04)
-            estimate = _estimate_signal(survey_frames)
+            survey_baseline, survey_noise = _estimate_baseline(survey_frames)
+            survey_estimate = self._try_estimate_signal(survey_frames)
+            estimate = self._combine_signal_estimates(
+                [initial_estimate, trial_estimate, survey_estimate],
+                baseline=survey_baseline,
+                noise_sigma=survey_noise,
+            )
+            if estimate is None:
+                self._progress("Auto Setup: waiting for a detector pulse...")
+                estimate = self._wait_for_sparse_signal(
+                    survey_baseline, survey_noise
+                )
 
             target_baseline = self._target_baseline(
                 estimate.polarity, estimate.noise_sigma
@@ -164,13 +210,11 @@ class ScopeAutoSetupProcedure:
             self._scope.set_dac_value(dac_value)
             self._sleep_checked(0.06)
             adjusted_frames = self._capture_forced_frames(6, 0.04)
-            try:
-                adjusted = _estimate_signal(adjusted_frames)
+            adjusted = self._try_estimate_signal(adjusted_frames)
+            if adjusted is not None:
                 if adjusted.polarity != estimate.polarity:
                     raise RuntimeError("pulse polarity was inconsistent during Auto Setup")
-            except RuntimeError as exc:
-                if "no clear unipolar pulse" not in str(exc):
-                    raise
+            else:
                 # At low event rates the post-adjustment viewer snapshots
                 # may contain baseline only. A DAC offset does not change
                 # pulse amplitude, so retain the survey pulse estimate and
@@ -194,15 +238,20 @@ class ScopeAutoSetupProcedure:
 
             self._scope.stop()
             self._restore_timing(state)
+            verification_reference = self._capture_forced_frames(1, 0.03)[-1]
             self._scope.set_trigger_level(trigger_level)
             self._scope.set_trigger_mode(trigger_mode)
 
             self._progress("Auto Setup: verifying the trigger...")
-            verification_frames = self._capture_triggered_frames(4, 0.08)
-            verified = self._crosses_threshold(
-                verification_frames, trigger_level, adjusted.polarity
+            frame = self._capture_frames(1, _VERIFICATION_WAIT_S)[-1]
+            fresh = (
+                frame.shape == verification_reference.shape
+                and not np.array_equal(frame, verification_reference)
             )
-            frame = np.asarray(verification_frames[-1], dtype=np.int16).copy()
+            verified = fresh and self._crosses_threshold(
+                [frame], trigger_level, adjusted.polarity
+            )
+            frame = np.asarray(frame, dtype=np.int16).copy()
             self._scope.stop()
 
             return ScopeAutoSetupResult(
@@ -254,8 +303,100 @@ class ScopeAutoSetupProcedure:
         self._scope.set_trigger_mode(TriggerMode.ANY_ABOVE)
         return self._capture_frames(count, interval_s)
 
-    def _capture_triggered_frames(self, count: int, interval_s: float) -> list[np.ndarray]:
-        return self._capture_frames(count, interval_s)
+    @staticmethod
+    def _try_estimate_signal(frames: list[np.ndarray]) -> _SignalEstimate | None:
+        try:
+            return _estimate_signal(frames)
+        except RuntimeError as exc:
+            if str(exc) != _NO_CLEAR_PULSE:
+                raise
+            return None
+
+    @staticmethod
+    def _combine_signal_estimates(
+        estimates: list[_SignalEstimate | None],
+        *,
+        baseline: float,
+        noise_sigma: float,
+    ) -> _SignalEstimate | None:
+        present = [estimate for estimate in estimates if estimate is not None]
+        if not present:
+            return None
+        polarities = {estimate.polarity for estimate in present}
+        if len(polarities) != 1:
+            raise RuntimeError("pulse polarity was inconsistent during Auto Setup")
+
+        polarity = present[0].polarity
+        amplitude = float(np.median([estimate.amplitude for estimate in present]))
+        combined_noise = max(
+            noise_sigma, *(estimate.noise_sigma for estimate in present)
+        )
+        return _SignalEstimate(
+            baseline=baseline,
+            noise_sigma=combined_noise,
+            low=baseline - amplitude if polarity < 0 else baseline,
+            high=baseline + amplitude if polarity > 0 else baseline,
+            polarity=polarity,
+            amplitude=amplitude,
+        )
+
+    def _wait_for_sparse_signal(
+        self, baseline: float, noise_sigma: float
+    ) -> _SignalEstimate:
+        """Wait on alternating provisional thresholds for a rare pulse.
+
+        Forced viewer frames sample only a few microseconds apiece. Detector
+        pulses can therefore be obvious when triggered manually but absent
+        from a short forced survey. Before each bounded wait, save a forced
+        baseline frame. An unchanged frame after arming means that no new
+        viewer capture occurred; a changed frame is inspected for a shaped
+        unipolar event.
+        """
+        trigger_spec = _range_spec(ScopeParam.TRIGGER_LEVEL)
+        for attempt in range(_SIGNAL_PROBE_ATTEMPTS):
+            reference = self._capture_forced_frames(1, 0.03)[-1]
+            reference_estimate = self._try_estimate_signal([reference])
+            if reference_estimate is not None:
+                combined = self._combine_signal_estimates(
+                    [reference_estimate],
+                    baseline=baseline,
+                    noise_sigma=noise_sigma,
+                )
+                assert combined is not None
+                return combined
+
+            reference_baseline, reference_noise = _estimate_baseline([reference])
+            polarity = -1 if attempt % 2 == 0 else 1
+            distance = max(256.0, 8.0 * reference_noise)
+            level = int(
+                np.clip(
+                    round(reference_baseline + polarity * distance),
+                    trigger_spec.min_val,
+                    trigger_spec.max_val,
+                )
+            )
+            self._scope.set_trigger_level(level)
+            self._scope.set_trigger_mode(
+                TriggerMode.ANY_BELOW if polarity < 0 else TriggerMode.ANY_ABOVE
+            )
+            candidate = self._capture_frames(1, _SIGNAL_PROBE_WAIT_S)[-1]
+            if candidate.shape == reference.shape and np.array_equal(
+                candidate, reference
+            ):
+                continue
+
+            candidate_estimate = self._try_estimate_signal([candidate])
+            if candidate_estimate is None:
+                continue
+            combined = self._combine_signal_estimates(
+                [candidate_estimate],
+                baseline=baseline,
+                noise_sigma=noise_sigma,
+            )
+            assert combined is not None
+            return combined
+
+        raise RuntimeError(_NO_CLEAR_PULSE)
 
     def _capture_frames(self, count: int, interval_s: float) -> list[np.ndarray]:
         frames: list[np.ndarray] = []
@@ -272,7 +413,9 @@ class ScopeAutoSetupProcedure:
             raise RuntimeError("the scope viewer did not return a frame")
         return frames
 
-    def _measure_dac_slope(self, original_dac: int, baseline: float) -> float:
+    def _measure_dac_slope(
+        self, original_dac: int, baseline: float
+    ) -> tuple[float, list[np.ndarray]]:
         dac_spec = _range_spec(ScopeParam.DAC_VALUE)
         step = 12 if original_dac <= int(dac_spec.max_val) - 12 else -12
         trial_dac = original_dac + step
@@ -283,7 +426,7 @@ class ScopeAutoSetupProcedure:
         slope = (trial_baseline - baseline) / step
         if abs(slope) < 0.5:
             raise RuntimeError("the DAC did not produce a measurable baseline shift")
-        return slope
+        return slope, trial_frames
 
     @staticmethod
     def _dac_for_baseline(

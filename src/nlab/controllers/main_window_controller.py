@@ -20,6 +20,7 @@ from nlab.controllers.scope_controller import ScopeController
 from nlab.hardware.digitizer.digitizer import Digitizer
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaEventBuffer
 from nlab.hardware.modbus_devices import ExternalDevices
+from nlab.views.energy_calibration_dialog import EnergyCalibrationDialog
 from nlab.workers.psd_file_worker import PsdFileWorker
 
 if TYPE_CHECKING:
@@ -68,6 +69,7 @@ class MainWindowController:
         self._external_controllers: list[ExternalDeviceController] = []
         self._global_controller: GlobalController | None = None
         self._coincidence_controller: CoincidenceController | None = None
+        self._energy_calibration_dialog: EnergyCalibrationDialog | None = None
         self._external_devices = ExternalDevices()
         self._thread: QThread | None = None
         self._psd_file_thread: QThread | None = None
@@ -448,6 +450,15 @@ class MainWindowController:
         if self._coincidence_controller is not None:
             self._coincidence_controller.refresh_dma_output_settings()
 
+    def show_energy_calibration(self) -> None:
+        """Open one modeless calibration workspace for all available MCAs."""
+        if self._energy_calibration_dialog is None:
+            self._energy_calibration_dialog = EnergyCalibrationDialog(
+                self._mca_controllers,
+                parent=self._window,
+            )
+        self._energy_calibration_dialog.show_workspace()
+
     def load_psd_events(self, path: Path) -> None:
         """Reconstruct one PSD view from a saved event file off the GUI thread."""
         if self._psd_file_thread is not None:
@@ -660,6 +671,9 @@ class MainWindowController:
     def shutdown(self) -> None:
         """Persist dock layout, stop all workers, close all devices."""
         log.info("Shutdown: persisting state")
+        if self._energy_calibration_dialog is not None:
+            self._energy_calibration_dialog.close_without_prompt()
+            self._energy_calibration_dialog = None
         self._save_dock_state()
         for ctrl in self._scope_controllers:
             ctrl.save_display_settings()
@@ -681,6 +695,9 @@ class MainWindowController:
         the (now-closed) backend connections.
         """
         log.info("Reconnect: stopping workers and closing current devices")
+        if self._energy_calibration_dialog is not None:
+            self._energy_calibration_dialog.close_without_prompt()
+            self._energy_calibration_dialog = None
         self._save_dock_state()
         for ctrl in self._scope_controllers:
             ctrl.save_display_settings()

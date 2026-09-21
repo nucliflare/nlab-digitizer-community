@@ -13,11 +13,17 @@ import pyqtgraph as pg
 from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QDoubleSpinBox, QFileDialog, QSlider, QSpinBox, QWidget
 
+from nlab.analysis.energy_calibration import (
+    EnergyCalibration,
+    FingerprintValue,
+    SpectrumSnapshot,
+)
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaDmaStreamer, McaEventBuffer
 from nlab.hardware.digitizer.mca import MCA_PARAMETER_SPECS, MCAParam, MultiChannelAnalyzer
 from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode, McaRunSummary
 from nlab.hardware.digitizer.scope import RangeSpec
 from nlab.ui.ui_mca_view import Ui_MCAView
+from nlab.views.energy_axis import CalibratedEnergyAxis
 from nlab.views.plot_viewbox import ModifierZoomViewBox
 from nlab.views.responsive_layout import configure_mca_layout
 from nlab.views.time_axis import format_duration_ns, time_axis_scale
@@ -114,6 +120,7 @@ class MCAController(QWidget):
     coincidence_finished = Signal(int)
     coincidence_error = Signal(int, str)
     coincidence_stop_requested = Signal()
+    energy_calibration_changed = Signal(int, object)
 
     def __init__(
         self,
@@ -156,6 +163,7 @@ class MCAController(QWidget):
 
         self._last_histogram: np.ndarray | None = None
         self._last_elapsed_s: float = 0.0
+        self._energy_calibration: EnergyCalibration | None = None
         self._pending_readback: MCAReadback | None = None
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
@@ -173,6 +181,10 @@ class MCAController(QWidget):
         self._connect_signals()
         self.ui.btnStop.setEnabled(False)
         self.refresh_dma_output_settings()
+
+    @property
+    def channel(self) -> int:
+        return self._channel
 
     # ------------------------------------------------------------------
     # Combo population
@@ -702,7 +714,11 @@ class MCAController(QWidget):
         self.ui.plotHistogram.setBackground("#f8f9fa")
 
         layout.addLabel("Counts", angle=-90)
-        self._hist_plot = layout.addPlot(viewBox=ModifierZoomViewBox())
+        self._energy_axis = CalibratedEnergyAxis("top")
+        self._hist_plot = layout.addPlot(
+            viewBox=ModifierZoomViewBox(),
+            axisItems={"top": self._energy_axis},
+        )
         self._hist_plot.showAxis("right")
         self._hist_plot.showAxis("top")
         self._hist_plot.showGrid(x=True, y=True, alpha=0.2)
@@ -865,10 +881,13 @@ class MCAController(QWidget):
 
     def configuration_settings(self) -> dict[str, object]:
         """Return controls that affect only GUI polling and presentation."""
-        return {
+        settings: dict[str, object] = {
             "refresh_rate_hz": self.ui.spinRefreshRate.value(),
             "roi": [float(value) for value in self._roi.getRegion()],
         }
+        if self._energy_calibration is not None:
+            settings["energy_calibration"] = self._energy_calibration.to_dict()
+        return settings
 
     def apply_configuration_settings(self, settings: object) -> None:
         if not isinstance(settings, dict):
@@ -879,6 +898,96 @@ class MCAController(QWidget):
         if isinstance(roi, list) and len(roi) == 2:
             self._roi.setRegion((float(roi[0]), float(roi[1])))
             self.roi_changed.emit()
+        if "energy_calibration" in settings:
+            raw_calibration = settings.get("energy_calibration")
+            if raw_calibration is None:
+                self.clear_energy_calibration()
+            else:
+                try:
+                    self.apply_energy_calibration(EnergyCalibration.from_dict(raw_calibration))
+                except ValueError:
+                    log.warning(
+                        "MCA ch%d: ignored invalid saved energy calibration",
+                        self._channel,
+                        exc_info=True,
+                    )
+
+    @property
+    def energy_calibration(self) -> EnergyCalibration | None:
+        return self._energy_calibration
+
+    def energy_calibration_fingerprint(self) -> dict[str, FingerprintValue]:
+        """Describe settings that can change histogram energy-channel scaling."""
+        return {
+            "binning": self.ui.comboBinning.currentIndex(),
+            "pulse_polarity": self.ui.comboPulsePolarity.currentIndex(),
+            "low_pass_preset": self.ui.comboLpPreset.currentIndex(),
+            "trapezoid_enabled": self.ui.cbTrapezEnable.isChecked(),
+            "trapezoid_r_ns": self.ui.spinTrapR.value(),
+            "trapezoid_m_ns": self.ui.spinTrapM.value(),
+            "trapezoid_t_ns": float(self.ui.spinTrapT.value()),
+            "trapezoid_e_ns": self.ui.spinTrapE.value(),
+            "trapezoid_ft": self.ui.comboTrapFt.currentIndex(),
+        }
+
+    def spectrum_snapshot(self) -> SpectrumSnapshot:
+        """Return an immutable copy of the latest presented MCA histogram."""
+        if self._last_histogram is None or len(self._last_histogram) == 0:
+            raise RuntimeError(f"MCA channel {self._channel} has no spectrum to copy")
+        created = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        return SpectrumSnapshot.create(
+            channel=self._channel,
+            counts=self._last_histogram,
+            label=f"MCA {self._channel} — {created}",
+            elapsed_s=self._last_elapsed_s,
+            live=self._worker is not None or self._dma_worker is not None,
+            fingerprint=self.energy_calibration_fingerprint(),
+        )
+
+    def apply_energy_calibration(self, calibration: EnergyCalibration) -> None:
+        self._energy_calibration = calibration
+        self._refresh_energy_axis()
+        self.energy_calibration_changed.emit(self._channel, calibration)
+        log.info(
+            "MCA ch%d: applied %s energy calibration, RMS residual %.4g keV",
+            self._channel,
+            calibration.model,
+            calibration.rms_residual_kev,
+        )
+
+    def clear_energy_calibration(self) -> None:
+        self._energy_calibration = None
+        self._refresh_energy_axis()
+        self.energy_calibration_changed.emit(self._channel, None)
+        log.info("MCA ch%d: cleared energy calibration", self._channel)
+
+    def energy_calibration_is_stale(self) -> bool:
+        calibration = self._energy_calibration
+        return bool(
+            calibration is not None
+            and not calibration.settings_compatible(
+                self.energy_calibration_fingerprint(),
+                allow_binning_rescale=True,
+            )
+        )
+
+    def _calibrated_energy(self, channel: float | np.ndarray) -> float | np.ndarray:
+        calibration = self._energy_calibration
+        if calibration is None:
+            raise RuntimeError("no MCA energy calibration is applied")
+        return calibration.energy_at_binning(
+            channel,
+            self.ui.comboBinning.currentIndex(),
+        )
+
+    def _refresh_energy_axis(self, *_args: object) -> None:
+        self._energy_axis.set_calibration(
+            self._energy_calibration,
+            binning_index=self.ui.comboBinning.currentIndex(),
+            stale=self.energy_calibration_is_stale(),
+        )
+        if self._roi.isVisible() and not self._roi_dragging:
+            self._update_roi_stats()
 
     # ------------------------------------------------------------------
     # ROI statistics (gross counts, peak centroid/FWHM estimate — no curve fit)
@@ -924,6 +1033,20 @@ class MCAController(QWidget):
             fwhm = 2.3548 * sigma
             resolution_pct = (fwhm / centroid * 100.0) if centroid > 0 else float("nan")
 
+            calibration = self._energy_calibration
+            if calibration is not None:
+                centroid_energy = float(self._calibrated_energy(centroid))
+                fwhm_energy = abs(
+                    float(self._calibrated_energy(centroid + fwhm / 2.0))
+                    - float(self._calibrated_energy(centroid - fwhm / 2.0))
+                )
+                calibrated_peak = (
+                    f"\n  Centroid energy:    {centroid_energy:.3f} keV"
+                    f"\n  Approx. FWHM:       {fwhm_energy:.3f} keV"
+                )
+            else:
+                calibrated_peak = ""
+
             peak_lines = (
                 f"  Max bin position:   {max_bin_pos}\n"
                 f"  Max bin counts:     {max_bin_counts:.0f}\n"
@@ -931,16 +1054,25 @@ class MCAController(QWidget):
                 f"  Weighted sigma:     {sigma:.2f}\n"
                 f"  Approx. FWHM:       {fwhm:.2f}\n"
                 f"  Approx. resolution: {resolution_pct:.2f} %"
+                f"{calibrated_peak}"
             )
         else:
             peak_lines = "  No counts in ROI"
 
+        calibration = self._energy_calibration
+        calibrated_range = (
+            f"\n  Energy range:       {float(self._calibrated_energy(low_bin)):.3f}-"
+            f"{float(self._calibrated_energy(high_bin)):.3f} keV"
+            if calibration is not None
+            else ""
+        )
         text = (
             f"ROI\n"
             f"  Left marker:        {low_bin}\n"
             f"  Right marker:       {high_bin}\n"
             f"  Width [bins]:       {width}\n"
-            f"  Energy/ch range:    {low_bin}-{high_bin}\n"
+            f"  Channel range:      {low_bin}-{high_bin}"
+            f"{calibrated_range}\n"
             f"\n"
             f"Counts\n"
             f"  Gross counts:       {gross_counts:.0f}\n"
@@ -1141,6 +1273,19 @@ class MCAController(QWidget):
         self.ui.comboTrapFt.currentIndexChanged.connect(
             lambda i: self._apply_hardware_setting(lambda: self._mca.filters.trapezoid.set_FT(i))
         )
+
+        # A calibration belongs to the energy-processing configuration used
+        # for its source spectra. Mark its top axis stale as soon as any of
+        # those controls changes; the raw channel axis remains authoritative.
+        self.ui.comboPulsePolarity.currentIndexChanged.connect(self._refresh_energy_axis)
+        self.ui.comboBinning.currentIndexChanged.connect(self._refresh_energy_axis)
+        self.ui.comboLpPreset.currentIndexChanged.connect(self._refresh_energy_axis)
+        self.ui.cbTrapezEnable.toggled.connect(self._refresh_energy_axis)
+        self.ui.spinTrapR.valueChanged.connect(self._refresh_energy_axis)
+        self.ui.spinTrapM.valueChanged.connect(self._refresh_energy_axis)
+        self.ui.spinTrapT.valueChanged.connect(self._refresh_energy_axis)
+        self.ui.spinTrapE.valueChanged.connect(self._refresh_energy_axis)
+        self.ui.comboTrapFt.currentIndexChanged.connect(self._refresh_energy_axis)
 
         self.ui.cbCcEnable.toggled.connect(
             lambda value: self._apply_hardware_setting(
@@ -1345,12 +1490,24 @@ class MCAController(QWidget):
         with open(path, "w", newline="") as f:
             f.write(f"# MCA channel {self._channel} spectrum export\n")
             f.write(f"# elapsed_s={self._last_elapsed_s:.1f}\n")
+            calibration = self._energy_calibration
+            if calibration is not None:
+                f.write(f"# energy_calibration_model={calibration.model}\n")
+                f.write(
+                    "# energy_calibration_coefficients_kev="
+                    + ",".join(f"{value:.17g}" for value in calibration.coefficients_kev)
+                    + "\n"
+                )
             if self._roi.isVisible():
                 for line in self.ui.lblRoiStats.text().splitlines():
                     f.write(f"# {line}\n")
-            f.write("channel,counts\n")
+            f.write("channel,energy_kev,counts\n" if calibration else "channel,counts\n")
             for ch, counts in enumerate(self._last_histogram):
-                f.write(f"{ch},{int(counts)}\n")
+                if calibration is None:
+                    f.write(f"{ch},{int(counts)}\n")
+                else:
+                    energy = float(self._calibrated_energy(ch))
+                    f.write(f"{ch},{energy:.12g},{int(counts)}\n")
 
         log.info("MCA ch%d: spectrum exported to %s", self._channel, path)
 
@@ -1557,6 +1714,13 @@ class MCAController(QWidget):
             # Pulse-processor fields are immutable while list_buffer_active
             # is set, so apply the duration before the worker's first read
             # creates/arms the lm_frame buffer.
+            client_record_schema = None
+            if metadata := getattr(self, "_coincidence_metadata", None):
+                analysis = metadata.get("analysis")
+                if isinstance(analysis, dict):
+                    schema = analysis.get("record_schema")
+                    if isinstance(schema, str):
+                        client_record_schema = schema
             self._dma_worker = IIOMcaDmaWorker(
                 streamer=self._mca_dma,
                 filepath=filepath,
@@ -1564,6 +1728,7 @@ class MCAController(QWidget):
                 output_mode=mode,
                 configuration_yaml=embedded_configuration,
                 channel=self._channel,
+                client_record_schema=client_record_schema,
             )
         else:
             assert isinstance(self._mca_dma, McaDmaStreamer)

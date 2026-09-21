@@ -11,12 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Experimental CFD fine-time coincidence mode uses both channels' valid
-  zero-crossing records for provisional sub-sample matching and a 1 ns delay
-  histogram. Auto selects it when both MCA CFD controls are enabled; the
-  explicit coarse mode remains available for comparison. The session manifest
-  records the timing formula and bin width, and the GUI counts skipped events
-  without valid CFD. The firmware timestamp anchor still needs live validation.
+- MCA energy-calibration tool with per-channel spectrum snapshots and overlays,
+  draggable reference lines synchronized with an editable point table, linear
+  and quadratic least-squares fits, residual reporting, calibrated top axes,
+  ROI/CSV integration, settings fingerprints, and YAML/capture persistence.
+  Applied calibrations automatically rescale their channel coordinates when the
+  MCA power-of-two binning setting changes.
+- Fixed qualified `vdpp-zc-calc-q2.14-v1` coincidence decoding, exact integer
+  timing in 1/8192 ns units, decimal-nanosecond inclusive gates, channel-delay
+  calibration, source/transport identity metadata, and diagnostics for invalid
+  fine values and accepted pairs crossing the uint8 offset boundary. Fine mode
+  uses exact 62.5 ps histogram bins and a guarded background-plus-Gaussian core
+  fit with picosecond FWHM reporting and fit-quality diagnostics; it no longer
+  enables itself merely because both CFD controls are checked.
+- Coincidence Start and Stop buttons now use the same green/red enabled,
+  checked, and disabled color scheme as the Scope and MCA controls.
 - Two-channel IIO Coincidence tab with shared software-start coordination,
   MCA ROI energy gates, AND/anti-coincidence/OR/XOR logic, configurable 8 ns
   timing window and channel offset, and three live result plots. Recording
@@ -32,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Scope Auto Setup now detects narrow stochastic detector pulses per event,
+  reuses pulses seen during baseline calibration, waits on bounded provisional
+  triggers when the forced survey is empty, and verifies against a fresh frame.
+  This replaces a whole-survey percentile that rejected clear low-duty-cycle
+  scintillator pulses while working with repetitive generator signals.
 - Scope Auto Setup now waits for its Qt worker thread to exit before releasing
   the thread wrapper, preventing a native PySide teardown crash that could
   terminate the app without a Python error (observed on channel 1).
@@ -42,8 +56,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   firmware output: one-byte marker and offset, signed Q2.14 estimate, two
   energies, and coarse timestamp. Coincidence no longer mistakes the offset
   byte for input-marker flags and discards valid CFD-tagged pulses. New HDF5
-  and ROOT recordings preserve the zero-crossing fields. Coarse 8 ns matching
-  remains available alongside the experimental fine-time mode.
+  and ROOT recordings preserve the zero-crossing fields. Fine coincidence now
+  follows the PetaLinux equation `8*timestamp + 2*(uint8 offset + Q2.14 fine)`
+  instead of sign-extending the offset and multiplying its correction by 8 ns.
+- Coincidence AND analysis now emits all pairs inside the inclusive calibrated
+  gate instead of greedy one-to-one nearest matches. Pair counts and unique
+  participating-event counts are reported separately, and live results remain
+  explicitly provisional until both raw streams have stopped and drained.
 - Coincidence IIO event energies now use the capture-validated fixed two-bit
   conversion to MCA histogram channels instead of an extra shift by the MCA
   binning selector. ROI gates and accepted-energy plots share the corrected scale.

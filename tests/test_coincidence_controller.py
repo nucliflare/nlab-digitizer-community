@@ -6,14 +6,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication, QCheckBox, QSpinBox
 
+from nlab.analysis.coincidence import CoincidencePeakFit, CoincidenceSettings
 from nlab.controllers import coincidence_controller as coincidence_module
 from nlab.controllers.coincidence_controller import CoincidenceController
 from nlab.controllers.mca_controller import MCAController
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer
+from nlab.hardware.digitizer.iio_listmode import TIME_Q_PER_NS, VDPP_ZC_CALC_SCHEMA
 from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
 
 
@@ -53,9 +56,7 @@ class _Mca:
         self.armed = False
         self.stop = Mock()
         self.cfd_enabled = False
-        self.filters = SimpleNamespace(
-            cfd=SimpleNamespace(get_enable=lambda: self.cfd_enabled)
-        )
+        self.filters = SimpleNamespace(cfd=SimpleNamespace(get_enable=lambda: self.cfd_enabled))
 
     def set_ext_trig_enable(self, value: bool) -> None:
         self.ext = value
@@ -195,7 +196,7 @@ def test_coincidence_application_settings_round_trip(monkeypatch: pytest.MonkeyP
     assert restored.configuration_settings() == saved
 
 
-def test_auto_precision_uses_fine_bins_only_with_both_mca_cfd_controls(
+def test_fine_precision_requires_explicit_mode_and_both_mca_cfd_controls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller, _, views = _make_controller(monkeypatch)
@@ -205,28 +206,112 @@ def test_auto_precision_uses_fine_bins_only_with_both_mca_cfd_controls(
     views[0].ui.cbCfdEnable.setChecked(True)
     assert not controller._settings().fine_timing
     views[1].ui.cbCfdEnable.setChecked(True)
-    assert controller._settings().fine_timing
-    assert controller._settings().bin_width_ns == 1
-    assert "provisional" in controller.timing_hint.text()
-
-    controller.timing_mode.setCurrentIndex(controller.timing_mode.findData("coarse"))
     assert not controller._settings().fine_timing
     controller.timing_mode.setCurrentIndex(controller.timing_mode.findData("cfd"))
     assert controller._settings().fine_timing
+    assert controller._settings().bin_width_ns == 0.0625
+    assert "2 ns/sample" in controller.timing_hint.text()
+    assert "62.5 ps" in controller.timing_hint.text()
     views[1].ui.cbCfdEnable.setChecked(False)
     with pytest.raises(ValueError, match="Enable CFD on both"):
         controller._settings()
 
 
-def test_older_coincidence_settings_without_precision_mode_load_as_auto(
+def test_coincidence_buttons_match_scope_and_mca_color_scheme(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller, _, _ = _make_controller(monkeypatch)
-    controller.timing_mode.setCurrentIndex(controller.timing_mode.findData("coarse"))
+
+    assert "background-color: #4CAF50" in controller.btnStart.styleSheet()
+    assert "background-color: #f44336" in controller.btnStop.styleSheet()
+    assert "QPushButton:disabled" in controller.btnStart.styleSheet()
+    assert "QPushButton:disabled" in controller.btnStop.styleSheet()
+    assert controller.btnStart.isCheckable()
+    assert controller.btnStop.isCheckable()
+
+
+def test_timing_fit_is_rendered_and_preserved_in_session_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _make_controller(monkeypatch)
+    fit = CoincidencePeakFit(
+        center_ns=-0.032,
+        sigma_ns=0.175,
+        fwhm_ns=0.412,
+        fwhm_uncertainty_ns=0.028,
+        amplitude_per_bin=20.0,
+        background_per_bin=1.0,
+        signal_counts=140.0,
+        reduced_chi_square=0.8,
+        fit_low_ns=-4.0,
+        fit_high_ns=4.0,
+    )
+    monkeypatch.setattr(coincidence_module, "fit_coincidence_peak", lambda *_args: fit)
+
+    controller._render_timing_fit(
+        SimpleNamespace(delay_counts=np.zeros(10, dtype=np.uint64)),
+        CoincidenceSettings(fine_timing=True),
+    )
+
+    assert "FWHM 412 ± 28 ps" in controller.timing_fit_label.text()
+    assert "Gaussian-core fit" in controller.timing_fit_label.text()
+    assert len(controller.delay_fit_curve.xData) == 401
+    assert controller._manifest(status="complete")["timing_fit"] == {
+        "center_ns": -0.032,
+        "sigma_ns": 0.175,
+        "fwhm_ns": 0.412,
+        "fwhm_uncertainty_ns": 0.028,
+        "amplitude_per_bin": 20.0,
+        "background_per_bin": 1.0,
+        "signal_counts": 140.0,
+        "reduced_chi_square": 0.8,
+        "fit_low_ns": -4.0,
+        "fit_high_ns": 4.0,
+    }
+
+
+def test_older_coincidence_settings_without_precision_mode_load_as_coarse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _make_controller(monkeypatch)
+    controller.timing_mode.setCurrentIndex(controller.timing_mode.findData("cfd"))
 
     controller.apply_configuration_settings({"window_ns": [-48, 48]})
 
-    assert controller.timing_mode.currentData() == "auto"
+    assert controller.timing_mode.currentData() == "coarse"
+    assert controller.configuration_settings()["record_schema"] == VDPP_ZC_CALC_SCHEMA
+
+
+def test_decimal_gate_and_channel_delay_use_exact_contract_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _make_controller(monkeypatch)
+    controller.low.setValue(-0.1)
+    controller.high.setValue(0.1)
+    controller.offset.setValue(0.5)
+
+    settings = controller._settings()
+
+    assert settings.low_q == -819  # lower bound rounded inward with ceil
+    assert settings.high_q == 819  # upper bound rounded inward with floor
+    assert settings.channel_delay_q == TIME_Q_PER_NS // 2
+    described = controller._describe(settings)
+    assert described["channel_delay_operation"] == ("raw_delta_ch1_minus_ch0 - channel_delay")
+
+
+def test_legacy_added_ch1_offset_migrates_to_subtracted_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _make_controller(monkeypatch)
+
+    controller.apply_configuration_settings(
+        {
+            "record_schema": VDPP_ZC_CALC_SCHEMA,
+            "offset_ch1_ns": 16,
+        }
+    )
+
+    assert controller.offset.value() == -16
 
 
 def test_mca_roi_overlay_tracks_selection_and_gate_state(

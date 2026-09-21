@@ -14,6 +14,8 @@ from pathlib import Path
 
 import numpy as np
 
+from nlab.hardware.digitizer.iio_listmode import VDPP_ZC_CALC_SCHEMA
+
 log = logging.getLogger(__name__)
 
 
@@ -203,7 +205,12 @@ class _BufferedStructuredSink(_CaptureSink, ABC):
 
 
 class _Hdf5Sink(_BufferedStructuredSink):
-    def __init__(self, path: Path, configuration_yaml: str) -> None:
+    def __init__(
+        self,
+        path: Path,
+        configuration_yaml: str,
+        client_record_schema: str,
+    ) -> None:
         super().__init__()
         import h5py
 
@@ -222,7 +229,9 @@ class _Hdf5Sink(_BufferedStructuredSink):
         )
         self._events.attrs["timestamp_unit"] = "8 ns ticks"
         self._events.attrs["gate_unit"] = "raw uint16"
-        self._events.attrs["zc_estimation_format"] = "signed Q2.14; relative, not absolute time"
+        self._events.attrs["client_record_schema"] = client_record_schema
+        self._events.attrs["zc_offset_format"] = "unsigned uint8; 2 ns ADC samples"
+        self._events.attrs["zc_estimation_format"] = "signed Q2.14 ADC-sample fraction"
         self._committed = self._file.create_dataset("committed_events", data=np.uint64(0))
         self._complete = self._file.create_dataset("capture_complete", data=np.bool_(False))
         self._file.attrs["format"] = "nlab-mca-listmode"
@@ -250,7 +259,12 @@ class _Hdf5Sink(_BufferedStructuredSink):
 
 
 class _RootSink(_BufferedStructuredSink):
-    def __init__(self, path: Path, configuration_yaml: str) -> None:
+    def __init__(
+        self,
+        path: Path,
+        configuration_yaml: str,
+        client_record_schema: str,
+    ) -> None:
         super().__init__()
         try:
             import uproot
@@ -263,9 +277,11 @@ class _RootSink(_BufferedStructuredSink):
         self._file = uproot.create(path)
         self._file["configuration_yaml"] = configuration_yaml
         self._file["event_schema"] = (
-            '{"timestamp":"uint64, 8 ns ticks","long_gate":"uint16, raw",'
+            f'{{"client_record_schema":"{client_record_schema}",'
+            '"timestamp":"uint64, 8 ns ticks","long_gate":"uint16, raw",'
             '"short_gate":"uint16, raw","marker":"uint8",'
-            '"zc_offset":"uint8, raw","zc_estimation":"int16, signed Q2.14"}'
+            '"zc_offset":"uint8, 2 ns ADC samples",'
+            '"zc_estimation":"int16, signed Q2.14 ADC-sample fraction"}'
         )
         self._tree = self._file.mktree(
             "events",
@@ -310,6 +326,7 @@ class McaCaptureWriter:
         mode: McaDmaOutputMode,
         configuration_yaml: str,
         binary_header: bytes,
+        client_record_schema: str = VDPP_ZC_CALC_SCHEMA,
     ) -> None:
         if mode is McaDmaOutputMode.ONLINE:
             raise ValueError("online mode has no capture writer")
@@ -317,6 +334,7 @@ class McaCaptureWriter:
         self._mode = mode
         self._configuration_yaml = configuration_yaml
         self._binary_header = binary_header
+        self._client_record_schema = client_record_schema
         self._queue: queue.Queue[object] = queue.Queue(maxsize=_WRITER_QUEUE_BATCHES)
         self._ready = threading.Event()
         self._done = threading.Event()
@@ -334,9 +352,17 @@ class McaCaptureWriter:
         if self._mode is McaDmaOutputMode.BINARY:
             return _BinarySink(self._path, self._binary_header)
         if self._mode is McaDmaOutputMode.HDF5:
-            return _Hdf5Sink(self._path, self._configuration_yaml)
+            return _Hdf5Sink(
+                self._path,
+                self._configuration_yaml,
+                self._client_record_schema,
+            )
         if self._mode is McaDmaOutputMode.ROOT:
-            return _RootSink(self._path, self._configuration_yaml)
+            return _RootSink(
+                self._path,
+                self._configuration_yaml,
+                self._client_record_schema,
+            )
         raise AssertionError(f"unsupported MCA output mode {self._mode}")
 
     def _run(self) -> None:

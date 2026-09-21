@@ -17,13 +17,13 @@ from nlab.hardware.digitizer.dma import (
     FILE_HEADER_STRUCT,
     FILE_MAGIC,
     FILE_VERSION,
-    IIO_LM_CLIENT_SCHEMA,
     IIO_LM_FILE_VERSION,
     IIO_LM_FRAME_BYTES,
     IIO_LM_FRAME_RECORDS,
+    IIO_LM_UNQUALIFIED_SCHEMA,
     SCOPE_TIMESTAMP_WORDS,
 )
-from nlab.hardware.digitizer.iio_listmode import cfd_interpolation_ticks, cfd_valid
+from nlab.hardware.digitizer.iio_listmode import cfd_interpolation_samples, cfd_valid
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +120,13 @@ def convert_listmode(src: Path, dst: Path) -> int:
         if header["version"] == IIO_LM_FILE_VERSION
         else None
     )
+    client_record_schema = (
+        capture_metadata.get("client_record_schema")
+        if capture_metadata is not None
+        else IIO_LM_UNQUALIFIED_SCHEMA
+    )
+    if not isinstance(client_record_schema, str):
+        client_record_schema = IIO_LM_UNQUALIFIED_SCHEMA
 
     if capture_metadata is not None:
         expected = {
@@ -185,12 +192,13 @@ def convert_listmode(src: Path, dst: Path) -> int:
             )
             h5.create_dataset("psd_zc", data=psd_zc, compression="gzip", compression_opts=4)
         else:
-            h5.attrs["client_record_schema"] = IIO_LM_CLIENT_SCHEMA
+            h5.attrs["client_record_schema"] = client_record_schema
             ds.attrs["fields"] = (
                 "marker, zc_offset, zc_estimation, charge_energy, "
                 "trapezoid_energy, timestamp"
             )
-            ds.attrs["zc_estimation_format"] = "signed Q2.14, 8 ns sample fraction"
+            ds.attrs["zc_offset_format"] = "unsigned uint8, 2 ns ADC samples"
+            ds.attrs["zc_estimation_format"] = "signed Q2.14 ADC-sample fraction"
             h5.create_dataset(
                 "charge_energy",
                 data=events["charge_energy"],
@@ -204,15 +212,15 @@ def convert_listmode(src: Path, dst: Path) -> int:
                 compression_opts=4,
             )
             cfd_interpolation = h5.create_dataset(
-                "cfd_interpolation_ticks",
-                data=cfd_interpolation_ticks(events),
+                "cfd_interpolation_samples",
+                data=cfd_interpolation_samples(events),
                 compression="gzip",
                 compression_opts=4,
             )
-            cfd_interpolation.attrs["unit"] = "8 ns sample ticks"
+            cfd_interpolation.attrs["unit"] = "ADC samples (2 ns/sample)"
             cfd_interpolation.attrs["meaning"] = (
-                "signed CFD interpolation term only; offset and timestamp "
-                "origin are unknown, so this is not an absolute event timestamp"
+                "signed fractional-sample CFD term; reconstruct event time with the "
+                "named client record schema"
             )
             h5.create_dataset(
                 "cfd_valid", data=cfd_valid(events), compression="gzip", compression_opts=4,

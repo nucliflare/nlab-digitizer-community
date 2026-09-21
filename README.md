@@ -45,6 +45,9 @@ preserve the lifecycle required by each firmware generation.
   frozen preview while dragging; settings are written on release, then the
   next acquired frame shows the actual signal. Auto Setup supplies a measured
   DAC sensitivity; without it, the vertical preview is approximate.
+- Scope Auto Setup recognizes narrow, randomly arriving detector pulses and
+  performs a bounded provisional-trigger search when its initial forced-frame
+  survey contains only baseline.
 - Configurable frame length, pretrigger position, frame gap, and analogue offset
 - Persistence and raw display modes
 - Full-resolution IIO DMA recording with capability-gated queued buffers,
@@ -59,6 +62,9 @@ preserve the lifecycle required by each firmware generation.
   hardware settings are applied on release.
 - Pulse-processor, input-filter, CFD, charge-comparison, and trapezoid controls
 - Live 16,384-bin spectra with logarithmic display and ROI statistics
+- Modeless multi-spectrum energy calibration under **Tools**, with draggable
+  reference lines, linear or quadratic fits, residuals, per-channel calibrated
+  top axes, and raw-channel-preserving CSV/YAML metadata
 - Debug waveform-bank readout
 - Synchronized stop/write/restart when changing MCA settings during acquisition
 - List-mode IIO DMA using fixed 1,024-record frames
@@ -69,7 +75,9 @@ preserve the lifecycle required by each firmware generation.
   frame/loss diagnostics are retained for every list-mode output format
 - Two-channel IIO coincidence acquisition with automatic shared software
   start, MCA ROI energy gates, AND/veto/OR/XOR logic, and live timing and
-  accepted-energy histograms
+  accepted-energy histograms. Qualified CFD timing uses exact 62.5 ps bins
+  and reports a guarded constant-background Gaussian-core center, FWHM,
+  uncertainty, fitted counts, and reduced chi-square.
 
 ### Instrument control
 
@@ -301,6 +309,34 @@ DMA with Charge Comparison disabled feeds live coincidence analysis when a
 coincidence run owns the channels; otherwise the events are discarded. All file formats are written
 incrementally through a bounded queue rather than accumulated in RAM.
 
+### MCA energy calibration
+
+Open **Tools → MCA Energy Calibration...**, choose an MCA channel, and copy its
+current spectrum into the calibration workspace. Double-click a known peak to
+add a draggable reference line, then enter its expected energy in keV. The
+channel value can also be edited numerically. At least two enabled references
+are required for a linear least-squares fit and three for a quadratic fit; the
+table reports each residual and the tool reports RMS and maximum residuals.
+
+Use **Add current as overlay** after changing radioactive sources to combine
+lines from several spectra. Existing points remain in place. Overlays are
+accepted only when their MCA binning, polarity, low-pass, and trapezoid settings
+match. A spectrum copied during acquisition is labelled as a live, non-atomic
+snapshot because histogram chunks are transferred sequentially while counts may
+still change.
+
+Applying a calibration does not modify FPGA registers, histogram bins, ROI
+coordinates, or raw list-mode records. The MCA histogram keeps raw channels on
+the bottom axis and displays calibrated keV on the top axis. ROI statistics and
+CSV exports include calibrated values, and Save Settings plus subsequent capture
+metadata preserve the reference points, coefficients, fit residuals, and energy-
+processing fingerprint. If a relevant MCA setting changes, the top axis is
+marked stale until the original settings are restored or a new calibration is
+applied. Binning is handled specially: changing its power-of-two factor
+automatically rescales the channel coordinates, so a calibration made at (for
+example) binning 16 remains valid at binning 32 or 8. Other energy-processing
+changes still mark the calibration stale.
+
 ### Live coincidence measurement
 
 The **Coincidence** tab requires two current-IIO MCA list-mode channels and
@@ -311,44 +347,63 @@ Each accepted-energy plot shows its MCA ROI as a dashed, shaded band; an
 unchecked Use ROI option leaves a muted reference outline without applying
 the gate. The band follows MCA ROI dragging and disappears when that ROI is hidden.
 The ROI and accepted-energy plots use MCA histogram-bin units. Current IIO
-list-mode records map their 16-bit `trapezoid_energy` to a 14-bit MCA channel
-with `trapezoid_energy >> 2`, **not** by shifting again by the MCA binning
-selector. This fixed mapping matched paired saved captures with different
-binning settings, but is not specified by the opaque-record IIO driver and
-should be checked with a labelled-source capture on new firmware. The axes
-remain raw MCA channels, not calibrated keV.
+list-mode records map their 16-bit selected-energy field to a 14-bit MCA
+channel with `energyRaw >> 2`, **not** by shifting again by the MCA binning
+selector. The producer may select trapezoidal or integration energy according
+to its configuration. This fixed mapping matched paired saved captures with
+different binning settings, but is not specified by the opaque-record IIO
+driver and should be checked with a labelled-source capture on new firmware.
+The axes remain raw MCA channels, not calibrated keV.
 
-`CH0 AND CH1` counts one-to-one matched pairs. A channel's **NOT** checkbox
+`CH0 AND CH1` emits every pair inside the inclusive timing gate. An event may
+participate in several pairs; the GUI reports pair count separately from the
+unique participating-event counts and reports CH0 anchors with multiple
+partners. A channel's **NOT** checkbox
 with AND makes the other channel an anti-coincidence anchor: `NOT CH0 AND CH1`
 accepts a CH1 event only if no ROI-qualified CH0 event falls in its timing
 window. NOT does not invert the energy ROI. `OR` shows the union of eligible
 singles; `XOR` shows eligible singles with no opposite-channel event in their
-window. Both-NOT and NOT with OR/XOR are deliberately unavailable. AND's
-multiple-hit rule is nearest available CH1 event for each CH0 event in time
-order; one event cannot appear in two pairs, and ambiguous windows are counted.
+window. Both-NOT and NOT with OR/XOR are deliberately unavailable.
 
-The signed time difference is CH1 event time minus CH0 event time, after the
-configured CH1 offset. The timing-window controls retain 8 ns steps; the default
--48 to +48 ns is the closest representable window to ±50 ns, and both bounds
-can reach ±1 µs. AND plots the
-accepted pair-delay histogram. Veto, OR, and XOR have no delay for accepted
-unpaired events, so the top panel instead plots accepted counts versus elapsed
-time. The lower plots show accepted CH0 and CH1 MCA-channel histograms.
-Changing an ROI, rule, or timing bound resets only the live analysis; raw file
-recording continues.
+The signed raw difference is CH1 event time minus CH0 event time. The measured
+CH1-minus-CH0 common-input delay is then **subtracted** as a calibration. Timing
+bounds and calibration accept decimal nanoseconds and are converted to exact
+integer coordinates; displayed gate bounds are inclusive. AND plots the pair-
+delay histogram. Veto, OR, and XOR have no delay for accepted unpaired events,
+so the top panel instead plots accepted counts versus elapsed time. The lower
+plots show unique participating CH0 and CH1 events. Changing an ROI, rule, or
+timing bound resets only live analysis; raw recording continues.
 
-The client decodes the IIO list-mode marker and zero-crossing fields from the
-current firmware output layout. Precision defaults to **Auto**: when CFD is
-enabled on both MCAs, coincidence uses provisional fine event times computed
-as `(coarse timestamp + signed 8-bit ZC offset + signed Q2.14 interpolation)
-× 8 ns`, and the delay histogram has 1 ns bins. Events without a valid CFD
-result are excluded from fine-mode analysis (but remain in raw recordings).
-Select **Coarse (8 ns)** to compare with the original timestamp-only matcher.
-The supplied zero-crossing stage does not define the offset's relationship to
-the coarse timestamp, and this candidate formula widened an earlier saved CFD
-peak. Fine mode is therefore experimental pending a controlled live delay
-sweep. The session manifest records which timing source and histogram bin
-width were used.
+The IIO driver exposes only `opaque[16]`. The GUI therefore uses the one
+qualified producer profile, `vdpp-zc-calc-q2.14-v1`, without presenting an
+unusable schema selector. The profile name remains in capture/session metadata;
+IP121 alone does not identify it. Precision defaults to **Coarse (8 ns)**;
+fine mode must be selected explicitly and requires CFD on both MCAs. Fine event
+coordinates follow the PetaLinux contract exactly:
+
+```text
+eventTime_ns = 8 * timestampTicks
+             + 2 * (uint8(zcOffset) + int16(fineRaw) / 16384)
+```
+
+`fineRaw` must be in [-16384, 0]. PSD marker `0x08` takes priority over CFD
+marker `0x02`; ineligible or out-of-range records are counted and excluded.
+Timing arithmetic remains integer in units of 1/8192 ns until bounded display
+differences are formed, so uint64 timestamps above 2^53 retain adjacent ticks.
+The delay histogram uses exact 62.5 ps bins. With at least 100 pairs and a
+significant local peak, the GUI overlays a constant-background Gaussian-core
+fit and reports its center, FWHM and formal uncertainty in picoseconds, fitted
+signal count, and reduced chi-square. A reduced chi-square above 3 is labelled
+non-Gaussian/poor fit; the displayed core width is not automatically a complete
+detector CTR characterization.
+
+`zcOffset` is unsigned and can wrap modulo 256. The client never sign-extends
+or heuristically unwraps it. Accepted pairs crossing opposite sides of that
+boundary are reported; settings that permit producer overflow are not qualified
+for fine timing. If the offset cannot be kept in range, the producer must carry
+the wrap into the coarse timestamp or widen/normalize the field. The session
+manifest records the fixed qualified schema, exact timing equation, channel-delay
+sign, inclusive gate, pairing policy, and available firmware/transport identity.
 
 Start automatically sets external start on both MCAs, arms both IIO DMA
 readers, then raises the shared software-start level only after both report
@@ -359,8 +414,10 @@ manifest. Binary files keep their per-channel YAML/JSON sidecars; HDF5 and
 ROOT files retain embedded settings. Online-only creates no files. The
 list-mode firmware publishes fixed 1024-record frames, so low-rate live
 updates, especially veto/XOR decisions, can wait for the next complete frame
-or stop. Zero timestamps in a final padded frame cannot be distinguished
-perfectly from real zero-time events and are reported as exclusions.
+or stop. Live results are labelled provisional until both streams stop and
+drain. Zero timestamps in a final padded frame cannot be distinguished
+perfectly from real zero-time events and are reported as ambiguous exclusions;
+the current producer has no fully qualified control-record or heartbeat ABI.
 
 IIO MCA NDMA files use format version 2 to distinguish the opaque IIO record
 from the same-sized legacy gRPC/ZMQ event record. A JSON sidecar stores IIO
@@ -369,8 +426,9 @@ same-stem YAML file stores the complete digitizer configuration. ROOT and
 HDF5 files embed that YAML snapshot and expose `timestamp`, `long_gate`, and
 `short_gate` fields for analysis. New HDF5 and ROOT files also preserve the
 raw IIO marker, zero-crossing offset, and signed Q2.14 estimate for offline
-analysis; these are not corrected absolute timestamps. Existing capture files
-remain readable.
+analysis. Structured output names the fixed client profile and records the
+offset as unsigned 2 ns samples and the Q2.14 term as a signed fractional ADC
+sample. Existing capture files remain readable.
 
 Every recorded MCA run also writes a same-stem `.run.json` with channel,
 format, start/end time, record count, average rate, and continuity status.

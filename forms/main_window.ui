@@ -167,8 +167,13 @@
     <addaction name="separator"/>
     <addaction name="actionDmaSaveFolder"/>
    </widget>
+   <widget class="QMenu" name="menuTools">
+    <property name="title"><string>Tools</string></property>
+    <addaction name="actionEnergyCalibration"/>
+   </widget>
    <addaction name="menuFile"/>
    <addaction name="menuView"/>
+   <addaction name="menuTools"/>
    <addaction name="menuSettings"/>
    <addaction name="menuHelp"/>
    <addaction name="menuDeveloper"/>
@@ -213,6 +218,9 @@
   </action>
   <action name="actionValidateTiming">
    <property name="text"><string>Validate Two-Channel Timing...</string></property>
+  </action>
+  <action name="actionEnergyCalibration">
+   <property name="text"><string>MCA Energy Calibration...</string></property>
   </action>
   <action name="actionExit">
    <property name="text"><string>Exit</string></property>

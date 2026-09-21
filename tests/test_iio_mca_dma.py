@@ -30,10 +30,11 @@ from nlab.hardware.digitizer.dma import (
     _LM_EVENT_DTYPE,
     FILE_HEADER_STRUCT,
     IIO_LM_FILE_VERSION,
+    IIO_LM_UNQUALIFIED_SCHEMA,
     IIOMcaDmaStreamer,
     McaEventBuffer,
 )
-from nlab.hardware.digitizer.iio_listmode import cfd_interpolation_ticks
+from nlab.hardware.digitizer.iio_listmode import cfd_interpolation_samples
 from nlab.utils.dma_converter import convert_listmode, read_file_header
 
 
@@ -56,7 +57,7 @@ def test_iio_event_bytes_match_zero_crossing_hls_output_layout() -> None:
     assert events["charge_energy"][0] == 0x1234
     assert events["trapezoid_energy"][0] == 0x5678
     assert events["timestamp"][0] == 0x0102030405060708
-    np.testing.assert_array_equal(cfd_interpolation_ticks(events), [-1.0])
+    np.testing.assert_array_equal(cfd_interpolation_samples(events), [-1.0])
 
 
 def _frame(seed: int) -> np.ndarray:
@@ -433,6 +434,7 @@ def test_iio_streamer_writes_versioned_frames_and_preserves_tail(tmp_path: Path)
     assert metadata["driver_completed_frames"] == 2
     assert metadata["driver_dma_error_count"] == 0
     assert metadata["continuity_valid"] is True
+    assert metadata["client_record_schema"] == IIO_LM_UNQUALIFIED_SCHEMA
     assert streamer.last_capture_diagnostics == {
         "dma_fault": 0,
         "dma_error_count": 0,
@@ -477,14 +479,15 @@ def test_converter_understands_iio_listmode_version(tmp_path: Path) -> None:
         assert h5.attrs["driver_completed_frames"] == 2
         assert bool(h5.attrs["continuity_valid"])
         assert h5.attrs["source_sha256"]
+        assert h5.attrs["client_record_schema"] == IIO_LM_UNQUALIFIED_SCHEMA
         assert h5["events"].dtype == _LM_EVENT_DTYPE
         np.testing.assert_array_equal(
             h5["trapezoid_energy"][:1024], backend.first["trapezoid_energy"]
         )
-        np.testing.assert_allclose(h5["cfd_interpolation_ticks"][:1024], -0.25)
+        np.testing.assert_allclose(h5["cfd_interpolation_samples"][:1024], -0.25)
         np.testing.assert_array_equal(h5["cfd_valid"][:1024], True)
         assert h5["events"].attrs["zc_estimation_format"] == (
-            "signed Q2.14, 8 ns sample fraction"
+            "signed Q2.14 ADC-sample fraction"
         )
 
 

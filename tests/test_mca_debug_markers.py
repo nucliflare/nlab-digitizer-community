@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt
 from pytest import MonkeyPatch
 from pytestqt.qtbot import QtBot
 
+from nlab.analysis.energy_calibration import CalibrationPoint, fit_energy_calibration
 from nlab.controllers.mca_controller import MCAController
 
 
@@ -199,3 +200,54 @@ def test_offset_marker_failed_write_restores_hardware_value(
     assert controller.ui.spinPretrigger.value() == 24
     assert line.value() == 24
     assert "busy" in controller.ui.lblDmaStatus.text()
+
+
+def test_energy_calibration_snapshot_axis_and_settings_persistence(
+    qtbot: QtBot, monkeypatch: MonkeyPatch
+) -> None:
+    controller, _mca = _controller(qtbot, monkeypatch)
+    histogram = np.arange(32, dtype=np.uint32)
+    controller._last_elapsed_s = 12.5
+    controller._update_histogram(histogram)
+    snapshot = controller.spectrum_snapshot()
+
+    assert snapshot.channel == 0
+    assert snapshot.elapsed_s == 12.5
+    assert not snapshot.counts.flags.writeable
+    np.testing.assert_array_equal(snapshot.counts, histogram)
+
+    calibration = fit_energy_calibration(
+        (CalibrationPoint(4.0, 100.0), CalibrationPoint(20.0, 500.0)),
+        fingerprint=controller.energy_calibration_fingerprint(),
+    )
+    controller.apply_energy_calibration(calibration)
+
+    assert controller._energy_axis.tickStrings([4.0, 20.0], 1.0, 16.0) == [
+        "100",
+        "500",
+    ]
+    controller._energy_axis.setRange(0.0, 16_383.0)
+    assert controller._energy_axis.label.toPlainText() == "Energy (keV)"
+    assert not controller._energy_axis.autoSIPrefix
+    settings = controller.configuration_settings()
+    restored = settings["energy_calibration"]
+    assert isinstance(restored, dict)
+    assert restored["model"] == "linear"
+
+    controller.clear_energy_calibration()
+    controller.apply_configuration_settings(settings)
+    assert controller.energy_calibration is not None
+    assert np.isclose(controller.energy_calibration.energy(12.0), 300.0)
+
+    controller.ui.comboBinning.setCurrentIndex(1)
+    assert not controller.energy_calibration_is_stale()
+    assert controller._energy_axis.tickStrings([2.0, 10.0], 1.0, 8.0) == [
+        "100",
+        "500",
+    ]
+    assert np.isclose(controller._calibrated_energy(10.0), 500.0)
+    assert not controller._energy_axis._stale
+
+    controller.ui.comboPulsePolarity.setCurrentIndex(1)
+    assert controller.energy_calibration_is_stale()
+    assert controller._energy_axis._stale

@@ -8,11 +8,21 @@ import pytest
 from nlab.controllers import scope_controller as scope_controller_module
 from nlab.controllers.scope_controller import ScopeController
 from nlab.hardware.digitizer.scope import TriggerMode
-from nlab.workers.scope_auto_setup_worker import ScopeAutoSetupProcedure
+from nlab.workers.scope_auto_setup_worker import (
+    ScopeAutoSetupProcedure,
+    _estimate_signal,
+)
 
 
 class _FakePulseScope:
-    def __init__(self, polarity: int = -1, amplitude: int = 12_000) -> None:
+    def __init__(
+        self,
+        polarity: int = -1,
+        amplitude: int = 12_000,
+        *,
+        pulse_calls: set[int] | None = None,
+        pulse_width: int | None = None,
+    ) -> None:
         self.enabled = False
         self.dma_enabled = False
         self.dac_value = 386
@@ -22,6 +32,9 @@ class _FakePulseScope:
         self.pretrigger_samples = 32
         self.polarity = polarity
         self.amplitude = amplitude
+        self.pulse_calls = pulse_calls
+        self.pulse_width = pulse_width
+        self.acquire_count = 0
 
     def get_enable(self) -> bool:
         return self.enabled
@@ -68,11 +81,17 @@ class _FakePulseScope:
     def acquire_frame(self) -> np.ndarray:
         sample_count = self.frame_samples // 4
         baseline = (self.dac_value - 512) * 64
-        noise = np.resize(np.array([-12, -5, 0, 7, 11], dtype=np.int32), sample_count)
+        noise_pattern = np.roll(
+            np.array([-12, -5, 0, 7, 11], dtype=np.int32),
+            self.acquire_count % 5,
+        )
+        noise = np.resize(noise_pattern, sample_count)
         frame = np.full(sample_count, baseline, dtype=np.int32) + noise
-        start = sample_count // 3
-        width = max(12, sample_count // 10)
-        frame[start : start + width] += self.polarity * self.amplitude
+        if self.pulse_calls is None or self.acquire_count in self.pulse_calls:
+            start = sample_count // 3
+            width = self.pulse_width or max(12, sample_count // 10)
+            frame[start : start + width] += self.polarity * self.amplitude
+        self.acquire_count += 1
         result: np.ndarray = np.clip(frame, -32768, 32767).astype(np.int16)
         return result
 
@@ -128,6 +147,47 @@ def test_auto_setup_restores_settings_when_no_signal_is_found() -> None:
         scope.pretrigger_samples,
     ) == original
     assert not scope.enabled
+
+
+@pytest.mark.parametrize(
+    ("pulse_call", "polarity", "expected_mode", "expected_baseline"),
+    [
+        (1, -1, TriggerMode.FALLING_EDGE, 29_490),
+        (10, -1, TriggerMode.FALLING_EDGE, 29_490),
+        (23, -1, TriggerMode.FALLING_EDGE, 29_490),
+        (25, 1, TriggerMode.RISING_EDGE, -29_490),
+    ],
+)
+def test_auto_setup_accepts_one_narrow_stochastic_pulse(
+    pulse_call: int,
+    polarity: int,
+    expected_mode: TriggerMode,
+    expected_baseline: int,
+) -> None:
+    scope = _FakePulseScope(
+        polarity=polarity,
+        amplitude=6_000,
+        pulse_calls={pulse_call},
+        pulse_width=4,
+    )
+
+    result = ScopeAutoSetupProcedure(scope, sleep=lambda _seconds: None).run()  # type: ignore[arg-type]
+
+    assert result.trigger_mode == expected_mode
+    assert result.pulse_amplitude == pytest.approx(6_000, abs=50)
+    assert result.baseline == pytest.approx(expected_baseline, abs=100)
+    assert not result.verified
+    assert not scope.enabled
+    assert scope.frame_samples == 1024
+    assert scope.pretrigger_samples == 32
+
+
+def test_signal_estimator_rejects_one_sample_glitch() -> None:
+    frame = np.zeros(1024, dtype=np.int16)
+    frame[300] = -6_000
+
+    with pytest.raises(RuntimeError, match="no clear unipolar pulse"):
+        _estimate_signal([frame])
 
 
 class _ThreadProbe:

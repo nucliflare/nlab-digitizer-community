@@ -9,6 +9,7 @@ import h5py
 import numpy as np
 import pytest
 
+from nlab.hardware.digitizer.iio_listmode import VDPP_ZC_CALC_SCHEMA
 from nlab.hardware.digitizer.mca_capture import (
     McaCaptureWriter,
     McaDmaOutputMode,
@@ -95,6 +96,10 @@ def test_hdf5_writer_appends_events_and_embeds_configuration(tmp_path: Path) -> 
             capture["events"]["short_gate"], np.arange(10, 18)
         )
         assert int(capture.attrs["format_version"]) == 2
+        assert capture["events"].attrs["client_record_schema"] == VDPP_ZC_CALC_SCHEMA
+        assert capture["events"].attrs["zc_offset_format"] == (
+            "unsigned uint8; 2 ns ADC samples"
+        )
         np.testing.assert_array_equal(capture["events"]["marker"], 0x82)
         np.testing.assert_array_equal(capture["events"]["zc_estimation"], -8192)
 
@@ -122,6 +127,7 @@ def test_root_writer_appends_to_real_ttree_and_embeds_configuration(tmp_path: Pa
         np.testing.assert_array_equal(tree["timestamp"].array(library="np"), np.arange(8))
         np.testing.assert_array_equal(tree["zc_offset"].array(library="np"), 0xFD)
         assert str(capture["configuration_yaml"]) == "format_version: 3\n"
+        assert VDPP_ZC_CALC_SCHEMA in str(capture["event_schema"])
 
 
 @pytest.mark.parametrize(
@@ -197,6 +203,8 @@ def test_iio_dropped_records_mark_run_incomplete(tmp_path: Path) -> None:
 
 
 def test_iio_worker_emits_verified_summary_for_online_run() -> None:
+    received: dict[str, object] = {}
+
     class FakeStreamer:
         last_capture_diagnostics = {
             "continuity_valid": True,
@@ -205,6 +213,7 @@ def test_iio_worker_emits_verified_summary_for_online_run() -> None:
         }
 
         def stream_events(self, **kwargs: object) -> int:
+            received.update(kwargs)
             kwargs["on_progress"](2048)  # type: ignore[operator]
             return 2048
 
@@ -212,6 +221,7 @@ def test_iio_worker_emits_verified_summary_for_online_run() -> None:
         streamer=FakeStreamer(),  # type: ignore[arg-type]
         output_mode=McaDmaOutputMode.ONLINE,
         channel=1,
+        client_record_schema=VDPP_ZC_CALC_SCHEMA,
     )
     summaries: list[McaRunSummary] = []
     worker.summary.connect(summaries.append)
@@ -222,6 +232,7 @@ def test_iio_worker_emits_verified_summary_for_online_run() -> None:
     assert summaries[0].records == 2048
     assert summaries[0].continuity == "verified"
     assert summaries[0].sidecar_path is None
+    assert received["client_record_schema"] == VDPP_ZC_CALC_SCHEMA
 
 
 def test_legacy_worker_reports_unverified_without_loss_counters() -> None:

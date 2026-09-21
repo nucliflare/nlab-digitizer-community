@@ -5,9 +5,19 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from nlab.analysis.coincidence import CoincidenceAnalyzer, CoincidenceSettings
+from nlab.analysis.coincidence import (
+    FINE_BIN_NS,
+    CoincidenceAnalyzer,
+    CoincidenceSettings,
+    fit_coincidence_peak,
+)
 from nlab.hardware.digitizer.dma import McaEventBuffer
-from nlab.hardware.digitizer.iio_listmode import IIO_LM_EVENT_DTYPE, cfd_interpolation_ticks
+from nlab.hardware.digitizer.iio_listmode import (
+    COARSE_TICK_Q,
+    IIO_LM_EVENT_DTYPE,
+    TIME_Q_PER_NS,
+    cfd_interpolation_samples,
+)
 
 _DTYPE = IIO_LM_EVENT_DTYPE
 
@@ -33,20 +43,22 @@ def _analyze(
     return analyzer
 
 
-def test_and_uses_signed_delay_and_one_to_one_nearest_pairing() -> None:
+def test_and_emits_all_pairs_inside_inclusive_gate() -> None:
     analyzer = _analyze(
-        CoincidenceSettings(low_tick=-6, high_tick=6),
+        CoincidenceSettings(low_q=-6 * COARSE_TICK_Q, high_q=6 * COARSE_TICK_Q),
         _events((100, 160, 0), (200, 240, 0)),
         _events((98, 164, 0), (103, 168, 0), (206, 244, 0)),
     )
     snap = analyzer.snapshot()
-    assert snap.pairs == 2
-    assert snap.accepted_ch0 == snap.accepted_ch1 == 2
+    assert snap.pairs == 3
+    assert snap.accepted_ch0 == 2
+    assert snap.accepted_ch1 == 3
     assert snap.delay_counts[4] == 1  # -2 ticks relative to CH0
+    assert snap.delay_counts[9] == 1  # +3 ticks relative to CH0
     assert snap.delay_counts[12] == 1  # +6 inclusive boundary
     assert snap.ambiguous == 1
     assert snap.energy_ch1[41] == 1
-    assert snap.energy_ch1[42] == 0  # nearest CH1=98, not 103
+    assert snap.energy_ch1[42] == 1
 
 
 def test_roi_uses_fixed_dma_to_mca_scale_independent_of_binning() -> None:
@@ -99,7 +111,11 @@ def test_full_u16_dma_energy_maps_to_full_mca_histogram() -> None:
 
 def test_asymmetric_window_and_channel_offset_use_signed_ticks() -> None:
     analyzer = _analyze(
-        CoincidenceSettings(low_tick=2, high_tick=6, offset_ch1_tick=-4),
+        CoincidenceSettings(
+            low_q=2 * COARSE_TICK_Q,
+            high_q=6 * COARSE_TICK_Q,
+            channel_delay_q=4 * COARSE_TICK_Q,
+        ),
         _events((100, 40, 0)),
         _events((110, 50, 0)),
     )
@@ -162,42 +178,69 @@ def test_negative_cfd_offset_byte_is_not_an_input_marker() -> None:
     snap = analyzer.snapshot()
     assert snap.pairs == 1
     assert snap.cfd_valid == 2
-    np.testing.assert_allclose(cfd_interpolation_ticks(ch0), [-0.25])
+    np.testing.assert_allclose(cfd_interpolation_samples(ch0), [-0.25])
 
 
 def test_psd_result_takes_priority_over_cfd_in_shared_zero_crossing_field() -> None:
     events = _events((100, 160, 0x8A), (101, 160, 0x82), (102, 160, 0x80))
     events["zc_estimation"] = [-8192, -4096, 0]
-    result = cfd_interpolation_ticks(events)
+    result = cfd_interpolation_samples(events)
     assert np.isnan(result[0])
     assert result[1] == -0.25
     assert np.isnan(result[2])
 
 
-def test_fine_cfd_time_uses_subsample_correction_and_one_ns_bins() -> None:
+def test_fine_cfd_time_uses_exact_62_5_ps_bins() -> None:
     ch0 = _events((100, 160, 0x82))
-    ch0["zc_estimation"] = -8192  # -0.5 of an 8 ns tick
+    ch0["zc_estimation"] = -8192  # -0.5 sample = -1 ns
     ch1 = _events((103, 200, 0x82))
-    ch1["zc_estimation"] = -4096  # -0.25 of an 8 ns tick
+    ch1["zc_estimation"] = -4096  # -0.25 sample = -0.5 ns
 
     analyzer = _analyze(CoincidenceSettings(fine_timing=True), ch0, ch1)
     snapshot = analyzer.snapshot()
 
     assert snapshot.pairs == 1
-    assert len(snapshot.delay_counts) == 97
-    assert snapshot.delay_counts[74] == 1  # -48 ns + 74 ns = +26 ns
+    assert FINE_BIN_NS == 0.0625
+    assert len(snapshot.delay_counts) == 1537
+    assert snapshot.delay_counts[1160] == 1  # -48 ns + 1160 * 0.0625 ns = +24.5 ns
     assert snapshot.cfd_skipped == 0
 
 
-def test_fine_cfd_wraps_offset_byte_as_provisional_signed_sample_count() -> None:
-    ch0 = _events((100, 160, 0x82))
-    ch1 = _events((104, 200, 0x82))
-    ch1["zc_offset"] = 0xFF  # provisional signed interpretation: -1 tick
+def test_petalinux_acceptance_vector_uses_unsigned_two_ns_sample_offset() -> None:
+    ch0 = _events((100, 160, 0x02))
+    ch0["zc_offset"] = 18
+    ch1 = _events((100, 200, 0x02))
+    ch1["zc_offset"] = 19
+    ch1["zc_estimation"] = -4096
+    settings = CoincidenceSettings(
+        low_q=-TIME_Q_PER_NS,
+        high_q=TIME_Q_PER_NS,
+        channel_delay_q=TIME_Q_PER_NS // 2,
+        fine_timing=True,
+    )
 
-    snapshot = _analyze(CoincidenceSettings(fine_timing=True), ch0, ch1).snapshot()
+    snapshot = _analyze(settings, ch0, ch1).snapshot()
 
     assert snapshot.pairs == 1
-    assert snapshot.delay_counts[72] == 1  # +24 ns rather than coarse +32 ns
+    assert snapshot.delay_counts[32] == 1  # calibrated +1 ns inclusive upper edge
+
+
+def test_uint8_offset_boundary_is_reported_without_signed_unwrap() -> None:
+    ch0 = _events((100, 160, 0x02))
+    ch1 = _events((100, 200, 0x02))
+    ch0["zc_offset"] = 0xFF
+    ch1["zc_offset"] = 0
+    settings = CoincidenceSettings(
+        low_q=-600 * TIME_Q_PER_NS,
+        high_q=600 * TIME_Q_PER_NS,
+        fine_timing=True,
+    )
+
+    snapshot = _analyze(settings, ch0, ch1).snapshot()
+
+    assert snapshot.pairs == 1
+    assert snapshot.offset_boundary_pairs == 1
+    assert snapshot.delay_counts[1440] == 1  # -510 ns, not a heuristic +2 ns unwrap
 
 
 def test_fine_mode_excludes_events_without_selected_cfd_result() -> None:
@@ -212,32 +255,93 @@ def test_fine_mode_excludes_events_without_selected_cfd_result() -> None:
     assert snapshot.psd_zc_valid == 1
 
 
+def test_fine_mode_rejects_fraction_outside_minus_one_to_zero_samples() -> None:
+    ch0 = _events((100, 160, 0x02), (200, 160, 0x02))
+    ch1 = _events((100, 200, 0x02), (200, 200, 0x02))
+    ch0["zc_estimation"] = [-16385, -16384]
+
+    snapshot = _analyze(CoincidenceSettings(fine_timing=True), ch0, ch1).snapshot()
+
+    assert snapshot.pairs == 1
+    assert snapshot.fine_out_of_range == 1
+    assert snapshot.cfd_skipped == 1
+
+
 def test_fine_correction_reorders_close_events_across_dma_batches() -> None:
-    settings = CoincidenceSettings(low_tick=-1, high_tick=1, fine_timing=True)
+    settings = CoincidenceSettings(low_q=-1, high_q=1, fine_timing=True)
     analyzer = CoincidenceAnalyzer(settings)
     ch0_first = _events((100, 160, 0x82))
-    ch0_late = _events((101, 164, 0x82))
-    ch0_late["zc_offset"] = 0xFD  # event time is 98 ticks
+    ch0_first["zc_offset"] = 2
+    ch0_late = _events((100, 164, 0x82))
     analyzer.add_batch(0, ch0_first)
     analyzer.add_batch(0, ch0_late)
-    analyzer.add_batch(1, _events((98, 200, 0x82), (100, 204, 0x82)))
+    ch1 = _events((100, 200, 0x82), (100, 204, 0x82))
+    ch1[1]["zc_offset"] = 2
+    analyzer.add_batch(1, ch1)
     analyzer.finish()
 
     snapshot = analyzer.snapshot()
     assert snapshot.pairs == 2
-    assert snapshot.delay_counts[8] == 2  # both fine delays are zero
+    assert snapshot.delay_counts[0] == 2  # both fine delays are exactly zero
 
 
-def test_fine_match_waits_for_own_stream_to_rule_out_late_earlier_events() -> None:
+def test_fine_match_uses_opposite_event_time_watermark() -> None:
     analyzer = CoincidenceAnalyzer(CoincidenceSettings(fine_timing=True))
     analyzer.add_batch(0, _events((100, 160, 0x82)))
     analyzer.add_batch(1, _events((100, 200, 0x82), (1000, 200, 0x82)))
 
-    # The other stream is far ahead, but a later CH0 raw record may still
-    # correct back before the current CH0 event. Do not commit its pair yet.
-    assert analyzer.snapshot().pairs == 0
-    analyzer.add_batch(0, _events((300, 160, 0x82)))
     assert analyzer.snapshot().pairs == 1
+
+
+def test_exact_integer_timing_preserves_adjacent_ticks_above_two_to_53() -> None:
+    origin = 2**53 + 10
+    settings = CoincidenceSettings(
+        low_q=0,
+        high_q=COARSE_TICK_Q,
+        fine_timing=True,
+    )
+    snapshot = _analyze(
+        settings,
+        _events((origin, 160, 0x02)),
+        _events((origin + 1, 200, 0x02)),
+    ).snapshot()
+
+    assert snapshot.pairs == 1
+    assert snapshot.delay_counts[128] == 1
+
+
+def test_gaussian_peak_fit_reports_sub_nanosecond_fwhm() -> None:
+    settings = CoincidenceSettings(
+        low_q=-4 * TIME_Q_PER_NS,
+        high_q=4 * TIME_Q_PER_NS,
+        fine_timing=True,
+    )
+    centers = (
+        settings.low_ns
+        + (np.arange((settings.high_q - settings.low_q) // settings.bin_width_q + 1) + 0.5)
+        * settings.bin_width_ns
+    )
+    sigma_ns = 0.2
+    expected = 4.0 + 500.0 * np.exp(-0.5 * ((centers - 0.25) / sigma_ns) ** 2)
+
+    fit = fit_coincidence_peak(np.rint(expected).astype(np.uint64), settings)
+
+    assert fit is not None
+    assert fit.center_ns == pytest.approx(0.25, abs=0.01)
+    assert fit.fwhm_ns == pytest.approx(0.47096, abs=0.02)
+    assert fit.signal_counts > 1_000
+    assert fit.reduced_chi_square < 1.0
+
+
+def test_peak_fit_rejects_sparse_and_coarse_histograms() -> None:
+    fine = CoincidenceSettings(fine_timing=True)
+    sparse = np.zeros((fine.high_q - fine.low_q) // fine.bin_width_q + 1, dtype=np.uint64)
+    sparse[len(sparse) // 2] = 500
+
+    assert fit_coincidence_peak(sparse, fine) is None
+    assert (
+        fit_coincidence_peak(np.array([0, 200, 0], dtype=np.uint64), CoincidenceSettings()) is None
+    )
 
 
 def test_reversed_timestamps_fail_instead_of_producing_false_results() -> None:
