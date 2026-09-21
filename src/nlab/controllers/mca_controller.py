@@ -10,7 +10,7 @@ from typing import Protocol
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QDoubleSpinBox, QFileDialog, QSlider, QSpinBox, QWidget
 
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaDmaStreamer, McaEventBuffer
@@ -1372,7 +1372,6 @@ class MCAController(QWidget):
             Qt.ConnectionType.DirectConnection,
         )
         self._worker.finished.connect(self._worker.deleteLater)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
         self._worker_thread.finished.connect(self._on_worker_finished)
 
         self._worker_thread.start()
@@ -1381,9 +1380,25 @@ class MCAController(QWidget):
         if self._worker is not None:
             self._worker.request_stop.emit()
 
+    @Slot()
     def _on_worker_finished(self) -> None:
+        thread = self._worker_thread
+        if thread is None:
+            return  # synchronous shutdown already reaped this worker
+        if not thread.wait(2000):
+            log.error(
+                "MCA ch%d: polling thread emitted finished but did not exit",
+                self._channel,
+            )
+            QTimer.singleShot(100, self._on_worker_finished)
+            return
+
+        worker = self._worker
         self._worker = None
         self._worker_thread = None
+        log.info("MCA ch%d: polling worker exited", self._channel)
+        thread.deleteLater()
+        del worker
 
     def _on_refresh_rate_changed(self, value: int) -> None:
         if self._worker is not None:
@@ -1400,6 +1415,7 @@ class MCAController(QWidget):
                 log.warning("MCA worker thread did not stop in time, terminating")
                 thread.terminate()
                 thread.wait()
+            thread.deleteLater()
         self._worker_thread = None
         self._worker = None
 
@@ -1572,7 +1588,6 @@ class MCAController(QWidget):
             Qt.ConnectionType.DirectConnection,
         )
         self._dma_worker.finished.connect(self._dma_worker.deleteLater)
-        self._dma_thread.finished.connect(self._dma_thread.deleteLater)
         self._dma_thread.finished.connect(self._on_dma_finished)
 
         self._set_controls_enabled(False)
@@ -1710,18 +1725,40 @@ class MCAController(QWidget):
             details.append(f"Run summary: {summary.sidecar_path}")
         self.ui.lblDmaStatus.setToolTip("\n".join(details))
 
+    @Slot()
     def _on_dma_finished(self) -> None:
+        thread = self._dma_thread
+        if thread is None:
+            return  # synchronous shutdown already reaped this worker
+        if not thread.wait(2000):
+            log.error(
+                "MCA ch%d: DMA thread emitted finished but did not exit",
+                self._channel,
+            )
+            QTimer.singleShot(100, self._on_dma_finished)
+            return
+
+        # Coincidence Stop closes both channels together, so keep each pair
+        # of wrappers alive through PSD cleanup and the coincidence-finished
+        # signal cascade. Releasing one from QThread.finished can otherwise
+        # destroy a native QThread while it is still completing teardown.
+        worker = self._dma_worker
         self._dma_worker = None
         self._dma_thread = None
-        if self._dma_summary is None and self._dma_error is None:
-            self.ui.lblDmaStatus.setText("Stopped (run health unavailable)")
-        self._finish_psd_capture()
-        if getattr(self, "_coincidence_session", False):
-            if not self._coincidence_stopping:
-                self.coincidence_stop_requested.emit()
-            if self._coincidence_stopping:
-                self._end_coincidence_capture()
-        log.info("MCA DMA: worker finished")
+        log.info("MCA ch%d: DMA worker exited; restoring controls", self._channel)
+        try:
+            if self._dma_summary is None and self._dma_error is None:
+                self.ui.lblDmaStatus.setText("Stopped (run health unavailable)")
+            self._finish_psd_capture()
+            if getattr(self, "_coincidence_session", False):
+                if not self._coincidence_stopping:
+                    self.coincidence_stop_requested.emit()
+                if self._coincidence_stopping:
+                    self._end_coincidence_capture()
+            log.info("MCA ch%d: DMA worker cleanup complete", self._channel)
+        finally:
+            thread.deleteLater()
+            del worker
 
     def _finish_psd_capture(self) -> None:
         if self._psd_capture is not None:
@@ -1760,6 +1797,7 @@ class MCAController(QWidget):
                 log.warning("MCA DMA thread did not stop in time, terminating")
                 thread.terminate()
                 thread.wait()
+            thread.deleteLater()
         had_dma_worker = worker is not None
         self._dma_thread = None
         self._dma_worker = None

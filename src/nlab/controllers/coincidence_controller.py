@@ -154,6 +154,16 @@ class CoincidenceController(QWidget):
 
         timing_box = QGroupBox("Timing")
         timing_form = QFormLayout(timing_box)
+        self.timing_mode = QComboBox()
+        self.timing_mode.addItem("Auto (CFD when both enabled)", "auto")
+        self.timing_mode.addItem("Coarse (8 ns)", "coarse")
+        self.timing_mode.addItem("CFD fine (1 ns, experimental)", "cfd")
+        self.timing_mode.setToolTip(
+            "CFD mode uses timestamp + signed zero-crossing offset + Q2.14 "
+            "interpolation. The upstream timestamp anchor is unverified; "
+            "compare against coarse timing during live validation."
+        )
+        timing_form.addRow("Precision:", self.timing_mode)
         self.low = QSpinBox()
         self.high = QSpinBox()
         for spin in (self.low, self.high):
@@ -170,6 +180,9 @@ class CoincidenceController(QWidget):
         timing_form.addRow("Lower Δt:", self.low)
         timing_form.addRow("Upper Δt:", self.high)
         timing_form.addRow("CH1 offset:", self.offset)
+        self.timing_hint = QLabel()
+        self.timing_hint.setWordWrap(True)
+        timing_form.addRow(self.timing_hint)
         left.addWidget(timing_box)
 
         output_box = QGroupBox("Raw DMA recording")
@@ -248,6 +261,7 @@ class CoincidenceController(QWidget):
         self.btnStart.clicked.connect(self.start)
         self.btnStop.clicked.connect(lambda: self._begin_stop(None))
         self.btnFolder.clicked.connect(self._choose_folder)
+        self.timing_mode.currentIndexChanged.connect(self._analysis_settings_changed)
         self.operator.currentTextChanged.connect(self._update_rule)
         self.not_ch0.toggled.connect(lambda checked: self._on_not_changed(0, checked))
         self.not_ch1.toggled.connect(lambda checked: self._on_not_changed(1, checked))
@@ -261,6 +275,7 @@ class CoincidenceController(QWidget):
                 lambda selected=spin: selected.setValue(round(selected.value() / TICK_NS) * TICK_NS)
             )
         for channel, mca in enumerate(self._mca_views):
+            mca.ui.cbCfdEnable.toggled.connect(self._analysis_settings_changed)
             mca.roi_changed.connect(self._analysis_settings_changed)
             mca.roi_preview_changed.connect(self._render_roi_labels)
             mca.coincidence_ready.connect(self._on_channel_ready)
@@ -308,6 +323,11 @@ class CoincidenceController(QWidget):
             raise ValueError("Lower timing boundary must be below upper boundary")
         if any(value % TICK_NS for value in (low, high, offset)):
             raise ValueError("Timing bounds and CH1 offset must be multiples of 8 ns")
+        mode = self.timing_mode.currentData()
+        cfd_ready = all(mca.ui.cbCfdEnable.isChecked() for mca in self._mca_views)
+        if mode == "cfd" and not cfd_ready:
+            raise ValueError("Enable CFD on both MCA channels for fine timing")
+        fine_timing = mode == "cfd" or (mode == "auto" and cfd_ready)
         rois = tuple(
             mca.coincidence_roi() if check.isChecked() else None
             for mca, check in zip(self._mca_views, self.use_roi, strict=True)
@@ -323,6 +343,7 @@ class CoincidenceController(QWidget):
             roi_ch1=rois[1],
             energy_bin_ch0=self._mca_views[0].coincidence_energy_bin,
             energy_bin_ch1=self._mca_views[1].coincidence_energy_bin,
+            fine_timing=fine_timing,
         )
 
     def _render_roi_labels(self) -> None:
@@ -355,8 +376,15 @@ class CoincidenceController(QWidget):
             settings = self._settings()
         except ValueError as exc:
             self.status.setText(str(exc))
+            self.timing_hint.setText("Fine timing requires valid CFD on both channels.")
             return
         self._current_settings = settings
+        self.timing_hint.setText(
+            "CFD fine timing: provisional timestamp correction; 1 ns Δt bins. "
+            "Events without valid CFD are excluded from live analysis."
+            if settings.fine_timing
+            else "Coarse timestamps; 8 ns Δt bins."
+        )
         if self._analysis is not None:
             self._last_rendered_snapshot = self._analysis.result()[0]
         if self._analysis is not None and self._state in {"arming", "running"}:
@@ -440,6 +468,12 @@ class CoincidenceController(QWidget):
             "not_ch1": settings.not_ch1,
             "window_ns": [settings.low_tick * TICK_NS, settings.high_tick * TICK_NS],
             "offset_ch1_ns": settings.offset_ch1_tick * TICK_NS,
+            "timing_source": "cfd_provisional_v1" if settings.fine_timing else "coarse",
+            "delta_t_bin_ns": settings.bin_width_ns,
+            "cfd_correction": (
+                "timestamp + int8(zc_offset) + signed_q2_14(zc_estimation)"
+                if settings.fine_timing else None
+            ),
             "roi_bins": {"ch0": settings.roi_ch0, "ch1": settings.roi_ch1},
             "energy_bin": {"ch0": settings.energy_bin_ch0, "ch1": settings.energy_bin_ch1},
             "dma_energy_to_mca_channel": "trapezoid_energy >> 2",
@@ -451,6 +485,10 @@ class CoincidenceController(QWidget):
             return
         try:
             settings = self._settings()
+            if settings.fine_timing and not all(
+                device.mca.filters.cfd.get_enable() for device in self._devices
+            ):
+                raise RuntimeError("CFD fine timing requires hardware CFD enabled on both MCAs")
             self._current_settings = settings
             self._analysis_epochs = [
                 {"changed_utc": datetime.now(UTC).isoformat(), "settings": self._describe(settings)}
@@ -669,8 +707,9 @@ class CoincidenceController(QWidget):
             return
         pair_mode = settings.operator == "AND" and not (settings.not_ch0 or settings.not_ch1)
         if pair_mode:
+            left_ns = settings.low_tick * TICK_NS
             self.delay_curve.setData(
-                np.arange(settings.low_tick, settings.high_tick + 2) * TICK_NS,
+                left_ns + np.arange(len(snapshot.delay_counts) + 1) * settings.bin_width_ns,
                 snapshot.delay_counts,
             )
         else:
@@ -685,7 +724,9 @@ class CoincidenceController(QWidget):
             f"Pairs: {snapshot.pairs:,}  •  CH0: {snapshot.accepted_ch0:,}  •  "
             f"CH1: {snapshot.accepted_ch1:,}  •  Ambiguous: {snapshot.ambiguous:,}  •  "
             f"Zero timestamps: {snapshot.zero_timestamps:,}  •  "
-            f"Input markers: {snapshot.input_markers:,}  •  "
+            f"CFD valid: {snapshot.cfd_valid:,}  •  "
+            f"PSD ZC valid: {snapshot.psd_zc_valid:,}  •  "
+            f"CFD skipped: {snapshot.cfd_skipped:,}  •  "
             f"ROI rejects: {snapshot.outside_roi:,}  •  "
             f"Energy beyond plot: {snapshot.energy_overflow:,}"
         )
@@ -699,6 +740,7 @@ class CoincidenceController(QWidget):
             "use_roi": [control.isChecked() for control in self.use_roi],
             "window_ns": [self.low.value(), self.high.value()],
             "offset_ch1_ns": self.offset.value(),
+            "timing_mode": self.timing_mode.currentData(),
             "duration_s": self.duration.value(),
         }
 
@@ -724,6 +766,10 @@ class CoincidenceController(QWidget):
             self.low.setValue(int(window[0]))
             self.high.setValue(int(window[1]))
         self.offset.setValue(int(settings.get("offset_ch1_ns", 0)))
+        timing_mode = str(settings.get("timing_mode", "auto"))
+        mode_index = self.timing_mode.findData(timing_mode)
+        if mode_index >= 0:
+            self.timing_mode.setCurrentIndex(mode_index)
         self.duration.setValue(int(settings.get("duration_s", 0)))
 
     def request_shutdown(self) -> None:

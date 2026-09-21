@@ -327,14 +327,28 @@ window. Both-NOT and NOT with OR/XOR are deliberately unavailable. AND's
 multiple-hit rule is nearest available CH1 event for each CH0 event in time
 order; one event cannot appear in two pairs, and ambiguous windows are counted.
 
-The signed time difference is `(CH1 timestamp + CH1 offset) - CH0 timestamp`.
-The timing controls have 8 ns steps; the default -48 to +48 ns is the closest
-representable window to ±50 ns, and both bounds can reach ±1 µs. AND plots the
+The signed time difference is CH1 event time minus CH0 event time, after the
+configured CH1 offset. The timing-window controls retain 8 ns steps; the default
+-48 to +48 ns is the closest representable window to ±50 ns, and both bounds
+can reach ±1 µs. AND plots the
 accepted pair-delay histogram. Veto, OR, and XOR have no delay for accepted
 unpaired events, so the top panel instead plots accepted counts versus elapsed
 time. The lower plots show accepted CH0 and CH1 MCA-channel histograms.
 Changing an ROI, rule, or timing bound resets only the live analysis; raw file
 recording continues.
+
+The client decodes the IIO list-mode marker and zero-crossing fields from the
+current firmware output layout. Precision defaults to **Auto**: when CFD is
+enabled on both MCAs, coincidence uses provisional fine event times computed
+as `(coarse timestamp + signed 8-bit ZC offset + signed Q2.14 interpolation)
+× 8 ns`, and the delay histogram has 1 ns bins. Events without a valid CFD
+result are excluded from fine-mode analysis (but remain in raw recordings).
+Select **Coarse (8 ns)** to compare with the original timestamp-only matcher.
+The supplied zero-crossing stage does not define the offset's relationship to
+the coarse timestamp, and this candidate formula widened an earlier saved CFD
+peak. Fine mode is therefore experimental pending a controlled live delay
+sweep. The session manifest records which timing source and histogram bin
+width were used.
 
 Start automatically sets external start on both MCAs, arms both IIO DMA
 readers, then raises the shared software-start level only after both report
@@ -353,7 +367,10 @@ from the same-sized legacy gRPC/ZMQ event record. A JSON sidecar stores IIO
 capture geometry, schema, continuity, and driver diagnostics, while a
 same-stem YAML file stores the complete digitizer configuration. ROOT and
 HDF5 files embed that YAML snapshot and expose `timestamp`, `long_gate`, and
-`short_gate` fields for analysis.
+`short_gate` fields for analysis. New HDF5 and ROOT files also preserve the
+raw IIO marker, zero-crossing offset, and signed Q2.14 estimate for offline
+analysis; these are not corrected absolute timestamps. Existing capture files
+remain readable.
 
 Every recorded MCA run also writes a same-stem `.run.json` with channel,
 format, start/end time, record count, average rate, and continuity status.

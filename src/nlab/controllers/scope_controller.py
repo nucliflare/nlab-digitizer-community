@@ -981,7 +981,6 @@ class ScopeController(QWidget):
         worker.error.connect(self._on_auto_setup_error)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._on_auto_setup_finished)
 
         self._set_auto_setup_busy(True)
@@ -1004,49 +1003,69 @@ class ScopeController(QWidget):
     def _on_auto_setup_error(self, message: str) -> None:
         self._auto_setup_error = message
 
+    @Slot()
     def _on_auto_setup_finished(self) -> None:
+        thread = self._auto_setup_thread
+        if thread is None:
+            return  # synchronous shutdown already reaped this worker
+        if not thread.wait(2000):
+            log.error(
+                "Scope ch%d: Auto Setup thread emitted finished but did not exit",
+                self._channel,
+            )
+            QTimer.singleShot(100, self._on_auto_setup_finished)
+            return
+
+        # QThread.finished can be queued while the native thread is still
+        # completing teardown. Keep both Python wrappers alive until GUI and
+        # hardware-state restoration is done; releasing them earlier can make
+        # PySide destroy a still-running QThread and terminate the process.
+        worker = self._auto_setup_worker
+        log.info("Scope ch%d: Auto Setup worker exited; restoring controls", self._channel)
         result = self._auto_setup_result
         error = self._auto_setup_error
         self._auto_setup_worker = None
         self._auto_setup_thread = None
-        self._set_auto_setup_busy(False)
-
         try:
+            self._set_auto_setup_busy(False)
             self._load_hardware_state()
             self._update_frame_gap_enabled()
             self._update_axis_ranges()
         except Exception as exc:
             log.exception("Scope ch%d: failed to refresh after Auto Setup", self._channel)
             self.ui.lblRecordingStatus.setText(f"Auto Setup refresh failed: {exc}")
-            return
+        else:
+            if result is None:
+                self.ui.lblRecordingStatus.setText(
+                    f"Auto Setup failed: {error or 'unknown error'}"
+                )
+            else:
+                self._dac_adc_slope = result.dac_slope
 
-        if result is None:
-            self.ui.lblRecordingStatus.setText(f"Auto Setup failed: {error or 'unknown error'}")
-            return
-
-        self._dac_adc_slope = result.dac_slope
-
-        frame = result.frame[: self._frame_samples_from_ui() // 4]
-        raw_time = np.arange(len(frame)) * self._VIEWER_POINT_PERIOD_NS
-        self._on_frame_received([raw_time, frame])
-        verification = "verified" if result.verified else "set; pulse not re-observed"
-        self.ui.lblRecordingStatus.setText(
-            f"Auto Setup {verification}: DAC {result.dac_value}, "
-            f"{result.trigger_mode.name.lower().replace('_', ' ')} at "
-            f"{result.trigger_level}"
-        )
-        log.info(
-            "Scope ch%d: Auto Setup complete: DAC=%d, mode=%s, level=%d, "
-            "baseline=%.1f, noise=%.1f, amplitude=%.1f, verified=%s",
-            self._channel,
-            result.dac_value,
-            result.trigger_mode.name,
-            result.trigger_level,
-            result.baseline,
-            result.noise_sigma,
-            result.pulse_amplitude,
-            result.verified,
-        )
+                frame = result.frame[: self._frame_samples_from_ui() // 4]
+                raw_time = np.arange(len(frame)) * self._VIEWER_POINT_PERIOD_NS
+                self._on_frame_received([raw_time, frame])
+                verification = "verified" if result.verified else "set; pulse not re-observed"
+                self.ui.lblRecordingStatus.setText(
+                    f"Auto Setup {verification}: DAC {result.dac_value}, "
+                    f"{result.trigger_mode.name.lower().replace('_', ' ')} at "
+                    f"{result.trigger_level}"
+                )
+                log.info(
+                    "Scope ch%d: Auto Setup complete: DAC=%d, mode=%s, level=%d, "
+                    "baseline=%.1f, noise=%.1f, amplitude=%.1f, verified=%s",
+                    self._channel,
+                    result.dac_value,
+                    result.trigger_mode.name,
+                    result.trigger_level,
+                    result.baseline,
+                    result.noise_sigma,
+                    result.pulse_amplitude,
+                    result.verified,
+                )
+        finally:
+            thread.deleteLater()
+            del worker
 
     def _start_measurement_timer(self) -> None:
         time_s = self.ui.spinTime.value()

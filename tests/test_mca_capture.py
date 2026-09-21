@@ -18,8 +18,9 @@ from nlab.workers.dma_workers import IIOMcaDmaWorker, McaDmaWorker, _finish_mca_
 
 _IIO_EVENTS = np.dtype(
     [
-        ("flags", "<u2"),
-        ("cfd_q2", "<u2"),
+        ("marker", "u1"),
+        ("zc_offset", "u1"),
+        ("zc_estimation", "<i2"),
         ("charge_energy", "<u2"),
         ("trapezoid_energy", "<u2"),
         ("timestamp", "<u8"),
@@ -32,6 +33,9 @@ def _events(offset: int) -> np.ndarray:
     events["timestamp"] = np.arange(offset, offset + 4)
     events["trapezoid_energy"] = np.arange(100 + offset, 104 + offset)
     events["charge_energy"] = np.arange(10 + offset, 14 + offset)
+    events["marker"] = 0x82
+    events["zc_offset"] = 0xFD
+    events["zc_estimation"] = -8192
     return events
 
 
@@ -90,6 +94,9 @@ def test_hdf5_writer_appends_events_and_embeds_configuration(tmp_path: Path) -> 
         np.testing.assert_array_equal(
             capture["events"]["short_gate"], np.arange(10, 18)
         )
+        assert int(capture.attrs["format_version"]) == 2
+        np.testing.assert_array_equal(capture["events"]["marker"], 0x82)
+        np.testing.assert_array_equal(capture["events"]["zc_estimation"], -8192)
 
 
 def test_root_writer_appends_to_real_ttree_and_embeds_configuration(tmp_path: Path) -> None:
@@ -109,8 +116,11 @@ def test_root_writer_appends_to_real_ttree_and_embeds_configuration(tmp_path: Pa
         tree = capture["events"]
         assert tree.classname == "TTree"
         assert tree.num_entries == 8
-        assert set(tree.keys()) == {"timestamp", "long_gate", "short_gate"}
+        assert set(tree.keys()) == {
+            "timestamp", "long_gate", "short_gate", "marker", "zc_offset", "zc_estimation"
+        }
         np.testing.assert_array_equal(tree["timestamp"].array(library="np"), np.arange(8))
+        np.testing.assert_array_equal(tree["zc_offset"].array(library="np"), 0xFD)
         assert str(capture["configuration_yaml"]) == "format_version: 3\n"
 
 

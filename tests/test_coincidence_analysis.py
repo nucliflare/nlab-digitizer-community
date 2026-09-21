@@ -7,24 +7,17 @@ import pytest
 
 from nlab.analysis.coincidence import CoincidenceAnalyzer, CoincidenceSettings
 from nlab.hardware.digitizer.dma import McaEventBuffer
+from nlab.hardware.digitizer.iio_listmode import IIO_LM_EVENT_DTYPE, cfd_interpolation_ticks
 
-_DTYPE = np.dtype(
-    [
-        ("flags", "<u2"),
-        ("cfd_q2", "<u2"),
-        ("charge_energy", "<u2"),
-        ("trapezoid_energy", "<u2"),
-        ("timestamp", "<u8"),
-    ]
-)
+_DTYPE = IIO_LM_EVENT_DTYPE
 
 
 def _events(*rows: tuple[int, int, int]) -> np.ndarray:
     result = np.zeros(len(rows), dtype=_DTYPE)
-    for index, (tick, energy, flags) in enumerate(rows):
+    for index, (tick, energy, marker) in enumerate(rows):
         result[index]["timestamp"] = tick
         result[index]["trapezoid_energy"] = energy
-        result[index]["flags"] = flags
+        result[index]["marker"] = marker
     return result
 
 
@@ -146,16 +139,105 @@ def test_or_counts_all_qualified_singles_and_xor_counts_only_unpaired() -> None:
     assert exclusive.energy_ch1[52] == 1
 
 
-def test_zero_timestamp_and_input_markers_do_not_create_false_pairs() -> None:
+def test_zero_timestamp_and_input_tags_do_not_discard_real_events() -> None:
     analyzer = _analyze(
         CoincidenceSettings(),
-        _events((0, 40, 0), (100, 40, 0), (101, 40, 0x2000)),
-        _events((101, 50, 0)),
+        _events((0, 40, 0), (100, 160, 0x82)),
+        _events((101, 200, 0xC8)),
     )
     snap = analyzer.snapshot()
     assert snap.pairs == 1
     assert snap.zero_timestamps == 1
-    assert snap.input_markers == 1
+    assert snap.cfd_valid == 1
+    assert snap.psd_zc_valid == 1
+
+
+def test_negative_cfd_offset_byte_is_not_an_input_marker() -> None:
+    ch0 = _events((100, 160, 0x82))
+    ch0["zc_offset"] = 0xFD
+    ch0["zc_estimation"] = -4096
+    ch1 = _events((97, 200, 0x82))
+    ch1["zc_offset"] = 0xFE
+    analyzer = _analyze(CoincidenceSettings(), ch0, ch1)
+    snap = analyzer.snapshot()
+    assert snap.pairs == 1
+    assert snap.cfd_valid == 2
+    np.testing.assert_allclose(cfd_interpolation_ticks(ch0), [-0.25])
+
+
+def test_psd_result_takes_priority_over_cfd_in_shared_zero_crossing_field() -> None:
+    events = _events((100, 160, 0x8A), (101, 160, 0x82), (102, 160, 0x80))
+    events["zc_estimation"] = [-8192, -4096, 0]
+    result = cfd_interpolation_ticks(events)
+    assert np.isnan(result[0])
+    assert result[1] == -0.25
+    assert np.isnan(result[2])
+
+
+def test_fine_cfd_time_uses_subsample_correction_and_one_ns_bins() -> None:
+    ch0 = _events((100, 160, 0x82))
+    ch0["zc_estimation"] = -8192  # -0.5 of an 8 ns tick
+    ch1 = _events((103, 200, 0x82))
+    ch1["zc_estimation"] = -4096  # -0.25 of an 8 ns tick
+
+    analyzer = _analyze(CoincidenceSettings(fine_timing=True), ch0, ch1)
+    snapshot = analyzer.snapshot()
+
+    assert snapshot.pairs == 1
+    assert len(snapshot.delay_counts) == 97
+    assert snapshot.delay_counts[74] == 1  # -48 ns + 74 ns = +26 ns
+    assert snapshot.cfd_skipped == 0
+
+
+def test_fine_cfd_wraps_offset_byte_as_provisional_signed_sample_count() -> None:
+    ch0 = _events((100, 160, 0x82))
+    ch1 = _events((104, 200, 0x82))
+    ch1["zc_offset"] = 0xFF  # provisional signed interpretation: -1 tick
+
+    snapshot = _analyze(CoincidenceSettings(fine_timing=True), ch0, ch1).snapshot()
+
+    assert snapshot.pairs == 1
+    assert snapshot.delay_counts[72] == 1  # +24 ns rather than coarse +32 ns
+
+
+def test_fine_mode_excludes_events_without_selected_cfd_result() -> None:
+    ch0 = _events((100, 160, 0x82), (200, 160, 0x80))
+    ch1 = _events((103, 200, 0x82), (203, 200, 0x8A))
+
+    snapshot = _analyze(CoincidenceSettings(fine_timing=True), ch0, ch1).snapshot()
+
+    assert snapshot.pairs == 1
+    assert snapshot.cfd_skipped == 2
+    assert snapshot.cfd_valid == 2
+    assert snapshot.psd_zc_valid == 1
+
+
+def test_fine_correction_reorders_close_events_across_dma_batches() -> None:
+    settings = CoincidenceSettings(low_tick=-1, high_tick=1, fine_timing=True)
+    analyzer = CoincidenceAnalyzer(settings)
+    ch0_first = _events((100, 160, 0x82))
+    ch0_late = _events((101, 164, 0x82))
+    ch0_late["zc_offset"] = 0xFD  # event time is 98 ticks
+    analyzer.add_batch(0, ch0_first)
+    analyzer.add_batch(0, ch0_late)
+    analyzer.add_batch(1, _events((98, 200, 0x82), (100, 204, 0x82)))
+    analyzer.finish()
+
+    snapshot = analyzer.snapshot()
+    assert snapshot.pairs == 2
+    assert snapshot.delay_counts[8] == 2  # both fine delays are zero
+
+
+def test_fine_match_waits_for_own_stream_to_rule_out_late_earlier_events() -> None:
+    analyzer = CoincidenceAnalyzer(CoincidenceSettings(fine_timing=True))
+    analyzer.add_batch(0, _events((100, 160, 0x82)))
+    analyzer.add_batch(1, _events((100, 200, 0x82), (1000, 200, 0x82)))
+
+    # The other stream is far ahead, but a later CH0 raw record may still
+    # correct back before the current CH0 event. Do not commit its pair yet.
+    assert analyzer.snapshot().pairs == 0
+    analyzer.add_batch(0, _events((300, 160, 0x82)))
+    assert analyzer.snapshot().pairs == 1
 
 
 def test_reversed_timestamps_fail_instead_of_producing_false_results() -> None:

@@ -52,6 +52,10 @@ class _Mca:
         self.ext = False
         self.armed = False
         self.stop = Mock()
+        self.cfd_enabled = False
+        self.filters = SimpleNamespace(
+            cfd=SimpleNamespace(get_enable=lambda: self.cfd_enabled)
+        )
 
     def set_ext_trig_enable(self, value: bool) -> None:
         self.ext = value
@@ -94,6 +98,7 @@ class _McaView(QObject):
         self.ui = SimpleNamespace(
             cbDmaEnable=QCheckBox(),
             cbExtTrigger=QCheckBox(),
+            cbCfdEnable=QCheckBox(),
             spinTimeLimit=QSpinBox(),
         )
 
@@ -181,12 +186,47 @@ def test_coincidence_application_settings_round_trip(monkeypatch: pytest.MonkeyP
     controller.low.setValue(-80)
     controller.high.setValue(96)
     controller.offset.setValue(16)
+    controller.timing_mode.setCurrentIndex(controller.timing_mode.findData("coarse"))
     controller.duration.setValue(30)
     saved = controller.configuration_settings()
 
     restored, _, _ = _make_controller(monkeypatch)
     restored.apply_configuration_settings(saved)
     assert restored.configuration_settings() == saved
+
+
+def test_auto_precision_uses_fine_bins_only_with_both_mca_cfd_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, views = _make_controller(monkeypatch)
+    assert not controller._settings().fine_timing
+    assert controller._settings().bin_width_ns == 8
+
+    views[0].ui.cbCfdEnable.setChecked(True)
+    assert not controller._settings().fine_timing
+    views[1].ui.cbCfdEnable.setChecked(True)
+    assert controller._settings().fine_timing
+    assert controller._settings().bin_width_ns == 1
+    assert "provisional" in controller.timing_hint.text()
+
+    controller.timing_mode.setCurrentIndex(controller.timing_mode.findData("coarse"))
+    assert not controller._settings().fine_timing
+    controller.timing_mode.setCurrentIndex(controller.timing_mode.findData("cfd"))
+    assert controller._settings().fine_timing
+    views[1].ui.cbCfdEnable.setChecked(False)
+    with pytest.raises(ValueError, match="Enable CFD on both"):
+        controller._settings()
+
+
+def test_older_coincidence_settings_without_precision_mode_load_as_auto(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _make_controller(monkeypatch)
+    controller.timing_mode.setCurrentIndex(controller.timing_mode.findData("coarse"))
+
+    controller.apply_configuration_settings({"window_ns": [-48, 48]})
+
+    assert controller.timing_mode.currentData() == "auto"
 
 
 def test_mca_roi_overlay_tracks_selection_and_gate_state(

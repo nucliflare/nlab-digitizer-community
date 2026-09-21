@@ -66,6 +66,7 @@ from collections.abc import Callable
 import iio
 import numpy as np
 
+from ..iio_listmode import IIO_LM_EVENT_DTYPE
 from ..iio_scope_stream import IiodScopeStream
 from .base import DigitizerBackend
 
@@ -155,13 +156,7 @@ _LM_KERNEL_BUFFER_COUNT = 8
 _SCOPE_FALLBACK_KERNEL_BUFFER_COUNT = 1
 _SCOPE_IIOD_BATCH_FRAMES = 32
 _LM_RECORD_LAYOUT = "opaque[16]"
-_LM_EVENT_DTYPE = np.dtype([
-    ("flags", "<u2"),
-    ("cfd_q2", "<u2"),
-    ("charge_energy", "<u2"),
-    ("trapezoid_energy", "<u2"),
-    ("timestamp", "<u8"),
-])
+_LM_EVENT_DTYPE = IIO_LM_EVENT_DTYPE
 
 # vdpp-pulse-processor.c: PP_MEM_DEBUG_ENTRIES / PP_MEM_HISTOGRAM_ENTRIES.
 # Both memories are fixed-size (no sysfs attribute reports these counts

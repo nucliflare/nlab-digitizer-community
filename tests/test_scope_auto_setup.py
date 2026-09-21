@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
+from nlab.controllers import scope_controller as scope_controller_module
+from nlab.controllers.scope_controller import ScopeController
 from nlab.hardware.digitizer.scope import TriggerMode
 from nlab.workers.scope_auto_setup_worker import ScopeAutoSetupProcedure
 
@@ -124,3 +128,78 @@ def test_auto_setup_restores_settings_when_no_signal_is_found() -> None:
         scope.pretrigger_samples,
     ) == original
     assert not scope.enabled
+
+
+class _ThreadProbe:
+    def __init__(self, events: list[str], *, exits: bool) -> None:
+        self._events = events
+        self._exits = exits
+
+    def wait(self, timeout_ms: int) -> bool:
+        self._events.append(f"wait:{timeout_ms}")
+        return self._exits
+
+    def deleteLater(self) -> None:  # noqa: N802 - mirrors the Qt API
+        self._events.append("delete")
+
+
+class _StatusProbe:
+    def __init__(self) -> None:
+        self.text = ""
+
+    def setText(self, text: str) -> None:  # noqa: N802 - mirrors the Qt API
+        self.text = text
+
+
+def _auto_setup_finish_controller(
+    thread: _ThreadProbe,
+    events: list[str],
+) -> SimpleNamespace:
+    status = _StatusProbe()
+    return SimpleNamespace(
+        _auto_setup_thread=thread,
+        _auto_setup_worker=object(),
+        _auto_setup_result=None,
+        _auto_setup_error="test failure",
+        _channel=1,
+        ui=SimpleNamespace(lblRecordingStatus=status),
+        _set_auto_setup_busy=lambda busy: events.append(f"busy:{busy}"),
+        _load_hardware_state=lambda: events.append("load"),
+        _update_frame_gap_enabled=lambda: events.append("gap"),
+        _update_axis_ranges=lambda: events.append("axes"),
+        _on_auto_setup_finished=lambda: None,
+    )
+
+
+def test_auto_setup_finish_waits_for_thread_before_releasing_wrappers() -> None:
+    events: list[str] = []
+    thread = _ThreadProbe(events, exits=True)
+    controller = _auto_setup_finish_controller(thread, events)
+
+    ScopeController._on_auto_setup_finished(controller)  # type: ignore[arg-type]
+
+    assert events == ["wait:2000", "busy:False", "load", "gap", "axes", "delete"]
+    assert controller._auto_setup_thread is None
+    assert controller._auto_setup_worker is None
+    assert controller.ui.lblRecordingStatus.text == "Auto Setup failed: test failure"
+
+
+def test_auto_setup_finish_retries_without_releasing_live_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    thread = _ThreadProbe(events, exits=False)
+    controller = _auto_setup_finish_controller(thread, events)
+    retries: list[tuple[int, object]] = []
+    monkeypatch.setattr(
+        scope_controller_module,
+        "QTimer",
+        SimpleNamespace(singleShot=lambda delay, callback: retries.append((delay, callback))),
+    )
+
+    ScopeController._on_auto_setup_finished(controller)  # type: ignore[arg-type]
+
+    assert events == ["wait:2000"]
+    assert controller._auto_setup_thread is thread
+    assert controller._auto_setup_worker is not None
+    assert retries == [(100, controller._on_auto_setup_finished)]

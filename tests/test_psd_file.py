@@ -80,6 +80,24 @@ def test_hdf5_reader_honours_committed_rows_and_configuration_channel(
     assert [len(batch) for batch in batches] == [5, 5, 3]
 
 
+def test_earlier_three_field_hdf5_capture_remains_readable(tmp_path: Path) -> None:
+    path = tmp_path / "earlier-events.h5"
+    old_dtype = np.dtype(
+        [("timestamp", "<u8"), ("long_gate", "<u2"), ("short_gate", "<u2")]
+    )
+    events = np.zeros(3, dtype=old_dtype)
+    events["timestamp"] = [1, 2, 3]
+    events["long_gate"] = [100, 200, 300]
+    events["short_gate"] = [25, 50, 75]
+    with h5py.File(path, "w") as capture:
+        capture.attrs["format_version"] = 1
+        capture.create_dataset("events", data=events)
+
+    batches = list(iter_psd_event_batches(path))
+    assert inspect_psd_event_file(path).total_events == 3
+    np.testing.assert_array_equal(np.concatenate(batches)["long_gate"], [100, 200, 300])
+
+
 def test_native_hdf5_capture_feeds_psd_accumulator(tmp_path: Path) -> None:
     path = tmp_path / "native-events.h5"
     events = _events(100)

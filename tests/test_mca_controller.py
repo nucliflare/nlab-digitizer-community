@@ -8,6 +8,7 @@ import numpy as np
 import pyqtgraph as pg
 import pytest
 
+from nlab.controllers import mca_controller as mca_controller_module
 from nlab.controllers.mca_controller import MCAController
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaEventBuffer
 from nlab.hardware.digitizer.mca import MultiChannelAnalyzer
@@ -36,6 +37,19 @@ class _Backend:
         return self.enabled
 
 
+class _ThreadProbe:
+    def __init__(self, events: list[str], *, exits: bool = True) -> None:
+        self._events = events
+        self._exits = exits
+
+    def wait(self, timeout_ms: int) -> bool:
+        self._events.append(f"wait:{timeout_ms}")
+        return self._exits
+
+    def deleteLater(self) -> None:  # noqa: N802 - mirrors the Qt API
+        self._events.append("delete")
+
+
 def test_live_reconfiguration_stops_writes_and_restarts() -> None:
     backend = _Backend()
     mca = MultiChannelAnalyzer(backend)  # type: ignore[arg-type]
@@ -49,11 +63,14 @@ def test_live_reconfiguration_stops_writes_and_restarts() -> None:
 
 def test_dma_final_status_keeps_run_health_instead_of_stopped() -> None:
     label = Mock()
+    events: list[str] = []
+    thread = _ThreadProbe(events)
     controller = SimpleNamespace(
         _dma_summary=None,
         _dma_error=None,
         _dma_worker=object(),
-        _dma_thread=object(),
+        _dma_thread=thread,
+        _channel=0,
         ui=SimpleNamespace(lblDmaStatus=label),
         _finish_psd_capture=Mock(),
     )
@@ -74,6 +91,55 @@ def test_dma_final_status_keeps_run_health_instead_of_stopped() -> None:
 
     label.setText.assert_called_once_with("Verified: 2,048 records, 1,024/s avg")
     controller._finish_psd_capture.assert_called_once_with()
+    assert events == ["wait:2000", "delete"]
+    assert controller._dma_thread is None
+    assert controller._dma_worker is None
+
+
+def test_dma_finish_retries_without_releasing_live_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    thread = _ThreadProbe(events, exits=False)
+
+    def callback() -> None:
+        pass
+
+    controller = SimpleNamespace(
+        _dma_thread=thread,
+        _dma_worker=object(),
+        _channel=1,
+        _on_dma_finished=callback,
+    )
+    retries: list[tuple[int, object]] = []
+    monkeypatch.setattr(
+        mca_controller_module,
+        "QTimer",
+        SimpleNamespace(singleShot=lambda delay, target: retries.append((delay, target))),
+    )
+
+    MCAController._on_dma_finished(controller)  # type: ignore[arg-type]
+
+    assert events == ["wait:2000"]
+    assert controller._dma_thread is thread
+    assert controller._dma_worker is not None
+    assert retries == [(100, callback)]
+
+
+def test_polling_finish_waits_before_releasing_thread_wrappers() -> None:
+    events: list[str] = []
+    thread = _ThreadProbe(events)
+    controller = SimpleNamespace(
+        _worker_thread=thread,
+        _worker=object(),
+        _channel=0,
+    )
+
+    MCAController._on_worker_finished(controller)  # type: ignore[arg-type]
+
+    assert events == ["wait:2000", "delete"]
+    assert controller._worker_thread is None
+    assert controller._worker is None
 
 
 def test_live_reconfiguration_restarts_after_failed_write() -> None:

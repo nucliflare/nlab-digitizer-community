@@ -23,6 +23,7 @@ from typing import BinaryIO, Protocol
 import numpy as np
 import zmq
 
+from nlab.hardware.digitizer.iio_listmode import IIO_LM_EVENT_DTYPE, cfd_interpolation_ticks
 from nlab.hardware.digitizer.mca_capture import McaCaptureWriter, McaDmaOutputMode
 
 
@@ -77,7 +78,7 @@ IIO_LM_FRAME_RECORDS = 1024
 IIO_LM_RECORD_BYTES = 16
 IIO_LM_FRAME_BYTES = IIO_LM_FRAME_RECORDS * IIO_LM_RECORD_BYTES
 IIO_LM_KERNEL_BUFFER_COUNT = 8
-IIO_LM_CLIENT_SCHEMA = "vdpp-pulse-processor-event-v1"
+IIO_LM_CLIENT_SCHEMA = "vdpp-pulse-processor-event-v2"
 
 # Each raw scope DMA frame is prefixed with a per-frame timestamp: the first
 # 4 int16 slots (8 bytes) are a little-endian uint64, the remaining
@@ -102,17 +103,8 @@ _EVENT_DTYPE = np.dtype([
     ("timestamp", np.uint64),
 ])
 
-# vdpp-lm-frame.c v121: one unchanged 128-bit little-endian scan. This is
-# deliberately separate from _EVENT_DTYPE above: the first four bytes have
-# different field boundaries and semantics even though both records happen
-# to total 16 bytes.
-_LM_EVENT_DTYPE = np.dtype([
-    ("flags", "<u2"),
-    ("cfd_q2", "<u2"),
-    ("charge_energy", "<u2"),
-    ("trapezoid_energy", "<u2"),
-    ("timestamp", "<u8"),
-])
+# Preserve the historical private name for callers of the NDMA v2 reader.
+_LM_EVENT_DTYPE = IIO_LM_EVENT_DTYPE
 
 
 class McaEventBuffer:
@@ -805,8 +797,13 @@ class IIOMcaDmaStreamer:
 
     @staticmethod
     def compute_cfd_time(events: np.ndarray) -> np.ndarray:
-        """Convert the Q2 CFD field to its physical legacy value."""
-        return events["cfd_q2"].astype(np.float64) / 4.0
+        """Return the selected CFD interpolation term in 8 ns ticks.
+
+        The origin of the copied coarse timestamp is not established by the
+        supplied HLS stage. This result must not be treated as an absolute
+        event time until that upstream relationship is validated.
+        """
+        return cfd_interpolation_ticks(events)
 
 
 class McaDmaStreamer:

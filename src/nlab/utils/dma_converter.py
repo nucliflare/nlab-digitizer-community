@@ -17,11 +17,13 @@ from nlab.hardware.digitizer.dma import (
     FILE_HEADER_STRUCT,
     FILE_MAGIC,
     FILE_VERSION,
+    IIO_LM_CLIENT_SCHEMA,
     IIO_LM_FILE_VERSION,
     IIO_LM_FRAME_BYTES,
     IIO_LM_FRAME_RECORDS,
     SCOPE_TIMESTAMP_WORDS,
 )
+from nlab.hardware.digitizer.iio_listmode import cfd_interpolation_ticks, cfd_valid
 
 log = logging.getLogger(__name__)
 
@@ -183,9 +185,12 @@ def convert_listmode(src: Path, dst: Path) -> int:
             )
             h5.create_dataset("psd_zc", data=psd_zc, compression="gzip", compression_opts=4)
         else:
+            h5.attrs["client_record_schema"] = IIO_LM_CLIENT_SCHEMA
             ds.attrs["fields"] = (
-                "flags, cfd_q2, charge_energy, trapezoid_energy, timestamp"
+                "marker, zc_offset, zc_estimation, charge_energy, "
+                "trapezoid_energy, timestamp"
             )
+            ds.attrs["zc_estimation_format"] = "signed Q2.14, 8 ns sample fraction"
             h5.create_dataset(
                 "charge_energy",
                 data=events["charge_energy"],
@@ -198,9 +203,19 @@ def convert_listmode(src: Path, dst: Path) -> int:
                 compression="gzip",
                 compression_opts=4,
             )
-            cfd_time = events["cfd_q2"].astype(np.float64) / 4.0
+            cfd_interpolation = h5.create_dataset(
+                "cfd_interpolation_ticks",
+                data=cfd_interpolation_ticks(events),
+                compression="gzip",
+                compression_opts=4,
+            )
+            cfd_interpolation.attrs["unit"] = "8 ns sample ticks"
+            cfd_interpolation.attrs["meaning"] = (
+                "signed CFD interpolation term only; offset and timestamp "
+                "origin are unknown, so this is not an absolute event timestamp"
+            )
             h5.create_dataset(
-                "cfd_time", data=cfd_time, compression="gzip", compression_opts=4,
+                "cfd_valid", data=cfd_valid(events), compression="gzip", compression_opts=4,
             )
 
     log.info("Converted %d listmode events: %s -> %s", n_events, src, dst)

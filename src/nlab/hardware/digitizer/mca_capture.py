@@ -115,6 +115,9 @@ _CANONICAL_EVENT_DTYPE = np.dtype(
         ("timestamp", "<u8"),
         ("long_gate", "<u2"),
         ("short_gate", "<u2"),
+        ("marker", "u1"),
+        ("zc_offset", "u1"),
+        ("zc_estimation", "<i2"),
     ]
 )
 _WRITER_QUEUE_BATCHES = 32
@@ -135,6 +138,14 @@ def _canonical_events(events: np.ndarray) -> np.ndarray:
         converted["short_gate"] = events["charge_energy"]
     else:
         raise ValueError(f"unsupported MCA event fields: {', '.join(names)}")
+    if {"marker", "zc_offset", "zc_estimation"}.issubset(names):
+        converted["marker"] = events["marker"]
+        converted["zc_offset"] = events["zc_offset"]
+        converted["zc_estimation"] = events["zc_estimation"].view(np.int16)
+    else:
+        converted["marker"] = 0
+        converted["zc_offset"] = 0
+        converted["zc_estimation"] = 0
     return converted
 
 
@@ -211,10 +222,11 @@ class _Hdf5Sink(_BufferedStructuredSink):
         )
         self._events.attrs["timestamp_unit"] = "8 ns ticks"
         self._events.attrs["gate_unit"] = "raw uint16"
+        self._events.attrs["zc_estimation_format"] = "signed Q2.14; relative, not absolute time"
         self._committed = self._file.create_dataset("committed_events", data=np.uint64(0))
         self._complete = self._file.create_dataset("capture_complete", data=np.bool_(False))
         self._file.attrs["format"] = "nlab-mca-listmode"
-        self._file.attrs["format_version"] = 1
+        self._file.attrs["format_version"] = 2
         self._file.swmr_mode = True
         self._count = 0
 
@@ -252,11 +264,19 @@ class _RootSink(_BufferedStructuredSink):
         self._file["configuration_yaml"] = configuration_yaml
         self._file["event_schema"] = (
             '{"timestamp":"uint64, 8 ns ticks","long_gate":"uint16, raw",'
-            '"short_gate":"uint16, raw"}'
+            '"short_gate":"uint16, raw","marker":"uint8",'
+            '"zc_offset":"uint8, raw","zc_estimation":"int16, signed Q2.14"}'
         )
         self._tree = self._file.mktree(
             "events",
-            {"timestamp": "uint64", "long_gate": "uint16", "short_gate": "uint16"},
+            {
+                "timestamp": "uint64",
+                "long_gate": "uint16",
+                "short_gate": "uint16",
+                "marker": "uint8",
+                "zc_offset": "uint8",
+                "zc_estimation": "int16",
+            },
             title="NLab MCA list-mode events",
         )
 
@@ -266,6 +286,9 @@ class _RootSink(_BufferedStructuredSink):
                 "timestamp": events["timestamp"],
                 "long_gate": events["long_gate"],
                 "short_gate": events["short_gate"],
+                "marker": events["marker"],
+                "zc_offset": events["zc_offset"],
+                "zc_estimation": events["zc_estimation"],
             }
         )
 

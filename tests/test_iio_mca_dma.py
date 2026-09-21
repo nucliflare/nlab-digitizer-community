@@ -33,13 +33,37 @@ from nlab.hardware.digitizer.dma import (
     IIOMcaDmaStreamer,
     McaEventBuffer,
 )
+from nlab.hardware.digitizer.iio_listmode import cfd_interpolation_ticks
 from nlab.utils.dma_converter import convert_listmode, read_file_header
+
+
+def test_iio_event_bytes_match_zero_crossing_hls_output_layout() -> None:
+    raw = bytes.fromhex("82 fd 00 c0 34 12 78 56 08 07 06 05 04 03 02 01")
+    events = np.frombuffer(raw, dtype=_LM_EVENT_DTYPE)
+
+    assert _LM_EVENT_DTYPE.itemsize == 16
+    assert {name: field[1] for name, field in _LM_EVENT_DTYPE.fields.items()} == {
+        "marker": 0,
+        "zc_offset": 1,
+        "zc_estimation": 2,
+        "charge_energy": 4,
+        "trapezoid_energy": 6,
+        "timestamp": 8,
+    }
+    assert events["marker"][0] == 0x82
+    assert events["zc_offset"][0] == 0xFD
+    assert events["zc_estimation"][0] == -16384
+    assert events["charge_energy"][0] == 0x1234
+    assert events["trapezoid_energy"][0] == 0x5678
+    assert events["timestamp"][0] == 0x0102030405060708
+    np.testing.assert_array_equal(cfd_interpolation_ticks(events), [-1.0])
 
 
 def _frame(seed: int) -> np.ndarray:
     events = np.zeros(1024, dtype=_LM_EVENT_DTYPE)
-    events["flags"] = seed
-    events["cfd_q2"] = 4 * seed
+    events["marker"] = 0x82
+    events["zc_offset"] = seed
+    events["zc_estimation"] = -4096 * seed
     events["charge_energy"] = 100 + seed
     events["trapezoid_energy"] = 200 + seed
     events["timestamp"] = np.arange(1024, dtype=np.uint64) + 1000 * seed
@@ -120,14 +144,15 @@ class _FakeCloseErrorBackend(_FakeBackend):
         raise RuntimeError("synthetic close failure")
 
 
-def test_iio_event_dtype_matches_v121_layout() -> None:
+def test_iio_event_dtype_matches_supplied_hls_output_layout() -> None:
     assert _LM_EVENT_DTYPE == _BACKEND_LM_EVENT_DTYPE
     assert _LM_EVENT_DTYPE.itemsize == 16
     fields = _LM_EVENT_DTYPE.fields
     assert fields is not None
     assert {name: info[1] for name, info in fields.items()} == {
-        "flags": 0,
-        "cfd_q2": 2,
+        "marker": 0,
+        "zc_offset": 1,
+        "zc_estimation": 2,
         "charge_energy": 4,
         "trapezoid_energy": 6,
         "timestamp": 8,
@@ -456,7 +481,11 @@ def test_converter_understands_iio_listmode_version(tmp_path: Path) -> None:
         np.testing.assert_array_equal(
             h5["trapezoid_energy"][:1024], backend.first["trapezoid_energy"]
         )
-        np.testing.assert_allclose(h5["cfd_time"][:1024], backend.first["cfd_q2"] / 4.0)
+        np.testing.assert_allclose(h5["cfd_interpolation_ticks"][:1024], -0.25)
+        np.testing.assert_array_equal(h5["cfd_valid"][:1024], True)
+        assert h5["events"].attrs["zc_estimation_format"] == (
+            "signed Q2.14, 8 ns sample fraction"
+        )
 
 
 def test_converter_rejects_partial_iio_listmode_frame(tmp_path: Path) -> None:

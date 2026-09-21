@@ -101,15 +101,25 @@ with h5py.File(FILENAME, "r") as f:
         energy_raw = f["energy"][:]
         psd_zc_raw = f["psd_zc"][:]
         charge_energy_raw = None
-        cfd_time_raw = None
+        cfd_interpolation_raw = None
     elif format_version == 2:
-        schema_name = "IIO opaque[16] / deployed event decoder"
+        iio_fields = set(events_raw.dtype.names or ())
+        current_iio_layout = {"marker", "zc_offset", "zc_estimation"}.issubset(iio_fields)
+        schema_name = (
+            "IIO opaque[16] / zero-crossing output layout"
+            if current_iio_layout
+            else "IIO opaque[16] / earlier client interpretation"
+        )
         if ENERGY_FIELD not in {"charge_energy", "trapezoid_energy"}:
             raise ValueError(f"Unsupported ENERGY_FIELD: {ENERGY_FIELD}")
         energy_raw = f[ENERGY_FIELD][:]
         charge_energy_raw = f["charge_energy"][:]
         trapezoid_energy_raw = f["trapezoid_energy"][:]
-        cfd_time_raw = f["cfd_time"][:]
+        cfd_interpolation_raw = (
+            f["cfd_interpolation_ticks"][:]
+            if "cfd_interpolation_ticks" in f
+            else None
+        )
         psd_zc_raw = None
     else:
         raise ValueError(f"Unsupported list-mode format version: {format_version}")
@@ -155,7 +165,11 @@ charge_energy = (
 trapezoid_energy = (
     None if format_version == 1 else trapezoid_energy_raw[:analysis_stop]
 )
-cfd_time = None if cfd_time_raw is None else cfd_time_raw[:analysis_stop]
+cfd_interpolation = (
+    None
+    if cfd_interpolation_raw is None
+    else cfd_interpolation_raw[:analysis_stop]
+)
 event_count = len(events)
 
 if ENERGY_RIGHT_SHIFT == "auto":
@@ -260,20 +274,37 @@ if event_count:
         )
         print(f"Markers: unique={np.unique(events['marker'])}")
     else:
-        assert charge_energy is not None and cfd_time is not None
+        assert charge_energy is not None
         print(
             f"Charge-comparison energy: min={charge_energy.min()}, "
             f"max={charge_energy.max()}, mean={charge_energy.mean():.1f}, "
             f"std={charge_energy.std():.1f}"
         )
-        print(
-            f"CFD time: min={cfd_time.min():.2f}, max={cfd_time.max():.2f}, "
-            f"mean={cfd_time.mean():.2f}"
-        )
-        print(
-            "Flags: unique="
-            + str([f"0x{value:04x}" for value in np.unique(events["flags"])])
-        )
+        if current_iio_layout:
+            print(
+                "Markers: unique="
+                + str([f"0x{value:02x}" for value in np.unique(events["marker"])])
+            )
+            valid_cfd = (
+                ((events["marker"] & 0x02) != 0)
+                & ((events["marker"] & 0x08) == 0)
+            )
+            print(f"CFD zero-crossing results selected: {np.count_nonzero(valid_cfd)}")
+            if cfd_interpolation is not None and np.any(np.isfinite(cfd_interpolation)):
+                relative = cfd_interpolation[np.isfinite(cfd_interpolation)]
+                print(
+                    "CFD interpolation term [8 ns ticks; "
+                    "not an absolute timestamp]: "
+                    f"min={relative.min():.2f}, max={relative.max():.2f}, "
+                    f"mean={relative.mean():.2f}"
+                )
+        else:
+            print(
+                "Earlier converted IIO file uses the superseded flags/CFD "
+                "interpretation. Reconvert the original NDMA file to inspect "
+                "zero-crossing fields; do not treat stored CFD time as an "
+                "absolute event timestamp."
+            )
 else:
     timestamp_ticks = np.empty(0, dtype=np.uint64)
     timestamps_s = np.empty(0, dtype=np.float64)
