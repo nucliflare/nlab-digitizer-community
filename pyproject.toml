@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nlab"
-version = "0.3.2"
+version = "0.4.0"
 description = "Device communication and measurement GUI application"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -72,7 +72,7 @@ strict = true
 ignore_missing_imports = true
 
 [tool.bumpversion]
-current_version = "0.3.2"
+current_version = "0.4.0"
 commit = true
 tag = true
 tag_name = "v{new_version}"
