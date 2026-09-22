@@ -34,6 +34,7 @@ from nlab.analysis.energy_calibration import (
     SpectrumSnapshot,
     fit_energy_calibration,
 )
+from nlab.views.plot_viewbox import ModifierZoomViewBox
 
 if TYPE_CHECKING:
     from nlab.controllers.mca_controller import MCAController
@@ -121,7 +122,7 @@ class EnergyCalibrationDialog(QDialog):
         root.addLayout(source_row)
 
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        self.plot = pg.PlotWidget(self)
+        self.plot = pg.PlotWidget(self, viewBox=ModifierZoomViewBox())
         self.plot.setBackground("#f8f9fa")
         self.plot.setLabel("bottom", "MCA channel")
         self.plot.setLabel("left", "Counts")

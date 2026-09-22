@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Standalone waveform-analysis workbench under Tools with memory-mapped NLab
+  Scope NDMA and waveform-bearing CAEN browsing, robust per-event baseline
+  removal, automatic/manual polarity normalization, draggable nested
+  short/long integration gates, vectorized bounded-memory waveform batches,
+  configurable PSD matrix geometry and event subsampling, linked projections,
+  and stored-versus-recomputed CAEN gate comparison. Fixed-frame NDMA analysis
+  uses zero-copy 32,768-event views; CAEN uses dynamically bounded rectangular
+  batches for its variable-length records.
+- Standalone PSD event-readback workbench under Tools for chunked NDMA, CAEN,
+  HDF5, and ROOT analysis. Offline files no longer replace live Scope or PSD
+  measurement displays.
+- Compact PSD-readback controls and a larger waveform setup plot. Optional
+  gate-drag auto-recalculation uses a debounced every-twentieth-event preview,
+  cancels stale work, and queues a full-resolution result on marker release.
+  The waveform workbench now starts with the full -1 to 1 PSD-ratio range and
+  fits its complete PSD matrix and projections within the available desktop.
 - Coincidence energy-matrix workspace with a fixed 512x512 prompt matrix,
   equal-width delayed-random sidebands, scaled background subtraction,
   linear and signed-log pyqtgraph rendering, calibrated secondary axes,
@@ -26,6 +42,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PSD import for strictly validated headerless 24-byte CAEN single-channel
   extraction files, with bounded-memory iteration and full reserved-field and
   channel validation.
+
+### Fixed
+
+- MCA peak-fit worker failures are now shown in a modal error message as well
+  as in the workbench status labels and application log.
+- MCA peak-result column labels now use a compact two-line header and smaller
+  header font so all seven labels remain readable in the default results pane.
+- All waveform, spectrum, histogram, PSD matrix, residual, and projection plots
+  now consistently support Shift+wheel horizontal-only zoom and Ctrl+wheel
+  vertical-only zoom while retaining normal two-axis wheel zoom.
+- Auto range on live PSD, offline PSD, and coincidence two-dimensional
+  histograms now fits the image bounds without pyqtgraph's empty border.
 
 ---
 

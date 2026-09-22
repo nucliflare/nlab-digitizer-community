@@ -292,38 +292,10 @@ class MainAppWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_open_psd_events(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open PSD Event File",
-            str(QSettings().value(_KEY_DMA_FOLDER, "measurements")),
-            (
-                "PSD event files (*.bin *.h5 *.hdf5 *.root);;"
-                "Binary event files (*.bin);;HDF5 (*.h5 *.hdf5);;ROOT (*.root);;"
-                "All files (*)"
-            ),
-        )
-        if not path:
-            return
-        try:
-            self._controller.load_psd_events(Path(path))
-        except Exception as exc:
-            logging.getLogger(__name__).exception("Failed to open PSD event file")
-            QMessageBox.critical(self, "PSD File Load Failed", str(exc))
+        self._controller.show_psd_event_readback()
 
     def _on_open_waveform_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open Waveform File",
-            str(QSettings().value(_KEY_DMA_FOLDER, "measurements")),
-            "Waveform binaries (*.bin *.BIN);;All files (*)",
-        )
-        if not path:
-            return
-        try:
-            self._controller.load_waveform_file(Path(path))
-        except Exception as exc:
-            logging.getLogger(__name__).exception("Failed to open waveform file")
-            QMessageBox.critical(self, "Waveform File Load Failed", str(exc))
+        self._controller.show_waveform_analysis()
 
     def _on_validate_timing(self) -> None:
         TimingValidationDialog(self).exec()

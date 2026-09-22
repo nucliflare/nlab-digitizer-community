@@ -5,6 +5,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import pytest
+from pytestqt.qtbot import QtBot
 
 from nlab.analysis import psd_file
 from nlab.analysis.psd import PsdAccumulator
@@ -16,6 +17,7 @@ from nlab.hardware.digitizer.dma import (
     IIO_LM_FILE_VERSION,
 )
 from nlab.hardware.digitizer.mca_capture import McaCaptureWriter, McaDmaOutputMode
+from nlab.views.psd_readback_dialog import PsdReadbackDialog
 
 
 def _events(count: int) -> np.ndarray:
@@ -116,6 +118,24 @@ def test_native_hdf5_capture_feeds_psd_accumulator(tmp_path: Path) -> None:
 
     assert accumulator.statistics.received == 100
     assert accumulator.statistics.accepted == 100
+
+
+def test_standalone_psd_readback_loads_hdf5(
+    tmp_path: Path,
+    qtbot: QtBot,
+) -> None:
+    path = tmp_path / "readback.h5"
+    events = _events(10)
+    with h5py.File(path, "w") as file:
+        file.create_dataset("events", data=events)
+    dialog = PsdReadbackDialog()
+    qtbot.addWidget(dialog)
+
+    dialog.open_path(path)
+    qtbot.waitUntil(lambda: dialog._thread is None, timeout=5000)
+
+    assert int(dialog.plot._matrix.sum()) == 10
+    assert "Loaded 10 events" in dialog.status.text()
 
 
 def test_root_reader_iterates_tree_and_feeds_psd_accumulator(tmp_path: Path) -> None:

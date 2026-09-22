@@ -40,6 +40,7 @@ def test_bottom_histogram_hover_l_toggles_log_and_all_plots_use_modifier_zoom(
 
     for widget in (controller.ui.plotPsd, controller.ui.plotRatio, controller.ui.plotEnergy):
         assert isinstance(widget.getViewBox(), ModifierZoomViewBox)
+    assert controller.ui.plotPsd.getViewBox().state["defaultPadding"] == 0.0
 
     controller.ui.plotEnergy.underMouse = lambda: True
     key = QKeyEvent(

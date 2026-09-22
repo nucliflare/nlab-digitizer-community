@@ -53,38 +53,42 @@ def test_startup_reports_connection_and_view_progress(monkeypatch: pytest.Monkey
     ]
 
 
-def test_waveform_file_routes_to_matching_scope_panel(
+def test_waveform_file_opens_standalone_workbench(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _bare_controller()
-    scope_0 = SimpleNamespace(channel=0, open_waveform_file=Mock())
-    scope_1 = SimpleNamespace(channel=1, open_waveform_file=Mock())
-    controller._scope_controllers = [scope_0, scope_1]
-    controller._scope_dock_host = SimpleNamespace(findChildren=Mock(return_value=[]))
-    tab_scope = object()
-    controller._window = SimpleNamespace(
-        ui=SimpleNamespace(
-            mainTabs=SimpleNamespace(setCurrentWidget=Mock()),
-            tabScope=tab_scope,
-        )
-    )
+    controller._window = object()
+    controller._waveform_analysis_dialog = None
     path = Path("channel-1.bin")
-    monkeypatch.setattr(
-        main_window_module,
-        "inspect_waveform_file",
-        Mock(
-            return_value=SimpleNamespace(
-                channel=1,
-                format_name="NLab scope NDMA",
-            )
-        ),
-    )
+    dialog = SimpleNamespace(show_workspace=Mock(), open_path=Mock())
+    factory = Mock(return_value=dialog)
+    monkeypatch.setattr(main_window_module, "WaveformAnalysisDialog", factory)
 
     controller.load_waveform_file(path)
+    controller.show_waveform_analysis()
 
-    scope_0.open_waveform_file.assert_not_called()
-    scope_1.open_waveform_file.assert_called_once_with(path)
-    controller._window.ui.mainTabs.setCurrentWidget.assert_called_once_with(tab_scope)
+    factory.assert_called_once_with(parent=controller._window)
+    assert dialog.show_workspace.call_count == 2
+    dialog.open_path.assert_called_once_with(path)
+
+
+def test_psd_file_opens_standalone_readback_workbench(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _bare_controller()
+    controller._window = object()
+    controller._psd_readback_dialog = None
+    path = Path("events.h5")
+    dialog = SimpleNamespace(show_workspace=Mock(), open_path=Mock())
+    factory = Mock(return_value=dialog)
+    monkeypatch.setattr(main_window_module, "PsdReadbackDialog", factory)
+
+    controller.load_psd_events(path)
+    controller.show_psd_event_readback()
+
+    factory.assert_called_once_with(parent=controller._window)
+    assert dialog.show_workspace.call_count == 2
+    dialog.open_path.assert_called_once_with(path)
 
 
 def _bare_controller(*, backend: str = "iio") -> MainWindowController:
