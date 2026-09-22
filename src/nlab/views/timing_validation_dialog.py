@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from nlab.analysis.timing_validation import TimingValidationResult
+from nlab.views.plot_viewbox import ModifierZoomViewBox
 from nlab.workers.timing_validation_worker import TimingValidationWorker
 
 _FILE_FILTER = "NLab MCA events (*.bin *.h5 *.hdf5 *.root);;All files (*)"
@@ -87,7 +88,7 @@ class TimingValidationDialog(QDialog):
         self.status.setWordWrap(True)
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.status)
-        self.plot = pg.PlotWidget(self)
+        self.plot = pg.PlotWidget(self, viewBox=ModifierZoomViewBox())
         self.plot.setLabel("bottom", "Nearest B − A delay", units="ns")
         self.plot.setLabel("left", "Sampled A events")
         self.plot.showGrid(x=True, y=True, alpha=0.2)

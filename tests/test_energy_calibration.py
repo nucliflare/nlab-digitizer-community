@@ -15,6 +15,7 @@ from nlab.analysis.energy_calibration import (
 )
 from nlab.ui.ui_main_window import Ui_MainWindow
 from nlab.views.energy_calibration_dialog import EnergyCalibrationDialog
+from nlab.views.plot_viewbox import ModifierZoomViewBox
 
 
 def test_linear_calibration_uses_all_points_and_round_trips() -> None:
@@ -129,6 +130,15 @@ def test_dialog_keeps_points_when_a_new_source_spectrum_is_overlaid(qtbot: QtBot
     dialog._apply()
     assert controller.energy_calibration is not None
     assert len(controller.energy_calibration.points) == 2
+    dialog.close_without_prompt()
+
+
+def test_energy_calibration_spectrum_uses_modifier_zoom(qtbot: QtBot) -> None:
+    controller = _FakeMcaController(0, _snapshot("Cs-137", 5))
+    dialog = EnergyCalibrationDialog([controller])  # type: ignore[list-item]
+    qtbot.addWidget(dialog)
+
+    assert isinstance(dialog.plot.getViewBox(), ModifierZoomViewBox)
     dialog.close_without_prompt()
 
 

@@ -6,10 +6,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QByteArray, QSettings, Qt, QThread, QThreadPool
-from PySide6.QtWidgets import QDockWidget, QInputDialog, QMainWindow, QWidget
+from PySide6.QtWidgets import QDockWidget, QMainWindow, QWidget
 
-from nlab.analysis.psd_file import inspect_psd_event_file
-from nlab.analysis.waveform_file import inspect_waveform_file
 from nlab.controllers.coincidence_controller import CoincidenceController
 from nlab.controllers.external_device_controller import ExternalDeviceController
 from nlab.controllers.global_controller import GlobalController
@@ -22,7 +20,8 @@ from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaEventBuffer
 from nlab.hardware.modbus_devices import ExternalDevices
 from nlab.views.energy_calibration_dialog import EnergyCalibrationDialog
 from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
-from nlab.workers.psd_file_worker import PsdFileWorker
+from nlab.views.psd_readback_dialog import PsdReadbackDialog
+from nlab.views.waveform_analysis_dialog import WaveformAnalysisDialog
 
 if TYPE_CHECKING:
     from nlab.app import MainAppWindow
@@ -72,10 +71,10 @@ class MainWindowController:
         self._coincidence_controller: CoincidenceController | None = None
         self._energy_calibration_dialog: EnergyCalibrationDialog | None = None
         self._mca_peak_analysis_dialog: McaPeakAnalysisDialog | None = None
+        self._psd_readback_dialog: PsdReadbackDialog | None = None
+        self._waveform_analysis_dialog: WaveformAnalysisDialog | None = None
         self._external_devices = ExternalDevices()
         self._thread: QThread | None = None
-        self._psd_file_thread: QThread | None = None
-        self._psd_file_worker: PsdFileWorker | None = None
 
         self._scope_dock_host = self._make_dock_host()
         self._mca_dock_host = self._make_dock_host()
@@ -470,127 +469,29 @@ class MainWindowController:
             )
         self._mca_peak_analysis_dialog.show_workspace()
 
+    def show_psd_event_readback(self, path: Path | None = None) -> None:
+        """Open the hardware-independent saved-event PSD workbench."""
+        if self._psd_readback_dialog is None:
+            self._psd_readback_dialog = PsdReadbackDialog(parent=self._window)
+        self._psd_readback_dialog.show_workspace()
+        if path is not None:
+            self._psd_readback_dialog.open_path(path)
+
+    def show_waveform_analysis(self, path: Path | None = None) -> None:
+        """Open the waveform browser and offline PSD reconstruction workbench."""
+        if self._waveform_analysis_dialog is None:
+            self._waveform_analysis_dialog = WaveformAnalysisDialog(parent=self._window)
+        self._waveform_analysis_dialog.show_workspace()
+        if path is not None:
+            self._waveform_analysis_dialog.open_path(path)
+
     def load_psd_events(self, path: Path) -> None:
-        """Reconstruct one PSD view from a saved event file off the GUI thread."""
-        if self._psd_file_thread is not None:
-            raise RuntimeError("A PSD event file is already being processed")
-        if not self._psd_controllers:
-            raise RuntimeError("No PSD channel is available for displaying this file")
-
-        info = inspect_psd_event_file(path)
-        target = next(
-            (ctrl for ctrl in self._psd_controllers if ctrl.channel == info.channel),
-            None,
-        )
-        if target is None and len(self._psd_controllers) == 1:
-            target = self._psd_controllers[0]
-        if target is None:
-            choices = [f"PSD channel {ctrl.channel}" for ctrl in self._psd_controllers]
-            selected, accepted = QInputDialog.getItem(
-                self._window,
-                "Select PSD Display",
-                f"Source channel {info.channel!r} has no matching display. Load into:",
-                choices,
-                0,
-                False,
-            )
-            if not accepted:
-                return
-            target = self._psd_controllers[choices.index(selected)]
-
-        energy_bins, ratio_bins, energy_right_shift, ratio_range = (
-            target.file_analysis_settings()
-        )
-        worker = PsdFileWorker(
-            info,
-            energy_bins=energy_bins,
-            ratio_bins=ratio_bins,
-            energy_right_shift=energy_right_shift,
-            ratio_range=ratio_range,
-        )
-        thread = QThread()
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress.connect(target.update_file_load_progress)
-        worker.loaded.connect(target.finish_file_load)
-        worker.cancelled.connect(target.cancel_file_load)
-        worker.error.connect(target.fail_file_load)
-        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._on_psd_file_thread_finished)
-        target.begin_file_load(path)
-        self._psd_file_worker = worker
-        self._psd_file_thread = thread
-
-        self._window.ui.mainTabs.setCurrentWidget(self._window.ui.tabPSD)
-        for dock in self._psd_dock_host.findChildren(QDockWidget):
-            if dock.widget() is target:
-                dock.raise_()
-                break
-        thread.start()
-        log.info(
-            "PSD file load started: %s (%s, %d events, channel=%s)",
-            path,
-            info.format_name,
-            info.total_events,
-            info.channel,
-        )
+        """Compatibility wrapper opening the standalone PSD readback tool."""
+        self.show_psd_event_readback(path)
 
     def load_waveform_file(self, path: Path) -> None:
-        """Route a CAEN or NLab DMA waveform file to a Scope panel."""
-        if not self._scope_controllers:
-            raise RuntimeError("No Scope channel is available for displaying this file")
-        info = inspect_waveform_file(path)
-        target = next(
-            (ctrl for ctrl in self._scope_controllers if ctrl.channel == info.channel),
-            None,
-        )
-        if target is None and len(self._scope_controllers) == 1:
-            target = self._scope_controllers[0]
-        if target is None:
-            choices = [f"Scope channel {ctrl.channel}" for ctrl in self._scope_controllers]
-            selected, accepted = QInputDialog.getItem(
-                self._window,
-                "Select Scope Display",
-                f"Source channel {info.channel} has no matching display. Load into:",
-                choices,
-                0,
-                False,
-            )
-            if not accepted:
-                return
-            target = self._scope_controllers[choices.index(selected)]
-
-        target.open_waveform_file(path)
-        self._window.ui.mainTabs.setCurrentWidget(self._window.ui.tabScope)
-        for dock in self._scope_dock_host.findChildren(QDockWidget):
-            if dock.widget() is target:
-                dock.raise_()
-                break
-        log.info(
-            "Waveform file load started: %s (%s, source channel=%d, display channel=%d)",
-            path,
-            info.format_name,
-            info.channel,
-            target.channel,
-        )
-
-    def _on_psd_file_thread_finished(self) -> None:
-        self._psd_file_worker = None
-        self._psd_file_thread = None
-
-    def _stop_psd_file_load_sync(self) -> None:
-        worker = getattr(self, "_psd_file_worker", None)
-        thread = getattr(self, "_psd_file_thread", None)
-        if worker is not None:
-            worker.stop()
-        if thread is not None and not thread.wait(3000):
-            log.warning("PSD file worker did not stop in time, terminating")
-            thread.terminate()
-            thread.wait()
-        self._psd_file_worker = None
-        self._psd_file_thread = None
+        """Compatibility wrapper opening the standalone waveform workbench."""
+        self.show_waveform_analysis(path)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -625,8 +526,6 @@ class MainWindowController:
             ctrl.request_monitor_stop()
         for ctrl in self._external_controllers:
             ctrl.request_polling_stop()
-        if worker := getattr(self, "_psd_file_worker", None):
-            worker.stop()
 
         if self._global_controller is not None:
             self._global_controller.disarm_sync()
@@ -648,8 +547,6 @@ class MainWindowController:
 
         if coincidence is not None:
             coincidence.finish_shutdown_sync()
-
-        self._stop_psd_file_load_sync()
 
         # PSD timers consume only already-decoded display batches. Stop them
         # after MCA DMA tail drain has completed.
@@ -688,6 +585,12 @@ class MainWindowController:
         if self._mca_peak_analysis_dialog is not None:
             self._mca_peak_analysis_dialog.close_without_prompt()
             self._mca_peak_analysis_dialog = None
+        if self._psd_readback_dialog is not None:
+            self._psd_readback_dialog.close_without_prompt()
+            self._psd_readback_dialog = None
+        if self._waveform_analysis_dialog is not None:
+            self._waveform_analysis_dialog.close_without_prompt()
+            self._waveform_analysis_dialog = None
         self._save_dock_state()
         for ctrl in self._scope_controllers:
             ctrl.save_display_settings()

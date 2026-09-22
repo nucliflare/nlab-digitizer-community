@@ -6,12 +6,13 @@ from dataclasses import dataclass
 
 import numpy as np
 import pytest
-from PySide6.QtWidgets import QMainWindow
+from PySide6.QtWidgets import QMainWindow, QMessageBox
 from pytestqt.qtbot import QtBot
 
 from nlab.analysis.energy_calibration import EnergyCalibration, SpectrumSnapshot
 from nlab.ui.ui_main_window import Ui_MainWindow
 from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
+from nlab.views.plot_viewbox import ModifierZoomViewBox
 
 
 @dataclass
@@ -114,6 +115,61 @@ def test_workbench_runs_peak_fit_off_the_gui_thread(qtbot: QtBot) -> None:
     assert result.statistic == "poisson"
     assert dialog.peak_table.rowCount() == 1
     assert dialog.export_fit_button.isEnabled()
+    dialog.close_without_prompt()
+
+
+def test_peak_fit_failure_is_shown_in_status_and_message_box(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dialog = McaPeakAnalysisDialog(  # type: ignore[list-item]
+        [_FakeMcaController(0, _photopeak())]
+    )
+    qtbot.addWidget(dialog)
+    messages: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _parent, title, message: messages.append((title, message)),
+    )
+
+    dialog._fit_failed("peak centres must fall inside the fit range")
+
+    assert dialog.fit_status.text() == (
+        "Fit failed: peak centres must fall inside the fit range"
+    )
+    assert dialog.workbench_status.text() == (
+        "Peak fit failed: peak centres must fall inside the fit range"
+    )
+    assert messages == [
+        ("Peak Fit Failed", "peak centres must fall inside the fit range")
+    ]
+    dialog.close_without_prompt()
+
+
+def test_peak_results_header_fits_compact_results_panel(qtbot: QtBot) -> None:
+    dialog = McaPeakAnalysisDialog(  # type: ignore[list-item]
+        [_FakeMcaController(0, _photopeak())]
+    )
+    qtbot.addWidget(dialog)
+
+    header = dialog.peak_table.horizontalHeader()
+    assert header.font().pointSizeF() < dialog.peak_table.font().pointSizeF()
+    assert dialog.peak_table.horizontalHeaderItem(2).text() == "E\n(keV)"
+    assert dialog.peak_table.horizontalHeaderItem(5).text() == "Res.\n(%)"
+    assert dialog.peak_table.horizontalHeaderItem(6).text() == "Centre\nSE"
+    assert dialog.peak_table.horizontalHeaderItem(5).toolTip()
+    dialog.close_without_prompt()
+
+
+def test_peak_spectrum_and_residual_use_modifier_zoom(qtbot: QtBot) -> None:
+    dialog = McaPeakAnalysisDialog(  # type: ignore[list-item]
+        [_FakeMcaController(0, _photopeak())]
+    )
+    qtbot.addWidget(dialog)
+
+    assert isinstance(dialog.spectrum_plot.getViewBox(), ModifierZoomViewBox)
+    assert isinstance(dialog.residual_plot.getViewBox(), ModifierZoomViewBox)
     dialog.close_without_prompt()
 
 

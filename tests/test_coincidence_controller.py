@@ -18,6 +18,7 @@ from nlab.controllers.mca_controller import MCAController
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer
 from nlab.hardware.digitizer.iio_listmode import TIME_Q_PER_NS, VDPP_ZC_CALC_SCHEMA
 from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
+from nlab.views.plot_viewbox import ModifierZoomViewBox
 
 
 class _Sync:
@@ -256,6 +257,25 @@ def test_matrix_tab_renders_log_corrected_counts_and_interactive_projections(
     assert controller.matrix_projection0_curve.xData[[0, -1]].tolist() == [0, 16_384]
     assert controller.btnExportMatrix.isEnabled()
     assert "random scale 0.5" in controller.matrix_status.text()
+
+
+def test_all_coincidence_plots_use_independent_axis_modifier_zoom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _make_controller(monkeypatch)
+
+    plots = (
+        controller.delay_plot,
+        controller.energy_plot0,
+        controller.energy_plot1,
+        controller.matrix_plot,
+        controller.matrix_projection0_plot,
+        controller.matrix_projection1_plot,
+    )
+    for plot in plots:
+        assert isinstance(plot.getViewBox(), ModifierZoomViewBox)
+    assert controller.matrix_plot.getViewBox().state["aspectLocked"] is False
+    assert controller.matrix_plot.getViewBox().state["defaultPadding"] == 0.0
 
 
 def test_timing_fit_is_rendered_and_preserved_in_session_manifest(

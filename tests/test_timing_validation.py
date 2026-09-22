@@ -23,6 +23,7 @@ from nlab.hardware.digitizer.dma import (
 )
 from nlab.hardware.digitizer.mca_capture import McaCaptureWriter, McaDmaOutputMode
 from nlab.ui.ui_main_window import Ui_MainWindow
+from nlab.views.plot_viewbox import ModifierZoomViewBox
 from nlab.views.timing_validation_dialog import TimingValidationDialog
 
 app_module = importlib.import_module("nlab.app")
@@ -196,6 +197,7 @@ def test_timing_dialog_has_background_analysis_controls(qtbot: QtBot, qapp: QApp
     assert dialog.offset_ns.singleStep() == 8
     assert dialog.search_window_ns.singleStep() == 8
     assert dialog.analyze_button.isEnabled()
+    assert isinstance(dialog.plot.getViewBox(), ModifierZoomViewBox)
     dialog._start()
     assert "Select two existing" in dialog.status.text()
 

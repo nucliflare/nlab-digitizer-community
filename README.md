@@ -508,8 +508,10 @@ accepted-pulse count. Online-only DMA still creates no file and shows the
 summary only in the panel. A missing `.run.json` after a crash means the run
 was not finalized; it is not evidence that the capture is complete.
 
-Use **File → Open PSD Event File...** to reconstruct the PSD matrix and both
-projections from NDMA, CAEN CoMPASS, legacy `caen.py`, HDF5, or ROOT events.
+Use **Tools → PSD Event Readback...** to reconstruct the PSD matrix and both
+projections from NDMA, CAEN CoMPASS, legacy `caen.py`, HDF5, or ROOT events in
+a standalone workbench. Saved-event analysis no longer replaces or pauses a
+live PSD measurement.
 The import runs in a background worker: binary files are memory-mapped, HDF5
 is read in dataset slices, and ROOT uses chunked tree iteration, so event
 memory does not grow with file size. CAEN PSD import requires raw Energy and
@@ -530,13 +532,32 @@ neither matching metadata nor a histogram alone proves shared-clock timing;
 verify the observed peak against the known split-pulse setup. The plotted
 pairs are diagnostic and are **not** coincidence counts.
 
-Use **File → Open Waveform File...** to browse native NLab scope NDMA captures
-or waveform-bearing CAEN CoMPASS binaries. The selected Scope panel reveals a
-file-browser panel below its plot while the file is open and hides it again on
-Close. Variable-length CAEN events are indexed in a background worker, and
-only the selected frame is mapped. NLab DMA files use their known 8 ns point
-period. CoMPASS binaries do not store the ADC sample period, so set that value
-in the browser to obtain the correct time axis.
+Use **Tools → Waveform Analysis Workbench...** to browse native NLab scope NDMA
+captures or waveform-bearing CAEN CoMPASS binaries without occupying a live
+Scope panel. Variable-length CAEN events are indexed in a background worker,
+the file remains memory-mapped, and only the selected frame is copied for
+display. NLab DMA files use their known 8 ns point period. CoMPASS binaries do
+not store the ADC sample period; the tool starts at 2 ns for the common DT5730,
+but the operator must set the correct value for the originating digitizer.
+
+The same workbench reconstructs PSD directly from waveforms. It supports a
+draggable baseline region with median or mean offset removal, automatic or
+explicit pulse polarity, and draggable integration-start, short-end, and
+long-end markers. Each event produces `Qshort`, `Qlong`, and
+`(Qlong - Qshort) / Qlong`; accepted values feed a configurable energy-versus-
+ratio matrix and linked projections. Event stride and maximum-event controls
+bound exploratory processing time. Integration uses vectorized, bounded-memory
+background batches: fixed-frame NDMA waveforms are exposed as zero-copy views,
+while variable-length CoMPASS records are copied into a dynamically sized batch.
+When a CoMPASS event also stores gate sums, the
+result reports a computed-versus-stored long-gate scale as a format/setting
+cross-check. These operations never alter Scope DMA files or live PSD settings.
+With **Auto-recalculate while dragging** enabled, moving any baseline or gate
+marker produces a debounced preview from every twentieth selected event. Releasing
+the marker cancels any stale preview and queues a full calculation using the
+configured event stride and maximum-event limit. The initial PSD ratio view spans
+-1 to 1, and the workbench sizes its waveform and full PSD panes to the available
+desktop.
 
 For Scope NDMA timing checks, edit `FILENAME` in
 [`notebooks/check_dma.py`](notebooks/check_dma.py) and run it from the repository

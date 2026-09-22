@@ -79,6 +79,16 @@ class WaveformFrame:
     waveform_code: int | None = None
 
 
+@dataclass(frozen=True)
+class WaveformBatch:
+    """A bounded group of waveform prefixes prepared for vectorized analysis."""
+
+    samples: np.ndarray
+    complete: np.ndarray
+    long_gate: np.ndarray | None = None
+    short_gate: np.ndarray | None = None
+
+
 def _binary_signature(path: Path) -> tuple[bytes, int]:
     with path.open("rb") as stream:
         prefix = stream.read(4)
@@ -260,3 +270,104 @@ class MappedWaveformFile:
             offset=offset + SCOPE_TIMESTAMP_WORDS * 2,
         ).copy()
         return WaveformFrame(samples=samples, timestamp=timestamp, channel=source.channel)
+
+    def batch(
+        self,
+        first_frame: int,
+        frame_count: int,
+        *,
+        source_index: int = 0,
+        sample_count: int,
+        stride: int = 1,
+    ) -> WaveformBatch:
+        """Return waveform prefixes for vectorized processing.
+
+        Fixed-frame NDMA data use a zero-copy view when ``stride`` is one.
+        Variable-length CAEN records are copied into one reusable rectangular
+        batch because their waveform payloads are separated by event headers.
+        """
+        if not 0 <= source_index < len(self.index.channels):
+            raise IndexError(f"waveform source {source_index} is out of range")
+        if first_frame < 0 or frame_count < 0 or sample_count <= 0 or stride <= 0:
+            raise ValueError("invalid waveform batch geometry")
+        source = self.index.channels[source_index]
+        if frame_count == 0:
+            return WaveformBatch(
+                samples=np.empty((0, sample_count), dtype="<i2"),
+                complete=np.empty(0, dtype=np.bool_),
+            )
+        last_frame = first_frame + (frame_count - 1) * stride
+        if last_frame >= source.frame_count:
+            raise IndexError(f"waveform frame {last_frame} is out of range")
+
+        if self.index.caen_info is not None:
+            offsets = source.offsets
+            assert offsets is not None
+            samples = np.empty((frame_count, sample_count), dtype="<i2")
+            complete = np.zeros(frame_count, dtype=np.bool_)
+            has_stored_gates = self.index.caen_info.psd_compatible
+            long_gate = (
+                np.empty(frame_count, dtype=np.float64) if has_stored_gates else None
+            )
+            short_gate = (
+                np.empty(frame_count, dtype=np.float64) if has_stored_gates else None
+            )
+            for row in range(frame_count):
+                frame_index = first_frame + row * stride
+                event = parse_caen_event(
+                    self._mapped,
+                    int(offsets[frame_index]),
+                    self.index.caen_info,
+                )
+                if event.waveform_samples >= sample_count:
+                    assert event.waveform_offset is not None
+                    samples[row] = np.frombuffer(
+                        self._mapped,
+                        dtype="<i2",
+                        count=sample_count,
+                        offset=event.waveform_offset,
+                    )
+                    complete[row] = True
+                if has_stored_gates:
+                    assert long_gate is not None and short_gate is not None
+                    assert event.long_gate is not None and event.short_gate is not None
+                    long_gate[row] = event.long_gate
+                    short_gate[row] = event.short_gate
+            return WaveformBatch(samples, complete, long_gate, short_gate)
+
+        available_samples = self.index.ndma_frame_samples - SCOPE_TIMESTAMP_WORDS
+        if available_samples < sample_count:
+            return WaveformBatch(
+                samples=np.empty((frame_count, 0), dtype="<i2"),
+                complete=np.zeros(frame_count, dtype=np.bool_),
+            )
+        frame_samples = self.index.ndma_frame_samples
+        if stride == 1:
+            offset = (
+                FILE_HEADER_STRUCT.size
+                + first_frame * frame_samples * np.dtype("<i2").itemsize
+            )
+            words = np.ndarray(
+                shape=(frame_count, frame_samples),
+                dtype="<i2",
+                buffer=self._mapped,
+                offset=offset,
+            )
+            samples = words[
+                :, SCOPE_TIMESTAMP_WORDS : SCOPE_TIMESTAMP_WORDS + sample_count
+            ]
+        else:
+            all_words = np.ndarray(
+                shape=(source.frame_count, frame_samples),
+                dtype="<i2",
+                buffer=self._mapped,
+                offset=FILE_HEADER_STRUCT.size,
+            )
+            samples = all_words[
+                first_frame : last_frame + 1 : stride,
+                SCOPE_TIMESTAMP_WORDS : SCOPE_TIMESTAMP_WORDS + sample_count,
+            ]
+        return WaveformBatch(
+            samples=samples,
+            complete=np.ones(frame_count, dtype=np.bool_),
+        )

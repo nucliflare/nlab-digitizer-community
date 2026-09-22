@@ -189,10 +189,6 @@ def test_waveform_drag_only_available_on_live_raw_trace(qtbot: QtBot) -> None:
     assert not curve.clickable
     controller._set_controls_enabled(True)
     assert curve.clickable
-    controller._set_file_browser_busy(True)
-    assert not curve.clickable
-    controller._set_file_browser_busy(False)
-    assert curve.clickable
 
 
 def test_pretrigger_marker_shifts_frozen_trace_and_commits_on_release(
@@ -281,12 +277,6 @@ def test_pretrigger_marker_cancel_and_time_axis_follow_widget(qtbot: QtBot) -> N
     assert controller._time_scale.unit == "ns"
     assert line.value() == 80
     assert line.bounds() == (0.0, 2040.0)
-
-    controller._set_file_browser_busy(True)
-    assert not line.isVisible()
-    controller._set_file_browser_busy(False)
-    assert line.isVisible()
-
 
 def test_pretrigger_marker_write_failure_reads_back_hardware(qtbot: QtBot) -> None:
     controller, scope = _raw_controller(qtbot)

@@ -209,7 +209,11 @@ class McaPeakAnalysisDialog(QDialog):
         self.fit_region = pg.LinearRegionItem(values=(0.0, 1.0), movable=True)
         self.fit_region.setZValue(_FIT_REGION_Z)
         self.spectrum_plot.addItem(self.fit_region)
-        self.residual_plot = plot_widget.addPlot(row=1, col=0)
+        self.residual_plot = plot_widget.addPlot(
+            row=1,
+            col=0,
+            viewBox=ModifierZoomViewBox(),
+        )
         self.residual_plot.setMaximumHeight(210)
         self.residual_plot.setXLink(self.spectrum_plot)
         self.residual_plot.showGrid(x=True, y=True, alpha=0.2)
@@ -338,11 +342,40 @@ class McaPeakAnalysisDialog(QDialog):
         layout = QVBoxLayout(tab)
         self.peak_table = QTableWidget(0, 7, self)
         self.peak_table.setHorizontalHeaderLabels(
-            ["Peak", "Centre", "Energy keV", "FWHM", "Area", "Resolution %", "Centre err"]
+            [
+                "Peak",
+                "Centre",
+                "E\n(keV)",
+                "FWHM",
+                "Area",
+                "Res.\n(%)",
+                "Centre\nSE",
+            ]
         )
         self.peak_table.verticalHeader().setVisible(False)
         self.peak_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.peak_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        peak_header = self.peak_table.horizontalHeader()
+        header_font = peak_header.font()
+        if header_font.pointSizeF() > 0:
+            header_font.setPointSizeF(max(7.0, header_font.pointSizeF() - 1.0))
+        elif header_font.pixelSize() > 0:
+            header_font.setPixelSize(max(9, header_font.pixelSize() - 1))
+        peak_header.setFont(header_font)
+        peak_header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        peak_header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        header_tooltips = (
+            "Peak component identifier",
+            "Fitted centre in the spectrum coordinate unit",
+            "Calibrated peak energy in keV",
+            "Full width at half maximum",
+            "Integrated Gaussian peak area",
+            "FWHM divided by the calibrated energy",
+            "Standard error of the fitted centre",
+        )
+        for column, tooltip in enumerate(header_tooltips):
+            item = self.peak_table.horizontalHeaderItem(column)
+            if item is not None:
+                item.setToolTip(tooltip)
         layout.addWidget(self.peak_table)
         self.parameter_table = QTableWidget(0, 5, self)
         self.parameter_table.setHorizontalHeaderLabels(
@@ -738,6 +771,7 @@ class McaPeakAnalysisDialog(QDialog):
     def _fit_failed(self, message: str) -> None:
         self.fit_status.setText(f"Fit failed: {message}")
         self.workbench_status.setText(f"Peak fit failed: {message}")
+        QMessageBox.critical(self, "Peak Fit Failed", message)
 
     def _fit_thread_finished(self) -> None:
         self._fit_thread = None

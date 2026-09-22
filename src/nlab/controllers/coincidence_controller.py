@@ -338,7 +338,7 @@ class CoincidenceController(QWidget):
         self.matrix_plot.showAxis("top")
         self.matrix_plot.showAxis("right")
         self.matrix_plot.showGrid(x=True, y=True, alpha=0.15)
-        self.matrix_plot.getViewBox().setAspectLocked(True, ratio=1.0)
+        self.matrix_plot.getViewBox().setDefaultPadding(0.0)
         self.matrix_image = pg.ImageItem(axisOrder="row-major")
         self.matrix_image.setRect(QRectF(0.0, 0.0, HISTOGRAM_BINS, HISTOGRAM_BINS))
         self.matrix_plot.addItem(self.matrix_image)

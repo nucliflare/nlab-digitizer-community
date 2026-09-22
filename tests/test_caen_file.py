@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import struct
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from pytestqt.qtbot import QtBot
 
 from nlab.analysis.caen_file import (
     CAEN_LEGACY_HEADER,
@@ -15,13 +13,11 @@ from nlab.analysis.caen_file import (
 )
 from nlab.analysis.psd_file import inspect_psd_event_file, iter_psd_event_batches
 from nlab.analysis.waveform_file import MappedWaveformFile, build_waveform_file_index
-from nlab.controllers.scope_controller import DisplayMode, ScopeController
 from nlab.hardware.digitizer.dma import (
     FILE_HEADER_STRUCT,
     FILE_MAGIC,
     FILE_VERSION,
 )
-from nlab.hardware.digitizer.scope import PARAMETER_SPECS, Scope, TriggerMode
 
 
 def _native_event(
@@ -74,22 +70,6 @@ def _extracted_event(
     )
 
 
-def _scope_mock() -> MagicMock:
-    scope = MagicMock(spec=Scope)
-    scope.specs = PARAMETER_SPECS
-    scope.get_trigger_level.return_value = 0
-    scope.get_dac_value.return_value = 512
-    scope.get_pretrigger_samples.return_value = 32
-    scope.get_frame_samples.return_value = 1024
-    scope.get_frame_period_cycles.return_value = 0
-    scope.get_trigger_mode.return_value = TriggerMode.ANY_BELOW
-    scope.frame_period_cycles_supported.return_value = True
-    scope.get_dma_enable.return_value = False
-    scope.get_enable.return_value = False
-    scope.get_viewer_frame_samples_limit.return_value = None
-    return scope
-
-
 def test_native_caen_waveforms_feed_psd_without_materializing_samples(
     tmp_path: Path,
 ) -> None:
@@ -117,6 +97,12 @@ def test_native_caen_waveforms_feed_psd_without_materializing_samples(
 
     info = inspect_psd_event_file(path)
     batches = list(iter_psd_event_batches(path))
+    waveform_index = build_waveform_file_index(path)
+    reader = MappedWaveformFile(waveform_index)
+    try:
+        waveform_batch = reader.batch(0, 2, sample_count=3)
+    finally:
+        reader.close()
 
     assert info.format_name == "CAEN CoMPASS binary"
     assert info.channel == 0
@@ -125,6 +111,10 @@ def test_native_caen_waveforms_feed_psd_without_materializing_samples(
     np.testing.assert_array_equal(batches[0]["timestamp"], [10, 20])
     np.testing.assert_array_equal(batches[0]["long_gate"], [100, 200])
     np.testing.assert_array_equal(batches[0]["short_gate"], [25, 80])
+    np.testing.assert_array_equal(waveform_batch.complete, [True, False])
+    np.testing.assert_array_equal(waveform_batch.samples[0], [1, 2, 3])
+    np.testing.assert_array_equal(waveform_batch.long_gate, [100, 200])
+    np.testing.assert_array_equal(waveform_batch.short_gate, [25, 80])
 
 
 def test_legacy_caen_file_is_detected_as_fixed_records(tmp_path: Path) -> None:
@@ -380,7 +370,11 @@ def test_ndma_scope_frames_use_direct_mmap_offsets(tmp_path: Path) -> None:
     )
     frames = b"".join(
         struct.pack("<Q", timestamp) + np.asarray(samples, dtype="<i2").tobytes()
-        for timestamp, samples in ((11, (1, 2, 3, 4)), (22, (-1, -2, -3, -4)))
+        for timestamp, samples in (
+            (11, (1, 2, 3, 4)),
+            (22, (-1, -2, -3, -4)),
+            (33, (5, 6, 7, 8)),
+        )
     )
     path.write_bytes(header + frames)
 
@@ -388,111 +382,24 @@ def test_ndma_scope_frames_use_direct_mmap_offsets(tmp_path: Path) -> None:
     reader = MappedWaveformFile(index)
     try:
         second = reader.frame(1)
+        batch = reader.batch(0, 3, sample_count=4)
+        np.testing.assert_array_equal(batch.complete, [True, True, True])
+        np.testing.assert_array_equal(
+            batch.samples,
+            [[1, 2, 3, 4], [-1, -2, -3, -4], [5, 6, 7, 8]],
+        )
+        del batch
+        strided = reader.batch(0, 2, sample_count=4, stride=2)
+        np.testing.assert_array_equal(
+            strided.samples,
+            [[1, 2, 3, 4], [5, 6, 7, 8]],
+        )
+        del strided
     finally:
         reader.close()
 
     assert index.format_name == "NLab scope NDMA"
-    assert index.frame_count == 2
+    assert index.frame_count == 3
     assert index.sample_period_ns == 8.0
     assert second.timestamp == 22
     np.testing.assert_array_equal(second.samples, [-1, -2, -3, -4])
-
-
-def test_scope_file_browser_renders_and_releases_ndma_mapping(
-    tmp_path: Path,
-    qtbot: QtBot,
-) -> None:
-    path = tmp_path / "scope-browser.bin"
-    frame_samples = 8
-    header = FILE_HEADER_STRUCT.pack(
-        FILE_MAGIC,
-        FILE_VERSION,
-        0,
-        0,
-        0.0,
-        frame_samples,
-    )
-    samples = np.asarray((100, 200, -300, 400), dtype="<i2")
-    path.write_bytes(header + struct.pack("<Q", 42) + samples.tobytes())
-    controller = ScopeController(_scope_mock(), scope_dma=None, channel=0)
-    qtbot.addWidget(controller)
-    assert controller.ui.groupFileBrowser.isHidden()
-
-    controller.open_waveform_file(path)
-    qtbot.waitUntil(lambda: controller._waveform_index_thread is None)
-
-    assert controller._waveform_file is not None
-    assert not controller.ui.groupFileBrowser.isHidden()
-    assert controller.ui.comboFileChannel.isHidden()
-    assert controller._display_mode == DisplayMode.RAW
-    assert not controller.ui.btnStart.isEnabled()
-    assert not controller.ui.spinFileSamplePeriod.isEnabled()
-    assert "timestamp 42 (8 ns ticks)" in controller.ui.lblFileFrameInfo.text()
-    _, plotted = controller._raw_curve.getData()
-    np.testing.assert_array_equal(plotted, samples)
-    _, y_range = controller._plot_item.getViewBox().viewRange()
-    assert y_range[0] <= samples.min()
-    assert y_range[1] >= samples.max()
-    assert y_range[1] - y_range[0] < 1000
-
-    controller._on_close_waveform_file()
-
-    assert controller._waveform_file is None
-    assert controller.ui.groupFileBrowser.isHidden()
-    assert controller.ui.btnStart.isEnabled()
-    assert controller.ui.lblFileFrameInfo.text() == "No waveform file loaded."
-
-
-def test_scope_file_browser_selects_caen_board_channel(
-    tmp_path: Path,
-    qtbot: QtBot,
-) -> None:
-    path = tmp_path / "scope-multi-channel.bin"
-    channel_zero_first = (1, 2, 3)
-    channel_zero_second = (4, 5, 6)
-    channel_two = (-30, -20, -10)
-    _native_file(
-        path,
-        0xD,
-        [
-            _native_event(
-                options=0xD,
-                timestamp=20,
-                samples=channel_two,
-                channel=2,
-            ),
-            _native_event(
-                options=0xD,
-                timestamp=10,
-                samples=channel_zero_first,
-                channel=0,
-            ),
-            _native_event(
-                options=0xD,
-                timestamp=11,
-                samples=channel_zero_second,
-                channel=0,
-            ),
-        ],
-    )
-    controller = ScopeController(_scope_mock(), scope_dma=None, channel=0)
-    qtbot.addWidget(controller)
-
-    controller.open_waveform_file(path)
-    qtbot.waitUntil(lambda: controller._waveform_index_thread is None)
-
-    assert not controller.ui.comboFileChannel.isHidden()
-    assert controller.ui.comboFileChannel.count() == 2
-    assert controller.ui.comboFileChannel.itemText(0) == "Board 0 / Channel 0"
-    assert controller.ui.comboFileChannel.itemText(1) == "Board 0 / Channel 2"
-    assert controller.ui.spinFileFrame.maximum() == 1
-    _, plotted = controller._raw_curve.getData()
-    np.testing.assert_array_equal(plotted, channel_zero_first)
-
-    controller.ui.comboFileChannel.setCurrentIndex(1)
-
-    assert controller.ui.spinFileFrame.value() == 0
-    assert controller.ui.spinFileFrame.maximum() == 0
-    assert "channel 2" in controller.ui.lblFileFrameInfo.text()
-    _, plotted = controller._raw_curve.getData()
-    np.testing.assert_array_equal(plotted, channel_two)
