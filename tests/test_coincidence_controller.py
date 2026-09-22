@@ -11,7 +11,7 @@ import pytest
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication, QCheckBox, QSpinBox
 
-from nlab.analysis.coincidence import CoincidencePeakFit, CoincidenceSettings
+from nlab.analysis.coincidence import CoincidenceAnalyzer, CoincidencePeakFit, CoincidenceSettings
 from nlab.controllers import coincidence_controller as coincidence_module
 from nlab.controllers.coincidence_controller import CoincidenceController
 from nlab.controllers.mca_controller import MCAController
@@ -228,6 +228,34 @@ def test_coincidence_buttons_match_scope_and_mca_color_scheme(
     assert "QPushButton:disabled" in controller.btnStop.styleSheet()
     assert controller.btnStart.isCheckable()
     assert controller.btnStop.isCheckable()
+
+
+def test_matrix_tab_renders_log_corrected_counts_and_interactive_projections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _make_controller(monkeypatch)
+    snapshot = CoincidenceAnalyzer(CoincidenceSettings()).snapshot()
+    snapshot.prompt_matrix[20, 10] = 7
+    snapshot.random_matrix[20, 10] = 2
+    snapshot.prompt_matrix[30, 10] = 3
+    snapshot.prompt_matrix[20, 40] = 2
+    controller._current_settings = CoincidenceSettings()
+    controller.matrix_mode.setCurrentIndex(controller.matrix_mode.findData("corrected"))
+    controller.matrix_scale.setCurrentIndex(controller.matrix_scale.findData("log"))
+    controller.matrix_gate_ch0.setRegion((10 * 32, 11 * 32))
+    controller.matrix_gate_ch1.setRegion((20 * 32, 21 * 32))
+
+    controller._render_matrix(snapshot)
+
+    assert np.asarray(controller.matrix_image.image)[20, 10] == pytest.approx(np.log10(7))
+    assert controller.matrix_projection0_curve.yData[10] == 6
+    assert controller.matrix_projection0_curve.yData[40] == 2
+    assert controller.matrix_projection1_curve.yData[20] == 6
+    assert controller.matrix_projection1_curve.yData[30] == 3
+    assert len(controller.matrix_projection0_curve.xData) == 513
+    assert controller.matrix_projection0_curve.xData[[0, -1]].tolist() == [0, 16_384]
+    assert controller.btnExportMatrix.isEnabled()
+    assert "random scale 0.5" in controller.matrix_status.text()
 
 
 def test_timing_fit_is_rendered_and_preserved_in_session_manifest(

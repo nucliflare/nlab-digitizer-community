@@ -353,7 +353,7 @@ selector. The producer may select trapezoidal or integration energy according
 to its configuration. This fixed mapping matched paired saved captures with
 different binning settings, but is not specified by the opaque-record IIO
 driver and should be checked with a labelled-source capture on new firmware.
-The axes remain raw MCA channels, not calibrated keV.
+The accepted-energy plots remain in raw MCA channels.
 
 `CH0 AND CH1` emits every pair inside the inclusive timing gate. An event may
 participate in several pairs; the GUI reports pair count separately from the
@@ -364,6 +364,25 @@ accepts a CH1 event only if no ROI-qualified CH0 event falls in its timing
 window. NOT does not invert the energy ROI. `OR` shows the union of eligible
 singles; `XOR` shows eligible singles with no opposite-channel event in their
 window. Both-NOT and NOT with OR/XOR are deliberately unavailable.
+
+Ordinary `CH0 AND CH1` analysis also fills a 512x512 energy-correlation matrix.
+Rows are CH1 and columns are CH0; each matrix bin spans 32 raw MCA channels.
+The bottom and left axes remain raw channels, while applied MCA calibrations
+provide CH0 and CH1 keV labels on the top and right axes. Movable vertical and
+horizontal gates project the selected CH1 and CH0 populations respectively;
+these display gates do not change acquisition or the prompt-pair count.
+
+The matrix view can show prompt pairs, delayed-random pairs, or prompt minus
+scaled random. Random estimation uses two non-overlapping delayed sidebands,
+each equal in width to the prompt timing gate, with a configurable gap. Their
+combined matrix is multiplied by 0.5 before subtraction. Linear and logarithmic
+colour scales are available; corrected matrices use a sign-preserving
+`sign(count) * log10(1 + abs(count))` transform in logarithmic mode. The current
+prompt, random, and corrected matrices can be exported without overwriting an
+existing file to HDF5 or ROOT together with raw-channel edges, gate settings,
+timing configuration, calibration metadata, and session diagnostics. Matrix
+analysis is deliberately unavailable for veto, OR, and XOR modes because those
+modes do not produce two-member coincidence pairs.
 
 The signed raw difference is CH1 event time minus CH0 event time. The measured
 CH1-minus-CH0 common-input delay is then **subtracted** as a calibration. Timing

@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from nlab.analysis.coincidence import (
+    COINCIDENCE_MATRIX_CHANNELS_PER_BIN,
     FINE_BIN_NS,
     CoincidenceAnalyzer,
     CoincidenceSettings,
@@ -59,6 +60,29 @@ def test_and_emits_all_pairs_inside_inclusive_gate() -> None:
     assert snap.ambiguous == 1
     assert snap.energy_ch1[41] == 1
     assert snap.energy_ch1[42] == 1
+
+
+def test_prompt_and_delayed_random_matrices_preserve_paired_energies() -> None:
+    analyzer = _analyze(
+        CoincidenceSettings(low_q=-COARSE_TICK_Q, high_q=COARSE_TICK_Q),
+        _events((100, 100 * 4, 0)),
+        _events(
+            (97, 300 * 4, 0),  # lower delayed sideband
+            (100, 200 * 4, 0),  # prompt
+            (103, 400 * 4, 0),  # upper delayed sideband
+        ),
+    )
+
+    snapshot = analyzer.snapshot()
+
+    assert snapshot.pairs == 1
+    assert snapshot.random_pairs == 2
+    x = 100 // COINCIDENCE_MATRIX_CHANNELS_PER_BIN
+    assert snapshot.prompt_matrix[200 // COINCIDENCE_MATRIX_CHANNELS_PER_BIN, x] == 1
+    assert snapshot.random_matrix[300 // COINCIDENCE_MATRIX_CHANNELS_PER_BIN, x] == 1
+    assert snapshot.random_matrix[400 // COINCIDENCE_MATRIX_CHANNELS_PER_BIN, x] == 1
+    assert snapshot.prompt_matrix.sum() == 1
+    assert snapshot.random_matrix.sum() == 2
 
 
 def test_roi_uses_fixed_dma_to_mca_scale_independent_of_binning() -> None:

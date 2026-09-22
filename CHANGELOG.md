@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Coincidence energy-matrix workspace with a fixed 512x512 prompt matrix,
+  equal-width delayed-random sidebands, scaled background subtraction,
+  linear and signed-log pyqtgraph rendering, calibrated secondary axes,
+  interactive cross-channel gates and projections, and HDF5/ROOT export with
+  analysis metadata.
+
 ---
 
 ## [0.4.0] — 2026-09-22

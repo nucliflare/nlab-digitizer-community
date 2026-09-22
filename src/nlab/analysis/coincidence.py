@@ -37,6 +37,8 @@ FINE_BIN_NS = FINE_BIN_Q / TIME_Q_PER_NS
 COARSE_BIN_Q = COARSE_TICK_Q
 HISTOGRAM_BINS = 16_384
 DMA_ENERGY_TO_MCA_SHIFT = 2
+COINCIDENCE_MATRIX_BINS = 512
+COINCIDENCE_MATRIX_CHANNELS_PER_BIN = HISTOGRAM_BINS // COINCIDENCE_MATRIX_BINS
 PEAK_FIT_MIN_PAIRS = 100
 PEAK_FIT_HALF_WINDOW_NS = 4.0
 _GAUSSIAN_FWHM_FACTOR = 2.0 * math.sqrt(2.0 * math.log(2.0))
@@ -55,6 +57,8 @@ class CoincidenceSettings:
     energy_bin_ch0: int = 0
     energy_bin_ch1: int = 0
     fine_timing: bool = False
+    random_sidebands: bool = True
+    random_sideband_gap_q: int = 0
     record_schema: str = VDPP_ZC_CALC_SCHEMA
 
     @property
@@ -91,6 +95,13 @@ class CoincidenceSettings:
         for energy_bin in (self.energy_bin_ch0, self.energy_bin_ch1):
             if not 0 <= energy_bin <= 9:
                 raise ValueError("energy_bin must be in 0..9")
+        if self.random_sideband_gap_q < 0:
+            raise ValueError("random sideband gap cannot be negative")
+
+    @property
+    def random_scale(self) -> float:
+        """Scale two equal-width sidebands to one prompt-window width."""
+        return 0.5 if self.random_sidebands else 0.0
 
 
 @dataclass
@@ -108,9 +119,12 @@ class CoincidenceSnapshot:
     delay_counts: np.ndarray
     energy_ch0: np.ndarray
     energy_ch1: np.ndarray
+    prompt_matrix: np.ndarray
+    random_matrix: np.ndarray
     rate_seconds: np.ndarray
     rate_counts: np.ndarray
     pairs: int
+    random_pairs: int
     accepted_ch0: int
     accepted_ch1: int
     ambiguous: int
@@ -263,7 +277,12 @@ class CoincidenceAnalyzer:
             np.zeros(HISTOGRAM_BINS, dtype=np.uint64),
             np.zeros(HISTOGRAM_BINS, dtype=np.uint64),
         )
+        self.prompt_matrix = np.zeros(
+            (COINCIDENCE_MATRIX_BINS, COINCIDENCE_MATRIX_BINS), dtype=np.uint64
+        )
+        self.random_matrix = np.zeros_like(self.prompt_matrix)
         self.pairs = 0
+        self.random_pairs = 0
         self.accepted = [0, 0]
         self.ambiguous = 0
         self.zero_timestamps = 0
@@ -391,9 +410,12 @@ class CoincidenceAnalyzer:
             self.delay_counts.copy(),
             self.energy_counts[0].copy(),
             self.energy_counts[1].copy(),
+            self.prompt_matrix.copy(),
+            self.random_matrix.copy(),
             seconds,
             rate_counts,
             self.pairs,
+            self.random_pairs,
             self.accepted[0],
             self.accepted[1],
             self.ambiguous,
@@ -418,11 +440,47 @@ class CoincidenceAnalyzer:
         times = self._times[opposite]
         return self._events[opposite][bisect_left(times, low) : bisect_right(times, high)]
 
+    def _random_candidates(self, event: _Event) -> list[_Event]:
+        """Return CH1 events in two non-overlapping delayed sidebands.
+
+        Each sideband has the same physical width as the inclusive prompt
+        window. Their combined counts are therefore scaled by one half before
+        subtraction from the prompt matrix. Prompt boundary events are never
+        also classified as random events.
+        """
+        if not self.settings.random_sidebands:
+            return []
+        width = self._high_units - self._low_units
+        gap = self.settings.random_sideband_gap_q
+        lower_start = event.tick + self._low_units - gap - width
+        lower_stop = event.tick + self._low_units - gap
+        upper_start = event.tick + self._high_units + gap
+        upper_stop = event.tick + self._high_units + gap + width
+        times = self._times[1]
+        events = self._events[1]
+        lower = events[bisect_left(times, lower_start) : bisect_left(times, lower_stop)]
+        upper = events[bisect_right(times, upper_start) : bisect_right(times, upper_stop)]
+        return [*lower, *upper]
+
     def _can_finalize(self, channel: int, event: _Event) -> bool:
         other = self._watermark[1 - channel]
         if other is None:
             return False
-        limit = event.tick + self._high_units if channel == 0 else event.tick - self._low_units
+        if (
+            channel == 0
+            and self.settings.operator == "AND"
+            and not (self.settings.not_ch0 or self.settings.not_ch1)
+            and self.settings.random_sidebands
+        ):
+            width = self._high_units - self._low_units
+            limit = (
+                event.tick
+                + self._high_units
+                + self.settings.random_sideband_gap_q
+                + width
+            )
+        else:
+            limit = event.tick + self._high_units if channel == 0 else event.tick - self._low_units
         # Gate edges are inclusive, so only a strictly later watermark closes it.
         return other > limit
 
@@ -443,11 +501,10 @@ class CoincidenceAnalyzer:
             del self._rate[min(self._rate)]
 
     def _accept_all_pairs(self, event: _Event, candidates: list[_Event]) -> None:
-        if not candidates:
-            return
-        self.ambiguous += int(len(candidates) > 1)
-        event.paired = True
-        self._accept(0, event)
+        if candidates:
+            self.ambiguous += int(len(candidates) > 1)
+            event.paired = True
+            self._accept(0, event)
         for partner in candidates:
             partner.paired = True
             self._accept(1, partner)
@@ -462,6 +519,17 @@ class CoincidenceAnalyzer:
                 self.offset_boundary_pairs += 1
             delay_bin = (partner.tick - event.tick - self._low_units) // self._bin_units
             self.delay_counts[delay_bin] += 1
+            self._increment_matrix(self.prompt_matrix, event, partner)
+        for partner in self._random_candidates(event):
+            self.random_pairs += 1
+            self._increment_matrix(self.random_matrix, event, partner)
+
+    @staticmethod
+    def _increment_matrix(matrix: np.ndarray, ch0: _Event, ch1: _Event) -> None:
+        x = ch0.energy // COINCIDENCE_MATRIX_CHANNELS_PER_BIN
+        y = ch1.energy // COINCIDENCE_MATRIX_CHANNELS_PER_BIN
+        if 0 <= x < COINCIDENCE_MATRIX_BINS and 0 <= y < COINCIDENCE_MATRIX_BINS:
+            matrix[y, x] += 1
 
     def _advance(self) -> None:
         settings = self.settings
@@ -503,7 +571,15 @@ class CoincidenceAnalyzer:
         if None in self._watermark:
             return
         assert self._watermark[0] is not None and self._watermark[1] is not None
-        span = max(abs(self._low_units), abs(self._high_units))
+        if self.settings.random_sidebands:
+            width = self._high_units - self._low_units
+            gap = self.settings.random_sideband_gap_q
+            span = max(
+                abs(self._low_units - gap - width),
+                abs(self._high_units + gap + width),
+            )
+        else:
+            span = max(abs(self._low_units), abs(self._high_units))
         cutoff = min(self._watermark[0], self._watermark[1]) - 2 * span - 1
         for channel in (0, 1):
             times = self._times[channel]

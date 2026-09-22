@@ -8,12 +8,12 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtCore import QRectF, QSettings, Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -26,15 +26,26 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from nlab.analysis.coincidence import (
+    COINCIDENCE_MATRIX_BINS,
+    HISTOGRAM_BINS,
     CoincidencePeakFit,
     CoincidenceSettings,
     CoincidenceSnapshot,
     fit_coincidence_peak,
+)
+from nlab.analysis.coincidence_matrix import (
+    MatrixMode,
+    display_matrix,
+    export_coincidence_matrix,
+    matrix_channel_edges,
+    matrix_projections,
+    select_matrix,
 )
 from nlab.controllers.global_controller import GlobalController
 from nlab.controllers.mca_controller import MCAController
@@ -43,6 +54,7 @@ from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaEventBuffer
 from nlab.hardware.digitizer.iio_listmode import TIME_Q_PER_NS, VDPP_ZC_CALC_SCHEMA
 from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
 from nlab.utils.settings_io import write_configuration
+from nlab.views.energy_axis import CalibratedEnergyAxis
 from nlab.views.plot_viewbox import ModifierZoomViewBox
 from nlab.workers.coincidence_worker import CoincidenceAnalysisThread
 
@@ -97,6 +109,7 @@ class CoincidenceController(QWidget):
         self._current_settings = CoincidenceSettings()
         self._analysis_epochs: list[dict[str, object]] = []
         self._firmware_identity_snapshot: list[dict[str, object]] = []
+        self._matrix_exports: list[str] = []
         self._build_ui()
         self._connect_signals()
         self._display_timer = QTimer(self)
@@ -215,6 +228,31 @@ class CoincidenceController(QWidget):
         timing_form.addRow(self.timing_hint)
         left.addWidget(timing_box)
 
+        matrix_box = QGroupBox("Coincidence matrix")
+        matrix_form = QFormLayout(matrix_box)
+        self.random_sidebands = QCheckBox("Accumulate delayed random sidebands")
+        self.random_sidebands.setChecked(True)
+        self.random_sidebands.setToolTip(
+            "Accumulate two delayed windows, each the width of the prompt timing gate."
+        )
+        self.random_gap = QDoubleSpinBox()
+        self.random_gap.setDecimals(3)
+        self.random_gap.setRange(0.0, 100_000.0)
+        self.random_gap.setSingleStep(1.0)
+        self.random_gap.setSuffix(" ns")
+        self.random_gap.setToolTip(
+            "Separation between the prompt gate and each equal-width delayed sideband."
+        )
+        matrix_form.addRow(self.random_sidebands)
+        matrix_form.addRow("Sideband gap:", self.random_gap)
+        matrix_note = QLabel(
+            f"Fixed {COINCIDENCE_MATRIX_BINS}x{COINCIDENCE_MATRIX_BINS} matrix; "
+            "each bin spans 32 raw MCA channels."
+        )
+        matrix_note.setWordWrap(True)
+        matrix_form.addRow(matrix_note)
+        left.addWidget(matrix_box)
+
         output_box = QGroupBox("Raw DMA recording")
         output_layout = QVBoxLayout(output_box)
         self.output_label = QLabel()
@@ -231,6 +269,7 @@ class CoincidenceController(QWidget):
         left.addWidget(output_box)
         left.addStretch(1)
 
+        self.result_tabs = QTabWidget()
         plots = QWidget()
         plot_layout = QVBoxLayout(plots)
         self.delay_plot, self.delay_curve = self._plot(
@@ -259,9 +298,103 @@ class CoincidenceController(QWidget):
         )
         self.timing_fit_label.setWordWrap(True)
         plot_layout.addWidget(self.timing_fit_label)
-        splitter.addWidget(plots)
+        self.result_tabs.addTab(plots, "Timing and spectra")
+
+        matrix_page = QWidget()
+        matrix_layout = QVBoxLayout(matrix_page)
+        matrix_toolbar = QHBoxLayout()
+        self.matrix_mode = QComboBox()
+        self.matrix_mode.addItem("Prompt", "prompt")
+        self.matrix_mode.addItem("Delayed random", "random")
+        self.matrix_mode.addItem("Prompt - scaled random", "corrected")
+        self.matrix_scale = QComboBox()
+        self.matrix_scale.addItem("Linear", "linear")
+        self.matrix_scale.addItem("Log", "log")
+        self.btnExportMatrix = QPushButton("Export matrix...")
+        self.btnExportMatrix.setEnabled(False)
+        matrix_toolbar.addWidget(QLabel("Data:"))
+        matrix_toolbar.addWidget(self.matrix_mode)
+        matrix_toolbar.addWidget(QLabel("Scale:"))
+        matrix_toolbar.addWidget(self.matrix_scale)
+        matrix_toolbar.addStretch(1)
+        matrix_toolbar.addWidget(self.btnExportMatrix)
+        matrix_layout.addLayout(matrix_toolbar)
+
+        self._matrix_energy_axes = (
+            CalibratedEnergyAxis("top"),
+            CalibratedEnergyAxis("right"),
+        )
+        self.matrix_plot = pg.PlotWidget(
+            viewBox=ModifierZoomViewBox(),
+            axisItems={
+                "top": self._matrix_energy_axes[0],
+                "right": self._matrix_energy_axes[1],
+            },
+        )
+        self.matrix_plot.setBackground("#f8f9fa")
+        self.matrix_plot.setTitle("Coincident CH0-CH1 energy matrix")
+        self.matrix_plot.setLabel("bottom", "CH0 MCA channel")
+        self.matrix_plot.setLabel("left", "CH1 MCA channel")
+        self.matrix_plot.showAxis("top")
+        self.matrix_plot.showAxis("right")
+        self.matrix_plot.showGrid(x=True, y=True, alpha=0.15)
+        self.matrix_plot.getViewBox().setAspectLocked(True, ratio=1.0)
+        self.matrix_image = pg.ImageItem(axisOrder="row-major")
+        self.matrix_image.setRect(QRectF(0.0, 0.0, HISTOGRAM_BINS, HISTOGRAM_BINS))
+        self.matrix_plot.addItem(self.matrix_image)
+        self.matrix_colorbar = pg.ColorBarItem(
+            values=(0.0, 1.0),
+            colorMap=pg.colormap.get("CET-L9"),
+            label="Counts",
+            interactive=False,
+        )
+        self.matrix_colorbar.setImageItem(
+            self.matrix_image,
+            insert_in=self.matrix_plot.getPlotItem(),
+        )
+        self.matrix_plot.setXRange(0.0, HISTOGRAM_BINS, padding=0.0)
+        self.matrix_plot.setYRange(0.0, HISTOGRAM_BINS, padding=0.0)
+
+        roi_defaults = tuple(
+            view.coincidence_roi() or (0, HISTOGRAM_BINS - 1) for view in self._mca_views
+        )
+        self.matrix_gate_ch0 = pg.LinearRegionItem(
+            values=(roi_defaults[0][0], roi_defaults[0][1] + 1),
+            orientation="vertical",
+            bounds=(0, HISTOGRAM_BINS),
+            movable=True,
+        )
+        self.matrix_gate_ch1 = pg.LinearRegionItem(
+            values=(roi_defaults[1][0], roi_defaults[1][1] + 1),
+            orientation="horizontal",
+            bounds=(0, HISTOGRAM_BINS),
+            movable=True,
+        )
+        self._style_matrix_gate(self.matrix_gate_ch0, "#1f77b4")
+        self._style_matrix_gate(self.matrix_gate_ch1, "#d28b38")
+        self.matrix_plot.addItem(self.matrix_gate_ch0, ignoreBounds=True)
+        self.matrix_plot.addItem(self.matrix_gate_ch1, ignoreBounds=True)
+        matrix_layout.addWidget(self.matrix_plot, 4)
+
+        self.matrix_projection0_plot, self.matrix_projection0_curve = self._plot(
+            "CH0 projection for the CH1 matrix gate", "CH0 MCA channel", None, "#1f77b4"
+        )
+        self.matrix_projection1_plot, self.matrix_projection1_curve = self._plot(
+            "CH1 projection for the CH0 matrix gate", "CH1 MCA channel", None, "#d28b38"
+        )
+        matrix_layout.addWidget(self.matrix_projection0_plot, 1)
+        matrix_layout.addWidget(self.matrix_projection1_plot, 1)
+        self.matrix_status = QLabel(
+            "Matrix is available for ordinary CH0 AND CH1 coincidence analysis."
+        )
+        self.matrix_status.setWordWrap(True)
+        matrix_layout.addWidget(self.matrix_status)
+        self._matrix_tab_index = self.result_tabs.addTab(matrix_page, "Energy matrix")
+
+        splitter.addWidget(self.result_tabs)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+        self._refresh_matrix_axes()
 
     @staticmethod
     def _plot(title: str, axis: str, unit: str | None, color: str) -> tuple[Any, Any]:
@@ -295,11 +428,178 @@ class CoincidenceController(QWidget):
         for line in region.lines:
             line.setPen(pen)
 
+    @staticmethod
+    def _style_matrix_gate(region: pg.LinearRegionItem, color: str) -> None:
+        shade = pg.mkColor(color)
+        shade.setAlpha(18)
+        region.setBrush(pg.mkBrush(shade))
+        boundary = pg.mkColor(color)
+        boundary.setAlpha(210)
+        for line in region.lines:
+            line.setPen(pg.mkPen(boundary, width=1.5, style=Qt.PenStyle.DashLine))
+
+    def _refresh_matrix_axes(self, *_args: object) -> None:
+        for axis, view in zip(self._matrix_energy_axes, self._mca_views, strict=True):
+            calibration = getattr(view, "energy_calibration", None)
+            stale_method = getattr(view, "energy_calibration_is_stale", None)
+            stale = bool(stale_method()) if callable(stale_method) else False
+            binning_index = int(getattr(view, "coincidence_energy_bin", 0))
+            axis.set_calibration(
+                calibration,
+                binning_index=binning_index,
+                stale=stale,
+            )
+
+    def _matrix_calibration_metadata(self) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for channel, view in enumerate(self._mca_views):
+            calibration = getattr(view, "energy_calibration", None)
+            stale_method = getattr(view, "energy_calibration_is_stale", None)
+            result[f"ch{channel}"] = (
+                {
+                    "definition": calibration.to_dict(),
+                    "binning_index": int(getattr(view, "coincidence_energy_bin", 0)),
+                    "stale": bool(stale_method()) if callable(stale_method) else False,
+                }
+                if calibration is not None
+                else None
+            )
+        return result
+
+    def _clear_matrix(self, message: str) -> None:
+        self.matrix_image.clear()
+        self.matrix_projection0_curve.setData([], [])
+        self.matrix_projection1_curve.setData([], [])
+        self.matrix_status.setText(message)
+        self.btnExportMatrix.setEnabled(False)
+
+    def _render_matrix(self, snapshot: object | None = None) -> None:
+        if not isinstance(snapshot, CoincidenceSnapshot):
+            snapshot = self._last_rendered_snapshot
+        if snapshot is None:
+            return
+        settings = self._current_settings
+        pair_mode = settings.operator == "AND" and not (settings.not_ch0 or settings.not_ch1)
+        if not pair_mode:
+            self._clear_matrix("Energy matrices require ordinary CH0 AND CH1 pair analysis.")
+            return
+
+        mode = cast(MatrixMode, str(self.matrix_mode.currentData()))
+        values = select_matrix(
+            snapshot.prompt_matrix,
+            snapshot.random_matrix,
+            mode,
+            random_scale=settings.random_scale,
+        )
+        logarithmic = self.matrix_scale.currentData() == "log"
+        displayed = display_matrix(values, logarithmic=logarithmic)
+        corrected = mode == "corrected"
+        color_map = pg.colormap.get("CET-D1" if corrected else "CET-L9")
+        self.matrix_image.setImage(displayed, autoLevels=False)
+        self.matrix_image.setRect(QRectF(0.0, 0.0, HISTOGRAM_BINS, HISTOGRAM_BINS))
+        if corrected:
+            maximum = float(np.max(np.abs(displayed))) if displayed.size else 0.0
+            maximum = max(maximum, 1.0)
+            levels = (-maximum, maximum)
+        else:
+            maximum = float(np.max(displayed)) if displayed.size else 0.0
+            levels = (0.0, max(maximum, 1.0))
+        self.matrix_colorbar.setColorMap(color_map)
+        self.matrix_colorbar.setLevels(levels)
+        self.matrix_colorbar.axis.setLabel(
+            text="Signed log10(1 + |count|)" if logarithmic else "Counts"
+        )
+
+        ch0_region = self.matrix_gate_ch0.getRegion()
+        ch1_region = self.matrix_gate_ch1.getRegion()
+        gate0 = (float(ch0_region[0]), float(ch0_region[1]))
+        gate1 = (float(ch1_region[0]), float(ch1_region[1]))
+        projection0, projection1 = matrix_projections(
+            values,
+            ch0_gate=gate0,
+            ch1_gate=gate1,
+        )
+        edges = matrix_channel_edges()
+        self.matrix_projection0_curve.setData(edges, projection0)
+        self.matrix_projection1_curve.setData(edges, projection1)
+        scale_description = "signed log10(1 + |count|)" if logarithmic else "linear counts"
+        completeness = "Live provisional" if self._state in {"arming", "running"} else "Drained"
+        self.matrix_status.setText(
+            f"{completeness} {COINCIDENCE_MATRIX_BINS}x{COINCIDENCE_MATRIX_BINS} {mode} matrix; "
+            f"prompt pairs {snapshot.pairs:,}; delayed-random pairs {snapshot.random_pairs:,}; "
+            f"random scale {settings.random_scale:g}; display {scale_description}. "
+            f"CH0 gate {min(gate0):.0f}-{max(gate0):.0f}; "
+            f"CH1 gate {min(gate1):.0f}-{max(gate1):.0f} raw MCA channels."
+        )
+        self.btnExportMatrix.setEnabled(True)
+
+    def _export_matrix(self) -> None:
+        snapshot = self._last_rendered_snapshot
+        if snapshot is None and self._analysis is not None:
+            snapshot = self._analysis.result()[0]
+        if snapshot is None:
+            self.status.setText("No coincidence matrix is available to export.")
+            return
+        folder = Path(str(QSettings().value("dma/save_folder", "measurements")))
+        stem = f"coincidence_{self._session_id or 'matrix'}_matrix"
+        filename, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export coincidence matrix",
+            str(folder / f"{stem}.h5"),
+            "HDF5 matrix (*.h5);;ROOT matrix (*.root)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        if not path.suffix:
+            path = path.with_suffix(".root" if "ROOT" in selected_filter else ".h5")
+        try:
+            export_coincidence_matrix(
+                path,
+                prompt=snapshot.prompt_matrix,
+                random=snapshot.random_matrix,
+                random_scale=self._current_settings.random_scale,
+                metadata={
+                    **self._manifest(
+                        status=(
+                            "live_provisional"
+                            if self._state in {"arming", "running"}
+                            else "complete"
+                        )
+                    ),
+                    "matrix_display": {
+                        "mode": self.matrix_mode.currentData(),
+                        "scale": self.matrix_scale.currentData(),
+                        "ch0_projection_gate": list(self.matrix_gate_ch0.getRegion()),
+                        "ch1_projection_gate": list(self.matrix_gate_ch1.getRegion()),
+                    },
+                },
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            log.exception("Could not export coincidence matrix")
+            self.status.setText(f"Matrix export failed: {exc}")
+            return
+        self._matrix_exports.append(str(path))
+        if self._session_manifest is not None:
+            write_configuration(
+                self._session_manifest,
+                self._manifest(status="complete" if self._state == "idle" else self._state),
+            )
+        self.status.setText(f"Coincidence matrix exported to {path}")
+
     def _connect_signals(self) -> None:
         self.btnStart.clicked.connect(self.start)
         self.btnStop.clicked.connect(lambda: self._begin_stop(None))
         self.btnFolder.clicked.connect(self._choose_folder)
         self.timing_mode.currentIndexChanged.connect(self._analysis_settings_changed)
+        self.random_sidebands.toggled.connect(self._analysis_settings_changed)
+        self.random_sidebands.toggled.connect(self.random_gap.setEnabled)
+        self.random_gap.valueChanged.connect(self._analysis_settings_changed)
+        self.matrix_mode.currentIndexChanged.connect(self._render_matrix)
+        self.matrix_scale.currentIndexChanged.connect(self._render_matrix)
+        self.matrix_gate_ch0.sigRegionChanged.connect(self._render_matrix)
+        self.matrix_gate_ch1.sigRegionChanged.connect(self._render_matrix)
+        self.btnExportMatrix.clicked.connect(self._export_matrix)
         self.operator.currentTextChanged.connect(self._update_rule)
         self.not_ch0.toggled.connect(lambda checked: self._on_not_changed(0, checked))
         self.not_ch1.toggled.connect(lambda checked: self._on_not_changed(1, checked))
@@ -316,6 +616,12 @@ class CoincidenceController(QWidget):
             mca.coincidence_finished.connect(self._on_channel_finished)
             mca.coincidence_error.connect(self._on_channel_error)
             mca.coincidence_stop_requested.connect(lambda ch=channel: self._begin_stop(None))
+            calibration_changed = getattr(mca, "energy_calibration_changed", None)
+            if calibration_changed is not None:
+                calibration_changed.connect(self._refresh_matrix_axes)
+            binning_control = getattr(mca.ui, "comboBinning", None)
+            if binning_control is not None:
+                binning_control.currentIndexChanged.connect(self._refresh_matrix_axes)
 
     def _on_not_changed(self, channel: int, checked: bool) -> None:
         if checked:
@@ -347,6 +653,8 @@ class CoincidenceController(QWidget):
             if is_and and not (self.not_ch0.isChecked() or self.not_ch1.isChecked())
             else "s",
         )
+        pair_mode = is_and and not (self.not_ch0.isChecked() or self.not_ch1.isChecked())
+        self.result_tabs.setTabEnabled(self._matrix_tab_index, pair_mode)
         self._analysis_settings_changed()
 
     def _settings(self) -> CoincidenceSettings:
@@ -376,6 +684,8 @@ class CoincidenceController(QWidget):
             energy_bin_ch0=self._mca_views[0].coincidence_energy_bin,
             energy_bin_ch1=self._mca_views[1].coincidence_energy_bin,
             fine_timing=fine_timing,
+            random_sidebands=self.random_sidebands.isChecked(),
+            random_sideband_gap_q=_ns_to_q(self.random_gap.value(), ROUND_HALF_UP),
             record_schema=VDPP_ZC_CALC_SCHEMA,
         )
 
@@ -451,6 +761,7 @@ class CoincidenceController(QWidget):
         )
         self.energy_curve0.setData([], [])
         self.energy_curve1.setData([], [])
+        self._clear_matrix("Analysis settings changed; collecting a new coincidence matrix.")
 
     def refresh_dma_output_settings(self) -> None:
         settings = QSettings()
@@ -498,6 +809,8 @@ class CoincidenceController(QWidget):
             "timing_fit": asdict(self._timing_fit) if self._timing_fit is not None else None,
             "analysis_epochs": self._analysis_epochs,
             "firmware_identity": self._firmware_identity_snapshot,
+            "energy_calibration": self._matrix_calibration_metadata(),
+            "matrix_exports": list(self._matrix_exports),
             "channels": (
                 {
                     f"ch{channel}": {
@@ -564,6 +877,15 @@ class CoincidenceController(QWidget):
             "energy_bin": {"ch0": settings.energy_bin_ch0, "ch1": settings.energy_bin_ch1},
             "dma_energy_to_mca_channel": "selected_energy_raw >> 2 (capture-derived)",
             "pairing_policy": "all pairs inside inclusive calibrated gate",
+            "coincidence_matrix": {
+                "bins": [COINCIDENCE_MATRIX_BINS, COINCIDENCE_MATRIX_BINS],
+                "axis_order": "rows=ch1, columns=ch0",
+                "channels_per_bin": HISTOGRAM_BINS // COINCIDENCE_MATRIX_BINS,
+                "random_sidebands": settings.random_sidebands,
+                "random_sideband_gap_ns": settings.random_sideband_gap_q / TIME_Q_PER_NS,
+                "random_sideband_count": 2 if settings.random_sidebands else 0,
+                "random_scale": settings.random_scale,
+            },
         }
 
     def start(self) -> None:
@@ -580,6 +902,7 @@ class CoincidenceController(QWidget):
             self._analysis_epochs = [
                 {"changed_utc": datetime.now(UTC).isoformat(), "settings": self._describe(settings)}
             ]
+            self._matrix_exports = []
             if any(mca.coincidence_busy for mca in self._mca_views):
                 raise RuntimeError(
                     "Stop both existing MCA measurements before starting coincidence"
@@ -594,6 +917,7 @@ class CoincidenceController(QWidget):
             self._files = self._prepare_paths(mode)
             self._run_error = None
             self._timing_fit = None
+            self._clear_matrix("Collecting a new coincidence energy matrix.")
             self.delay_fit_curve.setData([], [])
             self.timing_fit_label.setText(
                 "Collecting data for a qualified Gaussian core fit."
@@ -833,8 +1157,10 @@ class CoincidenceController(QWidget):
                 self.delay_curve.setData([], [])
         self.energy_curve0.setData(np.arange(16_385), snapshot.energy_ch0)
         self.energy_curve1.setData(np.arange(16_385), snapshot.energy_ch1)
+        self._render_matrix(snapshot)
         completeness = "Live provisional" if self._state in {"arming", "running"} else "Drained"
         self.counts_label.setText(
+            f"Random sideband pairs: {snapshot.random_pairs:,} | "
             f"{completeness}  •  Pairs: {snapshot.pairs:,}  •  "
             f"CH0 participants: {snapshot.accepted_ch0:,}  •  "
             f"CH1 participants: {snapshot.accepted_ch1:,}  •  Multi-partner anchors: "
@@ -892,6 +1218,14 @@ class CoincidenceController(QWidget):
             "record_schema": VDPP_ZC_CALC_SCHEMA,
             "timing_mode": self.timing_mode.currentData(),
             "duration_s": self.duration.value(),
+            "matrix_random_sidebands": self.random_sidebands.isChecked(),
+            "matrix_random_gap_ns": self.random_gap.value(),
+            "matrix_display_mode": self.matrix_mode.currentData(),
+            "matrix_scale": self.matrix_scale.currentData(),
+            "matrix_projection_gates": {
+                "ch0": list(self.matrix_gate_ch0.getRegion()),
+                "ch1": list(self.matrix_gate_ch1.getRegion()),
+            },
         }
 
     @property
@@ -928,6 +1262,20 @@ class CoincidenceController(QWidget):
         if mode_index >= 0:
             self.timing_mode.setCurrentIndex(mode_index)
         self.duration.setValue(int(settings.get("duration_s", 0)))
+        self.random_sidebands.setChecked(bool(settings.get("matrix_random_sidebands", True)))
+        self.random_gap.setValue(float(settings.get("matrix_random_gap_ns", 0.0)))
+        matrix_mode = self.matrix_mode.findData(str(settings.get("matrix_display_mode", "prompt")))
+        if matrix_mode >= 0:
+            self.matrix_mode.setCurrentIndex(matrix_mode)
+        matrix_scale = self.matrix_scale.findData(str(settings.get("matrix_scale", "linear")))
+        if matrix_scale >= 0:
+            self.matrix_scale.setCurrentIndex(matrix_scale)
+        gates = settings.get("matrix_projection_gates")
+        if isinstance(gates, dict):
+            for key, region in (("ch0", self.matrix_gate_ch0), ("ch1", self.matrix_gate_ch1)):
+                values = gates.get(key)
+                if isinstance(values, list) and len(values) == 2:
+                    region.setRegion((float(values[0]), float(values[1])))
 
     def request_shutdown(self) -> None:
         """Gate off both producers before main-window worker teardown."""
