@@ -65,6 +65,11 @@ preserve the lifecycle required by each firmware generation.
 - Modeless multi-spectrum energy calibration under **Tools**, with draggable
   reference lines, linear or quadratic fits, residuals, per-channel calibrated
   top axes, and raw-channel-preserving CSV/YAML metadata
+- Modeless MCA peak-analysis workbench under **Tools** with automatic frozen
+  snapshots of current MCA spectra, CSV/ASCII SPE/Tukan WDM/CAEN TXT3/ROOT
+  loading, one-to-three Gaussian fits, selectable count-aware backgrounds,
+  residuals, parameter uncertainties, and variance-preserving spectrum
+  arithmetic
 - Debug waveform-bank readout
 - Synchronized stop/write/restart when changing MCA settings during acquisition
 - List-mode IIO DMA using fixed 1,024-record frames
@@ -336,6 +341,49 @@ applied. Binning is handled specially: changing its power-of-two factor
 automatically rescales the channel coordinates, so a calibration made at (for
 example) binning 16 remains valid at binning 32 or 8. Other energy-processing
 changes still mark the calibration stale.
+
+### MCA peak-analysis workbench
+
+Open **Tools -> MCA Peak Analysis Workbench...** to copy the latest presented
+spectrum from every available MCA channel. These are frozen analysis snapshots:
+**Refresh selected MCA** or **Refresh all MCA spectra** copies newer data, but
+the workbench never starts, stops, clears, or reconfigures acquisition. A copy
+taken while acquisition is running is identified as live and non-atomic for the
+same reason as the calibration workspace.
+
+The workbench also loads NLab or ordinary delimited CSV spectra,
+Maestro/ORTEC-style ASCII `.Spe` files, legacy binary Tukan `.wdm` spectra,
+CAEN calibrated ASCII `.txt3` exports, and CAEN ROOT energy histograms. It
+accepts counts-only CSV, channel and counts columns, or channel/energy/counts
+columns. A ROOT file contributes every `TH1` object from its `Energy` directory
+as a separate spectrum, including empty channel histograms; unrelated Time/PSD
+objects are omitted. CAEN calibration coordinates and real/live measurement
+times are retained when the source represents them. CAEN `_F_` and `_R_`
+histogram prefixes are recorded as filtered and raw provenance respectively.
+The documented fixed
+Tukan metadata includes the analyzer identity, spectrum description,
+acquisition start time, and real/live measurement times. The undocumented
+variable Tukan calibration/ROI tail and opaque CAEN ROOT calibration objects
+are not guessed or applied. Visible spectra can be overlaid when they share
+channel or energy coordinates; spectra using another axis are not silently
+resampled.
+
+Select one, two, or three Gaussian components and a background of none,
+constant, linear, centred exponential, an error-function Compton step, or a
+logistic Fermi step. Draggable markers seed and bound the peak centres. Raw
+non-negative count spectra default to a Poisson-deviance fit; scaled,
+background-subtracted, or otherwise derived spectra use their propagated
+variance. Results include channel and calibrated-energy centroids, FWHM,
+integrated area, resolution, parameter uncertainty, reduced fit statistic,
+AIC/BIC, component curves, residuals, and boundary/covariance warnings.
+
+Spectrum operations create new immutable entries rather than changing their
+sources. Available operations are scalar scaling, area/maximum/acquisition-time
+normalization, addition, subtraction, live- or elapsed-time-scaled background
+subtraction, integer rebinning, and cropping to the fit range. Arithmetic
+requires identical coordinate grids, propagates variance, and never performs
+implicit interpolation. Spectra export to CSV; fit summaries export to JSON or
+CSV without overwriting existing files.
 
 ### Live coincidence measurement
 
