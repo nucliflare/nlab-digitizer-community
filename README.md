@@ -513,7 +513,11 @@ projections from NDMA, CAEN CoMPASS, legacy `caen.py`, HDF5, or ROOT events.
 The import runs in a background worker: binary files are memory-mapped, HDF5
 is read in dataset slices, and ROOT uses chunked tree iteration, so event
 memory does not grow with file size. CAEN PSD import requires raw Energy and
-Energy Short fields; waveform samples are skipped.
+Energy Short fields; waveform samples are skipped. Headerless 24-byte files
+produced by single-channel extraction tools are accepted only when sampled
+records have one stable board/channel, monotonic timestamps, coherent gate
+values, and zero reserved words; every reserved word and channel is then
+validated during bounded-memory iteration.
 
 Use **Developer → Validate Two-Channel Timing...** with two native NLab MCA
 list-mode files from a known pulse split between channels (lower-index channel

@@ -52,6 +52,28 @@ def _native_file(path: Path, options: int, events: list[bytes]) -> None:
     path.write_bytes(struct.pack("<H", 0xCAE0 | options) + b"".join(events))
 
 
+def _extracted_event(
+    *,
+    timestamp: int,
+    long_gate: int,
+    short_gate: int,
+    board: int = 0,
+    channel: int = 0,
+    flags: int = 0x4040,
+    reserved: int = 0,
+) -> bytes:
+    return struct.pack(
+        "<HHQHHII",
+        board,
+        channel,
+        timestamp,
+        long_gate,
+        short_gate,
+        flags,
+        reserved,
+    )
+
+
 def _scope_mock() -> MagicMock:
     scope = MagicMock(spec=Scope)
     scope.specs = PARAMETER_SPECS
@@ -156,6 +178,58 @@ def test_caen_raw_and_calibrated_energy_layout_uses_raw_gate(tmp_path: Path) -> 
     assert info.total_events == 1
     assert batch["long_gate"][0] == 900
     assert batch["short_gate"][0] == 300
+
+
+def test_headerless_extracted_caen_channel_feeds_psd(tmp_path: Path) -> None:
+    path = tmp_path / "Data_CH0@DT5730_666.bin"
+    path.write_bytes(
+        b"".join(
+            [
+                _extracted_event(timestamp=10, long_gate=452, short_gate=28),
+                _extracted_event(timestamp=20, long_gate=534, short_gate=30),
+                _extracted_event(timestamp=30, long_gate=614, short_gate=35),
+            ]
+        )
+    )
+
+    info = inspect_psd_event_file(path)
+    batches = list(iter_psd_event_batches(path))
+
+    assert info.format_name == "CAEN extracted channel binary"
+    assert info.channel == 0
+    assert info.total_events == 3
+    assert [len(batch) for batch in batches] == [3]
+    np.testing.assert_array_equal(batches[0]["timestamp"], [10, 20, 30])
+    np.testing.assert_array_equal(batches[0]["long_gate"], [452, 534, 614])
+    np.testing.assert_array_equal(batches[0]["short_gate"], [28, 30, 35])
+
+
+def test_extracted_caen_detection_rejects_arbitrary_aligned_binary(tmp_path: Path) -> None:
+    path = tmp_path / "not-caen.bin"
+    path.write_bytes(bytes(48))
+
+    with pytest.raises(ValueError, match="Unsupported CAEN binary header"):
+        inspect_psd_event_file(path)
+
+
+def test_extracted_caen_iterator_validates_every_reserved_word(tmp_path: Path) -> None:
+    path = tmp_path / "corrupt-extraction.bin"
+    records = [
+        _extracted_event(
+            timestamp=index + 1,
+            long_gate=100,
+            short_gate=20,
+            reserved=1 if index == 1 else 0,
+        )
+        for index in range(200)
+    ]
+    path.write_bytes(b"".join(records))
+
+    info = inspect_psd_event_file(path)
+
+    assert info.total_events == 200
+    with pytest.raises(ValueError, match="nonzero reserved field"):
+        list(iter_psd_event_batches(path))
 
 
 def test_caen_waveform_index_supports_variable_sample_counts(tmp_path: Path) -> None:

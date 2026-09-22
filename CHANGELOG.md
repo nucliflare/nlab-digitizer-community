@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   constant/linear/exponential/Compton/Fermi backgrounds, calibrated results,
   residual and component plots, JSON/CSV reports, and immutable
   variance-propagating spectrum arithmetic and background subtraction.
+- PSD import for strictly validated headerless 24-byte CAEN single-channel
+  extraction files, with bounded-memory iteration and full reserved-field and
+  channel validation.
 
 ---
 

@@ -24,7 +24,9 @@ CAEN_SHORT_ENERGY = 0x4
 CAEN_WAVEFORM = 0x8
 
 _LEGACY_EVENT = struct.Struct("<HHQHHI")
+_EXTRACTED_EVENT = struct.Struct("<HHQHHII")
 _BASE_EVENT = struct.Struct("<HHQ")
+_EXTRACTED_VALIDATION_SAMPLES = 96
 _PSD_EVENT_DTYPE = np.dtype(
     [("timestamp", "<u8"), ("long_gate", "<u2"), ("short_gate", "<u2")]
 )
@@ -44,18 +46,23 @@ class CaenFileInfo:
     channel: int
     total_events: int
     fixed_record_bytes: int | None
+    payload_offset: int
 
     @property
     def legacy(self) -> bool:
         return self.header == CAEN_LEGACY_HEADER
 
     @property
+    def extracted(self) -> bool:
+        return self.payload_offset == 0
+
+    @property
     def has_waveforms(self) -> bool:
-        return not self.legacy and bool(self.options & CAEN_WAVEFORM)
+        return not self.legacy and not self.extracted and bool(self.options & CAEN_WAVEFORM)
 
     @property
     def psd_compatible(self) -> bool:
-        return self.legacy or (
+        return self.legacy or self.extracted or (
             bool(self.options & CAEN_RAW_ENERGY)
             and bool(self.options & CAEN_SHORT_ENERGY)
         )
@@ -115,6 +122,23 @@ def native_fixed_record_bytes(options: int) -> int | None:
 def parse_caen_event(data: mmap.mmap, offset: int, info: CaenFileInfo) -> CaenEvent:
     """Parse one event and locate, but do not materialize, its waveform."""
     size = len(data)
+    if info.extracted:
+        _require_bytes(size, offset, _EXTRACTED_EVENT.size)
+        board, channel, timestamp, long_gate, short_gate, flags, _reserved = (
+            _EXTRACTED_EVENT.unpack_from(data, offset)
+        )
+        return CaenEvent(
+            board=board,
+            channel=channel,
+            timestamp=timestamp,
+            long_gate=long_gate,
+            short_gate=short_gate,
+            flags=flags,
+            waveform_code=None,
+            waveform_offset=None,
+            waveform_samples=0,
+            next_offset=offset + _EXTRACTED_EVENT.size,
+        )
     if info.legacy:
         _require_bytes(size, offset, _LEGACY_EVENT.size)
         board, channel, timestamp, long_gate, short_gate, flags = (
@@ -182,6 +206,68 @@ def parse_caen_event(data: mmap.mmap, offset: int, info: CaenFileInfo) -> CaenEv
     )
 
 
+def _inspect_extracted_channel_file(
+    path: Path,
+    data: mmap.mmap,
+    first_word: int,
+) -> CaenFileInfo | None:
+    """Recognize the fixed 24-byte records produced by channel extraction tools."""
+    size = len(data)
+    if size < 2 * _EXTRACTED_EVENT.size or size % _EXTRACTED_EVENT.size:
+        return None
+    total_events = size // _EXTRACTED_EVENT.size
+    sample_count = min(total_events, _EXTRACTED_VALIDATION_SAMPLES)
+    indices = sorted(
+        {
+            round(index * (total_events - 1) / (sample_count - 1))
+            for index in range(sample_count)
+        }
+    )
+    expected_board: int | None = None
+    expected_channel: int | None = None
+    previous_timestamp: int | None = None
+    first_timestamp: int | None = None
+    valid_gate_pairs = 0
+    nonzero_long_gates = 0
+    for index in indices:
+        offset = index * _EXTRACTED_EVENT.size
+        board, channel, timestamp, long_gate, short_gate, _flags, reserved = (
+            _EXTRACTED_EVENT.unpack_from(data, offset)
+        )
+        if expected_board is None:
+            expected_board, expected_channel = board, channel
+            first_timestamp = timestamp
+        if board != expected_board or channel != expected_channel or reserved != 0:
+            return None
+        if previous_timestamp is not None and timestamp < previous_timestamp:
+            return None
+        previous_timestamp = timestamp
+        if long_gate:
+            nonzero_long_gates += 1
+            if short_gate <= long_gate:
+                valid_gate_pairs += 1
+    if (
+        first_timestamp is None
+        or previous_timestamp is None
+        or previous_timestamp <= first_timestamp
+        or nonzero_long_gates == 0
+        or valid_gate_pairs / nonzero_long_gates < 0.75
+    ):
+        return None
+    assert expected_board is not None and expected_channel is not None
+    return CaenFileInfo(
+        path=path,
+        format_name="CAEN extracted channel binary",
+        header=first_word,
+        options=0,
+        board=expected_board,
+        channel=expected_channel,
+        total_events=total_events,
+        fixed_record_bytes=_EXTRACTED_EVENT.size,
+        payload_offset=0,
+    )
+
+
 def inspect_caen_file(path: Path) -> CaenFileInfo:
     """Validate a CAEN signature and inspect its first event."""
     size = path.stat().st_size
@@ -190,10 +276,13 @@ def inspect_caen_file(path: Path) -> CaenFileInfo:
     with path.open("rb") as stream:
         raw_header = stream.read(CAEN_FILE_HEADER_BYTES)
         header = struct.unpack("<H", raw_header)[0]
-        if not is_caen_header(header):
-            raise ValueError(f"Unsupported CAEN binary header 0x{header:04X}")
         mapped = mmap.mmap(stream.fileno(), length=0, access=mmap.ACCESS_READ)
         try:
+            if not is_caen_header(header):
+                extracted = _inspect_extracted_channel_file(path, mapped, header)
+                if extracted is not None:
+                    return extracted
+                raise ValueError(f"Unsupported CAEN binary header 0x{header:04X}")
             if header == CAEN_LEGACY_HEADER:
                 options = 0
                 record_bytes: int | None = _LEGACY_EVENT.size
@@ -211,6 +300,7 @@ def inspect_caen_file(path: Path) -> CaenFileInfo:
                 channel=0,
                 total_events=0,
                 fixed_record_bytes=record_bytes,
+                payload_offset=CAEN_FILE_HEADER_BYTES,
             )
             first = parse_caen_event(mapped, CAEN_FILE_HEADER_BYTES, provisional)
         finally:
@@ -230,10 +320,23 @@ def inspect_caen_file(path: Path) -> CaenFileInfo:
         channel=first.channel,
         total_events=total_events,
         fixed_record_bytes=record_bytes,
+        payload_offset=CAEN_FILE_HEADER_BYTES,
     )
 
 
 def _fixed_event_dtype(info: CaenFileInfo) -> np.dtype:
+    if info.extracted:
+        return np.dtype(
+            [
+                ("board", "<u2"),
+                ("channel", "<u2"),
+                ("timestamp", "<u8"),
+                ("long_gate", "<u2"),
+                ("short_gate", "<u2"),
+                ("flags", "<u4"),
+                ("reserved", "<u4"),
+            ]
+        )
     if info.legacy:
         return np.dtype(
             [
@@ -284,7 +387,7 @@ def iter_caen_psd_batches(
         try:
             if info.fixed_record_bytes is not None:
                 dtype = _fixed_event_dtype(info)
-                payload_bytes = len(mapped) - CAEN_FILE_HEADER_BYTES
+                payload_bytes = len(mapped) - info.payload_offset
                 usable_bytes = payload_bytes - payload_bytes % dtype.itemsize
                 if usable_bytes != payload_bytes:
                     log.warning(
@@ -299,21 +402,33 @@ def iter_caen_psd_batches(
                         mapped,
                         dtype=dtype,
                         count=count,
-                        offset=CAEN_FILE_HEADER_BYTES + first * dtype.itemsize,
+                        offset=info.payload_offset + first * dtype.itemsize,
                     )
                     multiple_channels = bool(np.any(raw["channel"] != info.channel))
+                    multiple_boards = bool(
+                        info.extracted and np.any(raw["board"] != info.board)
+                    )
+                    invalid_reserved = bool(
+                        info.extracted and np.any(raw["reserved"] != 0)
+                    )
                     canonical = _canonical_batch(raw)
                     del raw
-                    if multiple_channels:
-                        raise ValueError("CAEN file contains events from multiple channels")
+                    if multiple_channels or multiple_boards:
+                        raise ValueError(
+                            "CAEN file contains events from multiple board/channel sources"
+                        )
+                    if invalid_reserved:
+                        raise ValueError(
+                            "CAEN extracted channel file contains a nonzero reserved field"
+                        )
                     yield canonical
                 return
 
             capacity = 65_536
             batch = np.empty(capacity, dtype=_PSD_EVENT_DTYPE)
             count = 0
-            batch_start = CAEN_FILE_HEADER_BYTES
-            offset = CAEN_FILE_HEADER_BYTES
+            batch_start = info.payload_offset
+            offset = info.payload_offset
             while offset < len(mapped):
                 try:
                     event = parse_caen_event(mapped, offset, info)
