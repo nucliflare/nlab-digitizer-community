@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   linear and signed-log pyqtgraph rendering, calibrated secondary axes,
   interactive cross-channel gates and projections, and HDF5/ROOT export with
   analysis metadata.
+- MCA peak-analysis workbench with automatic frozen live-spectrum snapshots,
+  manual refresh, tolerant CSV, ASCII SPE, legacy binary Tukan WDM, CAEN TXT3,
+  and CAEN ROOT energy-histogram import, linear/log pyqtgraph overlays,
+  asynchronous lmfit models containing one to three Gaussians and selectable
+  constant/linear/exponential/Compton/Fermi backgrounds, calibrated results,
+  residual and component plots, JSON/CSV reports, and immutable
+  variance-propagating spectrum arithmetic and background subtraction.
 
 ---
 

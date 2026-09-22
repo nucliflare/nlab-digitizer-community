@@ -21,6 +21,7 @@ from nlab.hardware.digitizer.digitizer import Digitizer
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaEventBuffer
 from nlab.hardware.modbus_devices import ExternalDevices
 from nlab.views.energy_calibration_dialog import EnergyCalibrationDialog
+from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
 from nlab.workers.psd_file_worker import PsdFileWorker
 
 if TYPE_CHECKING:
@@ -70,6 +71,7 @@ class MainWindowController:
         self._global_controller: GlobalController | None = None
         self._coincidence_controller: CoincidenceController | None = None
         self._energy_calibration_dialog: EnergyCalibrationDialog | None = None
+        self._mca_peak_analysis_dialog: McaPeakAnalysisDialog | None = None
         self._external_devices = ExternalDevices()
         self._thread: QThread | None = None
         self._psd_file_thread: QThread | None = None
@@ -459,6 +461,15 @@ class MainWindowController:
             )
         self._energy_calibration_dialog.show_workspace()
 
+    def show_mca_peak_analysis(self) -> None:
+        """Open one modeless peak-analysis workbench for live and saved spectra."""
+        if self._mca_peak_analysis_dialog is None:
+            self._mca_peak_analysis_dialog = McaPeakAnalysisDialog(
+                self._mca_controllers,
+                parent=self._window,
+            )
+        self._mca_peak_analysis_dialog.show_workspace()
+
     def load_psd_events(self, path: Path) -> None:
         """Reconstruct one PSD view from a saved event file off the GUI thread."""
         if self._psd_file_thread is not None:
@@ -674,6 +685,9 @@ class MainWindowController:
         if self._energy_calibration_dialog is not None:
             self._energy_calibration_dialog.close_without_prompt()
             self._energy_calibration_dialog = None
+        if self._mca_peak_analysis_dialog is not None:
+            self._mca_peak_analysis_dialog.close_without_prompt()
+            self._mca_peak_analysis_dialog = None
         self._save_dock_state()
         for ctrl in self._scope_controllers:
             ctrl.save_display_settings()
@@ -698,6 +712,9 @@ class MainWindowController:
         if self._energy_calibration_dialog is not None:
             self._energy_calibration_dialog.close_without_prompt()
             self._energy_calibration_dialog = None
+        if self._mca_peak_analysis_dialog is not None:
+            self._mca_peak_analysis_dialog.close_without_prompt()
+            self._mca_peak_analysis_dialog = None
         self._save_dock_state()
         for ctrl in self._scope_controllers:
             ctrl.save_display_settings()

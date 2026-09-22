@@ -534,3 +534,21 @@ def test_global_stop_request_tolerates_already_deleted_qobject() -> None:
     GlobalController._request_diagnostics_stop(controller)  # type: ignore[arg-type]
 
     assert controller._worker_stop_requested
+
+
+def test_peak_analysis_workbench_is_modeless_and_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _bare_controller()
+    controller._mca_controllers = [object(), object()]
+    controller._window = object()
+    controller._mca_peak_analysis_dialog = None
+    dialog = SimpleNamespace(show_workspace=Mock())
+    factory = Mock(return_value=dialog)
+    monkeypatch.setattr(main_window_module, "McaPeakAnalysisDialog", factory)
+
+    controller.show_mca_peak_analysis()
+    controller.show_mca_peak_analysis()
+
+    factory.assert_called_once_with(controller._mca_controllers, parent=controller._window)
+    assert dialog.show_workspace.call_count == 2
