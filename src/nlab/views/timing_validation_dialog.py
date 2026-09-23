@@ -142,7 +142,7 @@ class TimingValidationDialog(QDialog):
         worker.error.connect(lambda message: self.status.setText(f"Timing check failed: {message}"))
         worker.cancelled.connect(lambda: self.status.setText("Timing check cancelled."))
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
-        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._on_thread_finished)
         self._worker = worker

@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import struct
+import threading
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import pytest
+from PySide6.QtCore import Signal
 from pytestqt.qtbot import QtBot
 
+import nlab.views.waveform_analysis_dialog as waveform_dialog_module
 from nlab.analysis.waveform_file import build_waveform_file_index
 from nlab.analysis.waveform_psd import (
     WaveformPsdAccumulator,
@@ -22,6 +25,7 @@ from nlab.hardware.digitizer.dma import FILE_HEADER_STRUCT, FILE_MAGIC, FILE_VER
 from nlab.views.offline_psd_plot import OfflinePsdPlot
 from nlab.views.plot_viewbox import ModifierZoomViewBox
 from nlab.views.waveform_analysis_dialog import WaveformAnalysisDialog
+from nlab.workers.base_worker import BaseWorker
 from nlab.workers.waveform_psd_worker import WaveformPsdWorker
 
 
@@ -241,3 +245,55 @@ def test_waveform_workbench_indexes_and_reconstructs_ndma(
     assert not dialog._auto_preview_timer.isActive()
     qtbot.waitUntil(lambda: dialog._analysis_thread is None, timeout=5000)
     assert "PSD complete" in dialog.status.text()
+
+
+def test_waveform_worker_is_deleted_by_its_finished_thread(
+    tmp_path: Path,
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "worker-lifetime.bin"
+    frame_samples = 12
+    header = FILE_HEADER_STRUCT.pack(
+        FILE_MAGIC,
+        FILE_VERSION,
+        0,
+        0,
+        0.0,
+        frame_samples,
+    )
+    samples = np.asarray((100, 100, 100, 90, 60, 70, 90, 100), dtype="<i2")
+    path.write_bytes(header + struct.pack("<Q", 1) + samples.tobytes())
+
+    class BlockingWorker(BaseWorker):
+        progress = Signal(object, object)
+        loaded = Signal(object)
+        cancelled = Signal()
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            super().__init__()
+            self.release = threading.Event()
+
+        def run(self) -> None:
+            assert self.release.wait(5)
+            self.finished.emit()
+
+        def stop(self) -> None:
+            self.release.set()
+
+    dialog = WaveformAnalysisDialog()
+    qtbot.addWidget(dialog)
+    dialog.open_path(path)
+    qtbot.waitUntil(lambda: dialog._index_thread is None, timeout=5000)
+    monkeypatch.setattr(waveform_dialog_module, "WaveformPsdWorker", BlockingWorker)
+
+    dialog._start_analysis()
+    worker = dialog._analysis_worker
+    assert isinstance(worker, BlockingWorker)
+    destroyed: list[bool] = []
+    worker.destroyed.connect(lambda: destroyed.append(True))
+    worker.release.set()
+
+    qtbot.waitUntil(lambda: dialog._analysis_thread is None, timeout=5000)
+
+    assert destroyed == [True]

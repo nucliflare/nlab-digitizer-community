@@ -80,7 +80,10 @@ class ScopeDmaWorker(BaseWorker):
     """
 
     ready = Signal()
-    progress = Signal(int)
+    # Scope captures can exceed the signed 32-bit range in bytes. Keep the
+    # Python integer intact across Qt's queued connection instead of wrapping
+    # it through a C++ ``int``.
+    progress = Signal(object)
 
     def __init__(
         self,
@@ -133,7 +136,7 @@ class IIOScopeDmaWorker(BaseWorker):
     """
 
     ready = Signal()
-    progress = Signal(int)
+    progress = Signal(object)
 
     def __init__(
         self,

@@ -152,7 +152,9 @@ class PsdReadbackDialog(QDialog):
         worker.cancelled.connect(self._cancelled)
         worker.error.connect(self._failed)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
-        worker.finished.connect(worker.deleteLater)
+        # Let the worker thread process its own deferred QObject deletion
+        # before GUI-side cleanup releases the final Python reference.
+        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(self._thread_finished)
         self._worker = worker
         self._thread = thread

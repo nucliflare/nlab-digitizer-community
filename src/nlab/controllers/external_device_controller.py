@@ -408,7 +408,7 @@ class ExternalDeviceController(QWidget):
             self._worker_thread.quit,
             Qt.ConnectionType.DirectConnection,
         )
-        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker_thread.finished.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
         self._worker_thread.finished.connect(self._on_polling_finished)
 

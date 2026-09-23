@@ -109,6 +109,17 @@ def _scope_model_for_controller() -> MagicMock:
     return scope
 
 
+def test_scope_dma_progress_formats_large_file_without_wrapping(qtbot: QtBot) -> None:
+    controller = ScopeController(_scope_model_for_controller(), scope_dma=None, channel=0)
+    qtbot.addWidget(controller)
+    controller._dma_thread = MagicMock()
+
+    controller._on_dma_progress(8 * 1024**3)
+
+    assert controller.ui.lblRecordingStatus.text() == "Recording: 8.00 GiB"
+    controller._dma_thread = None
+
+
 def test_scope_viewer_scales_time_axis_and_explains_sample_period(qtbot: QtBot) -> None:
     scope = _scope_model_for_controller()
     controller = ScopeController(scope, scope_dma=None, channel=0)

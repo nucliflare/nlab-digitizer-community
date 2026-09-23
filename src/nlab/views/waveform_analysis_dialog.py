@@ -328,7 +328,11 @@ class WaveformAnalysisDialog(QDialog):
         worker.cancelled.connect(self._index_cancelled)
         worker.error.connect(self._index_failed)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
-        worker.finished.connect(worker.deleteLater)
+        # Delete the worker only once QThread has stopped its event loop. If
+        # deleteLater() is queued from worker.finished after the direct quit,
+        # a long-running job can leave the QObject alive until the GUI drops
+        # its final Python reference, causing cross-thread native destruction.
+        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(self._index_thread_finished)
         self._index_worker = worker
         self._index_thread = thread
@@ -621,7 +625,7 @@ class WaveformAnalysisDialog(QDialog):
         worker.cancelled.connect(self._analysis_cancelled)
         worker.error.connect(self._analysis_failed)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
-        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(self._analysis_thread_finished)
         self._analysis_worker = worker
         self._analysis_thread = thread

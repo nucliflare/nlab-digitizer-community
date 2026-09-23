@@ -304,11 +304,14 @@ Legacy gRPC channel numbers are one-based, matching the old service API.
 
 ## Capture files and analysis
 
-Scope recording remains binary with an `NDMA` header. MCA list-mode output is
-selected under **Settings → DMA Settings...** and creates a new file for every
-measurement. Available modes are binary NDMA, a ROOT `TTree`, appendable HDF5
-with SWMR metadata, and online-only DMA with no file. Binary, ROOT, and HDF5
-save list-mode events whether or not Charge Comparison is enabled. With Charge
+Scope recording remains binary with an `NDMA` header. Scope files are not
+rotated at an application-defined size; the GUI reports KiB, MiB, or GiB while
+the same file grows until recording stops or storage reports an error. MCA
+list-mode output is selected under **Settings → DMA Settings...** and creates a
+new file for every measurement. Available modes are binary NDMA, a ROOT
+`TTree`, appendable HDF5 with SWMR metadata, and online-only DMA with no file.
+Binary, ROOT, and HDF5 save list-mode events whether or not Charge Comparison
+is enabled. With Charge
 Comparison enabled, DMA also feeds the live PSD view when available. Online-only
 DMA with Charge Comparison disabled feeds live coincidence analysis when a
 coincidence run owns the channels; otherwise the events are discarded. All file formats are written

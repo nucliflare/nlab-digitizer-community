@@ -1528,7 +1528,7 @@ class MCAController(QWidget):
             self._worker_thread.quit,
             Qt.ConnectionType.DirectConnection,
         )
-        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker_thread.finished.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._on_worker_finished)
 
         self._worker_thread.start()
@@ -1752,7 +1752,7 @@ class MCAController(QWidget):
             self._dma_thread.quit,
             Qt.ConnectionType.DirectConnection,
         )
-        self._dma_worker.finished.connect(self._dma_worker.deleteLater)
+        self._dma_thread.finished.connect(self._dma_worker.deleteLater)
         self._dma_thread.finished.connect(self._on_dma_finished)
 
         self._set_controls_enabled(False)

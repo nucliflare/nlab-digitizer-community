@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Scope DMA size progress now preserves byte counts beyond the signed 32-bit
+  Qt boundary and displays long recordings in GiB instead of appearing to
+  restart from zero at multi-gigabyte sizes.
+- Background workers are now destroyed during their QThread shutdown instead
+  of racing GUI-side reference cleanup. This covers Scope/MCA DMA and polling,
+  Scope Auto Setup, PSD and waveform readers, peak fitting, timing validation,
+  temperature correction, power-supply monitoring, global diagnostics, and
+  external-device polling.
+
 ## [0.5.0] — 2026-09-22
 
 ### Added

@@ -796,7 +796,7 @@ class ScopeController(QWidget):
             self._dma_thread.quit,
             Qt.ConnectionType.DirectConnection,
         )
-        self._dma_worker.finished.connect(self._dma_worker.deleteLater)
+        self._dma_thread.finished.connect(self._dma_worker.deleteLater)
         self._dma_thread.finished.connect(self._on_dma_finished)
 
         self._set_controls_enabled(False)
@@ -921,7 +921,7 @@ class ScopeController(QWidget):
         worker.succeeded.connect(self._on_auto_setup_succeeded)
         worker.error.connect(self._on_auto_setup_error)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
-        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(self._on_auto_setup_finished)
 
         self._set_auto_setup_busy(True)
@@ -1316,7 +1316,7 @@ class ScopeController(QWidget):
             self._dma_filepath = Path(path)
             log.info("Scope DMA: user selected filepath: %s", self._dma_filepath)
 
-    @Slot(int)
+    @Slot(object)
     def _on_dma_progress(self, bytes_written: int) -> None:
         if self._dma_stopping or self._dma_thread is None:
             return
@@ -1325,13 +1325,17 @@ class ScopeController(QWidget):
         # make the displayed number equal the actual file size.
         file_bytes = bytes_written + FILE_HEADER_STRUCT.size
         suffix = "; viewer paused" if self._frame_exceeds_viewer_limit() else ""
-        if file_bytes < 1024 * 1024:
+        if file_bytes < 1024**2:
             self.ui.lblRecordingStatus.setText(
                 f"Recording: {file_bytes / 1024:.1f} KiB{suffix}"
             )
+        elif file_bytes < 1024**3:
+            self.ui.lblRecordingStatus.setText(
+                f"Recording: {file_bytes / 1024**2:.1f} MiB{suffix}"
+            )
         else:
             self.ui.lblRecordingStatus.setText(
-                f"Recording: {file_bytes / (1024 * 1024):.1f} MiB{suffix}"
+                f"Recording: {file_bytes / 1024**3:.2f} GiB{suffix}"
             )
 
     @Slot(str)

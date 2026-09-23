@@ -265,7 +265,7 @@ class GlobalController(QWidget):
         # that blocking wait and consume the entire timeout. quit() is
         # thread-safe; invoke it directly when the worker finishes.
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
-        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._on_temperature_finished)
         self._temperature_worker = worker
@@ -528,7 +528,7 @@ class GlobalController(QWidget):
             self._worker_thread.quit,
             Qt.ConnectionType.DirectConnection,
         )
-        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker_thread.finished.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
         self._worker_thread.finished.connect(self._on_diagnostics_finished)
         self._worker_thread.start()

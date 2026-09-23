@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import h5py
 import numpy as np
 import pytest
+from PySide6.QtCore import Signal
 from pytestqt.qtbot import QtBot
 
+import nlab.views.psd_readback_dialog as psd_readback_module
 from nlab.analysis import psd_file
 from nlab.analysis.psd import PsdAccumulator
 from nlab.analysis.psd_file import inspect_psd_event_file, iter_psd_event_batches
@@ -18,6 +21,7 @@ from nlab.hardware.digitizer.dma import (
 )
 from nlab.hardware.digitizer.mca_capture import McaCaptureWriter, McaDmaOutputMode
 from nlab.views.psd_readback_dialog import PsdReadbackDialog
+from nlab.workers.base_worker import BaseWorker
 
 
 def _events(count: int) -> np.ndarray:
@@ -136,6 +140,46 @@ def test_standalone_psd_readback_loads_hdf5(
 
     assert int(dialog.plot._matrix.sum()) == 10
     assert "Loaded 10 events" in dialog.status.text()
+
+
+def test_psd_readback_worker_is_deleted_by_its_finished_thread(
+    tmp_path: Path,
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "worker-lifetime.h5"
+    with h5py.File(path, "w") as file:
+        file.create_dataset("events", data=_events(1))
+
+    class BlockingWorker(BaseWorker):
+        progress = Signal(object, object)
+        loaded = Signal(object, object, str)
+        cancelled = Signal()
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            super().__init__()
+            self.release = threading.Event()
+
+        def run(self) -> None:
+            assert self.release.wait(5)
+            self.finished.emit()
+
+        def stop(self) -> None:
+            self.release.set()
+
+    monkeypatch.setattr(psd_readback_module, "PsdFileWorker", BlockingWorker)
+    dialog = PsdReadbackDialog()
+    qtbot.addWidget(dialog)
+    dialog.open_path(path)
+    worker = dialog._worker
+    assert isinstance(worker, BlockingWorker)
+    destroyed: list[bool] = []
+    worker.destroyed.connect(lambda: destroyed.append(True))
+    worker.release.set()
+
+    qtbot.waitUntil(lambda: dialog._thread is None, timeout=5000)
+
+    assert destroyed == [True]
 
 
 def test_root_reader_iterates_tree_and_feeds_psd_accumulator(tmp_path: Path) -> None:
