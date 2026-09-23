@@ -6,7 +6,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import pytest
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QThread, Signal
 from pytestqt.qtbot import QtBot
 
 import nlab.views.psd_readback_dialog as psd_readback_module
@@ -167,8 +167,15 @@ def test_psd_readback_worker_is_deleted_by_its_finished_thread(
         def stop(self) -> None:
             self.release.set()
 
+    finish_threads: list[QThread] = []
+
+    class TrackingDialog(PsdReadbackDialog):
+        def _thread_finished(self) -> None:
+            finish_threads.append(QThread.currentThread())
+            super()._thread_finished()
+
     monkeypatch.setattr(psd_readback_module, "PsdFileWorker", BlockingWorker)
-    dialog = PsdReadbackDialog()
+    dialog = TrackingDialog()
     qtbot.addWidget(dialog)
     dialog.open_path(path)
     worker = dialog._worker
@@ -180,6 +187,7 @@ def test_psd_readback_worker_is_deleted_by_its_finished_thread(
     qtbot.waitUntil(lambda: dialog._thread is None, timeout=5000)
 
     assert destroyed == [True]
+    assert finish_threads == [dialog.thread()]
 
 
 def test_root_reader_iterates_tree_and_feeds_psd_accumulator(tmp_path: Path) -> None:

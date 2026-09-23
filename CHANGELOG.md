@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of racing GUI-side reference cleanup. This covers Scope/MCA DMA and polling,
   Scope Auto Setup, PSD and waveform readers, peak fitting, timing validation,
   temperature correction, power-supply monitoring, global diagnostics, and
-  external-device polling.
+  external-device polling. GUI-side completion handlers are explicitly queued
+  back to the main thread so rendering a completed large-file analysis cannot
+  update Qt widgets from the worker thread.
 
 ## [0.5.0] — 2026-09-22
 

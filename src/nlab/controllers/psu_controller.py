@@ -216,7 +216,10 @@ class PSUController(QWidget):
         )
         self._worker_thread.finished.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        self._worker_thread.finished.connect(self._on_monitor_finished)
+        self._worker_thread.finished.connect(
+            self._on_monitor_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         self.ui.btnStartMonitor.setEnabled(False)
         self.ui.btnStopMonitor.setEnabled(True)

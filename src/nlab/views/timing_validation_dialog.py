@@ -144,7 +144,10 @@ class TimingValidationDialog(QDialog):
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._on_thread_finished)
+        thread.finished.connect(
+            self._on_thread_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._worker = worker
         self._thread = thread
         thread.start()

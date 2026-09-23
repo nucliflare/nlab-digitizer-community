@@ -410,7 +410,10 @@ class ExternalDeviceController(QWidget):
         )
         self._worker_thread.finished.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        self._worker_thread.finished.connect(self._on_polling_finished)
+        self._worker_thread.finished.connect(
+            self._on_polling_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         self._worker_thread.start()
         log.info("External device polling started: %s", self.device.connection_info())

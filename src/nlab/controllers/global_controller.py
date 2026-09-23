@@ -267,7 +267,10 @@ class GlobalController(QWidget):
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._on_temperature_finished)
+        thread.finished.connect(
+            self._on_temperature_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._temperature_worker = worker
         self._temperature_worker_thread = thread
         self._temperature_worker_stop_requested = False
@@ -530,7 +533,10 @@ class GlobalController(QWidget):
         )
         self._worker_thread.finished.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        self._worker_thread.finished.connect(self._on_diagnostics_finished)
+        self._worker_thread.finished.connect(
+            self._on_diagnostics_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._worker_thread.start()
 
     def _on_diagnostics_interval_changed(self, interval_ms: int) -> None:

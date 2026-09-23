@@ -744,7 +744,10 @@ class McaPeakAnalysisDialog(QDialog):
         worker.cancelled.connect(lambda: self.fit_status.setText("Peak fit cancelled."))
         worker.finished.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._fit_thread_finished)
+        thread.finished.connect(
+            self._fit_thread_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
         thread.finished.connect(thread.deleteLater)
         self._fit_thread = thread
         self._fit_worker = worker

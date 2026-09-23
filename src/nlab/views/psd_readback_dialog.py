@@ -155,7 +155,10 @@ class PsdReadbackDialog(QDialog):
         # Let the worker thread process its own deferred QObject deletion
         # before GUI-side cleanup releases the final Python reference.
         thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._thread_finished)
+        thread.finished.connect(
+            self._thread_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._worker = worker
         self._thread = thread
         self._set_busy(True)

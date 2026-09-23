@@ -11,11 +11,17 @@ class BaseWorker(QObject):
         thread.started.connect(worker.run)
         worker.finished.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(
+            controller._on_worker_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
         thread.finished.connect(thread.deleteLater)
         thread.start()
 
     Tying worker deletion to ``QThread.finished`` ensures the thread handles
     its deferred deletion before GUI-side code releases the Python wrapper.
+    GUI/controller cleanup handlers must use an explicit queued connection so
+    they never manipulate widgets from the thread emitting ``finished``.
     """
 
     finished = Signal()

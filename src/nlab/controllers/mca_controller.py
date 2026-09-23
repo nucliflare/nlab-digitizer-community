@@ -1529,7 +1529,10 @@ class MCAController(QWidget):
             Qt.ConnectionType.DirectConnection,
         )
         self._worker_thread.finished.connect(self._worker.deleteLater)
-        self._worker_thread.finished.connect(self._on_worker_finished)
+        self._worker_thread.finished.connect(
+            self._on_worker_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         self._worker_thread.start()
 
@@ -1753,7 +1756,10 @@ class MCAController(QWidget):
             Qt.ConnectionType.DirectConnection,
         )
         self._dma_thread.finished.connect(self._dma_worker.deleteLater)
-        self._dma_thread.finished.connect(self._on_dma_finished)
+        self._dma_thread.finished.connect(
+            self._on_dma_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         self._set_controls_enabled(False)
         if mode is McaDmaOutputMode.ONLINE:

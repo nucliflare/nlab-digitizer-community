@@ -333,7 +333,10 @@ class WaveformAnalysisDialog(QDialog):
         # a long-running job can leave the QObject alive until the GUI drops
         # its final Python reference, causing cross-thread native destruction.
         thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._index_thread_finished)
+        thread.finished.connect(
+            self._index_thread_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._index_worker = worker
         self._index_thread = thread
         self._set_indexing(True)
@@ -626,7 +629,10 @@ class WaveformAnalysisDialog(QDialog):
         worker.error.connect(self._analysis_failed)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._analysis_thread_finished)
+        thread.finished.connect(
+            self._analysis_thread_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._analysis_worker = worker
         self._analysis_thread = thread
         self._active_analysis_kind = kind

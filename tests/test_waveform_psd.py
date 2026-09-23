@@ -9,7 +9,7 @@ from typing import Literal
 
 import numpy as np
 import pytest
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QThread, Signal
 from pytestqt.qtbot import QtBot
 
 import nlab.views.waveform_analysis_dialog as waveform_dialog_module
@@ -281,7 +281,14 @@ def test_waveform_worker_is_deleted_by_its_finished_thread(
         def stop(self) -> None:
             self.release.set()
 
-    dialog = WaveformAnalysisDialog()
+    finish_threads: list[QThread] = []
+
+    class TrackingDialog(WaveformAnalysisDialog):
+        def _analysis_thread_finished(self) -> None:
+            finish_threads.append(QThread.currentThread())
+            super()._analysis_thread_finished()
+
+    dialog = TrackingDialog()
     qtbot.addWidget(dialog)
     dialog.open_path(path)
     qtbot.waitUntil(lambda: dialog._index_thread is None, timeout=5000)
@@ -297,3 +304,4 @@ def test_waveform_worker_is_deleted_by_its_finished_thread(
     qtbot.waitUntil(lambda: dialog._analysis_thread is None, timeout=5000)
 
     assert destroyed == [True]
+    assert finish_threads == [dialog.thread()]

@@ -797,7 +797,10 @@ class ScopeController(QWidget):
             Qt.ConnectionType.DirectConnection,
         )
         self._dma_thread.finished.connect(self._dma_worker.deleteLater)
-        self._dma_thread.finished.connect(self._on_dma_finished)
+        self._dma_thread.finished.connect(
+            self._on_dma_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         self._set_controls_enabled(False)
         self.ui.lblRecordingStatus.setText("Connecting...")
@@ -922,7 +925,10 @@ class ScopeController(QWidget):
         worker.error.connect(self._on_auto_setup_error)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._on_auto_setup_finished)
+        thread.finished.connect(
+            self._on_auto_setup_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         self._set_auto_setup_busy(True)
         self.ui.lblRecordingStatus.setText("Auto Setup: connecting...")
