@@ -111,7 +111,7 @@ idle Scope channel, restores its settings in `finally`, and emits JSON:
 ```bash
 python examples/current_monitor_gui_profile.py
 python examples/current_monitor_dma_diagnostic.py --host 192.168.10.135 \
-  --frame-samples 8000 --gap-cycles 12500 --frames 100000
+  --frame-samples 8000 --gap-cycles 12500 --frames 100000 --render-fps 30
 ```
 
 ### MCA and PSD

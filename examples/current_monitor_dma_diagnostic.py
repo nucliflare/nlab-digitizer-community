@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Measure the production Scope-DMA current accumulator without a GUI.
+"""Measure the production Scope-DMA current accumulator, optionally rendering.
 
 The command changes one idle Scope channel temporarily, receives a fixed
 number of frames through the same streamer used by the application, prints a
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -36,6 +37,91 @@ class Options:
     gap_cycles: int
     frames: int
     bin_width_ms: int
+    render_fps: int
+
+
+def _capture(
+    streamer: IIOScopeDmaStreamer,
+    accumulator: ScopeCurrentAccumulator,
+    frames: int,
+    render_fps: int,
+    channel: int,
+) -> tuple[int, int]:
+    """Capture synchronously or render production snapshots on the main thread."""
+    stop_event = threading.Event()
+    if not render_fps:
+        captured = streamer.stream_to_file(
+            None,
+            stop_event,
+            n_frames=frames,
+            current_accumulator=accumulator,
+        )
+        return captured, 0
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from nlab.controllers.current_monitor_controller import CurrentMonitorController
+
+    app = QApplication.instance() or QApplication([])
+    controller = CurrentMonitorController(
+        object(),  # type: ignore[arg-type]
+        channel=channel,
+        auto_start=False,
+        scope_current_accumulator=accumulator,
+    )
+    controller.ui.comboMode.setCurrentIndex(1)
+    result: dict[str, int | str] = {}
+
+    def receive() -> None:
+        try:
+            result["frames"] = streamer.stream_to_file(
+                None,
+                stop_event,
+                n_frames=frames,
+                current_accumulator=accumulator,
+            )
+        except BaseException as exc:
+            # Do not retain a traceback that may retain a native IIO buffer.
+            result["error"] = f"{type(exc).__name__}: {exc}"
+
+    receiver = threading.Thread(target=receive, name="current-dma-diagnostic")
+    receiver.start()
+    period_ns = round(1_000_000_000 / render_fps)
+    next_render_ns = time.perf_counter_ns() + period_ns
+    last_generation = -1
+    try:
+        while receiver.is_alive():
+            now_ns = time.perf_counter_ns()
+            if now_ns >= next_render_ns:
+                snapshot = accumulator.snapshot(now_ns=now_ns)
+                if snapshot.generation != last_generation:
+                    render_started_ns = time.perf_counter_ns()
+                    controller._render_dma_snapshot(snapshot)
+                    accumulator.note_display_update(
+                        snapshot.generation,
+                        time.perf_counter_ns() - render_started_ns,
+                    )
+                    last_generation = snapshot.generation
+                app.processEvents()
+                next_render_ns += period_ns
+                if next_render_ns <= now_ns:
+                    next_render_ns = now_ns + period_ns
+            else:
+                time.sleep(min(0.002, (next_render_ns - now_ns) / 1_000_000_000))
+    except BaseException:
+        stop_event.set()
+        try:
+            streamer.request_stop()
+        finally:
+            receiver.join()
+        raise
+    finally:
+        controller.close()
+    receiver.join()
+    if "error" in result:
+        raise RuntimeError(f"Scope DMA failed: {result['error']}")
+    return int(result.get("frames", 0)), render_fps
 
 
 def run(options: Options) -> dict[str, object]:
@@ -88,11 +174,12 @@ def run(options: Options) -> dict[str, object]:
         )
 
         started_ns = time.perf_counter_ns()
-        captured = streamer.stream_to_file(
-            None,
-            threading.Event(),
-            n_frames=options.frames,
-            current_accumulator=accumulator,
+        captured, rendered_fps = _capture(
+            streamer,
+            accumulator,
+            options.frames,
+            options.render_fps,
+            options.channel,
         )
         stopped_ns = time.perf_counter_ns()
         snapshot = accumulator.snapshot(now_ns=stopped_ns)
@@ -142,6 +229,10 @@ def run(options: Options) -> dict[str, object]:
             "analysis_queue_high_water": snapshot.analysis_queue_high_water,
             "analysis_lag_ms": snapshot.analysis_lag_ns / 1_000_000,
             "maximum_analysis_lag_ms": snapshot.maximum_analysis_lag_ns / 1_000_000,
+            "render_fps": rendered_fps,
+            "display_updates": snapshot.display_updates,
+            "replaced_display_generations": snapshot.replaced_display_generations,
+            "display_p95_ms": snapshot.display_p95_duration_ns / 1_000_000,
         }
     finally:
         try:
@@ -169,6 +260,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gap-cycles", type=int, default=12500)
     parser.add_argument("--frames", type=int, default=100000)
     parser.add_argument("--bin-width-ms", type=int, default=100)
+    parser.add_argument(
+        "--render-fps",
+        type=int,
+        default=0,
+        help="render the production Current widget at 1..30 fps (default: disabled)",
+    )
     args = parser.parse_args(argv)
     if args.frame_samples < 4 or args.frame_samples % 4:
         parser.error("--frame-samples must be a positive multiple of four")
@@ -176,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--gap-cycles must be non-negative")
     if args.frames <= 0:
         parser.error("--frames must be positive")
+    if not 0 <= args.render_fps <= 30:
+        parser.error("--render-fps must be 0..30")
     options = Options(
         uri=f"ip:{args.host}:{args.port}",
         channel=args.channel,
@@ -183,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
         gap_cycles=args.gap_cycles,
         frames=args.frames,
         bin_width_ms=args.bin_width_ms,
+        render_fps=args.render_fps,
     )
     report = run(options)
     print(json.dumps(report, indent=2, sort_keys=True))
