@@ -18,7 +18,7 @@ from pytestqt.qtbot import QtBot
 from nlab.controllers.mca_controller import MCAController
 from nlab.controllers.scope_controller import DisplayMode, ScopeController
 from nlab.hardware.digitizer.backends.iio_backend import IIODigitizerBackend
-from nlab.hardware.digitizer.dma import IIOScopeDmaStreamer
+from nlab.hardware.digitizer.dma import IIOScopeDmaStreamer, ScopeFrameBuffer
 from nlab.hardware.digitizer.mca import MCA_PARAMETER_SPECS, MCAParam
 from nlab.hardware.digitizer.scope import (
     PARAMETER_SPECS,
@@ -105,8 +105,40 @@ def _scope_model_for_controller() -> MagicMock:
     scope.get_trigger_mode.return_value = TriggerMode.ANY_BELOW
     scope.frame_period_cycles_supported.return_value = True
     scope.get_dma_enable.return_value = False
+    scope.get_enable.return_value = False
+    scope.get_ip_version.return_value = 122
     scope.get_viewer_frame_samples_limit.return_value = 2328
     return scope
+
+
+def test_current_dma_start_configures_v122_periodic_scope(qtbot: QtBot) -> None:
+    scope = _scope_model_for_controller()
+    frame_buffer = ScopeFrameBuffer()
+    streamer = object.__new__(IIOScopeDmaStreamer)
+    controller = ScopeController(
+        scope,
+        scope_dma=streamer,
+        channel=0,
+        dma_frame_buffer=frame_buffer,
+    )
+    qtbot.addWidget(controller)
+    scope.reset_mock()
+
+    def mark_started() -> None:
+        controller._dma_worker = MagicMock()
+
+    controller._on_start = MagicMock(side_effect=mark_started)  # type: ignore[method-assign]
+
+    controller.start_current_dma_monitor()
+
+    scope.set_pretrigger_samples.assert_called_once_with(0)
+    scope.set_frame_samples.assert_called_once_with(8188)
+    scope.set_trigger_mode.assert_called_once_with(TriggerMode.TIMED)
+    scope.set_frame_period_cycles.assert_called_once_with(515)
+    assert controller.ui.spinFrameSamples.value() == 16_376
+    assert controller.ui.spinFrameGap.value() == 4_120
+    assert controller.ui.comboTriggerMode.currentIndex() == TriggerMode.TIMED
+    assert controller.ui.cbDmaEnable.isChecked()
 
 
 def test_scope_dma_progress_formats_large_file_without_wrapping(qtbot: QtBot) -> None:

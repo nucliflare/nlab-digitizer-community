@@ -22,6 +22,8 @@ from nlab.hardware.digitizer.dma import (
     FILE_MAGIC,
     FILE_VERSION,
     IIOScopeDmaStreamer,
+    ScopeDmaGeometry,
+    ScopeFrameBuffer,
 )
 from nlab.utils.dma_converter import convert_scope
 from nlab.workers.dma_workers import IIOScopeDmaWorker, ScopeDmaWorker
@@ -112,6 +114,22 @@ class _TwoFrameScopeBackend(_BlockingScopeBackend):
         return struct.pack("<Q", self.read_calls) + np.arange(4, dtype="<i2").tobytes()
 
 
+class _OneDynamicFrameScopeBackend(_BlockingScopeBackend):
+    def get_scope_dma_geometry(self) -> ScopeDmaGeometry:
+        return ScopeDmaGeometry(
+            frame_samples=512,
+            buffer_samples=132,
+            frame_bytes=264,
+            waveform_samples=127,
+            sample_decimation=4,
+            padding_bytes=2,
+        )
+
+    def read_dma_raw_frame(self) -> bytes:
+        waveform = np.arange(127, dtype="<i2").tobytes()
+        return struct.pack("<Q", 1234) + waveform + b"\x00\x00"
+
+
 def test_iio_scope_worker_coalesces_frame_progress(tmp_path: Path) -> None:
     def stream_to_file(*, on_ready, on_progress, **_kwargs):
         on_ready()
@@ -182,6 +200,49 @@ def test_streamer_stop_interrupts_blocked_refill(tmp_path: Path) -> None:
     assert backend.stop_requests == 1
     assert backend.closed == 1
     assert output.stat().st_size == FILE_HEADER_STRUCT.size
+
+
+def test_streamer_publishes_dynamic_frames_without_creating_a_file() -> None:
+    backend = _OneDynamicFrameScopeBackend()
+    streamer = IIOScopeDmaStreamer(backend, channel=0)
+    frame_buffer = ScopeFrameBuffer()
+
+    captured = streamer.stream_to_file(
+        None,
+        threading.Event(),
+        n_frames=1,
+        frame_buffer=frame_buffer,
+    )
+
+    frames, dropped = frame_buffer.drain()
+    assert captured == 1
+    assert dropped == 0
+    assert len(frames) == 1
+    assert frames[0].timestamp == 1234
+    assert frames[0].geometry.capture_duration_ns == 1016
+    np.testing.assert_array_equal(frames[0].samples, np.arange(127, dtype="<i2"))
+    assert backend.closed == 1
+
+
+def test_scope_frame_subscribers_drain_independently() -> None:
+    geometry = ScopeDmaGeometry.legacy(8)
+    publisher = ScopeFrameBuffer()
+    subscriber = ScopeFrameBuffer()
+    publisher.subscribe(subscriber)
+    frame = dma_module.ScopeDmaFrame(
+        timestamp=1,
+        received_ns=2,
+        samples=np.arange(4, dtype="<i2"),
+        geometry=geometry,
+    )
+
+    publisher.append(frame)
+    published, _ = publisher.drain()
+    subscribed, _ = subscriber.drain()
+
+    assert len(published) == len(subscribed) == 1
+    assert published[0] is not subscribed[0]
+    assert not np.shares_memory(published[0].samples, subscribed[0].samples)
 
 
 def test_streamer_rejects_incomplete_waveform(tmp_path: Path) -> None:
@@ -302,6 +363,7 @@ def test_backend_uses_queue_capability_before_scope_buffer_creation(
     monkeypatch.setattr(backend, "_close_dma_buffer", lambda: order.append("close"))
     monkeypatch.setattr(backend, "_dma_get_enable", lambda: False)
     monkeypatch.setattr(backend, "_dma_get_dma_enable", lambda: False)
+    monkeypatch.setattr(backend, "_dma_get_frame_samples", lambda: 8)
     capability_values = {
         "dma_queue_mode": "dmaengine",
         "dma_kernel_buffers_max": "4",
@@ -356,6 +418,7 @@ def test_backend_uses_batched_iiod_for_qualified_remote_scope(
     monkeypatch.setattr(backend, "_close_dma_buffer", lambda: None)
     monkeypatch.setattr(backend, "_dma_get_enable", lambda: False)
     monkeypatch.setattr(backend, "_dma_get_dma_enable", lambda: False)
+    monkeypatch.setattr(backend, "_dma_get_frame_samples", lambda: 1024)
     monkeypatch.setattr(backend, "_dma_attr_get", values.__getitem__)
     created: list[tuple[str, str, int, int, int]] = []
     fake_buffer = object()
@@ -381,6 +444,57 @@ def test_backend_uses_batched_iiod_for_qualified_remote_scope(
     assert backend._dma_buf is fake_buffer
     assert backend._dma_capture_transport == "iiod-batched"
     assert backend._dma_capture_kernel_buffers == 4
+
+
+def test_backend_allocates_v122_advertised_periodic_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = object.__new__(IIODigitizerBackend)
+    backend._ch = 0
+    backend._uri = "local:"
+    backend._dma_fault_latched = False
+    backend._dma_stop_requested = threading.Event()
+    backend._dma_buf = None
+    backend._dma_scope = SimpleNamespace(
+        id="iio:device15",
+        attrs={
+            "dma_frame_bytes": object(),
+            "dma_waveform_samples": object(),
+            "dma_sample_decimation": object(),
+        },
+        set_kernel_buffers_count=lambda _count: None,
+    )
+    values = {
+        "dma_frame_bytes": "264",
+        "dma_waveform_samples": "127",
+        "dma_sample_decimation": "4",
+        "dma_buffer_active": "0",
+    }
+    monkeypatch.setattr(backend, "_close_dma_buffer", lambda: None)
+    monkeypatch.setattr(backend, "_dma_get_enable", lambda: False)
+    monkeypatch.setattr(backend, "_dma_get_dma_enable", lambda: False)
+    monkeypatch.setattr(backend, "_dma_get_frame_samples", lambda: 512)
+    monkeypatch.setattr(backend, "_dma_attr_get", values.__getitem__)
+    lengths: list[int] = []
+
+    def make_buffer(_device: object, length: int, _cyclic: bool) -> object:
+        lengths.append(length)
+        return object()
+
+    monkeypatch.setattr(iio, "Buffer", make_buffer)
+
+    backend._create_dma_buffer(512)
+
+    assert lengths == [132]
+    assert backend._dma_buf_frame_samples == 132
+    assert backend._dma_capture_geometry == ScopeDmaGeometry(
+        frame_samples=512,
+        buffer_samples=132,
+        frame_bytes=264,
+        waveform_samples=127,
+        sample_decimation=4,
+        padding_bytes=2,
+    )
 
 
 def test_backend_keeps_one_block_without_queue_capability() -> None:

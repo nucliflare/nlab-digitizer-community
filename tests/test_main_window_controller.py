@@ -96,6 +96,7 @@ def _bare_controller(*, backend: str = "iio") -> MainWindowController:
     controller._backend = backend
     controller._host = "board.local"
     controller._port = 30431 if backend == "iio" else 50050
+    controller._current_monitor_controllers = []
     return controller
 
 
@@ -154,10 +155,12 @@ def test_startup_builds_one_psu_controller_and_dock_per_channel(
     controller._psd_controller_by_device = {}
     controller._psu_controllers = []
     controller._scope_dock_host = object()
+    controller._current_dock_host = object()
     controller._mca_dock_host = object()
     controller._psd_dock_host = object()
     controller._psu_dock_host = object()
 
+    tab_current = SimpleNamespace(setToolTip=Mock())
     tab_mca = SimpleNamespace(setToolTip=Mock())
     tab_psd = SimpleNamespace(setToolTip=Mock())
     tab_psu = SimpleNamespace(setToolTip=Mock())
@@ -168,10 +171,12 @@ def test_startup_builds_one_psu_controller_and_dock_per_channel(
     controller._window = SimpleNamespace(
         ui=SimpleNamespace(
             layoutTabScope=SimpleNamespace(addWidget=Mock()),
+            layoutTabCurrent=SimpleNamespace(addWidget=Mock()),
             layoutTabMCA=SimpleNamespace(addWidget=Mock()),
             layoutTabPSD=SimpleNamespace(addWidget=Mock()),
             layoutTabPSU=SimpleNamespace(addWidget=Mock()),
             mainTabs=main_tabs,
+            tabCurrent=tab_current,
             tabMCA=tab_mca,
             tabPSD=tab_psd,
             tabPSU=tab_psu,
@@ -228,9 +233,11 @@ def test_startup_disables_psu_tab_when_backend_is_missing(
     controller._psd_controller_by_device = {}
     controller._psu_controllers = []
     controller._scope_dock_host = object()
+    controller._current_dock_host = object()
     controller._mca_dock_host = object()
     controller._psd_dock_host = object()
     controller._psu_dock_host = object()
+    tab_current = SimpleNamespace(setToolTip=Mock())
     tab_mca = SimpleNamespace(setToolTip=Mock())
     tab_psd = SimpleNamespace(setToolTip=Mock())
     tab_psu = SimpleNamespace(setToolTip=Mock())
@@ -241,10 +248,12 @@ def test_startup_disables_psu_tab_when_backend_is_missing(
     controller._window = SimpleNamespace(
         ui=SimpleNamespace(
             layoutTabScope=SimpleNamespace(addWidget=Mock()),
+            layoutTabCurrent=SimpleNamespace(addWidget=Mock()),
             layoutTabMCA=SimpleNamespace(addWidget=Mock()),
             layoutTabPSD=SimpleNamespace(addWidget=Mock()),
             layoutTabPSU=SimpleNamespace(addWidget=Mock()),
             mainTabs=main_tabs,
+            tabCurrent=tab_current,
             tabMCA=tab_mca,
             tabPSD=tab_psd,
             tabPSU=tab_psu,
@@ -287,10 +296,12 @@ def test_startup_shares_bounded_event_buffer_with_mca_and_psd(
     controller._psd_controller_by_device = {}
     controller._psu_controllers = []
     controller._scope_dock_host = object()
+    controller._current_dock_host = object()
     controller._mca_dock_host = object()
     controller._psd_dock_host = object()
     controller._psu_dock_host = object()
 
+    tab_current = SimpleNamespace(setToolTip=Mock())
     tab_mca = SimpleNamespace(setToolTip=Mock())
     tab_psd = SimpleNamespace(setToolTip=Mock())
     tab_psu = SimpleNamespace(setToolTip=Mock())
@@ -298,10 +309,12 @@ def test_startup_shares_bounded_event_buffer_with_mca_and_psd(
     controller._window = SimpleNamespace(
         ui=SimpleNamespace(
             layoutTabScope=SimpleNamespace(addWidget=Mock()),
+            layoutTabCurrent=SimpleNamespace(addWidget=Mock()),
             layoutTabMCA=SimpleNamespace(addWidget=Mock()),
             layoutTabPSD=SimpleNamespace(addWidget=Mock()),
             layoutTabPSU=SimpleNamespace(addWidget=Mock()),
             mainTabs=main_tabs,
+            tabCurrent=tab_current,
             tabMCA=tab_mca,
             tabPSD=tab_psd,
             tabPSU=tab_psu,
@@ -312,9 +325,11 @@ def test_startup_shares_bounded_event_buffer_with_mca_and_psd(
     psd = object()
     mca = object()
     scope_factory = Mock(return_value=scope)
+    current_factory = Mock(return_value=object())
     psd_factory = Mock(return_value=psd)
     mca_factory = Mock(return_value=mca)
     monkeypatch.setattr(main_window_module, "ScopeController", scope_factory)
+    monkeypatch.setattr(main_window_module, "CurrentMonitorController", current_factory)
     monkeypatch.setattr(main_window_module, "PSDController", psd_factory)
     monkeypatch.setattr(main_window_module, "MCAController", mca_factory)
     controller._make_dock = Mock(return_value=SimpleNamespace())
@@ -322,6 +337,16 @@ def test_startup_shares_bounded_event_buffer_with_mca_and_psd(
 
     controller._build_channel_docks()
 
+    scope_buffer = scope_factory.call_args.kwargs["dma_frame_buffer"]
+    assert isinstance(scope_buffer, main_window_module.ScopeFrameBuffer)
+    current_factory.assert_called_once_with(
+        controller._devices[0].mca,
+        channel=0,
+        auto_start=False,
+        scope_controller=scope,
+        scope_frame_buffer=scope_buffer,
+    )
+    assert controller._current_monitor_controllers == [current_factory.return_value]
     psd_buffer = psd_factory.call_args.kwargs["event_buffer"]
     assert isinstance(psd_buffer, main_window_module.McaEventBuffer)
     assert mca_factory.call_args.kwargs["event_buffer"] is psd_buffer
@@ -489,6 +514,12 @@ def test_shutdown_requests_all_pollers_before_waiting(
             stop_polling_sync=record("wait-external"),
         )
     ]
+    controller._current_monitor_controllers = [
+        SimpleNamespace(
+            request_monitor_stop=record("request-current"),
+            stop_monitor_sync=record("wait-current"),
+        )
+    ]
     controller._thread = None
     thread_pool = SimpleNamespace(waitForDone=record("wait-thread-pool"))
     monkeypatch.setattr(
@@ -499,15 +530,21 @@ def test_shutdown_requests_all_pollers_before_waiting(
 
     controller._stop_all_workers()
 
-    assert events[:3] == [
+    assert events[:4] == [
         "request-global",
         "request-psu",
         "request-external",
+        "request-current",
     ]
     first_wait = min(index for index, event in enumerate(events) if event.startswith("wait-"))
     assert all(
         events.index(request) < first_wait
-        for request in ("request-global", "request-psu", "request-external")
+        for request in (
+            "request-global",
+            "request-psu",
+            "request-external",
+            "request-current",
+        )
     )
 
 

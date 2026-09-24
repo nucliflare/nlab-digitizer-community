@@ -3,19 +3,30 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QRectF, QSettings, Qt, QThread, QThreadPool, QTimer, Slot
+from PySide6.QtCore import (
+    QRectF,
+    QSettings,
+    Qt,
+    QThread,
+    QThreadPool,
+    QTimer,
+    Signal,
+    Slot,
+)
 from PySide6.QtWidgets import QFileDialog, QSlider, QSpinBox, QWidget
 
 from nlab.hardware.digitizer.dma import (
     FILE_HEADER_STRUCT,
     IIOScopeDmaStreamer,
     ScopeDmaStreamer,
+    ScopeFrameBuffer,
 )
 from nlab.hardware.digitizer.scope import (
     SCOPE_ADC_SAMPLE_PERIOD_NS,
@@ -104,6 +115,14 @@ class ScopeController(QWidget):
     _VIEWER_POINT_PERIOD_NS = SCOPE_DATAPATH_CLOCK_PERIOD_NS
     _THRESHOLD_MARKER_COLOR = "#a66f6f"
     _PRETRIGGER_MARKER_COLOR = "#648b71"
+    _CURRENT_DMA_FRAME_SAMPLES = 8188
+    # Live v122 dmesg reports that the 2047-beat maximum frame needs 2562
+    # datapath clocks, hence 515 idle clocks. The source-backed v121 path
+    # retains its conservative full-frame gap.
+    _CURRENT_DMA_V122_GAP_CYCLES = 515
+    _CURRENT_DMA_V121_GAP_CYCLES = 2049
+
+    current_dma_state_changed = Signal(bool, str)
 
     def __init__(
         self,
@@ -111,10 +130,13 @@ class ScopeController(QWidget):
         scope_dma: ScopeDmaStreamer | IIOScopeDmaStreamer | None = None,
         channel: int = 1,
         parent: QWidget | None = None,
+        *,
+        dma_frame_buffer: ScopeFrameBuffer | None = None,
     ) -> None:
         super().__init__(parent)
         self._scope = scope
         self._scope_dma = scope_dma
+        self._dma_frame_buffer = dma_frame_buffer
         self._channel = channel
         self.ui = Ui_ScopeView()
         self.ui.setupUi(self)
@@ -133,6 +155,8 @@ class ScopeController(QWidget):
         self._dma_filepath: Path | None = None
         self._dma_counter = 0
         self._dma_stopping = False
+        self._dma_online_current = False
+        self._dma_last_error: str | None = None
 
         self._auto_setup_worker: ScopeAutoSetupWorker | None = None
         self._auto_setup_thread: QThread | None = None
@@ -718,6 +742,118 @@ class ScopeController(QWidget):
     # Start / Stop
     # ------------------------------------------------------------------
 
+    def current_dma_supported(self) -> bool:
+        """Whether this Scope can feed the Current view without a file."""
+        return (
+            isinstance(self._scope_dma, IIOScopeDmaStreamer)
+            and self._dma_frame_buffer is not None
+            and self._scope.frame_period_cycles_supported()
+        )
+
+    def start_current_dma_monitor(self) -> None:
+        """Configure and start the optimized online periodic DMA stream.
+
+        The Scope controller remains the sole DMA owner. The Current view is
+        only a subscriber to decoded complete frames, exactly as PSD is a
+        subscriber to MCA list-mode batches.
+        """
+        if not self.current_dma_supported():
+            raise RuntimeError(
+                "Scope DMA current monitoring requires the direct IIO backend "
+                "with periodic-frame support"
+            )
+        if self._auto_setup_thread is not None:
+            raise RuntimeError("Scope Auto Setup is active")
+        if self._dma_worker is not None or self._dma_thread is not None:
+            raise RuntimeError("Scope DMA is already active on this channel")
+
+        if self.ui.btnStart.isChecked() or self._refresh_timer.isActive():
+            self._on_stop()
+        elif self._scope.get_enable():
+            self._scope.stop()
+
+        frame_samples = self._CURRENT_DMA_FRAME_SAMPLES
+        frame_spec = self._scope.specs[ScopeParam.FRAME_SAMPLES]
+        assert isinstance(frame_spec, RangeSpec)
+        frame_samples = min(frame_samples, int(frame_spec.max_val))
+        ip_version = self._scope.get_ip_version()
+        gap_cycles = (
+            self._CURRENT_DMA_V122_GAP_CYCLES
+            if ip_version >= 122
+            else self._CURRENT_DMA_V121_GAP_CYCLES
+        )
+
+        # Write the hardware explicitly. Updating the widgets with blocked
+        # signals below is presentation only and must not duplicate writes.
+        self._scope.set_pretrigger_samples(0)
+        self._scope.set_frame_samples(frame_samples)
+        self._scope.set_trigger_mode(TriggerMode.TIMED)
+        self._scope.set_frame_period_cycles(gap_cycles)
+        self._scope.set_dma_enable(True)
+
+        def set_without_signal(
+            widget: QWidget,
+            setter: Callable[[int], None],
+            value: int,
+        ) -> None:
+            blocked = widget.blockSignals(True)
+            try:
+                setter(value)
+            finally:
+                widget.blockSignals(blocked)
+
+        set_without_signal(
+            self.ui.spinPretrigger,
+            self.ui.spinPretrigger.setValue,
+            0,
+        )
+        set_without_signal(
+            self.ui.spinFrameSamples,
+            self.ui.spinFrameSamples.setValue,
+            frame_samples * self._SAMPLE_PERIOD_NS,
+        )
+        set_without_signal(
+            self.ui.spinFrameGap,
+            self.ui.spinFrameGap.setValue,
+            gap_cycles * self._VIEWER_POINT_PERIOD_NS,
+        )
+        set_without_signal(
+            self.ui.comboTriggerMode,
+            self.ui.comboTriggerMode.setCurrentIndex,
+            TriggerMode.TIMED.value,
+        )
+        blocked = self.ui.cbDmaEnable.blockSignals(True)
+        try:
+            self.ui.cbDmaEnable.setChecked(True)
+        finally:
+            self.ui.cbDmaEnable.blockSignals(blocked)
+        self._update_frame_gap_enabled()
+        self._update_viewer_transport_hint()
+
+        assert self._dma_frame_buffer is not None
+        self._dma_frame_buffer.clear()
+        self._dma_online_current = True
+        self._dma_last_error = None
+        try:
+            self._on_start()
+        except Exception:
+            self._dma_online_current = False
+            raise
+        if self._dma_worker is None:
+            self._dma_online_current = False
+            raise RuntimeError("Scope DMA did not start")
+
+    def stop_current_dma_monitor(self, *, wait: bool = False) -> None:
+        """Stop a DMA session that was started on behalf of Current."""
+        if not self._dma_online_current:
+            return
+        self._on_stop()
+        if wait:
+            self.stop_dma_sync()
+            if self._dma_online_current:
+                self._dma_online_current = False
+                self.current_dma_state_changed.emit(False, "Scope DMA stopped.")
+
     def _on_dma_toggled(self, enabled: bool) -> None:
         self._scope.set_dma_enable(enabled)
         self._update_viewer_transport_hint()
@@ -739,6 +875,7 @@ class ScopeController(QWidget):
             return
         self._discard_inflight_frame = False
         self._dma_stopping = False
+        self._dma_last_error = None
         self.ui.btnStart.setChecked(True)
         self.ui.btnStart.setEnabled(False)
         self.ui.btnStop.setChecked(False)
@@ -763,16 +900,28 @@ class ScopeController(QWidget):
         log.info("Scope ch%d: acquisition started (refresh %d ms)", self._channel, interval_ms)
 
     def _start_with_dma(self) -> None:
-        filepath = self._dma_filepath or self._generate_filepath()
+        filepath = (
+            None
+            if self._dma_online_current
+            else self._dma_filepath or self._generate_filepath()
+        )
         self._dma_filepath = None
 
         if isinstance(self._scope_dma, IIOScopeDmaStreamer):
-            log.debug("Scope ch%d IIO DMA [1/4]: creating worker, file=%s", self._channel, filepath)
+            log.debug(
+                "Scope ch%d IIO DMA [1/4]: creating worker, destination=%s",
+                self._channel,
+                filepath or "live Current view",
+            )
             self._dma_worker = IIOScopeDmaWorker(
                 streamer=self._scope_dma,
                 filepath=filepath,
+                frame_buffer=self._dma_frame_buffer,
             )
         else:
+            if filepath is None:
+                raise RuntimeError("online Scope DMA is unavailable on the legacy backend")
+            assert isinstance(self._scope_dma, ScopeDmaStreamer)
             frame_samples = self._frame_samples_from_ui()
             log.debug(
                 "Scope ch%d DMA [1/6]: creating worker, file=%s, frame_samples=%d",
@@ -808,7 +957,10 @@ class ScopeController(QWidget):
             "Scope ch%d DMA [2/6]: starting worker thread (ZMQ connect + subscribe)", self._channel
         )
         self._dma_thread.start()
-        log.info("Scope DMA: worker started, waiting for socket ready, file=%s", filepath)
+        log.info(
+            "Scope DMA: worker started, waiting for ready, destination=%s",
+            filepath or "live Current view",
+        )
 
     @Slot()
     def _on_dma_ready(self) -> None:
@@ -836,11 +988,17 @@ class ScopeController(QWidget):
         interval_ms = 1000 // self.ui.spinRefreshRate.value()
         self._refresh_timer.start(interval_ms)
         self.ui.btnStop.setEnabled(True)
-        self.ui.lblRecordingStatus.setText(
-            "Recording full frames; live preview is truncated."
-            if self._frame_exceeds_viewer_limit()
-            else "Recording..."
-        )
+        if self._dma_online_current:
+            self.ui.lblRecordingStatus.setText(
+                "Streaming periodic DMA frames to Current; Scope preview is live."
+            )
+            self.current_dma_state_changed.emit(True, "Scope DMA is streaming.")
+        else:
+            self.ui.lblRecordingStatus.setText(
+                "Recording full frames; live preview is truncated."
+                if self._frame_exceeds_viewer_limit()
+                else "Recording..."
+            )
         self._start_measurement_timer()
         log.info("Scope ch%d: DMA + acquisition started (socket was ready)", self._channel)
 
@@ -1326,6 +1484,11 @@ class ScopeController(QWidget):
     def _on_dma_progress(self, bytes_written: int) -> None:
         if self._dma_stopping or self._dma_thread is None:
             return
+        if self._dma_online_current:
+            self.ui.lblRecordingStatus.setText(
+                f"Streaming to Current: {bytes_written / 1024**2:.1f} MiB received"
+            )
+            return
         # Both scope formats prepend the same 24-byte NDMA header. The
         # streamer progress value counts payload only, so add the header to
         # make the displayed number equal the actual file size.
@@ -1347,6 +1510,7 @@ class ScopeController(QWidget):
     @Slot(str)
     def _on_dma_error(self, message: str) -> None:
         log.error("Scope DMA error: %s", message)
+        self._dma_last_error = message
         self.ui.lblRecordingStatus.setText(f"Error: {message}")
 
     @Slot()
@@ -1362,6 +1526,7 @@ class ScopeController(QWidget):
         # Keep both wrappers alive through GUI restoration. The thread's
         # finished signal can be queued alongside earlier worker callbacks.
         worker = self._dma_worker
+        online_current = self._dma_online_current
         log.info("Scope DMA: worker finished; restoring controls")
         try:
             self._set_controls_enabled(True)
@@ -1394,7 +1559,11 @@ class ScopeController(QWidget):
                 self.ui.lblRecordingStatus.setText("Stopped (recovered from DMA fault)")
                 return
 
-            self.ui.lblRecordingStatus.setText("Stopped")
+            self.ui.lblRecordingStatus.setText(
+                f"Error: {self._dma_last_error}"
+                if self._dma_last_error is not None
+                else "Stopped"
+            )
         except Exception:
             log.exception("Scope ch%d: failed to restore GUI after DMA stop", self._channel)
             self.ui.lblRecordingStatus.setText("DMA stopped; GUI refresh failed")
@@ -1402,8 +1571,14 @@ class ScopeController(QWidget):
             self._dma_worker = None
             self._dma_thread = None
             self._dma_stopping = False
+            self._dma_online_current = False
             thread.deleteLater()
             del worker
+            if online_current:
+                self.current_dma_state_changed.emit(
+                    False,
+                    self._dma_last_error or "Scope DMA stopped.",
+                )
 
     def stop_dma_sync(self) -> None:
         """Blocking stop for use during application shutdown/reconnect only.

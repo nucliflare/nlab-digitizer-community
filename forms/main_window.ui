@@ -34,6 +34,17 @@
        </layout>
       </widget>
 
+      <!-- ── Current tab (inner channel tabs added programmatically) ── -->
+      <widget class="QWidget" name="tabCurrent">
+       <attribute name="title"><string>Current</string></attribute>
+       <layout class="QVBoxLayout" name="layoutTabCurrent">
+        <property name="leftMargin"><number>0</number></property>
+        <property name="topMargin"><number>0</number></property>
+        <property name="rightMargin"><number>0</number></property>
+        <property name="bottomMargin"><number>0</number></property>
+       </layout>
+      </widget>
+
       <!-- ── MCA tab (inner channel tabs added programmatically) ── -->
       <widget class="QWidget" name="tabMCA">
        <attribute name="title"><string>MCA</string></attribute>
