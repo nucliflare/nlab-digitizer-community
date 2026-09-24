@@ -14,6 +14,7 @@ import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from PySide6.QtCore import Signal
@@ -28,6 +29,9 @@ from nlab.hardware.digitizer.dma import (
 )
 from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode, McaRunSummary
 from nlab.workers.base_worker import BaseWorker
+
+if TYPE_CHECKING:
+    from nlab.hardware.digitizer.current_monitor import ScopeCurrentAccumulator
 
 log = logging.getLogger(__name__)
 _SCOPE_PROGRESS_INTERVAL_S = 0.1
@@ -144,12 +148,14 @@ class IIOScopeDmaWorker(BaseWorker):
         filepath: Path | None,
         n_frames: int | None = None,
         frame_buffer: ScopeFrameBuffer | None = None,
+        current_accumulator: ScopeCurrentAccumulator | None = None,
     ) -> None:
         super().__init__()
         self._streamer = streamer
         self._filepath = filepath
         self._n_frames = n_frames
         self._frame_buffer = frame_buffer
+        self._current_accumulator = current_accumulator
         self._stop_event = threading.Event()
 
     def run(self) -> None:
@@ -175,6 +181,7 @@ class IIOScopeDmaWorker(BaseWorker):
                 on_ready=lambda: self.ready.emit(),
                 on_progress=report_progress,
                 frame_buffer=self._frame_buffer,
+                current_accumulator=self._current_accumulator,
             )
             log.info("IIOScopeDmaWorker: completed, %d frames captured", total)
         except Exception:

@@ -57,10 +57,10 @@ preserve the lifecycle required by each firmware generation.
 ### Live current monitor
 
 The per-channel **Current** workspace has two selectable acquisition modes.
-Both retain every received estimate in a rolling ten-second history while the
-plot and numeric display redraw at 60 Hz. Each screen interval reports its
-mean, minimum, maximum, and sample count, and a saved linear calibration,
-`(raw - zero) * scale`, can display A, mA, uA, nA, or pA.
+Both preserve received observations in a rolling ten-second numeric history
+while the plot and numeric display redraw at no more than 30 Hz. Each screen
+interval reports its mean, minimum, maximum, and sample count, and a saved
+linear calibration, `(raw - zero) * scale`, can display A, mA, uA, nA, or pA.
 The monitor starts stopped; select a mode and press **Start monitor** before it
 opens a polling connection or takes ownership of Scope DMA.
 
@@ -71,26 +71,48 @@ opens a polling connection or takes ownership of Scope DMA.
   driver exposes this as direct-mode `in_voltage0_raw`, with no IIO buffer or
   hardware timestamp, so 1 ms is a requested host spacing rather than a
   guaranteed hardware-time grid.
-- **Scope DMA** starts the channel's Scope viewer in online-only DMA mode and
-  consumes the same complete-frame stream through a bounded subscriber buffer,
-  analogous to the MCA-to-PSD path. It automatically selects periodic trigger,
-  the 8,188-sample frame, zero pretrigger, and the firmware-appropriate safe
-  gap. Each plotted value is the mean of one transported waveform, while the
-  widget reports measured frame rate, median frame spacing, averaging window,
-  time coverage, sample age, and dropped display frames.
+- **Scope DMA** starts the channel's Scope acquisition in online-only DMA mode.
+  It selects periodic trigger and zero pretrigger but preserves the frame length
+  and gap shown in the Scope workspace, so matched measurements are
+  reproducible. Complete frames are validated and reduced on the receiver
+  thread before any replaceable display hand-off. Signed sums and sample counts
+  are accumulated into 100 ms bins by default; the GUI plots about 100 bins for
+  ten seconds rather than retaining every waveform. An entire short frame is
+  assigned to the bin containing its trigger timestamp. Empty intervals remain
+  gaps, not interpolated or zero-current samples.
 
-On the live v122 board at `192.168.10.128`, that optimized Scope DMA setup
-transported 2,046 samples at 8 ns spacing per frame: a 16.368 us averaging
-window. It sustained about 2.7 kframes/s with a 0.369 ms mean frame interval,
-about 4.44% time coverage, and roughly 11.1 MB/s. These are measured operating
-figures, not hard guarantees; the widget reports the rate and coverage actually
-seen in each session. Scope DMA owns the channel's Scope acquisition while this
-mode is running, so a separate Scope file recording cannot run concurrently;
-the ordinary Scope preview remains active.
+The widget distinguishes host receive rate (decimal MB/s and frames/s), FPGA
+timestamp spacing/skipped opportunities, observed waveform coverage, analysis
+counts, preview/display replacement, protocol errors, analysis lag and GUI
+render time. The default 100 ms scientific bins and the display cadence are
+independent configuration settings. With IP122 periodic decimation, each DMA
+waveform word already averages four ADC samples and represents 8 ns; it is not
+divided by four again. Scope DMA owns the channel while this mode is running,
+so a separate Scope recording cannot run concurrently. If the Scope panel is
+visible its preview uses only the latest owned DMA frame; a hidden panel causes
+no independent viewer IIO reads.
+
+The qualified `.128` reference transport reached about 24.5--25.4 decimal
+MB/s at saturated 8,000-sample periodic settings with the patched server,
+READBUF x32, four kernel buffers, online means, and no GUI. That is a reference
+operating point rather than a guarantee. The monitor reports the transport and
+buffer policy actually selected in each session.
 
 The two raw sources are not identical: IIR mode displays the normalized FPGA
 filter result, while DMA mode displays a mean ADC waveform code. Neither is
-amperes until the appropriate sensor/front-end calibration is entered.
+amperes until the appropriate sensor/front-end calibration is entered. In the
+saved raw-code convention, `zero_code` is an ADC-code baseline and
+`scale_per_code` is current units per ADC code (including its sign).
+
+Two headless diagnostics exercise the revised paths. The GUI profile is
+synthetic and performs no hardware I/O; the DMA diagnostic temporarily owns an
+idle Scope channel, restores its settings in `finally`, and emits JSON:
+
+```bash
+python examples/current_monitor_gui_profile.py
+python examples/current_monitor_dma_diagnostic.py --host 192.168.10.135 \
+  --frame-samples 8000 --gap-cycles 12500 --frames 100000
+```
 
 ### MCA and PSD
 

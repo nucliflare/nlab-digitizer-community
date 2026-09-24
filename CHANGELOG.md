@@ -13,16 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Per-channel live Current workspace backed by the FPGA input-filter IIR
   register. A worker-owned IIO/gRPC connection targets 1 kHz acquisition into
-  a bounded buffer while the GUI renders at 60 Hz, with measured rate, median
-  transaction latency, sample age, interval statistics, rolling history,
-  overflow reporting, and saved zero/scale/unit calibration.
-- Selectable online Scope DMA mode for the Current workspace. The Scope
-  controller configures an optimized periodic capture and publishes complete
-  frames through a bounded subscriber buffer; Current displays one mean per
-  frame with measured spacing, averaging-window duration, time coverage, age,
-  and loss statistics while the Scope preview remains live. The IIO backend
-  also consumes the v122 driver-advertised dynamic DMA geometry rather than
-  assuming that the configured full-rate frame length is the transport length.
+  a bounded buffer while the GUI renders at no more than 30 Hz, with measured
+  rate, median transaction latency, sample age, interval statistics, rolling
+  history, overflow reporting, and saved zero/scale/unit calibration.
+- Selectable online Scope DMA mode for the Current workspace. Validated frames
+  are reduced on the receiver thread into bounded, sample-weighted summaries
+  before any replaceable GUI hand-off. The Scope frame/gap settings remain
+  operator-visible, host receive and FPGA timing metrics are reported
+  separately, and protocol/analysis/display losses are distinguished. A
+  visible Scope panel previews the latest owned DMA frame without a second IIO
+  viewer transaction. The IIO backend consumes the v122 driver-advertised
+  dynamic DMA geometry rather than assuming that the configured full-rate
+  frame length is the transport length.
 - Current monitors now start stopped and open no polling or DMA transport until
   the operator presses **Start monitor**.
 

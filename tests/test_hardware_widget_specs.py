@@ -18,7 +18,8 @@ from pytestqt.qtbot import QtBot
 from nlab.controllers.mca_controller import MCAController
 from nlab.controllers.scope_controller import DisplayMode, ScopeController
 from nlab.hardware.digitizer.backends.iio_backend import IIODigitizerBackend
-from nlab.hardware.digitizer.dma import IIOScopeDmaStreamer, ScopeFrameBuffer
+from nlab.hardware.digitizer.current_monitor import ScopeCurrentAccumulator
+from nlab.hardware.digitizer.dma import IIOScopeDmaStreamer, ScopeDmaGeometry
 from nlab.hardware.digitizer.mca import MCA_PARAMETER_SPECS, MCAParam
 from nlab.hardware.digitizer.scope import (
     PARAMETER_SPECS,
@@ -113,13 +114,23 @@ def _scope_model_for_controller() -> MagicMock:
 
 def test_current_dma_start_configures_v122_periodic_scope(qtbot: QtBot) -> None:
     scope = _scope_model_for_controller()
-    frame_buffer = ScopeFrameBuffer()
+    accumulator = ScopeCurrentAccumulator()
     streamer = object.__new__(IIOScopeDmaStreamer)
+    streamer.capture_geometry = MagicMock(  # type: ignore[method-assign]
+        return_value=ScopeDmaGeometry(
+            frame_samples=1024,
+            buffer_samples=260,
+            frame_bytes=520,
+            waveform_samples=255,
+            sample_decimation=4,
+            padding_bytes=2,
+        )
+    )
     controller = ScopeController(
         scope,
         scope_dma=streamer,
         channel=0,
-        dma_frame_buffer=frame_buffer,
+        current_accumulator=accumulator,
     )
     qtbot.addWidget(controller)
     scope.reset_mock()
@@ -132,13 +143,16 @@ def test_current_dma_start_configures_v122_periodic_scope(qtbot: QtBot) -> None:
     controller.start_current_dma_monitor()
 
     scope.set_pretrigger_samples.assert_called_once_with(0)
-    scope.set_frame_samples.assert_called_once_with(8188)
+    scope.set_frame_samples.assert_called_once_with(1024)
     scope.set_trigger_mode.assert_called_once_with(TriggerMode.TIMED)
-    scope.set_frame_period_cycles.assert_called_once_with(515)
-    assert controller.ui.spinFrameSamples.value() == 16_376
-    assert controller.ui.spinFrameGap.value() == 4_120
+    scope.set_frame_period_cycles.assert_called_once_with(0)
+    assert controller.ui.spinFrameSamples.value() == 2048
+    assert controller.ui.spinFrameGap.value() == 0
     assert controller.ui.comboTriggerMode.currentIndex() == TriggerMode.TIMED
     assert controller.ui.cbDmaEnable.isChecked()
+    snapshot = accumulator.snapshot()
+    assert snapshot.runtime is not None
+    assert snapshot.runtime.expected_interval_ticks == 256
 
 
 def test_scope_dma_progress_formats_large_file_without_wrapping(qtbot: QtBot) -> None:

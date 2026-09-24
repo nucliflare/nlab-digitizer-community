@@ -16,11 +16,11 @@ from nlab.controllers.mca_controller import MCAController
 from nlab.controllers.psd_controller import PSDController
 from nlab.controllers.psu_controller import PSUController
 from nlab.controllers.scope_controller import ScopeController
+from nlab.hardware.digitizer.current_monitor import ScopeCurrentAccumulator
 from nlab.hardware.digitizer.digitizer import Digitizer
 from nlab.hardware.digitizer.dma import (
     IIOMcaDmaStreamer,
     McaEventBuffer,
-    ScopeFrameBuffer,
 )
 from nlab.hardware.modbus_devices import ExternalDevices
 from nlab.views.energy_calibration_dialog import EnergyCalibrationDialog
@@ -224,12 +224,12 @@ class MainWindowController:
             self._report_progress(f"Initializing channel {ch} controls...")
             ch_label = f"Ch {ch}"
 
-            scope_frame_buffer = ScopeFrameBuffer()
+            scope_current_accumulator = ScopeCurrentAccumulator()
             scope_ctrl = ScopeController(
                 device.scope,
                 scope_dma=device.scope_dma,
                 channel=ch,
-                dma_frame_buffer=scope_frame_buffer,
+                current_accumulator=scope_current_accumulator,
             )
             self._scope_controllers.append(scope_ctrl)
             scope_docks.append(self._make_dock(f"scope_ch{ch}", ch_label, scope_ctrl))
@@ -240,7 +240,7 @@ class MainWindowController:
                     channel=ch,
                     auto_start=False,
                     scope_controller=scope_ctrl,
-                    scope_frame_buffer=scope_frame_buffer,
+                    scope_current_accumulator=scope_current_accumulator,
                 )
                 self._current_monitor_controllers.append(current_ctrl)
                 current_docks.append(

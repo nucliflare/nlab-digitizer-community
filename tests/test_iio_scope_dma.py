@@ -17,6 +17,10 @@ import pytest
 import nlab.hardware.digitizer.backends.iio_backend as iio_backend_module
 import nlab.hardware.digitizer.dma as dma_module
 from nlab.hardware.digitizer.backends.iio_backend import IIODigitizerBackend
+from nlab.hardware.digitizer.current_monitor import (
+    ScopeCurrentAccumulator,
+    ScopeCurrentRuntime,
+)
 from nlab.hardware.digitizer.dma import (
     FILE_HEADER_STRUCT,
     FILE_MAGIC,
@@ -224,6 +228,56 @@ def test_streamer_publishes_dynamic_frames_without_creating_a_file() -> None:
     assert backend.closed == 1
 
 
+def test_streamer_accumulates_current_before_replaceable_display() -> None:
+    backend = _OneDynamicFrameScopeBackend()
+    streamer = IIOScopeDmaStreamer(backend, channel=0)
+    geometry = backend.get_scope_dma_geometry()
+    accumulator = ScopeCurrentAccumulator()
+    accumulator.start_session(
+        geometry,
+        ScopeCurrentRuntime(0, 122, 100, 228),
+    )
+
+    captured = streamer.stream_to_file(
+        None,
+        threading.Event(),
+        n_frames=1,
+        current_accumulator=accumulator,
+    )
+    snapshot = accumulator.snapshot()
+
+    assert captured == 1
+    assert snapshot.received_frames == snapshot.analyzed_frames == 1
+    assert snapshot.latest_frame_mean == pytest.approx(63.0)
+    assert snapshot.received_bytes == geometry.frame_bytes
+    assert not snapshot.active
+    assert backend.closed == 1
+
+
+def test_streamer_counts_incomplete_current_frame_as_rejected_protocol_data() -> None:
+    backend = _IncompleteScopeBackend()
+    streamer = IIOScopeDmaStreamer(backend, channel=0)
+    geometry = ScopeDmaGeometry.legacy(8)
+    accumulator = ScopeCurrentAccumulator()
+    accumulator.start_session(
+        geometry,
+        ScopeCurrentRuntime(0, 121, 8, 10),
+    )
+
+    with pytest.raises(RuntimeError, match="incomplete raw frame"):
+        streamer.stream_to_file(
+            None,
+            threading.Event(),
+            current_accumulator=accumulator,
+        )
+
+    snapshot = accumulator.snapshot()
+    assert snapshot.rejected_frames == 1
+    assert snapshot.protocol_errors == 1
+    assert snapshot.received_frames == snapshot.analyzed_frames == 0
+    assert not snapshot.active
+
+
 def test_scope_frame_subscribers_drain_independently() -> None:
     geometry = ScopeDmaGeometry.legacy(8)
     publisher = ScopeFrameBuffer()
@@ -241,8 +295,10 @@ def test_scope_frame_subscribers_drain_independently() -> None:
     subscribed, _ = subscriber.drain()
 
     assert len(published) == len(subscribed) == 1
-    assert published[0] is not subscribed[0]
-    assert not np.shares_memory(published[0].samples, subscribed[0].samples)
+    assert published[0] is subscribed[0]
+    assert not published[0].samples.flags.writeable
+    with pytest.raises(ValueError):
+        published[0].samples[0] = 99
 
 
 def test_streamer_rejects_incomplete_waveform(tmp_path: Path) -> None:
@@ -406,6 +462,8 @@ def test_backend_uses_batched_iiod_for_qualified_remote_scope(
             "dma_queue_mode": object(),
             "dma_kernel_buffers_max": object(),
             "dma_kernel_buffers_recommended": object(),
+            "queued_blocks": object(),
+            "queue_high_watermark": object(),
         },
         set_kernel_buffers_count=selected.append,
     )
@@ -414,6 +472,9 @@ def test_backend_uses_batched_iiod_for_qualified_remote_scope(
         "dma_kernel_buffers_max": "4",
         "dma_kernel_buffers_recommended": "4",
         "dma_buffer_active": "0",
+        "ip_version": "122",
+        "queued_blocks": "3",
+        "queue_high_watermark": "4",
     }
     monkeypatch.setattr(backend, "_close_dma_buffer", lambda: None)
     monkeypatch.setattr(backend, "_dma_get_enable", lambda: False)
@@ -444,6 +505,17 @@ def test_backend_uses_batched_iiod_for_qualified_remote_scope(
     assert backend._dma_buf is fake_buffer
     assert backend._dma_capture_transport == "iiod-batched"
     assert backend._dma_capture_kernel_buffers == 4
+    assert backend.get_scope_dma_runtime_metadata() == {
+        "uri": "ip:192.168.10.128:30431",
+        "device": "iio:device15",
+        "channel": 0,
+        "ip_version": 122,
+        "transport": "iiod-batched",
+        "kernel_buffers": 4,
+        "queued_blocks": 3,
+        "queue_high_watermark": 4,
+        "readbuf_batch_frames": 32,
+    }
 
 
 def test_backend_allocates_v122_advertised_periodic_geometry(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 import time
 from collections import deque
@@ -11,7 +12,10 @@ import pyqtgraph as pg
 from PySide6.QtCore import Qt, QThread, QTimer, Slot
 from PySide6.QtWidgets import QWidget
 
-from nlab.hardware.digitizer.dma import ScopeDmaFrame, ScopeFrameBuffer
+from nlab.hardware.digitizer.current_monitor import (
+    ScopeCurrentAccumulator,
+    ScopeCurrentSnapshot,
+)
 from nlab.hardware.digitizer.mca import MultiChannelAnalyzer
 from nlab.hardware.digitizer.scope import SCOPE_DATAPATH_CLOCK_PERIOD_NS
 from nlab.ui.ui_current_monitor_view import Ui_CurrentMonitorView
@@ -26,7 +30,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_DISPLAY_HZ = 60
+_DISPLAY_HZ = 30
 _DISPLAY_PERIOD_NS = round(1_000_000_000 / _DISPLAY_HZ)
 _TARGET_SAMPLE_HZ = 1000
 _HISTORY_NS = 10_000_000_000
@@ -48,16 +52,14 @@ class CurrentMonitorController(QWidget):
         *,
         auto_start: bool = False,
         scope_controller: ScopeController | None = None,
-        scope_frame_buffer: ScopeFrameBuffer | None = None,
+        scope_current_accumulator: ScopeCurrentAccumulator | None = None,
     ) -> None:
         super().__init__(parent)
         self._mca = mca
         self._channel = channel
         self._scope_controller = scope_controller
-        self._scope_frame_buffer = scope_frame_buffer
-        self._scope_frame_consumer = ScopeFrameBuffer(max_frames=1024)
+        self._scope_current_accumulator = scope_current_accumulator
         self._dma_active = False
-        self._dma_sequence = 0
         self._sample_buffer = CurrentSampleBuffer()
         self._worker: CurrentMonitorWorker | None = None
         self._worker_thread: QThread | None = None
@@ -67,6 +69,10 @@ class CurrentMonitorController(QWidget):
         self._last_batch: tuple[CurrentSample, ...] = ()
         self._dropped_samples = 0
         self._monitor_error: str | None = None
+        self._display_hz = _DISPLAY_HZ
+        self._display_period_ns = _DISPLAY_PERIOD_NS
+        self._last_dma_render_generation = -1
+        self._calibration_dirty = True
 
         self.ui = Ui_CurrentMonitorView()
         self.ui.setupUi(self)  # type: ignore[no-untyped-call]
@@ -117,7 +123,7 @@ class CurrentMonitorController(QWidget):
     def _dma_supported(self) -> bool:
         return (
             self._scope_controller is not None
-            and self._scope_frame_buffer is not None
+            and self._scope_current_accumulator is not None
             and self._scope_controller.current_dma_supported()
         )
 
@@ -166,6 +172,8 @@ class CurrentMonitorController(QWidget):
         self._worker_thread = thread
         self._stop_requested = False
         self._monitor_error = None
+        self._last_dma_render_generation = -1
+        self._calibration_dirty = True
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.error.connect(self._on_worker_error)
@@ -178,7 +186,7 @@ class CurrentMonitorController(QWidget):
         )
         self._set_running_controls(True)
         self.ui.lblStatus.setText("Opening an isolated current-monitor connection…")
-        self._next_display_ns = time.perf_counter_ns() + _DISPLAY_PERIOD_NS
+        self._next_display_ns = time.perf_counter_ns() + self._display_period_ns
         self._schedule_display()
         thread.start()
 
@@ -188,14 +196,13 @@ class CurrentMonitorController(QWidget):
         self._last_batch = ()
         self._dropped_samples = 0
         self._monitor_error = None
-        self._dma_sequence = 0
         self.ui.btnZero.setEnabled(False)
         self._curve.setData([], [])
 
     def _start_dma_monitor(self) -> None:
         scope_controller = self._scope_controller
-        publisher = self._scope_frame_buffer
-        if not self._dma_supported() or scope_controller is None or publisher is None:
+        accumulator = self._scope_current_accumulator
+        if not self._dma_supported() or scope_controller is None or accumulator is None:
             self._monitor_error = (
                 "Scope DMA mode requires the direct IIO Scope backend with "
                 "periodic-frame support."
@@ -203,14 +210,11 @@ class CurrentMonitorController(QWidget):
             self.ui.lblStatus.setText(self._monitor_error)
             return
 
-        self._scope_frame_consumer.clear()
-        publisher.subscribe(self._scope_frame_consumer)
         self._stop_requested = False
         self._monitor_error = None
         try:
             scope_controller.start_current_dma_monitor()
         except Exception as exc:
-            publisher.unsubscribe(self._scope_frame_consumer)
             self._monitor_error = f"Could not start Scope DMA current monitor: {exc}"
             self.ui.lblStatus.setText(self._monitor_error)
             log.exception("Starting Scope DMA current monitor failed")
@@ -218,8 +222,8 @@ class CurrentMonitorController(QWidget):
 
         self._dma_active = True
         self._set_running_controls(True)
-        self.ui.lblStatus.setText("Starting optimized periodic Scope DMA...")
-        self._next_display_ns = time.perf_counter_ns() + _DISPLAY_PERIOD_NS
+        self.ui.lblStatus.setText("Starting periodic Scope DMA with the visible Scope settings...")
+        self._next_display_ns = time.perf_counter_ns() + self._display_period_ns
         self._schedule_display()
 
     @Slot(str)
@@ -288,9 +292,6 @@ class CurrentMonitorController(QWidget):
         self._finish_dma_monitor(message)
 
     def _finish_dma_monitor(self, message: str) -> None:
-        publisher = self._scope_frame_buffer
-        if publisher is not None:
-            publisher.unsubscribe(self._scope_frame_consumer)
         self._display_timer.stop()
         self._dma_active = False
         self._render_pending()
@@ -298,8 +299,9 @@ class CurrentMonitorController(QWidget):
         self._set_running_controls(False)
         self.ui.lblStatus.setText(message)
 
-    def _convert(self, raw_code: float) -> float:
-        return (raw_code - self.ui.spinZero.value()) * self.ui.spinScale.value()
+    @staticmethod
+    def _convert(raw_code: float, zero: float, scale: float) -> float:
+        return (raw_code - zero) * scale
 
     def _unit(self) -> str:
         return self.ui.comboUnit.currentText()
@@ -314,6 +316,7 @@ class CurrentMonitorController(QWidget):
         return f"{value:,.6g}"
 
     def _calibration_changed(self, *_args: object) -> None:
+        self._calibration_dirty = True
         raw_label = (
             "Scope frame mean"
             if self.ui.comboMode.currentIndex() == _MODE_SCOPE_DMA
@@ -321,10 +324,37 @@ class CurrentMonitorController(QWidget):
         )
         label = "Current" if self._unit() != "raw" else raw_label
         self._plot.setLabel("left", label, units=self._unit())
-        self._render_values(time.perf_counter_ns())
+        now_ns = time.perf_counter_ns()
+        if self.ui.comboMode.currentIndex() == _MODE_SCOPE_DMA:
+            accumulator = self._scope_current_accumulator
+            if accumulator is not None:
+                snapshot = accumulator.snapshot(now_ns=now_ns)
+                self._render_dma_snapshot(snapshot)
+                self._last_dma_render_generation = snapshot.generation
+                self._calibration_dirty = False
+        else:
+            self._render_values(now_ns)
 
     @Slot()
     def _set_zero_from_recent(self) -> None:
+        if self.ui.comboMode.currentIndex() == _MODE_SCOPE_DMA:
+            accumulator = self._scope_current_accumulator
+            if accumulator is None:
+                return
+            snapshot = accumulator.snapshot(now_ns=time.perf_counter_ns())
+            if not snapshot.bins:
+                return
+            newest = snapshot.bins[-1]
+            cutoff_index = newest.index - max(
+                1, round(_ZERO_WINDOW_NS / snapshot.bin_width_ns)
+            )
+            recent = [item for item in snapshot.bins if item.index >= cutoff_index]
+            sample_count = sum(item.sample_count for item in recent)
+            if sample_count:
+                self.ui.spinZero.setValue(
+                    sum(item.raw_sum for item in recent) / sample_count
+                )
+            return
         latest = self._latest
         if latest is None:
             return
@@ -337,49 +367,134 @@ class CurrentMonitorController(QWidget):
     def _render_pending(self) -> None:
         now_ns = time.perf_counter_ns()
         if self.ui.comboMode.currentIndex() == _MODE_SCOPE_DMA:
-            samples, dropped = self._drain_dma_samples()
-            self._dropped_samples += dropped
+            accumulator = self._scope_current_accumulator
+            if accumulator is not None:
+                snapshot = accumulator.snapshot(now_ns=now_ns)
+                if (
+                    snapshot.generation != self._last_dma_render_generation
+                    or self._calibration_dirty
+                    or self._monitor_error is not None
+                ):
+                    render_started_ns = time.perf_counter_ns()
+                    self._render_dma_snapshot(snapshot)
+                    accumulator.note_display_update(
+                        snapshot.generation,
+                        time.perf_counter_ns() - render_started_ns,
+                    )
+                    self._last_dma_render_generation = snapshot.generation
+                    self._calibration_dirty = False
         else:
             batch = self._sample_buffer.drain()
             self._monitor_error = batch.error
             self._dropped_samples += batch.dropped_samples
             samples = batch.samples
-        if samples:
-            self._last_batch = samples
-            self._latest = samples[-1]
-            self._history.extend(samples)
-            cutoff = self._latest.timestamp_ns - _HISTORY_NS
-            while self._history and self._history[0].timestamp_ns < cutoff:
-                self._history.popleft()
-            self.ui.btnZero.setEnabled(True)
-        self._render_values(now_ns)
+            if samples:
+                self._last_batch = samples
+                self._latest = samples[-1]
+                self._history.extend(samples)
+                cutoff = self._latest.timestamp_ns - _HISTORY_NS
+                while self._history and self._history[0].timestamp_ns < cutoff:
+                    self._history.popleft()
+                self.ui.btnZero.setEnabled(True)
+            self._render_values(now_ns)
 
         if self._is_running():
-            self._next_display_ns += _DISPLAY_PERIOD_NS
+            self._next_display_ns += self._display_period_ns
             if self._next_display_ns <= now_ns:
-                self._next_display_ns = now_ns + _DISPLAY_PERIOD_NS
+                self._next_display_ns = now_ns + self._display_period_ns
             self._schedule_display()
 
-    def _drain_dma_samples(self) -> tuple[tuple[CurrentSample, ...], int]:
-        frames, dropped = self._scope_frame_consumer.drain()
-        samples: list[CurrentSample] = []
-        for frame in frames:
-            if not frame.samples.size:
-                continue
-            self._dma_sequence += 1
-            samples.append(self._current_sample_from_dma_frame(frame))
-        return tuple(samples), dropped
+    def _render_dma_snapshot(self, snapshot: ScopeCurrentSnapshot) -> None:
+        latest_mean = snapshot.latest_frame_mean
+        if latest_mean is None or not snapshot.bins:
+            if self._monitor_error is not None:
+                self.ui.lblStatus.setText(self._monitor_error)
+            return
 
-    def _current_sample_from_dma_frame(self, frame: ScopeDmaFrame) -> CurrentSample:
-        return CurrentSample(
-            sequence=self._dma_sequence,
-            timestamp_ns=frame.received_ns,
-            raw_code=float(np.mean(frame.samples, dtype=np.float64)),
-            read_latency_ns=0,
-            coverage_ns=frame.geometry.capture_duration_ns,
-            hardware_timestamp=frame.timestamp,
-            sample_count=frame.geometry.waveform_samples,
+        zero = self.ui.spinZero.value()
+        scale = self.ui.spinScale.value()
+        unit = self._unit()
+        current = self._convert(latest_mean, zero, scale)
+        self.ui.lblCurrent.setText(f"{self._format_value(current)} {unit}")
+        self.ui.lblRaw.setText(self._format_value(latest_mean))
+        self.ui.btnZero.setEnabled(True)
+
+        latest_bin = snapshot.bins[-1]
+        bin_mean = self._convert(latest_bin.raw_mean, zero, scale)
+        converted_extrema = (
+            self._convert(latest_bin.minimum_frame_mean, zero, scale),
+            self._convert(latest_bin.maximum_frame_mean, zero, scale),
         )
+        self.ui.lblInterval.setText(
+            f"mean {self._format_value(bin_mean)}; "
+            f"min {self._format_value(min(converted_extrema))}; "
+            f"max {self._format_value(max(converted_extrema))} {unit}; "
+            f"frames={latest_bin.frame_count:,}, samples={latest_bin.sample_count:,}"
+        )
+
+        geometry = snapshot.geometry
+        window_us = geometry.capture_duration_ns / 1000 if geometry is not None else 0.0
+        self.ui.lblAcquisition.setText(
+            f"{snapshot.received_fps:,.1f} recv frames/s; "
+            f"{snapshot.payload_mb_s:.3f} MB/s; median spacing "
+            f"{snapshot.median_interval_ns / 1_000_000:.3f} ms; "
+            f"window {window_us:.3f} us; coverage "
+            f"{snapshot.observed_coverage_percent:.2f}%; "
+            f"age {snapshot.data_age_ns / 1_000_000:.1f} ms"
+        )
+
+        runtime = snapshot.runtime
+        runtime_text = "transport pending"
+        if runtime is not None:
+            runtime_text = (
+                f"{runtime.transport}, buffers={runtime.kernel_buffers}, "
+                f"READBUF x{runtime.readbuf_batch_frames or 1}, "
+                f"queue={runtime.queued_blocks}/high {runtime.queue_high_watermark}, "
+                f"viewer={runtime.viewer_state}"
+            )
+        status = (
+            f"Analyzed {snapshot.analyzed_frames:,}/{snapshot.received_frames:,} "
+            f"received frames; {runtime_text}; skipped opportunities "
+            f"{snapshot.skipped_opportunities:,}; off-grid "
+            f"{snapshot.off_grid_intervals:,}; inline analysis lag "
+            f"{snapshot.analysis_lag_ns / 1_000_000:.3f} ms "
+            f"(queue 0); display p95 "
+            f"{snapshot.display_p95_duration_ns / 1_000_000:.1f} ms; "
+            f"preview/display replacements {snapshot.replaced_preview_frames:,}/"
+            f"{snapshot.replaced_display_generations:,}; protocol errors "
+            f"{snapshot.protocol_errors:,}."
+        )
+        if snapshot.rejected_frames or snapshot.discarded_analysis_frames:
+            status += (
+                f" Rejected {snapshot.rejected_frames:,}; analysis discarded "
+                f"{snapshot.discarded_analysis_frames:,}."
+            )
+        if self._monitor_error is not None:
+            status = self._monitor_error
+        elif snapshot.data_age_ns > max(
+            _MIN_STALE_NS, round(3 * snapshot.median_interval_ns)
+        ):
+            status = (
+                f"Stale: newest DMA frame is "
+                f"{snapshot.data_age_ns / 1_000_000:.1f} ms old. " + status
+            )
+        self.ui.lblStatus.setText(status)
+
+        newest_index = snapshot.bins[-1].index
+        x_values: list[float] = []
+        y_values: list[float] = []
+        previous_index: int | None = None
+        for item in snapshot.bins:
+            x_value = (
+                (item.index - newest_index) * snapshot.bin_width_ns / 1_000_000_000
+            )
+            if previous_index is not None and item.index > previous_index + 1:
+                x_values.append(x_value - snapshot.bin_width_ns / 1_000_000_000)
+                y_values.append(math.nan)
+            x_values.append(x_value)
+            y_values.append(self._convert(item.raw_mean, zero, scale))
+            previous_index = item.index
+        self._curve.setData(np.asarray(x_values), np.asarray(y_values))
 
     def _render_values(self, now_ns: int) -> None:
         latest = self._latest
@@ -388,12 +503,16 @@ class CurrentMonitorController(QWidget):
                 self.ui.lblStatus.setText(self._monitor_error)
             return
 
+        zero = self.ui.spinZero.value()
+        scale = self.ui.spinScale.value()
         unit = self._unit()
-        current = self._convert(latest.raw_code)
+        current = self._convert(latest.raw_code, zero, scale)
         self.ui.lblCurrent.setText(f"{self._format_value(current)} {unit}")
         self.ui.lblRaw.setText(self._format_value(latest.raw_code))
 
-        batch_values = [self._convert(sample.raw_code) for sample in self._last_batch]
+        batch_values = [
+            self._convert(sample.raw_code, zero, scale) for sample in self._last_batch
+        ]
         if batch_values:
             self.ui.lblInterval.setText(
                 f"mean {self._format_value(statistics.fmean(batch_values))}; "
@@ -478,7 +597,7 @@ class CurrentMonitorController(QWidget):
                 / 1_000_000_000
                 for sample in self._history
             ]
-            y = [self._convert(sample.raw_code) for sample in self._history]
+            y = [self._convert(sample.raw_code, zero, scale) for sample in self._history]
             self._curve.setData(x, y)
 
     @staticmethod
@@ -507,6 +626,12 @@ class CurrentMonitorController(QWidget):
             "zero_code": self.ui.spinZero.value(),
             "scale_per_code": self.ui.spinScale.value(),
             "unit": self._unit(),
+            "display_fps": self._display_hz,
+            "analysis_bin_ms": (
+                self._scope_current_accumulator.bin_width_ms
+                if self._scope_current_accumulator is not None
+                else 100
+            ),
         }
 
     def apply_configuration_settings(self, settings: object) -> None:
@@ -530,3 +655,15 @@ class CurrentMonitorController(QWidget):
             index = self.ui.comboUnit.findText(str(settings["unit"]))
             if index >= 0:
                 self.ui.comboUnit.setCurrentIndex(index)
+        if "display_fps" in settings:
+            requested_fps = int(settings["display_fps"])
+            if not 1 <= requested_fps <= _DISPLAY_HZ:
+                raise ValueError(f"display_fps must be 1..{_DISPLAY_HZ}")
+            self._display_hz = requested_fps
+            self._display_period_ns = round(1_000_000_000 / requested_fps)
+        if "analysis_bin_ms" in settings:
+            if self._is_running():
+                raise RuntimeError("cannot change analysis bins while monitor is running")
+            accumulator = self._scope_current_accumulator
+            if accumulator is not None:
+                accumulator.configure_bin_width_ms(int(settings["analysis_bin_ms"]))

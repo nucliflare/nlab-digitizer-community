@@ -19,7 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Protocol
 
 import numpy as np
 import zmq
@@ -30,6 +30,9 @@ from nlab.hardware.digitizer.iio_listmode import (
     cfd_interpolation_samples,
 )
 from nlab.hardware.digitizer.mca_capture import McaCaptureWriter, McaDmaOutputMode
+
+if TYPE_CHECKING:
+    from nlab.hardware.digitizer.current_monitor import ScopeCurrentAccumulator
 
 
 class _IIOScopeBackend(Protocol):
@@ -184,6 +187,15 @@ class ScopeDmaFrame:
     samples: np.ndarray
     geometry: ScopeDmaGeometry
 
+    def __post_init__(self) -> None:
+        samples = np.asarray(self.samples, dtype="<i2").reshape(-1)
+        if samples.size != self.geometry.waveform_samples:
+            raise ValueError("Scope DMA frame waveform does not match its geometry")
+        # Own one immutable byte string. Every bounded display consumer can
+        # safely share the resulting read-only view after the next DMA refill.
+        owned = bytes(samples.tobytes())
+        object.__setattr__(self, "samples", np.frombuffer(owned, dtype="<i2"))
+
 
 class ScopeFrameBuffer:
     """Bounded non-blocking hand-off queue for live Scope DMA consumers."""
@@ -199,12 +211,9 @@ class ScopeFrameBuffer:
 
     @staticmethod
     def _copy_frame(frame: ScopeDmaFrame) -> ScopeDmaFrame:
-        return ScopeDmaFrame(
-            timestamp=frame.timestamp,
-            received_ns=frame.received_ns,
-            samples=frame.samples.copy(),
-            geometry=frame.geometry,
-        )
+        # ScopeDmaFrame owns immutable backing bytes, so publication shares
+        # one safe frame instead of copying the waveform for every subscriber.
+        return frame
 
     def append(self, frame: ScopeDmaFrame) -> None:
         copied = self._copy_frame(frame)
@@ -542,6 +551,7 @@ class IIOScopeDmaStreamer:
         on_ready: Callable[[], None] | None = None,
         on_progress: Callable[[int], None] | None = None,
         frame_buffer: ScopeFrameBuffer | None = None,
+        current_accumulator: ScopeCurrentAccumulator | None = None,
     ) -> int:
         """Capture complete frames for an optional file and live publisher.
 
@@ -708,6 +718,7 @@ class IIOScopeDmaStreamer:
                     continue
             writer_thread.join()
 
+        accumulator_error = False
         try:
             writer_ready.wait()
             raise_writer_error()
@@ -729,10 +740,40 @@ class IIOScopeDmaStreamer:
                         break
                     raise
                 if len(record) != expected_frame_bytes:
+                    if current_accumulator is not None:
+                        current_accumulator.note_rejected_frame()
+                        accumulator_error = True
                     raise RuntimeError(
                         "scope DMA returned an incomplete raw frame: "
                         f"{len(record)} bytes, expected {expected_frame_bytes}"
                     )
+
+                received_ns = time.perf_counter_ns()
+                if current_accumulator is not None:
+                    try:
+                        current_accumulator.append_frame(record, geometry, received_ns)
+                    except Exception:
+                        accumulator_error = True
+                        raise
+                    if frame_count == 0:
+                        metadata_reader = getattr(
+                            self._backend,
+                            "get_scope_dma_runtime_metadata",
+                            None,
+                        )
+                        if callable(metadata_reader):
+                            metadata = metadata_reader()
+                            current_accumulator.update_runtime_transport(
+                                transport=str(metadata.get("transport", "unknown")),
+                                kernel_buffers=int(metadata.get("kernel_buffers", 0)),
+                                readbuf_batch_frames=int(
+                                    metadata.get("readbuf_batch_frames", 0)
+                                ),
+                                queued_blocks=int(metadata.get("queued_blocks", 0)),
+                                queue_high_watermark=int(
+                                    metadata.get("queue_high_watermark", 0)
+                                ),
+                            )
 
                 if frame_buffer is not None:
                     timestamp = int.from_bytes(record[:8], "little")
@@ -741,11 +782,11 @@ class IIOScopeDmaStreamer:
                         dtype="<i2",
                         count=geometry.waveform_samples,
                         offset=SCOPE_TIMESTAMP_WORDS * 2,
-                    ).copy()
+                    )
                     frame_buffer.append(
                         ScopeDmaFrame(
                             timestamp=timestamp,
-                            received_ns=time.perf_counter_ns(),
+                            received_ns=received_ns,
                             samples=samples,
                             geometry=geometry,
                         )
@@ -759,11 +800,23 @@ class IIOScopeDmaStreamer:
                 frame_count += 1
                 if filepath is None and on_progress is not None:
                     on_progress(frame_count * expected_frame_bytes)
+        except Exception:
+            if (
+                current_accumulator is not None
+                and not accumulator_error
+                and not stop_event.is_set()
+            ):
+                current_accumulator.note_protocol_error()
+            raise
         finally:
             try:
                 self._backend.close_dma_capture()
             finally:
-                finish_writer()
+                try:
+                    finish_writer()
+                finally:
+                    if current_accumulator is not None:
+                        current_accumulator.finish_session()
 
         raise_writer_error()
         if filepath is not None and written_frames[0] != frame_count:

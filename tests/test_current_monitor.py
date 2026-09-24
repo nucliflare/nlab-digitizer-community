@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import struct
 import time
 from types import SimpleNamespace
 from typing import Any, cast
@@ -13,12 +14,12 @@ from pytestqt.qtbot import QtBot
 from nlab.controllers.current_monitor_controller import CurrentMonitorController
 from nlab.hardware.digitizer.backends import iio_backend as iio_backend_module
 from nlab.hardware.digitizer.backends.iio_backend import IIODigitizerBackend
-from nlab.hardware.digitizer.current_monitor import CurrentMonitorClient
-from nlab.hardware.digitizer.dma import (
-    ScopeDmaFrame,
-    ScopeDmaGeometry,
-    ScopeFrameBuffer,
+from nlab.hardware.digitizer.current_monitor import (
+    CurrentMonitorClient,
+    ScopeCurrentAccumulator,
+    ScopeCurrentRuntime,
 )
+from nlab.hardware.digitizer.dma import ScopeDmaGeometry
 from nlab.hardware.digitizer.mca import MultiChannelAnalyzer
 from nlab.workers.current_monitor_worker import (
     CurrentMonitorWorker,
@@ -121,6 +122,8 @@ def test_controller_renders_calibrated_latest_and_interval_values(qtbot: QtBot) 
         "zero_code": 110.0,
         "scale_per_code": 0.5,
         "unit": "nA",
+        "display_fps": 30,
+        "analysis_bin_ms": 100,
     }
     controller.apply_configuration_settings(
         {"zero_code": -4.0, "scale_per_code": 0.125, "unit": "uA"}
@@ -130,6 +133,8 @@ def test_controller_renders_calibrated_latest_and_interval_values(qtbot: QtBot) 
         "zero_code": -4.0,
         "scale_per_code": 0.125,
         "unit": "uA",
+        "display_fps": 30,
+        "analysis_bin_ms": 100,
     }
     controller._on_worker_finished()
     qtbot.wait(60)
@@ -170,16 +175,130 @@ class _FakeScopeController(QObject):
         self.current_dma_state_changed.emit(False, "Scope DMA stopped.")
 
 
-def test_controller_scope_dma_mode_averages_subscribed_frames(qtbot: QtBot) -> None:
+def _scope_record(
+    timestamp: int,
+    values: np.ndarray,
+    geometry: ScopeDmaGeometry,
+) -> bytes:
+    return (
+        struct.pack("<Q", timestamp)
+        + np.asarray(values, dtype="<i2").tobytes()
+        + bytes(geometry.padding_bytes)
+    )
+
+
+def test_scope_current_accumulator_preserves_weighted_sums_and_bounded_bins() -> None:
+    geometry = ScopeDmaGeometry.legacy(8)
+    accumulator = ScopeCurrentAccumulator(bin_width_ms=1, history_seconds=1)
+    accumulator.start_session(
+        geometry,
+        ScopeCurrentRuntime(
+            channel=0,
+            ip_version=121,
+            gap_cycles=24_998,
+            expected_interval_ticks=25_000,
+        ),
+    )
+    accumulator.append_frame(
+        _scope_record(1, np.full(4, 0, dtype="<i2"), geometry), geometry, 1_000
+    )
+    accumulator.append_frame(
+        _scope_record(50_001, np.full(4, 10, dtype="<i2"), geometry),
+        geometry,
+        401_000,
+    )
+    accumulator.append_frame(
+        _scope_record(125_001, np.full(4, 100, dtype="<i2"), geometry),
+        geometry,
+        1_001_000,
+    )
+
+    snapshot = accumulator.snapshot(now_ns=1_101_000)
+
+    assert snapshot.received_frames == snapshot.analyzed_frames == 3
+    assert snapshot.analyzed_raw_sum == 440
+    assert snapshot.analyzed_sample_count == 12
+    assert snapshot.discarded_analysis_frames == 0
+    assert len(snapshot.bins) == 2
+    assert snapshot.bins[0].raw_mean == pytest.approx(5.0)
+    assert snapshot.bins[1].raw_mean == pytest.approx(100.0)
+    assert sum(item.raw_sum for item in snapshot.bins) / sum(
+        item.sample_count for item in snapshot.bins
+    ) == pytest.approx(110 / 3)
+    assert snapshot.skipped_opportunities == 3
+    assert snapshot.off_grid_intervals == 0
+    assert snapshot.analysis_queue_depth == 0
+    assert snapshot.analysis_queue_high_water == 0
+
+
+def test_scope_current_accumulator_rejects_nonzero_padding() -> None:
+    geometry = ScopeDmaGeometry(
+        frame_samples=16,
+        buffer_samples=8,
+        frame_bytes=16,
+        waveform_samples=3,
+        sample_decimation=4,
+        padding_bytes=2,
+    )
+    accumulator = ScopeCurrentAccumulator()
+    accumulator.start_session(
+        geometry,
+        ScopeCurrentRuntime(0, 122, 10, 14),
+    )
+    bad = struct.pack("<Q", 1) + np.arange(3, dtype="<i2").tobytes() + b"\x00\x01"
+
+    with pytest.raises(ValueError, match="padding"):
+        accumulator.append_frame(bad, geometry, 100)
+
+    snapshot = accumulator.snapshot(now_ns=100)
+    assert snapshot.rejected_frames == 1
+    assert snapshot.protocol_errors == 1
+    assert snapshot.analyzed_frames == 0
+
+
+def test_scope_current_accumulator_gui_pause_keeps_all_analysis() -> None:
+    geometry = ScopeDmaGeometry.legacy(8)
+    accumulator = ScopeCurrentAccumulator(bin_width_ms=100, history_seconds=1)
+    accumulator.start_session(
+        geometry,
+        ScopeCurrentRuntime(0, 121, 8, 10),
+    )
+    record_values = np.array([-32768, -1, 0, 32767], dtype="<i2")
+
+    for index in range(750):
+        accumulator.append_frame(
+            _scope_record(1 + index * 10, record_values, geometry),
+            geometry,
+            1_000 + index * 80,
+        )
+
+    snapshot = accumulator.snapshot(now_ns=1_000_000)
+    accumulator.note_display_update(snapshot.generation, 250_000_000)
+    accumulator.finish_session()
+    final = accumulator.snapshot(now_ns=1_000_000)
+
+    assert final.received_frames == final.analyzed_frames == 750
+    assert final.analyzed_raw_sum == -2 * 750
+    assert final.analyzed_sample_count == 4 * 750
+    assert final.discarded_analysis_frames == 0
+    assert sum(item.raw_sum for item in final.bins) == -2 * 750
+    assert sum(item.sample_count for item in final.bins) == 4 * 750
+    assert final.replaced_preview_frames == 749
+    assert final.display_updates == 1
+    assert final.last_display_duration_ns == 250_000_000
+    assert not final.active
+
+
+def test_controller_scope_dma_mode_renders_accumulated_summaries(qtbot: QtBot) -> None:
     mca = cast(MultiChannelAnalyzer, SimpleNamespace())
     scope = _FakeScopeController()
-    publisher = ScopeFrameBuffer()
+    accumulator = ScopeCurrentAccumulator()
     controller = CurrentMonitorController(
         mca,
         channel=0,
         auto_start=False,
         scope_controller=cast(Any, scope),
-        scope_frame_buffer=publisher,
+        scope_current_accumulator=accumulator,
     )
     qtbot.addWidget(controller)
     controller.ui.comboMode.setCurrentIndex(1)
@@ -196,23 +315,26 @@ def test_controller_scope_dma_mode_averages_subscribed_frames(qtbot: QtBot) -> N
         sample_decimation=4,
         padding_bytes=4,
     )
+    accumulator.start_session(
+        geometry,
+        ScopeCurrentRuntime(0, 122, 515, 46_125, "iiod-batched", 4, 32),
+    )
     received_ns = time.perf_counter_ns() - 20_000_000
     for timestamp, host_offset_ns in ((1234, 0), (47_359, 10_000_000)):
-        publisher.append(
-            ScopeDmaFrame(
-                timestamp=timestamp,
-                received_ns=received_ns + host_offset_ns,
-                samples=np.arange(2046, dtype="<i2"),
-                geometry=geometry,
-            )
+        accumulator.append_frame(
+            _scope_record(timestamp, np.arange(2046, dtype="<i2"), geometry),
+            geometry,
+            received_ns + host_offset_ns,
         )
     controller._render_pending()
     controller._display_timer.stop()
 
     assert controller.ui.lblRaw.text() == "1,022.5"
     assert "median spacing 0.369 ms" in controller.ui.lblAcquisition.text()
-    assert "frame average 16.368 us" in controller.ui.lblAcquisition.text()
-    assert "2,046 samples at 8 ns spacing" in controller.ui.lblStatus.text()
+    assert "window 16.368 us" in controller.ui.lblAcquisition.text()
+    assert "Analyzed 2/2 received frames" in controller.ui.lblStatus.text()
+    assert "iiod-batched, buffers=4, READBUF x32" in controller.ui.lblStatus.text()
+    assert "queue=0/high 0" in controller.ui.lblStatus.text()
     assert controller.configuration_settings()["mode"] == "scope_dma"
 
     controller.request_monitor_stop()

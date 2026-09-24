@@ -337,14 +337,16 @@ def test_startup_shares_bounded_event_buffer_with_mca_and_psd(
 
     controller._build_channel_docks()
 
-    scope_buffer = scope_factory.call_args.kwargs["dma_frame_buffer"]
-    assert isinstance(scope_buffer, main_window_module.ScopeFrameBuffer)
+    current_accumulator = scope_factory.call_args.kwargs["current_accumulator"]
+    assert isinstance(
+        current_accumulator, main_window_module.ScopeCurrentAccumulator
+    )
     current_factory.assert_called_once_with(
         controller._devices[0].mca,
         channel=0,
         auto_start=False,
         scope_controller=scope,
-        scope_frame_buffer=scope_buffer,
+        scope_current_accumulator=current_accumulator,
     )
     assert controller._current_monitor_controllers == [current_factory.return_value]
     psd_buffer = psd_factory.call_args.kwargs["event_buffer"]

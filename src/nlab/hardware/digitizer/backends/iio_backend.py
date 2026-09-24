@@ -1840,6 +1840,35 @@ class IIODigitizerBackend(DigitizerBackend):
             )
         return geometry
 
+    def get_scope_dma_runtime_metadata(self) -> dict[str, object]:
+        """Return transport choices and a queue snapshot for this arm.
+
+        This is intentionally read after the first successful frame: buffer
+        creation has then selected the real transport and qualified kernel
+        queue depth.  It contains scalar diagnostics only and performs no
+        buffer or acquisition state change.
+        """
+        def optional_integer(name: str) -> int:
+            if name not in self._dma_scope.attrs:
+                return 0
+            return int(self._dma_attr_get(name))
+
+        return {
+            "uri": self._uri,
+            "device": self._dma_scope.id,
+            "channel": self._ch,
+            "ip_version": int(self._dma_attr_get("ip_version")),
+            "transport": self._dma_capture_transport or "unarmed",
+            "kernel_buffers": self._dma_capture_kernel_buffers or 0,
+            "queued_blocks": optional_integer("queued_blocks"),
+            "queue_high_watermark": optional_integer("queue_high_watermark"),
+            "readbuf_batch_frames": (
+                _SCOPE_IIOD_BATCH_FRAMES
+                if self._dma_capture_transport == "iiod-batched"
+                else 1
+            ),
+        }
+
     def set_frame_samples(self, val: int) -> None:
         """Closes any open DMA capture buffer first, then writes directly
         -- no disarm/re-arm of plain viewer-only `enable` needed anymore.
