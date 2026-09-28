@@ -156,7 +156,10 @@ _LM_KERNEL_BUFFER_COUNT = 8
 # provider-qualified driver advertises a recommended/max depth through IIO;
 # use that only after validating the complete capability tuple.
 _SCOPE_FALLBACK_KERNEL_BUFFER_COUNT = 1
-_SCOPE_IIOD_BATCH_FRAMES = 32
+# The IP122/.128 coverage sweep found that 64-frame READBUF requests maximize
+# receiver throughput without changing the exact-frame DMA ABI. The server
+# still emits its bounded batches as frames become available.
+_SCOPE_IIOD_BATCH_FRAMES = 64
 _LM_RECORD_LAYOUT = "opaque[16]"
 _LM_EVENT_DTYPE = IIO_LM_EVENT_DTYPE
 

@@ -71,6 +71,12 @@ def _capture(
         scope_current_accumulator=accumulator,
     )
     controller.ui.comboMode.setCurrentIndex(1)
+    # Showing the widget is essential for a representative GUI benchmark.
+    # setData() alone does not exercise pyqtgraph's paint path, so a hidden
+    # controller can conceal the same rendering stalls seen in the real app.
+    controller.resize(1600, 900)
+    controller.show()
+    app.processEvents()
     result: dict[str, int | str] = {}
 
     def receive() -> None:
@@ -211,6 +217,7 @@ def run(options: Options) -> dict[str, object]:
             "runtime": runtime,
             "bin_width_ms": snapshot.bin_width_ns // 1_000_000,
             "retained_bins": len(snapshot.bins),
+            "retained_waveform_frames": len(snapshot.waveform_records),
             "received_frames": snapshot.received_frames,
             "received_bytes": snapshot.received_bytes,
             "analyzed_frames": snapshot.analyzed_frames,

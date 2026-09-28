@@ -123,10 +123,16 @@ def test_controller_renders_calibrated_latest_and_interval_values(qtbot: QtBot) 
         "scale_per_code": 0.5,
         "unit": "nA",
         "display_fps": 30,
+        "dma_gap_cycles": 12_500,
         "analysis_bin_ms": 100,
     }
     controller.apply_configuration_settings(
-        {"zero_code": -4.0, "scale_per_code": 0.125, "unit": "uA"}
+        {
+            "zero_code": -4.0,
+            "scale_per_code": 0.125,
+            "unit": "uA",
+            "dma_gap_cycles": 10_453,
+        }
     )
     assert controller.configuration_settings() == {
         "mode": "iir",
@@ -134,8 +140,10 @@ def test_controller_renders_calibrated_latest_and_interval_values(qtbot: QtBot) 
         "scale_per_code": 0.125,
         "unit": "uA",
         "display_fps": 30,
+        "dma_gap_cycles": 10_453,
         "analysis_bin_ms": 100,
     }
+    assert controller.ui.spinDmaGap.value() == pytest.approx(83.624)
     controller._on_worker_finished()
     qtbot.wait(60)
     assert not controller._display_timer.isActive()
@@ -162,17 +170,23 @@ class _FakeScopeController(QObject):
     def __init__(self) -> None:
         super().__init__()
         self.starts = 0
+        self.start_gaps: list[int | None] = []
         self.stops = 0
+        self.resets = 0
 
     def current_dma_supported(self) -> bool:
         return True
 
-    def start_current_dma_monitor(self) -> None:
+    def start_current_dma_monitor(self, *, gap_cycles: int | None = None) -> None:
         self.starts += 1
+        self.start_gaps.append(gap_cycles)
 
     def stop_current_dma_monitor(self, *, wait: bool = False) -> None:
         self.stops += 1
         self.current_dma_state_changed.emit(False, "Scope DMA stopped.")
+
+    def reset_defaults(self) -> None:
+        self.resets += 1
 
 
 def _scope_record(
@@ -219,6 +233,12 @@ def test_scope_current_accumulator_preserves_weighted_sums_and_bounded_bins() ->
     assert snapshot.analyzed_raw_sum == 440
     assert snapshot.analyzed_sample_count == 12
     assert snapshot.discarded_analysis_frames == 0
+    assert [
+        int.from_bytes(record[:8], "little") for record in snapshot.waveform_records
+    ] == [1, 50_001, 125_001]
+    assert snapshot.latest_raw_sample == 100
+    assert snapshot.latest_frame_minimum == 100
+    assert snapshot.latest_frame_maximum == 100
     assert len(snapshot.bins) == 2
     assert snapshot.bins[0].raw_mean == pytest.approx(5.0)
     assert snapshot.bins[1].raw_mean == pytest.approx(100.0)
@@ -281,6 +301,7 @@ def test_scope_current_accumulator_gui_pause_keeps_all_analysis() -> None:
     assert final.analyzed_raw_sum == -2 * 750
     assert final.analyzed_sample_count == 4 * 750
     assert final.discarded_analysis_frames == 0
+    assert len(final.waveform_records) == 750
     assert sum(item.raw_sum for item in final.bins) == -2 * 750
     assert sum(item.sample_count for item in final.bins) == 4 * 750
     assert final.replaced_preview_frames == 749
@@ -302,11 +323,15 @@ def test_controller_scope_dma_mode_renders_accumulated_summaries(qtbot: QtBot) -
     )
     qtbot.addWidget(controller)
     controller.ui.comboMode.setCurrentIndex(1)
+    controller.ui.spinDmaGap.setValue(83.624)
 
     controller.start_monitor()
 
     assert scope.starts == 1
+    assert scope.start_gaps == [10_453]
     assert not controller.ui.comboMode.isEnabled()
+    assert not controller.ui.spinDmaGap.isEnabled()
+    assert not controller.ui.btnResetScopeDefaults.isEnabled()
     geometry = ScopeDmaGeometry(
         frame_samples=8188,
         buffer_samples=2052,
@@ -317,7 +342,7 @@ def test_controller_scope_dma_mode_renders_accumulated_summaries(qtbot: QtBot) -
     )
     accumulator.start_session(
         geometry,
-        ScopeCurrentRuntime(0, 122, 515, 46_125, "iiod-batched", 4, 32),
+        ScopeCurrentRuntime(0, 122, 12_500, 14_547, "iiod-batched", 4, 64),
     )
     received_ns = time.perf_counter_ns() - 20_000_000
     for timestamp, host_offset_ns in ((1234, 0), (47_359, 10_000_000)):
@@ -329,18 +354,92 @@ def test_controller_scope_dma_mode_renders_accumulated_summaries(qtbot: QtBot) -
     controller._render_pending()
     controller._display_timer.stop()
 
-    assert controller.ui.lblRaw.text() == "1,022.5"
-    assert "median spacing 0.369 ms" in controller.ui.lblAcquisition.text()
+    assert controller.ui.lblRaw.text() == "2,045"
+    assert "gap 0.100 ms" in controller.ui.lblAcquisition.text()
+    assert "nominal/median spacing 0.116/0.369 ms" in (
+        controller.ui.lblAcquisition.text()
+    )
     assert "window 16.368 us" in controller.ui.lblAcquisition.text()
     assert "Analyzed 2/2 received frames" in controller.ui.lblStatus.text()
-    assert "iiod-batched, buffers=4, READBUF x32" in controller.ui.lblStatus.text()
+    assert "iiod-batched, buffers=4, READBUF x64" in controller.ui.lblStatus.text()
     assert "queue=0/high 0" in controller.ui.lblStatus.text()
+    assert controller.ui.labelInterval.text() == "Latest DMA fragment:"
+    x_values, y_values = controller._curve.getData()
+    assert x_values.size == y_values.size == 4_093
+    assert x_values[[0, 2045, 2046, 2047, -1]].tolist() == pytest.approx(
+        [-0.00038536, -0.000369, -0.000369, -0.00001636, 0.0]
+    )
+    assert np.isnan(y_values[2046])
+    assert y_values[[0, 2045, 2047, -1]].tolist() == pytest.approx(
+        [0.0, 2045.0, 0.0, 2045.0]
+    )
     assert controller.configuration_settings()["mode"] == "scope_dma"
 
     controller.request_monitor_stop()
     assert scope.stops == 1
     assert controller.ui.comboMode.isEnabled()
+    assert controller.ui.spinDmaGap.isEnabled()
+    assert controller.ui.btnResetScopeDefaults.isEnabled()
     assert controller.ui.lblStatus.text() == "Scope DMA stopped."
+
+    controller.ui.btnResetScopeDefaults.click()
+    assert scope.resets == 1
+    assert controller.ui.spinDmaGap.value() == pytest.approx(100.0)
+    assert controller.ui.lblStatus.text() == (
+        "Scope defaults restored; Current DMA optimization is inactive."
+    )
+
+
+def test_controller_throttles_bounded_raw_waveform_plot(
+    qtbot: QtBot,
+) -> None:
+    controller = CurrentMonitorController(
+        cast(MultiChannelAnalyzer, SimpleNamespace()),
+        channel=0,
+        auto_start=False,
+    )
+    qtbot.addWidget(controller)
+    controller.ui.comboMode.setCurrentIndex(1)
+    geometry = ScopeDmaGeometry.legacy(8)
+    accumulator = ScopeCurrentAccumulator()
+    accumulator.start_session(
+        geometry,
+        ScopeCurrentRuntime(0, 121, 8, 10),
+    )
+    for index in range(1_000):
+        accumulator.append_frame(
+            _scope_record(
+                1 + index * 10,
+                np.full(4, index % 101, dtype="<i2"),
+                geometry,
+            ),
+            geometry,
+            1_000 + index * 80,
+        )
+
+    controller._render_dma_snapshot(accumulator.snapshot())
+    live_plot_points = controller._last_dma_plot_points
+    live_x, _live_y = controller._curve.getData()
+
+    assert live_plot_points == 4_000
+    assert live_x.size == 4_999
+
+    accumulator.append_frame(
+        _scope_record(10_001, np.full(4, 50, dtype="<i2"), geometry),
+        geometry,
+        81_000,
+    )
+    controller._render_dma_snapshot(accumulator.snapshot())
+    throttled_x, _throttled_y = controller._curve.getData()
+
+    assert throttled_x.tolist() == live_x.tolist()
+
+    accumulator.finish_session()
+    controller._render_dma_snapshot(accumulator.snapshot())
+    stopped_x, _stopped_y = controller._curve.getData()
+
+    assert controller._last_dma_plot_points == 4_004
+    assert stopped_x.size == 5_004
 
 
 def test_iio_monitor_client_uses_a_new_context_and_channel_index(

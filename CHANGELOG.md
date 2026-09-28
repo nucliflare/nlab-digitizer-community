@@ -18,18 +18,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   history, overflow reporting, and saved zero/scale/unit calibration.
 - Selectable online Scope DMA mode for the Current workspace. Validated frames
   are reduced on the receiver thread into bounded, sample-weighted summaries
-  before any replaceable GUI hand-off. The Scope frame/gap settings remain
-  operator-visible, host receive and FPGA timing metrics are reported
-  separately, and protocol/analysis/display losses are distinguished. A
-  visible Scope panel previews the latest owned DMA frame without a second IIO
-  viewer transaction. The IIO backend consumes the v122 driver-advertised
-  dynamic DMA geometry rather than assuming that the configured full-rate
-  frame length is the transport length.
+  before any replaceable GUI hand-off. IP122 automatically uses the
+  live-qualified 8,188-sample/100 us maximum-coverage preset and mirrors it into
+  the Scope controls; other firmware retains its visible frame/gap settings.
+  Host receive and FPGA timing metrics are reported separately, and
+  protocol/analysis/display losses are distinguished. A visible Scope panel
+  previews the latest owned DMA frame without a second IIO viewer transaction.
+  The IIO backend consumes the v122 driver-advertised dynamic DMA geometry
+  rather than assuming that the configured full-rate frame length is the
+  transport length, and qualified remote streams use READBUF x64. The Current
+  plot retains a bounded 10 ms window of complete raw waveform fragments on
+  the FPGA timestamp timeline, with explicit breaks between fragments and no
+  additional software waveform averaging. Interval statistics remain
+  sample-weighted bins; the UI reports post-frame gap separately from nominal
+  and measured start-to-start spacing.
 - Current monitors now start stopped and open no polling or DMA transport until
   the operator presses **Start monitor**.
+- The stopped Current Scope-DMA mode exposes its post-frame gap as an exact
+  8 ns-step control, allowing operators to compare coverage and skipped-trigger
+  behavior without editing the Scope workspace or source code.
 
 ### Fixed
 
+- Visible Current Scope-DMA plotting no longer starves the receive thread. The
+  30 Hz scalar readout is decoupled from a 2 Hz raw-fragment waveform paint;
+  every received frame still contributes to scientific sums, while only a
+  bounded 10 ms raw display window is retained. The live diagnostic shows the
+  offscreen widget so Qt paint regressions are exercised instead of timing
+  `setData()` alone.
+- Starting Current Scope DMA explicitly reapplies the trigger-level and DAC-
+  baseline values displayed in Scope. Periodic acquisition preserves the
+  threshold for later trigger modes, and the selected DAC operating point is
+  used unchanged for the current waveform.
+- Stopping online Current DMA now clears the temporary Scope DMA selection
+  after buffer teardown, so stale GUI state no longer prevents Scope Auto
+  Setup. The stopped Current toolbar also provides **Reset Scope defaults** to
+  restore ordinary trigger, timing, DAC, and non-DMA settings after the IP122
+  optimization preset.
 - Scope DMA size progress now preserves byte counts beyond the signed 32-bit
   Qt boundary and displays long recordings in GiB instead of appearing to
   restart from zero at multi-gigabyte sizes.

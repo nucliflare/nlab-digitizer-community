@@ -28,8 +28,6 @@ class ScopeCurrentBin:
     frame_count: int
     payload_bytes: int
     coverage_ns: int
-    minimum_frame_mean: float
-    maximum_frame_mean: float
 
     @property
     def raw_mean(self) -> float:
@@ -74,7 +72,10 @@ class ScopeCurrentSnapshot:
     geometry: ScopeDmaGeometry | None
     runtime: ScopeCurrentRuntime | None
     bins: tuple[ScopeCurrentBin, ...]
-    latest_frame_mean: float | None
+    waveform_records: tuple[bytes, ...]
+    latest_raw_sample: int | None
+    latest_frame_minimum: int | None
+    latest_frame_maximum: int | None
     latest_timestamp: int | None
     latest_received_ns: int | None
     received_frames: int
@@ -116,8 +117,6 @@ class _ScopeCurrentBinBuilder:
     frame_count: int = 0
     payload_bytes: int = 0
     coverage_ns: int = 0
-    minimum_frame_mean: float = math.inf
-    maximum_frame_mean: float = -math.inf
 
     def freeze(self) -> ScopeCurrentBin:
         return ScopeCurrentBin(
@@ -131,19 +130,20 @@ class _ScopeCurrentBinBuilder:
             frame_count=self.frame_count,
             payload_bytes=self.payload_bytes,
             coverage_ns=self.coverage_ns,
-            minimum_frame_mean=self.minimum_frame_mean,
-            maximum_frame_mean=self.maximum_frame_mean,
         )
 
 
 class ScopeCurrentAccumulator:
-    """Receiver-owned, bounded current summaries for periodic Scope DMA.
+    """Receiver-owned analysis and bounded raw display data for Scope DMA.
 
-    Frames are reduced on the DMA thread before any replaceable GUI hand-off.
-    The accumulator keeps exact signed sums and sample counts, so display
-    cadence, calibration changes and preview replacement cannot alter the
-    scientific mean of the observations that were actually received.
+    Exact signed sums and sample counts are updated on the DMA thread, so
+    display cadence, calibration changes and preview replacement cannot alter
+    interval statistics.  A short hardware-timestamped window of complete raw
+    records is retained separately for waveform display; the GUI never turns
+    those records into one averaged point per frame.
     """
+
+    _WAVEFORM_HISTORY_NS = 10_000_000
 
     def __init__(
         self,
@@ -157,6 +157,9 @@ class ScopeCurrentAccumulator:
             raise ValueError("history_seconds must be positive")
         self._lock = threading.Lock()
         self._history_seconds = history_seconds
+        self._waveform_history_ticks = (
+            self._WAVEFORM_HISTORY_NS // SCOPE_DATAPATH_CLOCK_PERIOD_NS
+        )
         self._session_id = 0
         self._display_durations: deque[int] = deque(maxlen=256)
         self._interval_ticks: deque[int] = deque(maxlen=8192)
@@ -195,7 +198,10 @@ class ScopeCurrentAccumulator:
         self._previous_timestamp: int | None = None
         self._current_bin: _ScopeCurrentBinBuilder | None = None
         self._bins: deque[ScopeCurrentBin] = deque()
-        self._latest_frame_mean: float | None = None
+        self._waveform_records: deque[bytes] = deque()
+        self._latest_raw_sample: int | None = None
+        self._latest_frame_minimum: int | None = None
+        self._latest_frame_maximum: int | None = None
         self._latest_timestamp: int | None = None
         self._latest_received_ns: int | None = None
         self._preview: ScopeCurrentPreview | None = None
@@ -299,7 +305,9 @@ class ScopeCurrentAccumulator:
         )
         raw_sum = int(values.sum(dtype=np.int64))
         sample_count = int(values.size)
-        frame_mean = raw_sum / sample_count
+        latest_raw_sample = int(values[-1])
+        frame_minimum = int(values.min())
+        frame_maximum = int(values.max())
 
         with self._lock:
             if (
@@ -345,14 +353,22 @@ class ScopeCurrentAccumulator:
             current.frame_count += 1
             current.payload_bytes += len(record)
             current.coverage_ns += geometry.capture_duration_ns
-            current.minimum_frame_mean = min(current.minimum_frame_mean, frame_mean)
-            current.maximum_frame_mean = max(current.maximum_frame_mean, frame_mean)
             self._analyzed_frames += 1
             self._analyzed_raw_sum += raw_sum
             self._analyzed_sample_count += sample_count
-            self._latest_frame_mean = frame_mean
+            self._latest_raw_sample = latest_raw_sample
+            self._latest_frame_minimum = frame_minimum
+            self._latest_frame_maximum = frame_maximum
             self._latest_timestamp = timestamp
             self._latest_received_ns = received_ns
+            self._waveform_records.append(record)
+            waveform_cutoff = timestamp - self._waveform_history_ticks
+            while (
+                self._waveform_records
+                and int.from_bytes(self._waveform_records[0][:8], "little")
+                < waveform_cutoff
+            ):
+                self._waveform_records.popleft()
 
             if self._preview is not None and (
                 self._preview.generation > self._consumed_preview_generation
@@ -480,7 +496,10 @@ class ScopeCurrentAccumulator:
                 geometry=self._geometry,
                 runtime=self._runtime,
                 bins=tuple(bins),
-                latest_frame_mean=self._latest_frame_mean,
+                waveform_records=tuple(self._waveform_records),
+                latest_raw_sample=self._latest_raw_sample,
+                latest_frame_minimum=self._latest_frame_minimum,
+                latest_frame_maximum=self._latest_frame_maximum,
                 latest_timestamp=self._latest_timestamp,
                 latest_received_ns=self._latest_received_ns,
                 received_frames=self._received_frames,

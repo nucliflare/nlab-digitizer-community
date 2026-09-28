@@ -18,8 +18,28 @@
        <item><property name="text"><string>Scope DMA</string></property></item>
       </widget>
      </item>
+     <item><widget class="QLabel" name="labelDmaGap"><property name="text"><string>DMA gap:</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+     <item>
+      <widget class="QDoubleSpinBox" name="spinDmaGap">
+       <property name="enabled"><bool>false</bool></property>
+       <property name="toolTip"><string>Post-frame gap for the next Scope DMA current measurement; hardware resolution is 0.008 microseconds.</string></property>
+       <property name="suffix"><string> &#xB5;s</string></property>
+       <property name="decimals"><number>3</number></property>
+       <property name="minimum"><double>0.000000000000000</double></property>
+       <property name="maximum"><double>524.280000000000000</double></property>
+       <property name="singleStep"><double>0.008000000000000</double></property>
+       <property name="value"><double>100.000000000000000</double></property>
+      </widget>
+     </item>
      <item><widget class="QPushButton" name="btnStart"><property name="text"><string>Start monitor</string></property></widget></item>
      <item><widget class="QPushButton" name="btnStop"><property name="text"><string>Stop</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+     <item>
+      <widget class="QPushButton" name="btnResetScopeDefaults">
+       <property name="text"><string>Reset Scope defaults</string></property>
+       <property name="enabled"><bool>false</bool></property>
+       <property name="toolTip"><string>Restore the Scope hardware defaults after stopping Current DMA.</string></property>
+      </widget>
+     </item>
      <item><widget class="QPushButton" name="btnZero"><property name="text"><string>Set zero from recent samples</string></property><property name="enabled"><bool>false</bool></property></widget></item>
      <item><spacer name="controlsSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>20</height></size></property></spacer></item>
     </layout>

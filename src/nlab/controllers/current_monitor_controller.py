@@ -39,6 +39,11 @@ _ZERO_WINDOW_NS = 1_000_000_000
 _MIN_STALE_NS = 50_000_000
 _MODE_IIR = 0
 _MODE_SCOPE_DMA = 1
+_DMA_GAP_CYCLE_NS = SCOPE_DATAPATH_CLOCK_PERIOD_NS
+_DMA_GAP_MAX_CYCLES = 65_535
+_DEFAULT_DMA_GAP_CYCLES = 12_500
+_DMA_PLOT_HZ = 2
+_DMA_PLOT_PERIOD_NS = round(1_000_000_000 / _DMA_PLOT_HZ)
 
 
 class CurrentMonitorController(QWidget):
@@ -72,6 +77,8 @@ class CurrentMonitorController(QWidget):
         self._display_hz = _DISPLAY_HZ
         self._display_period_ns = _DISPLAY_PERIOD_NS
         self._last_dma_render_generation = -1
+        self._last_dma_plot_points = 0
+        self._last_dma_plot_update_ns = 0
         self._calibration_dirty = True
 
         self.ui = Ui_CurrentMonitorView()
@@ -106,12 +113,19 @@ class CurrentMonitorController(QWidget):
         plot.setLabel("bottom", "Time before newest sample", units="s")
         plot.setLabel("left", "IIR output", units="raw")
         self._plot = plot
-        self._curve = plot.plot(pen=pg.mkPen("#277da1", width=1.5))
+        self._curve = plot.plot(
+            pen=pg.mkPen("#277da1", width=1.5),
+            autoDownsample=True,
+            downsampleMethod="peak",
+            clipToView=True,
+        )
 
     def _connect_signals(self) -> None:
         self.ui.btnStart.clicked.connect(self.start_monitor)
         self.ui.btnStop.clicked.connect(self.request_monitor_stop)
+        self.ui.btnResetScopeDefaults.clicked.connect(self._reset_scope_defaults)
         self.ui.btnZero.clicked.connect(self._set_zero_from_recent)
+        self.ui.spinDmaGap.editingFinished.connect(self._normalize_dma_gap)
         self.ui.spinZero.valueChanged.connect(self._calibration_changed)
         self.ui.spinScale.valueChanged.connect(self._calibration_changed)
         self.ui.comboUnit.currentTextChanged.connect(self._calibration_changed)
@@ -131,22 +145,77 @@ class CurrentMonitorController(QWidget):
         self.ui.btnStart.setEnabled(not running)
         self.ui.btnStop.setEnabled(running)
         self.ui.comboMode.setEnabled(not running)
+        dma_gap_enabled = (
+            not running
+            and self.ui.comboMode.currentIndex() == _MODE_SCOPE_DMA
+            and self._dma_supported()
+        )
+        self.ui.labelDmaGap.setEnabled(dma_gap_enabled)
+        self.ui.spinDmaGap.setEnabled(dma_gap_enabled)
+        self.ui.btnResetScopeDefaults.setEnabled(
+            dma_gap_enabled
+        )
 
     @Slot(int)
     def _on_mode_changed(self, index: int) -> None:
         dma_mode = index == _MODE_SCOPE_DMA
-        self.ui.labelRaw.setText("Raw frame mean:" if dma_mode else "Raw IIR code:")
-        base_label = "Scope frame mean" if dma_mode else "IIR output"
+        self.ui.labelRaw.setText("Raw DMA sample:" if dma_mode else "Raw IIR code:")
+        self.ui.labelInterval.setText(
+            "Latest DMA fragment:" if dma_mode else "Last screen interval:"
+        )
+        base_label = "DMA waveform" if dma_mode else "IIR output"
         label = "Current" if self._unit() != "raw" else base_label
         self._plot.setLabel("left", label, units=self._unit())
         if self._is_running():
             return
+        dma_controls_enabled = dma_mode and self._dma_supported()
+        self.ui.labelDmaGap.setEnabled(dma_controls_enabled)
+        self.ui.spinDmaGap.setEnabled(dma_controls_enabled)
+        self.ui.btnResetScopeDefaults.setEnabled(dma_controls_enabled)
         if dma_mode and not self._dma_supported():
             self.ui.lblStatus.setText(
                 "Scope DMA mode is unavailable on this backend/firmware."
             )
         else:
             self.ui.lblStatus.setText("Monitor stopped.")
+
+    @Slot()
+    def _reset_scope_defaults(self) -> None:
+        scope_controller = self._scope_controller
+        if self._is_running() or scope_controller is None:
+            return
+        try:
+            scope_controller.reset_defaults()
+        except Exception as exc:
+            self.ui.lblStatus.setText(f"Could not reset Scope defaults: {exc}")
+            log.exception("Resetting Scope defaults failed")
+            return
+        self._set_dma_gap_cycles(_DEFAULT_DMA_GAP_CYCLES)
+        self.ui.lblStatus.setText(
+            "Scope defaults restored; Current DMA optimization is inactive."
+        )
+
+    def _dma_gap_cycles(self) -> int:
+        return max(
+            0,
+            min(
+                _DMA_GAP_MAX_CYCLES,
+                round(self.ui.spinDmaGap.value() * 1000 / _DMA_GAP_CYCLE_NS),
+            ),
+        )
+
+    def _set_dma_gap_cycles(self, cycles: int) -> None:
+        if not 0 <= cycles <= _DMA_GAP_MAX_CYCLES:
+            raise ValueError("DMA gap cycles must be 0..65535")
+        blocked = self.ui.spinDmaGap.blockSignals(True)
+        try:
+            self.ui.spinDmaGap.setValue(cycles * _DMA_GAP_CYCLE_NS / 1000)
+        finally:
+            self.ui.spinDmaGap.blockSignals(blocked)
+
+    @Slot()
+    def _normalize_dma_gap(self) -> None:
+        self._set_dma_gap_cycles(self._dma_gap_cycles())
 
     def _schedule_display(self) -> None:
         if not self._display_timer.isActive():
@@ -196,6 +265,8 @@ class CurrentMonitorController(QWidget):
         self._last_batch = ()
         self._dropped_samples = 0
         self._monitor_error = None
+        self._last_dma_plot_points = 0
+        self._last_dma_plot_update_ns = 0
         self.ui.btnZero.setEnabled(False)
         self._curve.setData([], [])
 
@@ -212,8 +283,10 @@ class CurrentMonitorController(QWidget):
 
         self._stop_requested = False
         self._monitor_error = None
+        gap_cycles = self._dma_gap_cycles()
+        self._set_dma_gap_cycles(gap_cycles)
         try:
-            scope_controller.start_current_dma_monitor()
+            scope_controller.start_current_dma_monitor(gap_cycles=gap_cycles)
         except Exception as exc:
             self._monitor_error = f"Could not start Scope DMA current monitor: {exc}"
             self.ui.lblStatus.setText(self._monitor_error)
@@ -222,7 +295,10 @@ class CurrentMonitorController(QWidget):
 
         self._dma_active = True
         self._set_running_controls(True)
-        self.ui.lblStatus.setText("Starting periodic Scope DMA with the visible Scope settings...")
+        self.ui.lblStatus.setText(
+            "Starting periodic Scope DMA current monitoring "
+            f"(gap {gap_cycles * _DMA_GAP_CYCLE_NS / 1000:.3f} us)..."
+        )
         self._next_display_ns = time.perf_counter_ns() + self._display_period_ns
         self._schedule_display()
 
@@ -317,8 +393,9 @@ class CurrentMonitorController(QWidget):
 
     def _calibration_changed(self, *_args: object) -> None:
         self._calibration_dirty = True
+        self._last_dma_plot_update_ns = 0
         raw_label = (
-            "Scope frame mean"
+            "DMA waveform"
             if self.ui.comboMode.currentIndex() == _MODE_SCOPE_DMA
             else "IIR output"
         )
@@ -405,8 +482,8 @@ class CurrentMonitorController(QWidget):
             self._schedule_display()
 
     def _render_dma_snapshot(self, snapshot: ScopeCurrentSnapshot) -> None:
-        latest_mean = snapshot.latest_frame_mean
-        if latest_mean is None or not snapshot.bins:
+        latest_raw_sample = snapshot.latest_raw_sample
+        if latest_raw_sample is None or not snapshot.bins:
             if self._monitor_error is not None:
                 self.ui.lblStatus.setText(self._monitor_error)
             return
@@ -414,36 +491,57 @@ class CurrentMonitorController(QWidget):
         zero = self.ui.spinZero.value()
         scale = self.ui.spinScale.value()
         unit = self._unit()
-        current = self._convert(latest_mean, zero, scale)
+        current = self._convert(latest_raw_sample, zero, scale)
         self.ui.lblCurrent.setText(f"{self._format_value(current)} {unit}")
-        self.ui.lblRaw.setText(self._format_value(latest_mean))
+        self.ui.lblRaw.setText(self._format_value(latest_raw_sample))
         self.ui.btnZero.setEnabled(True)
 
-        latest_bin = snapshot.bins[-1]
-        bin_mean = self._convert(latest_bin.raw_mean, zero, scale)
-        converted_extrema = (
-            self._convert(latest_bin.minimum_frame_mean, zero, scale),
-            self._convert(latest_bin.maximum_frame_mean, zero, scale),
+        frame_minimum = snapshot.latest_frame_minimum
+        frame_maximum = snapshot.latest_frame_maximum
+        geometry = snapshot.geometry
+        converted_minimum = (
+            self._convert(frame_minimum, zero, scale)
+            if frame_minimum is not None
+            else math.nan
+        )
+        converted_maximum = (
+            self._convert(frame_maximum, zero, scale)
+            if frame_maximum is not None
+            else math.nan
         )
         self.ui.lblInterval.setText(
-            f"mean {self._format_value(bin_mean)}; "
-            f"min {self._format_value(min(converted_extrema))}; "
-            f"max {self._format_value(max(converted_extrema))} {unit}; "
-            f"frames={latest_bin.frame_count:,}, samples={latest_bin.sample_count:,}"
+            f"last {self._format_value(current)}; "
+            f"min {self._format_value(converted_minimum)}; "
+            f"max {self._format_value(converted_maximum)} {unit}; "
+            f"samples={geometry.waveform_samples if geometry is not None else 0:,}"
         )
 
-        geometry = snapshot.geometry
+        runtime = snapshot.runtime
         window_us = geometry.capture_duration_ns / 1000 if geometry is not None else 0.0
+        timing_text = (
+            f"median spacing {snapshot.median_interval_ns / 1_000_000:.3f} ms"
+        )
+        if runtime is not None:
+            gap_ms = (
+                runtime.gap_cycles * SCOPE_DATAPATH_CLOCK_PERIOD_NS / 1_000_000
+            )
+            nominal_ms = (
+                runtime.expected_interval_ticks
+                * SCOPE_DATAPATH_CLOCK_PERIOD_NS
+                / 1_000_000
+            )
+            timing_text = (
+                f"gap {gap_ms:.3f} ms; nominal/median spacing "
+                f"{nominal_ms:.3f}/{snapshot.median_interval_ns / 1_000_000:.3f} ms"
+            )
         self.ui.lblAcquisition.setText(
             f"{snapshot.received_fps:,.1f} recv frames/s; "
-            f"{snapshot.payload_mb_s:.3f} MB/s; median spacing "
-            f"{snapshot.median_interval_ns / 1_000_000:.3f} ms; "
+            f"{snapshot.payload_mb_s:.3f} MB/s; {timing_text}; "
             f"window {window_us:.3f} us; coverage "
             f"{snapshot.observed_coverage_percent:.2f}%; "
             f"age {snapshot.data_age_ns / 1_000_000:.1f} ms"
         )
 
-        runtime = snapshot.runtime
         runtime_text = "transport pending"
         if runtime is not None:
             runtime_text = (
@@ -452,14 +550,25 @@ class CurrentMonitorController(QWidget):
                 f"queue={runtime.queued_blocks}/high {runtime.queue_high_watermark}, "
                 f"viewer={runtime.viewer_state}"
             )
+        render_time_ns = time.perf_counter_ns()
+        update_plot = (
+            not self._last_dma_plot_update_ns
+            or render_time_ns - self._last_dma_plot_update_ns >= _DMA_PLOT_PERIOD_NS
+            or not snapshot.active
+        )
+        if update_plot:
+            self._render_dma_plot(snapshot, zero, scale)
+            self._last_dma_plot_update_ns = render_time_ns
         status = (
             f"Analyzed {snapshot.analyzed_frames:,}/{snapshot.received_frames:,} "
             f"received frames; {runtime_text}; skipped opportunities "
             f"{snapshot.skipped_opportunities:,}; off-grid "
             f"{snapshot.off_grid_intervals:,}; inline analysis lag "
             f"{snapshot.analysis_lag_ns / 1_000_000:.3f} ms "
-            f"(queue 0); display p95 "
+            f"(queue 0); update preparation p95 "
             f"{snapshot.display_p95_duration_ns / 1_000_000:.1f} ms; "
+            f"plot {len(snapshot.waveform_records):,} raw fragments/"
+            f"{self._last_dma_plot_points:,} samples; "
             f"preview/display replacements {snapshot.replaced_preview_frames:,}/"
             f"{snapshot.replaced_display_generations:,}; protocol errors "
             f"{snapshot.protocol_errors:,}."
@@ -480,21 +589,57 @@ class CurrentMonitorController(QWidget):
             )
         self.ui.lblStatus.setText(status)
 
-        newest_index = snapshot.bins[-1].index
-        x_values: list[float] = []
-        y_values: list[float] = []
-        previous_index: int | None = None
-        for item in snapshot.bins:
-            x_value = (
-                (item.index - newest_index) * snapshot.bin_width_ns / 1_000_000_000
+    def _render_dma_plot(
+        self,
+        snapshot: ScopeCurrentSnapshot,
+        zero: float,
+        scale: float,
+    ) -> None:
+        """Plot bounded raw DMA fragments independently from the 30 Hz readout."""
+        geometry = snapshot.geometry
+        records = snapshot.waveform_records
+        if geometry is None or not records:
+            self._last_dma_plot_points = 0
+            self._curve.setData([], [])
+            return
+
+        samples_per_frame = geometry.waveform_samples
+        sample_points = len(records) * samples_per_frame
+        array_points = sample_points + len(records) - 1
+        x_values = np.empty(array_points, dtype=np.float64)
+        y_values = np.empty(array_points, dtype=np.float64)
+        sample_offsets_ns = (
+            np.arange(samples_per_frame, dtype=np.int64) * geometry.sample_period_ns
+        )
+        newest_timestamp = int.from_bytes(records[-1][:8], "little")
+        newest_sample_ns = (
+            newest_timestamp * SCOPE_DATAPATH_CLOCK_PERIOD_NS
+            + sample_offsets_ns[-1]
+        )
+        cursor = 0
+        for index, record in enumerate(records):
+            timestamp = int.from_bytes(record[:8], "little")
+            stop = cursor + samples_per_frame
+            x_values[cursor:stop] = (
+                timestamp * SCOPE_DATAPATH_CLOCK_PERIOD_NS
+                + sample_offsets_ns
+                - newest_sample_ns
             )
-            if previous_index is not None and item.index > previous_index + 1:
-                x_values.append(x_value - snapshot.bin_width_ns / 1_000_000_000)
-                y_values.append(math.nan)
-            x_values.append(x_value)
-            y_values.append(self._convert(item.raw_mean, zero, scale))
-            previous_index = item.index
-        self._curve.setData(np.asarray(x_values), np.asarray(y_values))
+            values = np.frombuffer(
+                record,
+                dtype="<i2",
+                count=samples_per_frame,
+                offset=8,
+            )
+            y_values[cursor:stop] = (values - zero) * scale
+            cursor = stop
+            if index + 1 < len(records):
+                x_values[cursor] = x_values[cursor - 1]
+                y_values[cursor] = np.nan
+                cursor += 1
+        x_values /= 1_000_000_000
+        self._last_dma_plot_points = sample_points
+        self._curve.setData(x_values, y_values)
 
     def _render_values(self, now_ns: int) -> None:
         latest = self._latest
@@ -526,11 +671,10 @@ class CurrentMonitorController(QWidget):
             for sample in self._history
             if sample.timestamp_ns >= latest.timestamp_ns - _RATE_WINDOW_NS
         ]
-        dma_mode = self.ui.comboMode.currentIndex() == _MODE_SCOPE_DMA
         intervals_ns = [
-            self._sample_interval_ns(left, right, dma_mode=dma_mode)
+            right.timestamp_ns - left.timestamp_ns
             for left, right in zip(rate_samples, rate_samples[1:])
-            if self._sample_interval_ns(left, right, dma_mode=dma_mode) > 0
+            if right.timestamp_ns > left.timestamp_ns
         ]
         rate_hz = 0.0
         median_interval_ns = 0.0
@@ -538,84 +682,32 @@ class CurrentMonitorController(QWidget):
             median_interval_ns = statistics.median(intervals_ns)
             rate_hz = 1_000_000_000 / statistics.fmean(intervals_ns)
         age_ns = max(0, now_ns - latest.timestamp_ns)
-        if dma_mode:
-            coverage_ns = sum(sample.coverage_ns for sample in rate_samples)
-            observation_ns = (
-                self._sample_interval_ns(
-                    rate_samples[0],
-                    rate_samples[-1],
-                    dma_mode=True,
-                )
-                + round(statistics.fmean(intervals_ns))
-                if len(rate_samples) > 1 and intervals_ns
-                else latest.coverage_ns
-            )
-            coverage_percent = 100 * coverage_ns / max(1, observation_ns)
-            self.ui.lblAcquisition.setText(
-                f"{rate_hz:,.1f} frames/s; median spacing "
-                f"{median_interval_ns / 1_000_000:.3f} ms; frame average "
-                f"{latest.coverage_ns / 1000:.3f} us; "
-                f"coverage {coverage_percent:.2f}%; age {age_ns / 1_000_000:.1f} ms"
-            )
-        else:
-            latencies_ms = [
-                sample.read_latency_ns / 1_000_000 for sample in rate_samples
-            ]
-            median_latency_ms = (
-                statistics.median(latencies_ms) if latencies_ms else 0.0
-            )
-            self.ui.lblAcquisition.setText(
-                f"{rate_hz:,.1f} Hz; median read {median_latency_ms:.3f} ms; "
-                f"age {age_ns / 1_000_000:.1f} ms"
-            )
+        latencies_ms = [sample.read_latency_ns / 1_000_000 for sample in rate_samples]
+        median_latency_ms = statistics.median(latencies_ms) if latencies_ms else 0.0
+        self.ui.lblAcquisition.setText(
+            f"{rate_hz:,.1f} Hz; median read {median_latency_ms:.3f} ms; "
+            f"age {age_ns / 1_000_000:.1f} ms"
+        )
 
         stale_ns = max(_MIN_STALE_NS, round(3 * median_interval_ns))
         if self._monitor_error is not None:
             status = self._monitor_error
         elif age_ns > stale_ns:
             status = f"Stale: newest sample is {age_ns / 1_000_000:.1f} ms old."
-        elif dma_mode:
-            sample_period_ns = (
-                latest.coverage_ns / latest.sample_count if latest.sample_count else 0
-            )
-            status = (
-                "Live periodic Scope DMA; each point averages "
-                f"{latest.sample_count:,} samples at {sample_period_ns:g} ns spacing; "
-                "frame spacing uses the hardware trigger timestamp."
-            )
         else:
             status = "Live FPGA IIR status; host timestamps are transaction midpoints."
         if self._dropped_samples:
-            noun = "frame(s)" if dma_mode else "sample(s)"
-            status += f" Display buffer dropped {self._dropped_samples:,} {noun}."
+            status += f" Display buffer dropped {self._dropped_samples:,} sample(s)."
         self.ui.lblStatus.setText(status)
 
         if self._history:
             newest = self._history[-1]
             x = [
-                -self._sample_interval_ns(sample, newest, dma_mode=dma_mode)
-                / 1_000_000_000
+                -(newest.timestamp_ns - sample.timestamp_ns) / 1_000_000_000
                 for sample in self._history
             ]
             y = [self._convert(sample.raw_code, zero, scale) for sample in self._history]
             self._curve.setData(x, y)
-
-    @staticmethod
-    def _sample_interval_ns(
-        left: CurrentSample,
-        right: CurrentSample,
-        *,
-        dma_mode: bool,
-    ) -> int:
-        if (
-            dma_mode
-            and left.hardware_timestamp is not None
-            and right.hardware_timestamp is not None
-        ):
-            return (
-                right.hardware_timestamp - left.hardware_timestamp
-            ) * SCOPE_DATAPATH_CLOCK_PERIOD_NS
-        return right.timestamp_ns - left.timestamp_ns
 
     def reset_zoom(self) -> None:
         self._plot.enableAutoRange()
@@ -627,6 +719,7 @@ class CurrentMonitorController(QWidget):
             "scale_per_code": self.ui.spinScale.value(),
             "unit": self._unit(),
             "display_fps": self._display_hz,
+            "dma_gap_cycles": self._dma_gap_cycles(),
             "analysis_bin_ms": (
                 self._scope_current_accumulator.bin_width_ms
                 if self._scope_current_accumulator is not None
@@ -637,6 +730,10 @@ class CurrentMonitorController(QWidget):
     def apply_configuration_settings(self, settings: object) -> None:
         if not isinstance(settings, dict):
             return
+        if "dma_gap_cycles" in settings:
+            if self._is_running():
+                raise RuntimeError("cannot change DMA gap while monitor is running")
+            self._set_dma_gap_cycles(int(settings["dma_gap_cycles"]))
         requested_mode = settings.get("mode")
         if requested_mode in ("iir", "scope_dma"):
             target = _MODE_SCOPE_DMA if requested_mode == "scope_dma" else _MODE_IIR

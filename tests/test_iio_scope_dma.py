@@ -248,7 +248,8 @@ def test_streamer_accumulates_current_before_replaceable_display() -> None:
 
     assert captured == 1
     assert snapshot.received_frames == snapshot.analyzed_frames == 1
-    assert snapshot.latest_frame_mean == pytest.approx(63.0)
+    assert snapshot.latest_raw_sample == 126
+    assert len(snapshot.waveform_records) == 1
     assert snapshot.received_bytes == geometry.frame_bytes
     assert not snapshot.active
     assert backend.closed == 1
@@ -500,7 +501,7 @@ def test_backend_uses_batched_iiod_for_qualified_remote_scope(
 
     assert selected == [4]
     assert created == [
-        ("ip:192.168.10.128:30431", "iio:device15", 1024, 4, 32),
+        ("ip:192.168.10.128:30431", "iio:device15", 1024, 4, 64),
     ]
     assert backend._dma_buf is fake_buffer
     assert backend._dma_capture_transport == "iiod-batched"
@@ -514,7 +515,7 @@ def test_backend_uses_batched_iiod_for_qualified_remote_scope(
         "kernel_buffers": 4,
         "queued_blocks": 3,
         "queue_high_watermark": 4,
-        "readbuf_batch_frames": 32,
+        "readbuf_batch_frames": 64,
     }
 
 

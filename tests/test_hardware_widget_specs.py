@@ -118,13 +118,54 @@ def test_current_dma_start_configures_v122_periodic_scope(qtbot: QtBot) -> None:
     streamer = object.__new__(IIOScopeDmaStreamer)
     streamer.capture_geometry = MagicMock(  # type: ignore[method-assign]
         return_value=ScopeDmaGeometry(
-            frame_samples=1024,
-            buffer_samples=260,
-            frame_bytes=520,
-            waveform_samples=255,
+            frame_samples=8188,
+            buffer_samples=2052,
+            frame_bytes=4104,
+            waveform_samples=2046,
             sample_decimation=4,
-            padding_bytes=2,
+            padding_bytes=4,
         )
+    )
+    controller = ScopeController(
+        scope,
+        scope_dma=streamer,
+        channel=0,
+        current_accumulator=accumulator,
+    )
+    qtbot.addWidget(controller)
+    controller.ui.spinTriggerLevel.setValue(23_622)
+    controller.ui.spinDacValue.setValue(272)
+    scope.reset_mock()
+
+    def mark_started() -> None:
+        controller._dma_worker = MagicMock()
+
+    controller._on_start = MagicMock(side_effect=mark_started)  # type: ignore[method-assign]
+
+    controller.start_current_dma_monitor()
+
+    scope.set_trigger_level.assert_called_once_with(23_622)
+    scope.set_dac_value.assert_called_once_with(272)
+    scope.set_pretrigger_samples.assert_called_once_with(0)
+    scope.set_frame_samples.assert_called_once_with(8188)
+    scope.set_trigger_mode.assert_called_once_with(TriggerMode.TIMED)
+    scope.set_frame_period_cycles.assert_called_once_with(12_500)
+    assert controller.ui.spinFrameSamples.value() == 16_376
+    assert controller.ui.spinFrameGap.value() == 100_000
+    assert controller.ui.comboTriggerMode.currentIndex() == TriggerMode.TIMED
+    assert controller.ui.cbDmaEnable.isChecked()
+    snapshot = accumulator.snapshot()
+    assert snapshot.runtime is not None
+    assert snapshot.runtime.expected_interval_ticks == 14_547
+
+
+def test_current_dma_start_preserves_visible_geometry_before_ip122(qtbot: QtBot) -> None:
+    scope = _scope_model_for_controller()
+    scope.get_ip_version.return_value = 121
+    accumulator = ScopeCurrentAccumulator()
+    streamer = object.__new__(IIOScopeDmaStreamer)
+    streamer.capture_geometry = MagicMock(  # type: ignore[method-assign]
+        return_value=ScopeDmaGeometry.legacy(1024)
     )
     controller = ScopeController(
         scope,
@@ -142,17 +183,116 @@ def test_current_dma_start_configures_v122_periodic_scope(qtbot: QtBot) -> None:
 
     controller.start_current_dma_monitor()
 
-    scope.set_pretrigger_samples.assert_called_once_with(0)
     scope.set_frame_samples.assert_called_once_with(1024)
-    scope.set_trigger_mode.assert_called_once_with(TriggerMode.TIMED)
     scope.set_frame_period_cycles.assert_called_once_with(0)
-    assert controller.ui.spinFrameSamples.value() == 2048
-    assert controller.ui.spinFrameGap.value() == 0
-    assert controller.ui.comboTriggerMode.currentIndex() == TriggerMode.TIMED
-    assert controller.ui.cbDmaEnable.isChecked()
     snapshot = accumulator.snapshot()
     assert snapshot.runtime is not None
     assert snapshot.runtime.expected_interval_ticks == 256
+
+
+def test_current_dma_start_applies_requested_gap(qtbot: QtBot) -> None:
+    scope = _scope_model_for_controller()
+    accumulator = ScopeCurrentAccumulator()
+    streamer = object.__new__(IIOScopeDmaStreamer)
+    streamer.capture_geometry = MagicMock(  # type: ignore[method-assign]
+        return_value=ScopeDmaGeometry(
+            frame_samples=8188,
+            buffer_samples=2052,
+            frame_bytes=4104,
+            waveform_samples=2046,
+            sample_decimation=4,
+            padding_bytes=4,
+        )
+    )
+    controller = ScopeController(
+        scope,
+        scope_dma=streamer,
+        channel=0,
+        current_accumulator=accumulator,
+    )
+    qtbot.addWidget(controller)
+    scope.reset_mock()
+
+    def mark_started() -> None:
+        controller._dma_worker = MagicMock()
+
+    controller._on_start = MagicMock(side_effect=mark_started)  # type: ignore[method-assign]
+
+    controller.start_current_dma_monitor(gap_cycles=10_453)
+
+    scope.set_frame_samples.assert_called_once_with(8188)
+    scope.set_frame_period_cycles.assert_called_once_with(10_453)
+    assert controller.ui.spinFrameGap.value() == 83_624
+    snapshot = accumulator.snapshot()
+    assert snapshot.runtime is not None
+    assert snapshot.runtime.gap_cycles == 10_453
+    assert snapshot.runtime.expected_interval_ticks == 12_500
+
+
+def test_scope_reset_defaults_restores_hardware_and_widgets(qtbot: QtBot) -> None:
+    scope = _scope_model_for_controller()
+    controller = ScopeController(scope, scope_dma=None, channel=0)
+    qtbot.addWidget(controller)
+    scope.reset_mock()
+
+    controller.reset_defaults()
+
+    scope.set_trigger_level.assert_called_once_with(0)
+    scope.set_dac_value.assert_called_once_with(512)
+    scope.set_pretrigger_samples.assert_called_once_with(32)
+    scope.set_frame_samples.assert_called_once_with(1024)
+    scope.set_frame_period_cycles.assert_called_once_with(0)
+    scope.set_trigger_mode.assert_called_once_with(TriggerMode.ANY_BELOW)
+    scope.set_dma_enable.assert_called_once_with(False)
+    assert controller.ui.spinPretrigger.value() == 64
+    assert controller.ui.spinFrameSamples.value() == 2048
+    assert controller.ui.spinFrameGap.value() == 0
+    assert not controller.ui.cbDmaEnable.isChecked()
+    assert controller.ui.lblRecordingStatus.text() == "Scope defaults restored"
+
+
+def test_online_current_dma_finish_clears_stale_dma_selection(qtbot: QtBot) -> None:
+    scope = _scope_model_for_controller()
+    scope.dma_fault_is_latched.return_value = False
+    controller = ScopeController(scope, scope_dma=None, channel=0)
+    qtbot.addWidget(controller)
+    controller.ui.cbDmaEnable.setChecked(True)
+    scope.reset_mock()
+
+    thread = MagicMock()
+    thread.wait.return_value = True
+    controller._dma_thread = thread
+    controller._dma_worker = MagicMock()
+    controller._dma_online_current = True
+
+    controller._on_dma_finished()
+
+    assert controller._dma_thread is None
+    assert controller._dma_worker is None
+    assert not controller.ui.cbDmaEnable.isChecked()
+    scope.set_dma_enable.assert_not_called()
+    thread.deleteLater.assert_called_once_with()
+
+
+def test_synchronous_current_dma_stop_clears_stale_dma_selection(
+    qtbot: QtBot,
+) -> None:
+    scope = _scope_model_for_controller()
+    controller = ScopeController(scope, scope_dma=None, channel=0)
+    qtbot.addWidget(controller)
+    controller.ui.cbDmaEnable.setChecked(True)
+    controller._dma_online_current = True
+    controller._on_stop = MagicMock()  # type: ignore[method-assign]
+    controller.stop_dma_sync = MagicMock()  # type: ignore[method-assign]
+    scope.reset_mock()
+
+    controller.stop_current_dma_monitor(wait=True)
+
+    controller._on_stop.assert_called_once_with()
+    controller.stop_dma_sync.assert_called_once_with()
+    assert not controller._dma_online_current
+    assert not controller.ui.cbDmaEnable.isChecked()
+    scope.set_dma_enable.assert_not_called()
 
 
 def test_scope_dma_progress_formats_large_file_without_wrapping(qtbot: QtBot) -> None:

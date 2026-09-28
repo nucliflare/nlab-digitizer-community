@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""Profile bounded Current DMA rendering with synthetic receiver summaries.
+"""Profile bounded raw Current DMA waveform rendering with synthetic data.
 
 This is a GUI-only diagnostic: it performs no hardware or network I/O. The
 synthetic accumulator is filled before timing begins, then the production
-Current widget repeatedly renders its immutable snapshot.
+Current widget repeatedly paints its immutable raw-fragment snapshot.
 """
 
 from __future__ import annotations
@@ -71,14 +71,21 @@ def profile(*, iterations: int, warmup: int) -> dict[str, object]:
         scope_current_accumulator=accumulator,
     )
     controller.ui.comboMode.setCurrentIndex(1)
+    controller.resize(1600, 900)
+    controller.show()
+    app.processEvents()
 
     for _ in range(warmup):
+        controller._last_dma_plot_update_ns = 0
         controller._render_dma_snapshot(snapshot)
         app.processEvents()
 
     prepare_ms: list[float] = []
     complete_ms: list[float] = []
     for _ in range(iterations):
+        # Force the expensive plot path. Production deliberately invokes it
+        # only at 2 Hz while the scalar readout continues at 30 Hz.
+        controller._last_dma_plot_update_ns = 0
         started_ns = time.perf_counter_ns()
         controller._render_dma_snapshot(snapshot)
         rendered_ns = time.perf_counter_ns()
@@ -92,10 +99,14 @@ def profile(*, iterations: int, warmup: int) -> dict[str, object]:
     return {
         "synthetic_frames": frames,
         "scientific_bins": len(snapshot.bins),
+        "retained_waveform_frames": len(snapshot.waveform_records),
+        "retained_raw_samples": (
+            len(snapshot.waveform_records) * geometry.waveform_samples
+        ),
         "plot_points": 0 if curve_x is None else len(curve_x),
         "iterations": iterations,
-        "requested_display_fps": 30,
-        "display_budget_ms": 1000 / 30,
+        "requested_plot_fps": 2,
+        "plot_budget_ms": 1000 / 2,
         "render_median_ms": statistics.median(prepare_ms),
         "render_p95_ms": _percentile(prepare_ms, 0.95),
         "render_and_events_median_ms": statistics.median(complete_ms),

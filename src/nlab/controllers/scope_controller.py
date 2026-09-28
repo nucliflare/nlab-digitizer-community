@@ -55,6 +55,10 @@ from nlab.workers.scope_worker import ScopeWorker
 
 log = logging.getLogger(__name__)
 
+_CURRENT_DMA_OPTIMIZED_IP_VERSION = 122
+_CURRENT_DMA_FRAME_SAMPLES = 8188
+_CURRENT_DMA_GAP_CYCLES = 12_500
+
 _SCOPE_CONTROL_TOOLTIPS = {
     "comboTriggerMode": "Selects the condition that starts each scope frame.",
     "spinTriggerLevel": "Sets the raw ADC threshold used by the selected trigger mode.",
@@ -355,6 +359,48 @@ class ScopeController(QWidget):
         self.ui.cbDmaEnable.setEnabled(enabled)
         self._threshold_line.setMovable(enabled)
         self._update_waveform_drag_enabled()
+
+    def _set_dma_checkbox_without_write(self, checked: bool) -> None:
+        """Mirror buffer-owned DMA state without writing its hardware gate."""
+        blocked = self.ui.cbDmaEnable.blockSignals(True)
+        try:
+            self.ui.cbDmaEnable.setChecked(checked)
+        finally:
+            self.ui.cbDmaEnable.blockSignals(blocked)
+        self._update_viewer_transport_hint()
+
+    def reset_defaults(self) -> None:
+        """Restore Scope hardware/UI defaults while the channel is idle."""
+        if (
+            self._auto_setup_thread is not None
+            or self._dma_worker is not None
+            or self._dma_thread is not None
+            or self._refresh_timer.isActive()
+            or self._scope.get_enable()
+        ):
+            raise RuntimeError("stop Scope acquisition before resetting defaults")
+
+        self._raw_curve.cancelDrag()
+        self._cancel_pretrigger_line_drag()
+        self._send_defaults()
+        self._load_hardware_state()
+        self._display_nx = self._frame_samples_from_ui() // 4
+        self._display_ny = self._display_nx * self._Y_SCALE_FACTOR
+        self._persistence_buffer = np.zeros(
+            (self._display_nx, self._display_ny),
+            dtype=np.float32,
+        )
+        self._persistence_img.setImage(
+            self._persistence_buffer,
+            autoLevels=False,
+            levels=(0, 1),
+        )
+        self._raw_curve.setData([], [])
+        self._sync_pretrigger_line_from_widget()
+        self._update_axis_ranges()
+        self._update_frame_gap_enabled()
+        self._update_viewer_transport_hint()
+        self.ui.lblRecordingStatus.setText("Scope defaults restored")
 
     def _viewer_frame_limit(self) -> int | None:
         return self._scope.get_viewer_frame_samples_limit()
@@ -750,12 +796,17 @@ class ScopeController(QWidget):
             and self._scope.frame_period_cycles_supported()
         )
 
-    def start_current_dma_monitor(self) -> None:
-        """Configure and start online periodic DMA with visible Scope settings.
+    def start_current_dma_monitor(self, *, gap_cycles: int | None = None) -> None:
+        """Configure and start online periodic DMA for current monitoring.
 
         The Scope controller remains the sole DMA owner. The Current view is
         only a subscriber to decoded complete frames, exactly as PSD is a
-        subscriber to MCA list-mode batches.
+        subscriber to MCA list-mode batches. IP122 uses the live-qualified
+        maximum-coverage frame/gap preset; the selected values remain visible
+        in the Scope controls. The displayed trigger level and DAC baseline are
+        applied unchanged so Current observes the same analogue operating
+        point as Scope. Other firmware retains the operator-selected Scope
+        geometry because that preset has not been qualified there.
         """
         if not self.current_dma_supported():
             raise RuntimeError(
@@ -772,20 +823,43 @@ class ScopeController(QWidget):
         elif self._scope.get_enable():
             self._scope.stop()
 
-        # Current monitoring uses the operator-visible Scope frame/gap values.
-        # It must not silently substitute the former 8188/515 saturation
-        # preset, which requested nearly 49 kframes/s and made matched
-        # diagnostics impossible.
-        frame_samples = self._frame_samples_from_ui()
+        ip_version = self._scope.get_ip_version()
+        if ip_version == _CURRENT_DMA_OPTIMIZED_IP_VERSION:
+            # Live-qualified on .128 with IP122: the maximum frame amortizes
+            # per-frame transport overhead, while a 100 us gap produced the
+            # best timestamp-derived coverage. Missing trigger opportunities
+            # remain explicit in the FPGA timestamps.
+            frame_samples = _CURRENT_DMA_FRAME_SAMPLES
+            selected_gap_cycles = (
+                _CURRENT_DMA_GAP_CYCLES if gap_cycles is None else gap_cycles
+            )
+        else:
+            frame_samples = self._frame_samples_from_ui()
+            selected_gap_cycles = (
+                self.ui.spinFrameGap.value() // self._VIEWER_POINT_PERIOD_NS
+                if gap_cycles is None
+                else gap_cycles
+            )
         frame_spec = self._scope.specs[ScopeParam.FRAME_SAMPLES]
         assert isinstance(frame_spec, RangeSpec)
         if not int(frame_spec.min_val) <= frame_samples <= int(frame_spec.max_val):
             raise ValueError("Scope frame setting is outside the supported range")
-        ip_version = self._scope.get_ip_version()
-        gap_cycles = self.ui.spinFrameGap.value() // self._VIEWER_POINT_PERIOD_NS
+        gap_spec = self._scope.specs[ScopeParam.FRAME_PERIOD_CYCLES]
+        assert isinstance(gap_spec, RangeSpec)
+        if not int(gap_spec.min_val) <= selected_gap_cycles <= int(gap_spec.max_val):
+            raise ValueError("Scope DMA gap is outside the supported range")
+        gap_cycles = selected_gap_cycles
+        trigger_level = self.ui.spinTriggerLevel.value()
+        dac_value = self.ui.spinDacValue.value()
 
         # Write the hardware explicitly. Updating the widgets with blocked
         # signals below is presentation only and must not duplicate writes.
+        # Periodic triggering does not evaluate trigger_level, but preserving
+        # it here keeps the Scope operating point exact when the operator later
+        # returns to a threshold/edge mode. The DAC baseline remains active for
+        # every mode and therefore directly affects the Current waveform mean.
+        self._scope.set_trigger_level(trigger_level)
+        self._scope.set_dac_value(dac_value)
         self._scope.set_pretrigger_samples(0)
         self._scope.set_frame_samples(frame_samples)
         self._scope.set_trigger_mode(TriggerMode.TIMED)
@@ -823,11 +897,7 @@ class ScopeController(QWidget):
             self.ui.comboTriggerMode.setCurrentIndex,
             TriggerMode.TIMED.value,
         )
-        blocked = self.ui.cbDmaEnable.blockSignals(True)
-        try:
-            self.ui.cbDmaEnable.setChecked(True)
-        finally:
-            self.ui.cbDmaEnable.blockSignals(blocked)
+        self._set_dma_checkbox_without_write(True)
         self._update_frame_gap_enabled()
         self._update_viewer_transport_hint()
 
@@ -868,6 +938,7 @@ class ScopeController(QWidget):
             self.stop_dma_sync()
             if self._dma_online_current:
                 self._dma_online_current = False
+                self._set_dma_checkbox_without_write(False)
                 self.current_dma_state_changed.emit(False, "Scope DMA stopped.")
 
     def _on_dma_toggled(self, enabled: bool) -> None:
@@ -1653,6 +1724,11 @@ class ScopeController(QWidget):
             self._dma_thread = None
             self._dma_stopping = False
             self._dma_online_current = False
+            if online_current:
+                # IIO buffer teardown owns and has already released the DMA
+                # gate. Clear the online-only selection so Auto Setup is not
+                # blocked by stale GUI state after Current reports stopped.
+                self._set_dma_checkbox_without_write(False)
             thread.deleteLater()
             del worker
             if online_current:
