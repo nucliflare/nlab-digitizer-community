@@ -38,6 +38,12 @@ calibration.
 The monitor deliberately starts stopped. Merely opening the workspace does not
 create a polling connection or arm DMA.
 
+The screenshot below uses deterministic synthetic data and performs no
+hardware or network I/O. Its values illustrate the controls and diagnostics;
+they are not a measurement result.
+
+![Current workspace in Scope DMA mode with synthetic waveform data.](images/current-monitor-dma.png)
+
 ### IIR polling
 
 IIR mode reads the input filter's signed output through a connection owned by

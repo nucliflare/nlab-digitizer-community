@@ -115,6 +115,12 @@ subtraction. Corrected logarithmic display uses a sign-preserving
 `sign(count) * log10(1 + abs(count))` transform. Matrix analysis is unavailable
 for veto, OR, and XOR because those rules do not produce two-member pairs.
 
+The screenshot below is a synthetic GUI example generated without hardware or
+network I/O. The matrix populations and counts are illustrative, not detector
+measurements.
+
+![Coincidence workspace showing a synthetic corrected energy matrix and its projections.](images/coincidence-matrix.png)
+
 ## Recording and finalization
 
 A recorded run creates channel-specific files (`..._ch0`, `..._ch1`) plus a

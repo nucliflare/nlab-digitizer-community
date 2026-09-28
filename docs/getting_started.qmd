@@ -73,6 +73,8 @@ In the connection dialog:
 3. keep port `30431` unless the target is configured differently;
 4. select the number of exposed channels and connect.
 
+![Connection dialog configured for the direct IIO backend.](images/connection-dialog.png)
+
 A saved YAML configuration can pre-fill the connection and hardware settings:
 
 ```bash

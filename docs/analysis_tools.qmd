@@ -50,6 +50,12 @@ statistic, AIC/BIC, component curves, residuals, and boundary/covariance
 warnings. Spectrum arithmetic creates new immutable entries, requires matching
 coordinate grids, propagates variance, and never interpolates silently.
 
+The following workbench view contains deterministic synthetic spectra. It is a
+UI example generated without hardware or network I/O, not a captured MCA
+result.
+
+![MCA peak-analysis workbench with two synthetic spectra and a selected fit region.](images/mca-peak-analysis.png)
+
 ## PSD event readback
 
 Open **Tools → PSD Event Readback...** to reconstruct energy/PSD matrices and

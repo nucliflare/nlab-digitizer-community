@@ -61,6 +61,17 @@ Do not hand-edit generated analysis output in place. Update the corresponding
 `.qmd`, render it, inspect both repository diffs, and keep wiki navigation in
 `Home.md` and `_Sidebar.md` synchronized with the source set.
 
+Refresh the versioned GUI screenshots after a documented widget changes:
+
+```bash
+python scripts/build_ui.py
+python scripts/capture_wiki_screenshots.py
+quarto render docs
+```
+
+The capture script runs Qt offscreen, makes no hardware or network connection,
+and labels every populated plot as deterministic synthetic documentation data.
+
 ## Driver-derived changes
 
 Use the maintainer-supplied PetaLinux revision as the authority for registers,
