@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>CurrentMonitorView</class>
+ <widget class="QWidget" name="CurrentMonitorView">
+  <property name="minimumSize"><size><width>720</width><height>480</height></size></property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <property name="leftMargin"><number>12</number></property>
+   <property name="topMargin"><number>12</number></property>
+   <property name="rightMargin"><number>12</number></property>
+   <property name="bottomMargin"><number>12</number></property>
+   <property name="spacing"><number>10</number></property>
+   <item>
+    <layout class="QHBoxLayout" name="monitorControls">
+     <item><widget class="QLabel" name="labelMode"><property name="text"><string>Mode:</string></property></widget></item>
+     <item>
+      <widget class="QComboBox" name="comboMode">
+       <item><property name="text"><string>IIR polling</string></property></item>
+       <item><property name="text"><string>Scope DMA</string></property></item>
+      </widget>
+     </item>
+     <item><widget class="QLabel" name="labelDmaGap"><property name="text"><string>DMA gap:</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+     <item>
+      <widget class="QDoubleSpinBox" name="spinDmaGap">
+       <property name="enabled"><bool>false</bool></property>
+       <property name="toolTip"><string>Post-frame gap for the next Scope DMA current measurement; hardware resolution is 0.008 microseconds.</string></property>
+       <property name="suffix"><string> &#xB5;s</string></property>
+       <property name="decimals"><number>3</number></property>
+       <property name="minimum"><double>0.000000000000000</double></property>
+       <property name="maximum"><double>524.280000000000000</double></property>
+       <property name="singleStep"><double>0.008000000000000</double></property>
+       <property name="value"><double>100.000000000000000</double></property>
+      </widget>
+     </item>
+     <item><widget class="QPushButton" name="btnStart"><property name="text"><string>Start monitor</string></property></widget></item>
+     <item><widget class="QPushButton" name="btnStop"><property name="text"><string>Stop</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+     <item>
+      <widget class="QPushButton" name="btnResetScopeDefaults">
+       <property name="text"><string>Reset Scope defaults</string></property>
+       <property name="enabled"><bool>false</bool></property>
+       <property name="toolTip"><string>Restore the Scope hardware defaults after stopping Current DMA.</string></property>
+      </widget>
+     </item>
+     <item><widget class="QPushButton" name="btnZero"><property name="text"><string>Set zero from recent samples</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+     <item><spacer name="controlsSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>20</height></size></property></spacer></item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupReading">
+     <property name="title"><string>Live current</string></property>
+     <layout class="QGridLayout" name="readingLayout">
+      <item row="0" column="0" rowspan="3">
+       <widget class="QLabel" name="lblCurrent">
+        <property name="minimumSize"><size><width>300</width><height>92</height></size></property>
+        <property name="font"><font><pointsize>30</pointsize><bold>true</bold></font></property>
+        <property name="text"><string>—</string></property>
+        <property name="alignment"><set>Qt::AlignCenter</set></property>
+       </widget>
+      </item>
+      <item row="0" column="1"><widget class="QLabel" name="labelRaw"><property name="text"><string>Raw IIR code:</string></property></widget></item>
+      <item row="0" column="2"><widget class="QLabel" name="lblRaw"><property name="text"><string>—</string></property></widget></item>
+      <item row="1" column="1"><widget class="QLabel" name="labelInterval"><property name="text"><string>Last screen interval:</string></property></widget></item>
+      <item row="1" column="2"><widget class="QLabel" name="lblInterval"><property name="text"><string>—</string></property></widget></item>
+      <item row="2" column="1"><widget class="QLabel" name="labelAcquisition"><property name="text"><string>Acquisition:</string></property></widget></item>
+      <item row="2" column="2"><widget class="QLabel" name="lblAcquisition"><property name="text"><string>—</string></property></widget></item>
+      <item row="0" column="3"><spacer name="readingSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>20</height></size></property></spacer></item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupCalibration">
+     <property name="title"><string>Linear calibration</string></property>
+     <layout class="QHBoxLayout" name="calibrationLayout">
+      <item><widget class="QLabel" name="labelZero"><property name="text"><string>Zero code:</string></property></widget></item>
+      <item>
+       <widget class="QDoubleSpinBox" name="spinZero">
+        <property name="decimals"><number>3</number></property>
+        <property name="minimum"><double>-32768.000000000000000</double></property>
+        <property name="maximum"><double>32767.000000000000000</double></property>
+        <property name="singleStep"><double>1.000000000000000</double></property>
+       </widget>
+      </item>
+      <item><widget class="QLabel" name="labelScale"><property name="text"><string>Scale:</string></property></widget></item>
+      <item>
+       <widget class="QDoubleSpinBox" name="spinScale">
+        <property name="decimals"><number>9</number></property>
+        <property name="minimum"><double>-1000000000.000000000000000</double></property>
+        <property name="maximum"><double>1000000000.000000000000000</double></property>
+        <property name="singleStep"><double>0.001000000000000</double></property>
+        <property name="value"><double>1.000000000000000</double></property>
+        <property name="suffix"><string> unit/code</string></property>
+       </widget>
+      </item>
+      <item><widget class="QLabel" name="labelUnit"><property name="text"><string>Display unit:</string></property></widget></item>
+      <item>
+       <widget class="QComboBox" name="comboUnit">
+        <item><property name="text"><string>raw</string></property></item>
+        <item><property name="text"><string>A</string></property></item>
+        <item><property name="text"><string>mA</string></property></item>
+        <item><property name="text"><string>uA</string></property></item>
+        <item><property name="text"><string>nA</string></property></item>
+        <item><property name="text"><string>pA</string></property></item>
+       </widget>
+      </item>
+      <item><spacer name="calibrationSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>20</height></size></property></spacer></item>
+     </layout>
+    </widget>
+   </item>
+   <item><widget class="NLabPlotWidget" name="plotCurrent" native="true"/></item>
+   <item>
+    <widget class="QLabel" name="lblStatus">
+     <property name="text"><string>Monitor stopped.</string></property>
+     <property name="wordWrap"><bool>true</bool></property>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <customwidgets>
+  <customwidget><class>NLabPlotWidget</class><extends>QWidget</extends><header>nlab.views.plot_viewbox</header><container>1</container></customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>

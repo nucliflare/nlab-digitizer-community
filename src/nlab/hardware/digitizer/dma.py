@@ -16,9 +16,10 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Protocol
 
 import numpy as np
 import zmq
@@ -30,11 +31,16 @@ from nlab.hardware.digitizer.iio_listmode import (
 )
 from nlab.hardware.digitizer.mca_capture import McaCaptureWriter, McaDmaOutputMode
 
+if TYPE_CHECKING:
+    from nlab.hardware.digitizer.current_monitor import ScopeCurrentAccumulator
+
 
 class _IIOScopeBackend(Protocol):
     def prepare_dma_capture(self) -> None: ...
 
     def get_frame_samples(self) -> int: ...
+
+    def get_scope_dma_geometry(self) -> ScopeDmaGeometry: ...
 
     def read_dma_raw_frame(self) -> bytes: ...
 
@@ -89,6 +95,7 @@ IIO_LM_UNQUALIFIED_SCHEMA = "unqualified-opaque[16]"
 # 4 int16 slots (8 bytes) are a little-endian uint64, the remaining
 # (frame_samples - SCOPE_TIMESTAMP_WORDS) slots are the int16 waveform.
 SCOPE_TIMESTAMP_WORDS = 4
+SCOPE_ADC_SAMPLE_PERIOD_NS = 2
 
 # Keep file-system stalls out of the time-critical IIO refill loop while still
 # bounding memory use. At the largest legal scope frame this queue occupies
@@ -110,6 +117,139 @@ _EVENT_DTYPE = np.dtype([
 
 # Preserve the historical private name for callers of the NDMA v2 reader.
 _LM_EVENT_DTYPE = IIO_LM_EVENT_DTYPE
+
+
+@dataclass(frozen=True)
+class ScopeDmaGeometry:
+    """One advertised Scope DMA record layout.
+
+    ``frame_samples`` remains the full-rate hardware capture length.  Newer
+    periodic firmware can decimate the transported waveform and pad each DMA
+    record to its required alignment, so neither the IIO buffer length nor the
+    payload byte count may be inferred from that register.
+    """
+
+    frame_samples: int
+    buffer_samples: int
+    frame_bytes: int
+    waveform_samples: int
+    sample_decimation: int
+    padding_bytes: int
+
+    def __post_init__(self) -> None:
+        payload_bytes = SCOPE_TIMESTAMP_WORDS * 2 + self.waveform_samples * 2
+        if (
+            self.frame_samples < SCOPE_TIMESTAMP_WORDS
+            or self.buffer_samples <= 0
+            or self.frame_bytes != self.buffer_samples * 2
+            or self.waveform_samples < 0
+            or self.sample_decimation <= 0
+            or self.padding_bytes < 0
+            or payload_bytes + self.padding_bytes != self.frame_bytes
+        ):
+            raise ValueError("invalid Scope DMA geometry")
+
+    @classmethod
+    def legacy(cls, frame_samples: int) -> ScopeDmaGeometry:
+        return cls(
+            frame_samples=frame_samples,
+            buffer_samples=frame_samples,
+            frame_bytes=frame_samples * 2,
+            waveform_samples=frame_samples - SCOPE_TIMESTAMP_WORDS,
+            sample_decimation=1,
+            padding_bytes=0,
+        )
+
+    @property
+    def sample_period_ns(self) -> int:
+        return SCOPE_ADC_SAMPLE_PERIOD_NS * self.sample_decimation
+
+    @property
+    def capture_duration_ns(self) -> int:
+        return self.waveform_samples * self.sample_period_ns
+
+    @property
+    def ndma_v1_compatible(self) -> bool:
+        return (
+            self.buffer_samples == self.frame_samples
+            and self.waveform_samples == self.frame_samples - SCOPE_TIMESTAMP_WORDS
+            and self.sample_decimation == 1
+            and self.padding_bytes == 0
+        )
+
+
+@dataclass(frozen=True)
+class ScopeDmaFrame:
+    """A complete decoded Scope frame handed to live display consumers."""
+
+    timestamp: int
+    received_ns: int
+    samples: np.ndarray
+    geometry: ScopeDmaGeometry
+
+    def __post_init__(self) -> None:
+        samples = np.asarray(self.samples, dtype="<i2").reshape(-1)
+        if samples.size != self.geometry.waveform_samples:
+            raise ValueError("Scope DMA frame waveform does not match its geometry")
+        # Own one immutable byte string. Every bounded display consumer can
+        # safely share the resulting read-only view after the next DMA refill.
+        owned = bytes(samples.tobytes())
+        object.__setattr__(self, "samples", np.frombuffer(owned, dtype="<i2"))
+
+
+class ScopeFrameBuffer:
+    """Bounded non-blocking hand-off queue for live Scope DMA consumers."""
+
+    def __init__(self, max_frames: int = 256) -> None:
+        if max_frames <= 0:
+            raise ValueError("max_frames must be positive")
+        self._max_frames = max_frames
+        self._frames: deque[ScopeDmaFrame] = deque()
+        self._lock = threading.Lock()
+        self._dropped_frames = 0
+        self._subscribers: list[ScopeFrameBuffer] = []
+
+    @staticmethod
+    def _copy_frame(frame: ScopeDmaFrame) -> ScopeDmaFrame:
+        # ScopeDmaFrame owns immutable backing bytes, so publication shares
+        # one safe frame instead of copying the waveform for every subscriber.
+        return frame
+
+    def append(self, frame: ScopeDmaFrame) -> None:
+        copied = self._copy_frame(frame)
+        with self._lock:
+            if len(self._frames) >= self._max_frames:
+                self._frames.popleft()
+                self._dropped_frames += 1
+            self._frames.append(copied)
+            subscribers = tuple(self._subscribers)
+        for subscriber in subscribers:
+            subscriber.append(frame)
+
+    def subscribe(self, subscriber: ScopeFrameBuffer) -> None:
+        if subscriber is self:
+            raise ValueError("a frame buffer cannot subscribe to itself")
+        with self._lock:
+            if subscriber not in self._subscribers:
+                self._subscribers.append(subscriber)
+
+    def unsubscribe(self, subscriber: ScopeFrameBuffer) -> None:
+        with self._lock:
+            if subscriber in self._subscribers:
+                self._subscribers.remove(subscriber)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._frames.clear()
+            self._dropped_frames = 0
+
+    def drain(self) -> tuple[list[ScopeDmaFrame], int]:
+        with self._lock:
+            frames = list(self._frames)
+            self._frames.clear()
+            dropped = self._dropped_frames
+            self._dropped_frames = 0
+            return frames, dropped
 
 
 class McaEventBuffer:
@@ -371,23 +511,18 @@ class ScopeDmaStreamer:
 
 
 class IIOScopeDmaStreamer:
-    """Full-resolution DMA-frame-to-file streaming for the IIO backend.
+    """Complete Scope DMA records for files and bounded live consumers.
 
     Not a drop-in replacement for ScopeDmaStreamer: that class is a ZMQ SUB
     client fed by the gRPC Engine's own push-based DMA server, which
     continuously streams frames captured by hardware running free. The IIO
     scope core exposes a pull-based IIO buffer rather than the legacy ZMQ
     push stream. This class arms one buffer for the measurement, repeatedly
-    refills it and hands copied, complete records to a dedicated file-writer
-    thread. The refill loop therefore starts waiting for the next hardware
-    frame as soon as the preceding record has entered the bounded queue; disk
-    writes and ordinary file-system latency do not extend that interval.
-
-    Uses the same NDMA file header as ScopeDmaStreamer for tooling
-    consistency, but the per-frame record layout is IIO's own (8-byte
-    timestamp header followed by ``frame_samples - 4`` waveform values).
-    The timestamp occupies the first four 16-bit slots of the hardware frame,
-    so each file record remains exactly ``frame_samples * 2`` bytes.
+    refills it and publishes decoded complete records to live subscribers.
+    Legacy-compatible records can additionally be handed to a dedicated file
+    writer. New periodic v122 layouts can decimate and align the transport;
+    their exact geometry is driver-advertised and is currently online-only
+    because NDMA v1 cannot describe the decimation or padding.
     """
 
     def __init__(self, backend: _IIOScopeBackend, channel: int) -> None:
@@ -398,20 +533,32 @@ class IIOScopeDmaStreamer:
         """Stop the acquisition gate and cancel a blocked backend refill."""
         self._backend.request_dma_stop()
 
+    def capture_geometry(self) -> ScopeDmaGeometry:
+        """Return the configured record layout, with a v121 fallback."""
+        reader = getattr(self._backend, "get_scope_dma_geometry", None)
+        if callable(reader):
+            geometry = reader()
+            if not isinstance(geometry, ScopeDmaGeometry):
+                raise TypeError("backend returned an invalid Scope DMA geometry")
+            return geometry
+        return ScopeDmaGeometry.legacy(self._backend.get_frame_samples())
+
     def stream_to_file(
         self,
-        filepath: Path,
+        filepath: Path | None,
         stop_event: threading.Event,
         n_frames: int | None = None,
         on_ready: Callable[[], None] | None = None,
         on_progress: Callable[[int], None] | None = None,
+        frame_buffer: ScopeFrameBuffer | None = None,
+        current_accumulator: ScopeCurrentAccumulator | None = None,
     ) -> int:
-        """Repeatedly capture full-resolution frames and append them to file.
+        """Capture complete frames for an optional file and live publisher.
 
-        Runs until *stop_event* is set or *n_frames* frames have been
-        queued for writing (None = unbounded). *on_ready* is called once the
-        writer has created and flushed the one-time NDMA header, right before
-        the first capture attempt. At that point no DMA buffer exists yet
+        Runs until *stop_event* is set or *n_frames* complete frames have been
+        accepted (None = unbounded). With file output, *on_ready* follows the
+        flushed one-time NDMA header; online-only mode calls it immediately
+        before the first capture attempt. At that point no DMA buffer exists yet
         (it's created lazily by the first read_dma_raw_frame() call), and that
         first call arms DMA, starts its blocking reader and then writes
         ``enable=1`` in the backend-defined order. There is no separate
@@ -453,8 +600,16 @@ class IIOScopeDmaStreamer:
         the caller thinks the measurement has stopped.
         """
         self._backend.prepare_dma_capture()
-        frame_samples = self._backend.get_frame_samples()
-        expected_frame_bytes = frame_samples * np.dtype("<i2").itemsize
+        geometry = self.capture_geometry()
+        frame_samples = geometry.frame_samples
+        expected_frame_bytes = geometry.frame_bytes
+        if filepath is not None and not geometry.ndma_v1_compatible:
+            self._backend.close_dma_capture()
+            raise RuntimeError(
+                "this Scope DMA layout uses decimation/alignment padding and "
+                "cannot be stored in the legacy NDMA v1 format; use online "
+                "streaming or add a versioned file format"
+            )
         frame_count = 0
         write_queue: queue.Queue[bytes | object] = queue.Queue(
             maxsize=_IIO_SCOPE_WRITE_QUEUE_FRAMES,
@@ -466,6 +621,7 @@ class IIOScopeDmaStreamer:
         written_frames: list[int] = [0]
 
         def writer() -> None:
+            assert filepath is not None
             total_bytes = 0
             try:
                 with open(filepath, "wb") as f:
@@ -508,12 +664,16 @@ class IIOScopeDmaStreamer:
                         "IIO scope DMA: failed to cancel capture after writer error"
                     )
 
-        writer_thread = threading.Thread(
-            target=writer,
-            name=f"iio-scope-ch{self._channel}-file-writer",
-            daemon=False,
-        )
-        writer_thread.start()
+        writer_thread: threading.Thread | None = None
+        if filepath is not None:
+            writer_thread = threading.Thread(
+                target=writer,
+                name=f"iio-scope-ch{self._channel}-file-writer",
+                daemon=False,
+            )
+            writer_thread.start()
+        else:
+            writer_ready.set()
 
         def raise_writer_error() -> None:
             if writer_failed.is_set():
@@ -521,6 +681,8 @@ class IIOScopeDmaStreamer:
 
         def enqueue_record(record: bytes | object) -> bool:
             """Queue a record, noticing a dead writer while backpressured."""
+            if writer_thread is None:
+                return True
             while writer_thread.is_alive():
                 raise_writer_error()
                 try:
@@ -543,6 +705,8 @@ class IIOScopeDmaStreamer:
 
         def finish_writer() -> None:
             """Append the FIFO sentinel and always join the file owner."""
+            if writer_thread is None:
+                return
             while writer_thread.is_alive():
                 try:
                     write_queue.put(
@@ -554,6 +718,7 @@ class IIOScopeDmaStreamer:
                     continue
             writer_thread.join()
 
+        accumulator_error = False
         try:
             writer_ready.wait()
             raise_writer_error()
@@ -575,9 +740,56 @@ class IIOScopeDmaStreamer:
                         break
                     raise
                 if len(record) != expected_frame_bytes:
+                    if current_accumulator is not None:
+                        current_accumulator.note_rejected_frame()
+                        accumulator_error = True
                     raise RuntimeError(
                         "scope DMA returned an incomplete raw frame: "
                         f"{len(record)} bytes, expected {expected_frame_bytes}"
+                    )
+
+                received_ns = time.perf_counter_ns()
+                if current_accumulator is not None:
+                    try:
+                        current_accumulator.append_frame(record, geometry, received_ns)
+                    except Exception:
+                        accumulator_error = True
+                        raise
+                    if frame_count == 0:
+                        metadata_reader = getattr(
+                            self._backend,
+                            "get_scope_dma_runtime_metadata",
+                            None,
+                        )
+                        if callable(metadata_reader):
+                            metadata = metadata_reader()
+                            current_accumulator.update_runtime_transport(
+                                transport=str(metadata.get("transport", "unknown")),
+                                kernel_buffers=int(metadata.get("kernel_buffers", 0)),
+                                readbuf_batch_frames=int(
+                                    metadata.get("readbuf_batch_frames", 0)
+                                ),
+                                queued_blocks=int(metadata.get("queued_blocks", 0)),
+                                queue_high_watermark=int(
+                                    metadata.get("queue_high_watermark", 0)
+                                ),
+                            )
+
+                if frame_buffer is not None:
+                    timestamp = int.from_bytes(record[:8], "little")
+                    samples = np.frombuffer(
+                        record,
+                        dtype="<i2",
+                        count=geometry.waveform_samples,
+                        offset=SCOPE_TIMESTAMP_WORDS * 2,
+                    )
+                    frame_buffer.append(
+                        ScopeDmaFrame(
+                            timestamp=timestamp,
+                            received_ns=received_ns,
+                            samples=samples,
+                            geometry=geometry,
+                        )
                     )
 
                 # The backend has already copied this exact immutable frame
@@ -586,20 +798,35 @@ class IIOScopeDmaStreamer:
                 if not enqueue_record(record):
                     raise RuntimeError("scope DMA writer stopped unexpectedly")
                 frame_count += 1
+                if filepath is None and on_progress is not None:
+                    on_progress(frame_count * expected_frame_bytes)
+        except Exception:
+            if (
+                current_accumulator is not None
+                and not accumulator_error
+                and not stop_event.is_set()
+            ):
+                current_accumulator.note_protocol_error()
+            raise
         finally:
             try:
                 self._backend.close_dma_capture()
             finally:
-                finish_writer()
+                try:
+                    finish_writer()
+                finally:
+                    if current_accumulator is not None:
+                        current_accumulator.finish_session()
 
         raise_writer_error()
-        if written_frames[0] != frame_count:
+        if filepath is not None and written_frames[0] != frame_count:
             raise RuntimeError(
                 "scope DMA writer stopped before committing every queued frame: "
                 f"wrote {written_frames[0]} of {frame_count}"
             )
 
-        log.info("IIO scope DMA: finished -- %d frames to %s", frame_count, filepath)
+        destination = str(filepath) if filepath is not None else "live consumers"
+        log.info("IIO scope DMA: finished -- %d frames to %s", frame_count, destination)
         return frame_count
 
 

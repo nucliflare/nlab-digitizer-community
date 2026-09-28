@@ -1,8 +1,12 @@
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from ..diagnostics import GlobalDiagnosticReading
+
+if TYPE_CHECKING:
+    from ..current_monitor import CurrentMonitorClient
 
 
 class ScopeBackend(ABC):
@@ -76,6 +80,17 @@ class ScopeBackend(ABC):
 
 class MCABackend(ABC):
     """Abstract interface for MCA / DPP hardware access."""
+
+    def create_current_monitor_client(self) -> "CurrentMonitorClient":
+        """Return an independent connection for background IIR polling.
+
+        A transport must opt in explicitly.  Falling back to ``self`` would
+        share one remote connection between the GUI and worker threads, which
+        is not safe for libiio and can also serialize unrelated gRPC calls.
+        """
+        raise NotImplementedError(
+            "this backend does not support isolated current-monitor access"
+        )
 
     # ---- device info ----
     @abstractmethod

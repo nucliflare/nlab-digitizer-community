@@ -8,6 +8,7 @@ from typing import TypedDict
 import numpy as np
 
 from .backends.base import MCABackend
+from .current_monitor import CurrentMonitorClient
 from .scope import ListSpec, ParameterSpec, RangeSpec
 
 # ---------------------------------------------------------------------------
@@ -458,6 +459,10 @@ class MultiChannelAnalyzer:
         self.filters = MCAFilters(backend)
         self.statistics = MCAStatistics(backend)
         self.sync = SyncTrigger(backend)
+
+    def create_current_monitor_client(self) -> CurrentMonitorClient:
+        """Create a transport connection owned by a monitor worker thread."""
+        return self._b.create_current_monitor_client()
 
     # ---- device info ----
 

@@ -9,14 +9,19 @@ from PySide6.QtCore import QByteArray, QSettings, Qt, QThread, QThreadPool
 from PySide6.QtWidgets import QDockWidget, QMainWindow, QWidget
 
 from nlab.controllers.coincidence_controller import CoincidenceController
+from nlab.controllers.current_monitor_controller import CurrentMonitorController
 from nlab.controllers.external_device_controller import ExternalDeviceController
 from nlab.controllers.global_controller import GlobalController
 from nlab.controllers.mca_controller import MCAController
 from nlab.controllers.psd_controller import PSDController
 from nlab.controllers.psu_controller import PSUController
 from nlab.controllers.scope_controller import ScopeController
+from nlab.hardware.digitizer.current_monitor import ScopeCurrentAccumulator
 from nlab.hardware.digitizer.digitizer import Digitizer
-from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaEventBuffer
+from nlab.hardware.digitizer.dma import (
+    IIOMcaDmaStreamer,
+    McaEventBuffer,
+)
 from nlab.hardware.modbus_devices import ExternalDevices
 from nlab.views.energy_calibration_dialog import EnergyCalibrationDialog
 from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
@@ -61,6 +66,7 @@ class MainWindowController:
         log.info("All %d device(s) connected", len(self._devices))
 
         self._scope_controllers: list[ScopeController] = []
+        self._current_monitor_controllers: list[CurrentMonitorController] = []
         self._mca_controllers: list[MCAController] = []
         self._psd_controllers: list[PSDController] = []
         self._psd_controller_by_device: dict[int, PSDController] = {}
@@ -77,6 +83,7 @@ class MainWindowController:
         self._thread: QThread | None = None
 
         self._scope_dock_host = self._make_dock_host()
+        self._current_dock_host = self._make_dock_host()
         self._mca_dock_host = self._make_dock_host()
         self._psd_dock_host = self._make_dock_host()
         self._psu_dock_host = self._make_dock_host()
@@ -94,8 +101,10 @@ class MainWindowController:
         self._restore_dock_state()
         self._connect_signals()
         log.info(
-            "UI initialized, %d scope / %d MCA / %d PSD / %d PSU / %d external controllers",
+            "UI initialized, %d scope / %d current / %d MCA / %d PSD / %d PSU / "
+            "%d external controllers",
             len(self._scope_controllers),
+            len(self._current_monitor_controllers),
             len(self._mca_controllers),
             len(self._psd_controllers),
             len(self._psu_controllers),
@@ -187,6 +196,7 @@ class MainWindowController:
 
     def _build_channel_docks(self) -> None:
         scope_docks: list[QDockWidget] = []
+        current_docks: list[QDockWidget] = []
         mca_docks: list[QDockWidget] = []
         psd_docks: list[QDockWidget] = []
         psu_docks: list[QDockWidget] = []
@@ -214,11 +224,28 @@ class MainWindowController:
             self._report_progress(f"Initializing channel {ch} controls...")
             ch_label = f"Ch {ch}"
 
-            scope_ctrl = ScopeController(device.scope, scope_dma=device.scope_dma, channel=ch)
+            scope_current_accumulator = ScopeCurrentAccumulator()
+            scope_ctrl = ScopeController(
+                device.scope,
+                scope_dma=device.scope_dma,
+                channel=ch,
+                current_accumulator=scope_current_accumulator,
+            )
             self._scope_controllers.append(scope_ctrl)
             scope_docks.append(self._make_dock(f"scope_ch{ch}", ch_label, scope_ctrl))
 
             if build_mca:
+                current_ctrl = CurrentMonitorController(
+                    device.mca,
+                    channel=ch,
+                    auto_start=False,
+                    scope_controller=scope_ctrl,
+                    scope_current_accumulator=scope_current_accumulator,
+                )
+                self._current_monitor_controllers.append(current_ctrl)
+                current_docks.append(
+                    self._make_dock(f"current_ch{ch}", ch_label, current_ctrl)
+                )
                 event_buffer = None
                 psd_ctrl = None
                 if device.mca_dma is not None:
@@ -249,14 +276,25 @@ class MainWindowController:
                 psu_docks.append(self._make_dock(f"psu_ch{ch}", ch_label, psu_ctrl))
 
         self._populate_dock_host(self._scope_dock_host, scope_docks)
+        self._populate_dock_host(self._current_dock_host, current_docks)
         self._populate_dock_host(self._mca_dock_host, mca_docks)
         self._populate_dock_host(self._psd_dock_host, psd_docks)
         self._populate_dock_host(self._psu_dock_host, psu_docks)
 
         self._window.ui.layoutTabScope.addWidget(self._scope_dock_host)
+        self._window.ui.layoutTabCurrent.addWidget(self._current_dock_host)
         self._window.ui.layoutTabMCA.addWidget(self._mca_dock_host)
         self._window.ui.layoutTabPSD.addWidget(self._psd_dock_host)
         self._window.ui.layoutTabPSU.addWidget(self._psu_dock_host)
+
+        current_tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabCurrent)
+        self._window.ui.mainTabs.setTabEnabled(current_tab_index, build_mca)
+        self._window.ui.tabCurrent.setToolTip(
+            ""
+            if build_mca
+            else "Current monitor is disabled: no input-filter device was found "
+            "for one or more connected channels."
+        )
 
         mca_tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabMCA)
         self._window.ui.mainTabs.setTabEnabled(mca_tab_index, build_mca)
@@ -354,6 +392,7 @@ class MainWindowController:
     # Bump suffix when dock object names or topology change so stale layouts
     # are silently discarded rather than corrupting the initial tab arrangement.
     _DOCK_STATE_KEY_SCOPE = "docks/v2/scope"
+    _DOCK_STATE_KEY_CURRENT = "docks/v1/current"
     _DOCK_STATE_KEY_MCA = "docks/v2/mca"
     _DOCK_STATE_KEY_PSD = "docks/v2/psd"
     _DOCK_STATE_KEY_PSU = "docks/v2/psu"
@@ -363,6 +402,7 @@ class MainWindowController:
     def _save_dock_state(self) -> None:
         settings = QSettings()
         settings.setValue(self._DOCK_STATE_KEY_SCOPE, self._scope_dock_host.saveState())
+        settings.setValue(self._DOCK_STATE_KEY_CURRENT, self._current_dock_host.saveState())
         settings.setValue(self._DOCK_STATE_KEY_MCA, self._mca_dock_host.saveState())
         settings.setValue(self._DOCK_STATE_KEY_PSD, self._psd_dock_host.saveState())
         settings.setValue(self._DOCK_STATE_KEY_PSU, self._psu_dock_host.saveState())
@@ -374,6 +414,9 @@ class MainWindowController:
         if state := settings.value(self._DOCK_STATE_KEY_SCOPE):
             if not self._scope_dock_host.restoreState(state):
                 settings.remove(self._DOCK_STATE_KEY_SCOPE)
+        if state := settings.value(self._DOCK_STATE_KEY_CURRENT):
+            if not self._current_dock_host.restoreState(state):
+                settings.remove(self._DOCK_STATE_KEY_CURRENT)
         if state := settings.value(self._DOCK_STATE_KEY_MCA):
             if not self._mca_dock_host.restoreState(state):
                 settings.remove(self._DOCK_STATE_KEY_MCA)
@@ -394,6 +437,7 @@ class MainWindowController:
         """Clear saved dock state and re-tabify all channel docks."""
         settings = QSettings()
         settings.remove(self._DOCK_STATE_KEY_SCOPE)
+        settings.remove(self._DOCK_STATE_KEY_CURRENT)
         settings.remove(self._DOCK_STATE_KEY_MCA)
         settings.remove(self._DOCK_STATE_KEY_PSD)
         settings.remove(self._DOCK_STATE_KEY_PSU)
@@ -402,6 +446,7 @@ class MainWindowController:
 
         dock_hosts = (
             self._scope_dock_host,
+            self._current_dock_host,
             self._mca_dock_host,
             self._psd_dock_host,
             self._psu_dock_host,
@@ -435,13 +480,15 @@ class MainWindowController:
         log.info("Histogram Y-axis set to %s", "log" if enabled else "linear")
 
     def reset_all_zoom(self) -> None:
-        """Auto-range/reset zoom on every scope and MCA plot."""
-        for ctrl in self._scope_controllers:
-            ctrl.reset_zoom()
-        for ctrl in self._mca_controllers:
-            ctrl.reset_zoom()
-        for ctrl in self._psd_controllers:
-            ctrl.reset_zoom()
+        """Auto-range/reset zoom on every live plot."""
+        for scope_controller in self._scope_controllers:
+            scope_controller.reset_zoom()
+        for current_controller in self._current_monitor_controllers:
+            current_controller.reset_zoom()
+        for mca_controller in self._mca_controllers:
+            mca_controller.reset_zoom()
+        for psd_controller in self._psd_controllers:
+            psd_controller.reset_zoom()
         log.info("Zoom reset on all plots")
 
     def refresh_dma_output_settings(self) -> None:
@@ -522,38 +569,44 @@ class MainWindowController:
         # than making shutdown pay every transport timeout in series.
         if self._global_controller is not None:
             self._global_controller.request_polling_stop()
-        for ctrl in self._psu_controllers:
-            ctrl.request_monitor_stop()
-        for ctrl in self._external_controllers:
-            ctrl.request_polling_stop()
+        for psu_controller in self._psu_controllers:
+            psu_controller.request_monitor_stop()
+        for external_controller in self._external_controllers:
+            external_controller.request_polling_stop()
+        for current_controller in self._current_monitor_controllers:
+            current_controller.request_monitor_stop()
 
         if self._global_controller is not None:
             self._global_controller.disarm_sync()
             self._global_controller.stop_polling_sync()
 
         # 1. Stop scope timers — no new workers will be submitted
-        for ctrl in self._scope_controllers:
-            ctrl._refresh_timer.stop()
+        for scope_controller in self._scope_controllers:
+            scope_controller._refresh_timer.stop()
 
         # 2. Stop DMA workers (blocking)
-        for ctrl in self._scope_controllers:
-            ctrl.stop_dma_sync()
-        for ctrl in self._mca_controllers:
-            ctrl.stop_dma_sync()
+        for scope_controller in self._scope_controllers:
+            scope_controller.stop_dma_sync()
+        for mca_controller in self._mca_controllers:
+            mca_controller.stop_dma_sync()
 
         # 3. Stop MCA polling workers (blocking)
-        for ctrl in self._mca_controllers:
-            ctrl.stop_worker_sync()
+        for mca_controller in self._mca_controllers:
+            mca_controller.stop_worker_sync()
+
+        # 4. Current monitors own independent direct-IIO/gRPC connections.
+        for current_controller in self._current_monitor_controllers:
+            current_controller.stop_monitor_sync()
 
         if coincidence is not None:
             coincidence.finish_shutdown_sync()
 
         # PSD timers consume only already-decoded display batches. Stop them
         # after MCA DMA tail drain has completed.
-        for ctrl in self._psd_controllers:
-            ctrl.stop_processing()
+        for psd_controller in self._psd_controllers:
+            psd_controller.stop_processing()
 
-        # 4. Wait for in-flight scope workers to finish
+        # 5. Wait for in-flight scope workers to finish
         viewer_pool_idle = QThreadPool.globalInstance().waitForDone(3000)
         if viewer_pool_idle:
             for scope_controller in self._scope_controllers:
@@ -563,13 +616,13 @@ class MainWindowController:
             # close that context out from under a native libiio read.
             log.warning("Scope viewer workers did not stop within 3 seconds")
 
-        # 5. Stop PSU workers (blocking)
-        for ctrl in self._psu_controllers:
-            ctrl.stop_monitor_sync()
+        # 6. Stop PSU workers (blocking)
+        for psu_controller in self._psu_controllers:
+            psu_controller.stop_monitor_sync()
 
-        # 6. Stop external Modbus device workers (blocking)
-        for ctrl in self._external_controllers:
-            ctrl.stop_polling_sync()
+        # 7. Stop external Modbus device workers (blocking)
+        for external_controller in self._external_controllers:
+            external_controller.stop_polling_sync()
 
         if self._thread is not None:
             self._thread.quit()
@@ -634,6 +687,7 @@ class MainWindowController:
 
         dock_hosts = (
             self._scope_dock_host,
+            self._current_dock_host,
             self._mca_dock_host,
             self._psd_dock_host,
             self._psu_dock_host,
@@ -649,6 +703,7 @@ class MainWindowController:
                 dock.deleteLater()
 
         self._scope_controllers.clear()
+        self._current_monitor_controllers.clear()
         self._mca_controllers.clear()
         self._psd_controllers.clear()
         self._psd_controller_by_device.clear()
@@ -672,8 +727,10 @@ class MainWindowController:
         self._build_external_docks()
         self._restore_dock_state()
         log.info(
-            "Reconnect complete, %d scope / %d MCA / %d PSD / %d PSU / %d external controllers",
+            "Reconnect complete, %d scope / %d current / %d MCA / %d PSD / %d PSU / "
+            "%d external controllers",
             len(self._scope_controllers),
+            len(self._current_monitor_controllers),
             len(self._mca_controllers),
             len(self._psd_controllers),
             len(self._psu_controllers),
@@ -686,6 +743,10 @@ class MainWindowController:
 
         write_configuration(path, self.configuration_document())
         log.info("All channel and application settings saved to %s", path)
+
+    @staticmethod
+    def _encoded_dock_state(host: QMainWindow) -> str:
+        return bytes(host.saveState().toBase64()).decode("ascii")
 
     def configuration_document(self) -> dict[str, object]:
         """Snapshot the same complete document used by Save Settings."""
@@ -712,6 +773,10 @@ class MainWindowController:
             application_channel: dict[str, object] = {
                 "scope": self._scope_controllers[idx].configuration_settings(),
             }
+            if idx < len(self._current_monitor_controllers):
+                application_channel["current_monitor"] = (
+                    self._current_monitor_controllers[idx].configuration_settings()
+                )
             if psu_ctrl is not None:
                 application_channel["psu"] = psu_ctrl.configuration_settings()
             if mca_ctrl is not None:
@@ -741,12 +806,13 @@ class MainWindowController:
         )
         coincidence = getattr(self, "_coincidence_controller", None)
         layout = {
-            "scope": self._scope_dock_host.saveState().toBase64().data().decode("ascii"),
-            "mca": self._mca_dock_host.saveState().toBase64().data().decode("ascii"),
-            "psd": self._psd_dock_host.saveState().toBase64().data().decode("ascii"),
-            "psu": self._psu_dock_host.saveState().toBase64().data().decode("ascii"),
-            "global": self._global_dock_host.saveState().toBase64().data().decode("ascii"),
-            "external": self._external_dock_host.saveState().toBase64().data().decode("ascii"),
+            "scope": self._encoded_dock_state(self._scope_dock_host),
+            "current": self._encoded_dock_state(self._current_dock_host),
+            "mca": self._encoded_dock_state(self._mca_dock_host),
+            "psd": self._encoded_dock_state(self._psd_dock_host),
+            "psu": self._encoded_dock_state(self._psu_dock_host),
+            "global": self._encoded_dock_state(self._global_dock_host),
+            "external": self._encoded_dock_state(self._external_dock_host),
         }
         document = {
             "format_version": FORMAT_VERSION,
@@ -833,6 +899,10 @@ class MainWindowController:
             app_channel = channel_application_entry(document, channel)
             if app_channel is not None:
                 self._scope_controllers[idx].apply_configuration_settings(app_channel.get("scope"))
+                if idx < len(self._current_monitor_controllers):
+                    self._current_monitor_controllers[idx].apply_configuration_settings(
+                        app_channel.get("current_monitor")
+                    )
                 psu_ctrl = self._psu_controller_by_device.get(idx)
                 if psu_ctrl is not None:
                     psu_ctrl.apply_configuration_settings(app_channel.get("psu"))
@@ -878,6 +948,7 @@ class MainWindowController:
             return
         hosts = {
             "scope": self._scope_dock_host,
+            "current": self._current_dock_host,
             "mca": self._mca_dock_host,
             "psd": self._psd_dock_host,
             "psu": self._psu_dock_host,

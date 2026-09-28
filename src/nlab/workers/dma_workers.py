@@ -14,6 +14,7 @@ import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from PySide6.QtCore import Signal
@@ -24,9 +25,13 @@ from nlab.hardware.digitizer.dma import (
     McaDmaStreamer,
     McaEventBuffer,
     ScopeDmaStreamer,
+    ScopeFrameBuffer,
 )
 from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode, McaRunSummary
 from nlab.workers.base_worker import BaseWorker
+
+if TYPE_CHECKING:
+    from nlab.hardware.digitizer.current_monitor import ScopeCurrentAccumulator
 
 log = logging.getLogger(__name__)
 _SCOPE_PROGRESS_INTERVAL_S = 0.1
@@ -120,8 +125,7 @@ class ScopeDmaWorker(BaseWorker):
 
 
 class IIOScopeDmaWorker(BaseWorker):
-    """Streams full-resolution DMA frames to a binary file via the IIO
-    backend's pull-based IIOScopeDmaStreamer.
+    """Streams IIO Scope DMA frames to a file and/or live consumers.
 
     Not interchangeable with ScopeDmaWorker: IIOScopeDmaStreamer.
     stream_to_file() takes n_frames instead of frame_samples (it reads
@@ -141,13 +145,17 @@ class IIOScopeDmaWorker(BaseWorker):
     def __init__(
         self,
         streamer: IIOScopeDmaStreamer,
-        filepath: Path,
+        filepath: Path | None,
         n_frames: int | None = None,
+        frame_buffer: ScopeFrameBuffer | None = None,
+        current_accumulator: ScopeCurrentAccumulator | None = None,
     ) -> None:
         super().__init__()
         self._streamer = streamer
         self._filepath = filepath
         self._n_frames = n_frames
+        self._frame_buffer = frame_buffer
+        self._current_accumulator = current_accumulator
         self._stop_event = threading.Event()
 
     def run(self) -> None:
@@ -172,8 +180,10 @@ class IIOScopeDmaWorker(BaseWorker):
                 n_frames=self._n_frames,
                 on_ready=lambda: self.ready.emit(),
                 on_progress=report_progress,
+                frame_buffer=self._frame_buffer,
+                current_accumulator=self._current_accumulator,
             )
-            log.info("IIOScopeDmaWorker: completed, %d frames written", total)
+            log.info("IIOScopeDmaWorker: completed, %d frames captured", total)
         except Exception:
             log.exception("IIOScopeDmaWorker: streaming failed")
             self.error.emit("IIO scope DMA streaming failed")

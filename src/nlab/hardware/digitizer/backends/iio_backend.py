@@ -66,6 +66,8 @@ from collections.abc import Callable
 import iio
 import numpy as np
 
+from ..current_monitor import CurrentMonitorClient
+from ..dma import ScopeDmaGeometry
 from ..iio_listmode import IIO_LM_EVENT_DTYPE
 from ..iio_scope_stream import IiodScopeStream
 from .base import DigitizerBackend
@@ -154,7 +156,10 @@ _LM_KERNEL_BUFFER_COUNT = 8
 # provider-qualified driver advertises a recommended/max depth through IIO;
 # use that only after validating the complete capability tuple.
 _SCOPE_FALLBACK_KERNEL_BUFFER_COUNT = 1
-_SCOPE_IIOD_BATCH_FRAMES = 32
+# The IP122/.128 coverage sweep found that 64-frame READBUF requests maximize
+# receiver throughput without changing the exact-frame DMA ABI. The server
+# still emits its bounded batches as frames become available.
+_SCOPE_IIOD_BATCH_FRAMES = 64
 _LM_RECORD_LAYOUT = "opaque[16]"
 _LM_EVENT_DTYPE = IIO_LM_EVENT_DTYPE
 
@@ -302,6 +307,57 @@ def _device_for_channel(
         return matches[0]
     return devices[channel] if channel < len(devices) else None
 
+
+class _IIOCurrentMonitorClient(CurrentMonitorClient):
+    """Worker-owned direct-mode reader for one input-filter IIR register."""
+
+    def __init__(self, channel: int, uri: str) -> None:
+        self._channel_index = channel
+        self._uri = uri
+        self._device: iio.Device | None = None
+        self._input_channel: iio.Channel | None = None
+        context = iio.Context(uri)
+        self._context: iio.Context | None = context
+        device = _device_for_channel(
+            context,
+            _INPUT_FILTER_DEVICE_NAME,
+            channel,
+        )
+        if device is None:
+            self.close()
+            raise RuntimeError(
+                f"no {_INPUT_FILTER_DEVICE_NAME} device for channel {channel} at {uri}"
+            )
+        input_channel = device.find_channel("voltage0")
+        if input_channel is None:
+            self.close()
+            raise RuntimeError(
+                f"{_INPUT_FILTER_DEVICE_NAME} channel {channel} has no voltage0 channel"
+            )
+        self._device = device
+        self._input_channel = input_channel
+
+    def read_raw(self) -> int:
+        """Read the driver's signed 16-bit IIR code without rescaling it.
+
+        ``vdpp-input-filter.c::vdpp_input_filter_read_raw()`` casts the low
+        register halfword to ``s16`` and advertises a separate 1/32768 scale.
+        The monitor keeps the code intact because conversion to amperes also
+        needs the deployment-specific sensor/front-end calibration.
+        """
+        channel = self._input_channel
+        if channel is None:
+            raise RuntimeError("current-monitor IIO client is closed")
+        return int(channel.attrs["raw"].value)
+
+    def close(self) -> None:
+        # pylibiio 0.x releases devices with their owning Context.  Drop
+        # child references first so the network connection can be destroyed
+        # deterministically when the context reference is cleared.
+        self._input_channel = None
+        self._device = None
+        self._context = None
+
 # vdpp-scope.c's trigger_mode is a plain integer register (0..4), not a
 # string attribute like the previous driver. Confirmed from the driver
 # source: SCOPE_TRIG_LEVEL_ABOVE=0, SCOPE_TRIG_LEVEL_BELOW=1,
@@ -383,6 +439,7 @@ class IIODigitizerBackend(DigitizerBackend):
         self._dma_buf_frame_samples: int | None = None
         self._dma_capture_transport: str | None = None
         self._dma_capture_kernel_buffers: int | None = None
+        self._dma_capture_geometry: ScopeDmaGeometry | None = None
         self._dma_last_timestamp: int | None = None
         # Set by IIOScopeDmaWorker.stop() through the streamer. Buffer.cancel()
         # is the libiio-supported way to interrupt a refill blocked in another
@@ -606,6 +663,10 @@ class IIODigitizerBackend(DigitizerBackend):
             _scope_only=True,
         )
 
+    def create_current_monitor_client(self) -> CurrentMonitorClient:
+        """Open the monitor's independent, input-filter-only IIO context."""
+        return _IIOCurrentMonitorClient(self._ch, self._uri)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -736,6 +797,7 @@ class IIODigitizerBackend(DigitizerBackend):
 
         self._dma_buf = None
         self._dma_buf_frame_samples = None
+        self._dma_capture_geometry = None
         if isinstance(buf, IiodScopeStream):
             # Closing the dedicated data connection makes iiod destroy the
             # remote IIO buffer. Control/gate polling remains on _dma_ctx.
@@ -1715,6 +1777,101 @@ class IIODigitizerBackend(DigitizerBackend):
     def get_frame_samples(self) -> int:
         return int(self._attr_get("frame_samples"))
 
+    def get_scope_dma_geometry(self) -> ScopeDmaGeometry:
+        """Return the complete record geometry advertised by the driver.
+
+        Scope v121 has no geometry attributes and transports one int16 scan
+        for every configured sample.  The deployed v122 driver changes its
+        periodic layout dynamically: it advertises the exact byte count,
+        waveform count and sample decimation after ``trigger_mode`` and
+        ``frame_samples`` are configured.  Live v122 validation on
+        192.168.10.128 showed that a 512-sample periodic frame is 264 bytes
+        (132 scans), not 1024 bytes; inferring the IIO length from
+        ``frame_samples`` is therefore rejected in favour of these attrs.
+
+        The corresponding v122 driver source is not yet present in the
+        supplied PetaLinux checkout, so this branch treats the three names as
+        a capability-qualified live ABI and retains the source-derived v121
+        fallback only when all three are absent.
+        """
+        frame_samples = self._dma_get_frame_samples()
+        names = (
+            "dma_frame_bytes",
+            "dma_waveform_samples",
+            "dma_sample_decimation",
+        )
+        present = tuple(name in self._dma_scope.attrs for name in names)
+        if not any(present):
+            return ScopeDmaGeometry.legacy(frame_samples)
+        if not all(present):
+            missing = ", ".join(
+                name for name, available in zip(names, present) if not available
+            )
+            raise RuntimeError(
+                f"incomplete Scope DMA geometry capability; missing {missing}"
+            )
+
+        frame_bytes = int(self._dma_attr_get("dma_frame_bytes"))
+        waveform_samples = int(self._dma_attr_get("dma_waveform_samples"))
+        sample_decimation = int(self._dma_attr_get("dma_sample_decimation"))
+        if frame_bytes % np.dtype("<i2").itemsize:
+            raise RuntimeError(
+                f"Scope DMA frame size {frame_bytes} is not int16-aligned"
+            )
+        payload_bytes = 8 + waveform_samples * np.dtype("<i2").itemsize
+        padding_bytes = frame_bytes - payload_bytes
+        try:
+            geometry = ScopeDmaGeometry(
+                frame_samples=frame_samples,
+                buffer_samples=frame_bytes // np.dtype("<i2").itemsize,
+                frame_bytes=frame_bytes,
+                waveform_samples=waveform_samples,
+                sample_decimation=sample_decimation,
+                padding_bytes=padding_bytes,
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "driver advertised invalid Scope DMA geometry: "
+                f"frame_samples={frame_samples}, frame_bytes={frame_bytes}, "
+                f"waveform_samples={waveform_samples}, "
+                f"sample_decimation={sample_decimation}"
+            ) from exc
+        if geometry.buffer_samples % 4:
+            raise RuntimeError(
+                "Scope DMA buffer length is not aligned to the driver's "
+                f"8-byte requirement: {geometry.buffer_samples} int16 scans"
+            )
+        return geometry
+
+    def get_scope_dma_runtime_metadata(self) -> dict[str, object]:
+        """Return transport choices and a queue snapshot for this arm.
+
+        This is intentionally read after the first successful frame: buffer
+        creation has then selected the real transport and qualified kernel
+        queue depth.  It contains scalar diagnostics only and performs no
+        buffer or acquisition state change.
+        """
+        def optional_integer(name: str) -> int:
+            if name not in self._dma_scope.attrs:
+                return 0
+            return int(self._dma_attr_get(name))
+
+        return {
+            "uri": self._uri,
+            "device": self._dma_scope.id,
+            "channel": self._ch,
+            "ip_version": int(self._dma_attr_get("ip_version")),
+            "transport": self._dma_capture_transport or "unarmed",
+            "kernel_buffers": self._dma_capture_kernel_buffers or 0,
+            "queued_blocks": optional_integer("queued_blocks"),
+            "queue_high_watermark": optional_integer("queue_high_watermark"),
+            "readbuf_batch_frames": (
+                _SCOPE_IIOD_BATCH_FRAMES
+                if self._dma_capture_transport == "iiod-batched"
+                else 1
+            ),
+        }
+
     def set_frame_samples(self, val: int) -> None:
         """Closes any open DMA capture buffer first, then writes directly
         -- no disarm/re-arm of plain viewer-only `enable` needed anymore.
@@ -1950,7 +2107,7 @@ class IIODigitizerBackend(DigitizerBackend):
     # ------------------------------------------------------------------
 
     def read_dma_frame(self) -> tuple[int, np.ndarray]:
-        """Read one full-resolution frame from the DMA path, creating the
+        """Read one advertised waveform frame from the DMA path, creating the
         capture buffer on first use and reusing it on subsequent calls.
 
         Safe to reuse here -- unlike the previous driver rewrite, which
@@ -1964,20 +2121,24 @@ class IIODigitizerBackend(DigitizerBackend):
         exactly one frame, matching the buffer sizing in
         _refill_dma_buffer()'s docstring.
 
-        Returns (timestamp_raw, samples) where samples excludes the first
-        4 elements: per vdpp-scope.c's channel comment and the reference
-        stub's frame_timestamp() helper, the core overwrites the first 4
-        int16 slots of every frame with a 64-bit trigger timestamp
-        (little-endian), passed through otherwise unchanged -- so samples
-        here is frame_samples - 4 real ADC values, not the full
-        frame_samples. Timestamp is decoded directly from the raw bytes
-        (not via the stub's own uint64-cast-of-int16 approach, which
-        sign-extends on any negative-looking sample word and silently
-        corrupts the packing).
+        Returns (timestamp_raw, samples), excluding the first four int16
+        timestamp slots and any advertised alignment padding. On v121 this is
+        ``frame_samples - 4`` full-rate ADC values. Periodic v122 firmware can
+        instead advertise a decimated waveform count and sample period.
+        Timestamp is decoded directly from the raw bytes to avoid signed-word
+        extension corrupting the packed uint64 value.
         """
         raw = self.read_dma_raw_frame()
+        geometry = self._dma_capture_geometry
+        if geometry is None:
+            raise RuntimeError("Scope DMA capture has no cached record geometry")
         timestamp = int.from_bytes(raw[:8], "little")
-        samples = np.frombuffer(raw[8:], dtype="<i2")
+        samples = np.frombuffer(
+            raw,
+            dtype="<i2",
+            count=geometry.waveform_samples,
+            offset=8,
+        )
         return timestamp, samples
 
     def read_dma_raw_frame(self) -> bytes:
@@ -1996,14 +2157,13 @@ class IIODigitizerBackend(DigitizerBackend):
         reports for the completed frame (raw, timestamp header included,
         unparsed).
 
-        Buffer sizing: confirmed live via dmesg ("buffer length is 1024,
-        must be 512 for a 512 sample frame") that scope_buffer_preenable()
-        now requires the buffer's sample count to be exactly
-        frame_samples, not 2 * frame_samples like an earlier driver
-        revision needed -- one refill() delivers exactly one frame now. The
-        current remote path batches multiple complete refills into one iiod
-        request without splitting or enlarging a DMA block. The buffer is
-        recreated automatically if frame_samples changes between calls.
+        Buffer sizing is capability-driven. Source-backed v121 requires the
+        IIO scan count to equal ``frame_samples``. Deployed v122 periodic mode
+        advertises ``dma_frame_bytes``, ``dma_waveform_samples`` and
+        ``dma_sample_decimation``; for example, 512 configured full-rate
+        samples use a 132-scan transport record. One refill still delivers
+        exactly one complete frame. The remote path batches complete refills
+        without splitting or enlarging a DMA block.
 
         Deliberately reads the exact byte count iio_buffer_refill()
         reports rather than trusting the public Buffer.read(), which
@@ -2069,12 +2229,10 @@ class IIODigitizerBackend(DigitizerBackend):
         # defeats much of READBUF batching, so only read it for the initial arm.
         first = self._dma_buf is None
         if first:
-            n = self._dma_get_frame_samples()
-            self._create_dma_buffer(n)
-        else:
-            if self._dma_buf_frame_samples is None:
-                raise RuntimeError("armed Scope DMA buffer has no cached geometry")
-            n = self._dma_buf_frame_samples
+            self._create_dma_buffer(self._dma_get_frame_samples())
+        if self._dma_buf_frame_samples is None:
+            raise RuntimeError("armed Scope DMA buffer has no cached geometry")
+        n = self._dma_buf_frame_samples
 
         buf = self._dma_buf
         assert buf is not None
@@ -2262,9 +2420,11 @@ class IIODigitizerBackend(DigitizerBackend):
         return result[0]
 
     def _create_dma_buffer(self, n: int) -> None:
-        """Close any existing buffer and open a fresh one sized for n
-        samples for _refill_dma_buffer()'s initial arm. Does not touch enable
-        itself; see
+        """Close any existing buffer and arm the layout for configured n.
+
+        The actual IIO scan count comes from :meth:`get_scope_dma_geometry`,
+        so dynamic v122 periodic records are not confused with the configured
+        full-rate capture length. Does not touch enable itself; see
         _start_reader_then_enable()'s docstring for why that write moved
         out of here and into the caller, ordered after the first refill()
         has already started.
@@ -2324,6 +2484,14 @@ class IIODigitizerBackend(DigitizerBackend):
                 "prior session was not fully torn down"
             )
 
+        geometry = self.get_scope_dma_geometry()
+        if geometry.frame_samples != n:
+            raise RuntimeError(
+                "Scope DMA geometry changed while arming: "
+                f"configured {n} samples, advertised {geometry.frame_samples}"
+            )
+        buffer_samples = geometry.buffer_samples
+
         kernel_buffers = self._scope_dma_kernel_buffers()
         use_batched_iiod = (
             self._uri.startswith("ip:")
@@ -2346,21 +2514,26 @@ class IIODigitizerBackend(DigitizerBackend):
             self._dma_buf = IiodScopeStream(
                 self._uri,
                 self._dma_scope.id,
-                n,
+                buffer_samples,
                 kernel_buffers,
                 _SCOPE_IIOD_BATCH_FRAMES,
             )
             self._dma_capture_transport = "iiod-batched"
         else:
-            self._dma_buf = iio.Buffer(self._dma_scope, n, False)
+            self._dma_buf = iio.Buffer(self._dma_scope, buffer_samples, False)
             self._dma_capture_transport = "libiio"
-        self._dma_buf_frame_samples = n
+        self._dma_buf_frame_samples = buffer_samples
+        self._dma_capture_geometry = geometry
         self._dma_capture_kernel_buffers = kernel_buffers
         log.debug(
             "IIO backend ch%d: DMA buffer armed, frame_samples=%d, "
+            "buffer_samples=%d, waveform_samples=%d, decimation=%d, "
             "transport=%s, kernel_buffers=%d",
             self._ch,
             n,
+            buffer_samples,
+            geometry.waveform_samples,
+            geometry.sample_decimation,
             self._dma_capture_transport,
             kernel_buffers,
         )

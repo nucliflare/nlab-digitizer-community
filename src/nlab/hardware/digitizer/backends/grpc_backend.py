@@ -15,6 +15,7 @@ import numpy as np
 import settings_pb2 as sp
 import settings_pb2_grpc
 
+from ..current_monitor import CurrentMonitorClient
 from .base import DigitizerBackend
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,12 @@ class GrpcDigitizerBackend(DigitizerBackend):
     def create_isolated_scope_backend(self) -> GrpcDigitizerBackend:
         """Open a worker-owned gRPC channel for Scope Auto Setup."""
         return type(self)(self._ch, self._hostname, self._port)
+
+    def create_current_monitor_client(self) -> CurrentMonitorClient:
+        """Open a gRPC channel used only by the current-monitor worker."""
+        return _GrpcCurrentMonitorClient(
+            type(self)(self._ch, self._hostname, self._port)
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers — the only place gRPC types appear in this file
@@ -523,3 +530,16 @@ class GrpcDigitizerBackend(DigitizerBackend):
 
     def get_sync_timestamp(self) -> int:
         return self._int(_CMD.VDPP_sync_get_timestamp, no_channel=True)
+
+
+class _GrpcCurrentMonitorClient(CurrentMonitorClient):
+    """Own one lightweight-purpose gRPC backend for IIR polling."""
+
+    def __init__(self, backend: GrpcDigitizerBackend) -> None:
+        self._backend = backend
+
+    def read_raw(self) -> int:
+        return self._backend.get_iir_lp_average()
+
+    def close(self) -> None:
+        self._backend.close()

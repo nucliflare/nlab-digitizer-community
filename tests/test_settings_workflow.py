@@ -34,6 +34,22 @@ def test_menu_save_writes_one_document_with_each_channel(
         SimpleNamespace(configuration_settings=lambda: {"refresh_rate_hz": 10}),
         SimpleNamespace(configuration_settings=lambda: {"refresh_rate_hz": 20}),
     ]
+    controller._current_monitor_controllers = [
+        SimpleNamespace(
+            configuration_settings=lambda: {
+                "zero_code": 12.5,
+                "scale_per_code": 0.25,
+                "unit": "nA",
+            }
+        ),
+        SimpleNamespace(
+            configuration_settings=lambda: {
+                "zero_code": -3.0,
+                "scale_per_code": 0.5,
+                "unit": "nA",
+            }
+        ),
+    ]
     controller._mca_controllers = [
         SimpleNamespace(
             hardware_configuration_settings=lambda: {"low_pass_preset": 0},
@@ -74,6 +90,7 @@ def test_menu_save_writes_one_document_with_each_channel(
     controller._window = SimpleNamespace(configuration_settings=lambda: {"show_roi": True})
     dock = SimpleNamespace(saveState=lambda: QByteArray(b"dock-state"))
     controller._scope_dock_host = dock
+    controller._current_dock_host = dock
     controller._mca_dock_host = dock
     controller._psd_dock_host = dock
     controller._psu_dock_host = dock
@@ -98,6 +115,12 @@ def test_menu_save_writes_one_document_with_each_channel(
     assert set(document["application"]["channels"]) == {"0", "1"}
     assert document["application"]["channels"]["0"]["psd"] == {"ratio_cut": 0.2}
     assert document["application"]["channels"]["1"]["psd"] == {"ratio_cut": 0.3}
+    assert document["application"]["channels"]["0"]["current_monitor"] == {
+        "zero_code": 12.5,
+        "scale_per_code": 0.25,
+        "unit": "nA",
+    }
+    assert "current" in document["application"]["dock_layout"]
     assert "psd" in document["application"]["dock_layout"]
     assert document["connection"] == {
         "backend": "iio",
