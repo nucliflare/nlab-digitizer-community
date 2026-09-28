@@ -265,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=30_431)
     parser.add_argument("--minimum-events", type=int, default=200_000)
     parser.add_argument("--timeout", type=float, default=45.0)
-    parser.add_argument("--output-dir", type=Path, default=Path("wiki/images"))
+    parser.add_argument("--output-dir", type=Path, default=Path("docs/images"))
     args = parser.parse_args(argv)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="nlab-live-wiki-psd-") as settings_dir:

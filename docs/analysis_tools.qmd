@@ -50,11 +50,19 @@ statistic, AIC/BIC, component curves, residuals, and boundary/covariance
 warnings. Spectrum arithmetic creates new immutable entries, requires matching
 coordinate grids, propagates variance, and never interpolates silently.
 
-The following workbench view contains deterministic synthetic spectra. It is a
-UI example generated without hardware or network I/O, not a captured MCA
-result.
+The following workbench view contains a stopped, frozen spectrum measured on
+CH0 of the reference board at `192.168.10.128:30431`. It was acquired with
+negative polarity, raw trigger level `-96`, and binning `32`; the application
+did not read or change the PSU. The online list-mode run accumulated 172,232
+events before the stream was stopped and drained.
 
-![MCA peak-analysis workbench with two synthetic spectra and a selected fit region.](images/mca-peak-analysis.png)
+The shaded range `2132–2772` surrounds the prominent raw peak near channel
+`2452`, and the dashed marker is the workbench's suggested starting position.
+It is not an energy calibration or a completed fit. Raw peak positions depend
+on detector gain and processing settings.
+
+![MCA peak-analysis workbench showing a frozen live CH0 spectrum and selected
+peak region.](images/mca-peak-analysis-live.png)
 
 ## PSD event readback
 

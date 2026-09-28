@@ -1,0 +1,134 @@
+---
+title: "Live Pulse-Shape Discrimination"
+format: gfm
+---
+
+The per-channel **PSD** workspace separates event populations using the two
+charge estimates transported in MCA list-mode records. It is a live analysis
+view fed by the MCA DMA worker; it does not own another hardware buffer and
+does not alter a simultaneously recorded raw event stream.
+
+The displayed ratio is:
+
+```text
+PSD ratio = (Qlong - Qshort) / Qlong
+          = 1 - charge_energy / trapezoid_energy
+```
+
+`trapezoid_energy` is also the horizontal coordinate. Both quantities are raw
+producer values until the detector response and event-field interpretation
+have been validated for the specific setup.
+
+## CH0 live workflow on `.128`
+
+The following reference run used channel 0 of
+`192.168.10.128:30431`. The application did not read or change the PSU.
+
+### 1. Run Scope Auto Setup
+
+1. Open **Scope** and select **CH0**.
+2. Stop ordinary Scope acquisition and disable **Record DMA frames**.
+3. Click **Auto Setup** and wait for the result instead of changing Scope
+   controls while its worker is active.
+4. Confirm that a real pulse crosses the selected trigger and that the status
+   reports *verified*.
+
+In this run Auto Setup found a negative pulse, selected **Falling edge**, set
+the DAC baseline to `256`, and set the raw Scope threshold to `27326`.
+
+![Live CH0 Scope after a verified Auto Setup on the `.128` PSD
+signal.](images/psd-ch0-scope-auto-setup-live.png)
+
+These Scope values describe the Scope ADC path. They are not the MCA trigger
+level below and should not be copied between the two signal paths.
+
+### 2. Configure MCA charge comparison
+
+Stop Scope before moving to MCA. Apply these CH0 settings while MCA list-mode
+DMA is stopped:
+
+| Setting | Value |
+|---|---|
+| Polarity | Negative |
+| Baseline | 64 ns |
+| Debug 1 / Debug 2 | Input signal / Trigger signal |
+| Pile-ups | 0 |
+| Binning | 32 |
+| Trigger level | `-96` raw |
+| Window length | 256 ns |
+| Pretrigger offset | 24 ns |
+| Trigger source | Threshold |
+| Charge Comparison | Enabled, 64 ns |
+| PSD Zero Crossing | Disabled |
+| Zero Crossing mode/window | Mode 0, 8–16 ns (inactive while disabled) |
+
+Charge Comparison is the feature that supplies `charge_energy` for this live
+PSD ratio. The separately named **PSD Zero Crossing** block produces timing
+markers for another analysis path; it is deliberately disabled in this
+example.
+
+![Live CH0 MCA settings and spectrum used for the PSD
+measurement.](images/psd-ch0-mca-settings-live.png)
+
+Select **Online only** under **Settings → DMA Settings...** when no raw file is
+required, then enable **Record list-mode DMA**. Choose Binary, HDF5, or ROOT
+instead when the same events must also be retained for offline analysis.
+
+### 3. Configure and acquire the PSD view
+
+Use these client-side display settings:
+
+| PSD control | Value |
+|---|---|
+| Energy display bins | 1024 |
+| Ratio display bins | 256 |
+| Energy shift | 0 bits |
+| Ratio range | `-1.0…1.0` |
+| PSD cut | `0.5834` |
+
+Return to MCA and press **Start**. The PSD workspace begins accumulating only
+when MCA list-mode DMA is active and Charge Comparison is enabled. Stop the
+MCA measurement and wait for the final drain before treating the matrix as a
+completed result.
+
+![Completed live CH0 PSD matrix showing two separated signal
+populations.](images/psd-ch0-live.png)
+
+## Reading the plots
+
+- The left image is a logarithmically coloured energy-versus-ratio matrix.
+  Its axes remain raw values.
+- The red horizontal line is the movable PSD cut. It classifies the display;
+  it does not reject records from a saved DMA stream.
+- The blue vertical region selects the energy interval used by the ratio
+  projection at upper right.
+- The lower plot contains separate raw-energy projections for events below
+  and above the cut.
+
+This live run produced two clear ratio populations near `0.355` and `0.785`.
+The cut at `0.5834` separates their displayed energy projections. These are
+two experimentally distinct pulse-shape populations, but they are
+intentionally not labelled as particle species. Such a label requires a
+controlled, independently identified source and a detector-specific
+validation.
+
+Energy positions, ratio centres, and the best cut depend on detector gain,
+pulse shaping, integration time, and source geometry. Repeat the optimization
+instead of copying `0.5834` to another channel or setup.
+
+## Integrity of the reference run
+
+The final CH0 run transported 204,800 records in 200 complete frames. The MCA
+view reported verified continuity. Of those records, 203,950 entered the
+displayed ratio range; 815 had zero total energy and 35 lay outside the
+configured view. The PSD subscriber reported zero display-buffer drops.
+
+A visually clean matrix is not enough to establish integrity. Always inspect
+the final MCA DMA summary after Stop. A nonzero `list_deadtime_raw`, frame
+count mismatch, DMA fault, or display drop makes the affected interpretation
+incomplete.
+
+For saved-event reconstruction and bounded offline analysis, see [MCA
+List-Mode Analysis](analyze_listmode). For buffer ownership and output modes,
+see [Acquisition Workflows](acquisition_workflows) and [Capture Files and
+Integrity](data_formats).

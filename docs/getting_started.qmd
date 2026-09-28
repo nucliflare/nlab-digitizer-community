@@ -25,6 +25,28 @@ and ZMQ for DMA. Keep it only for older images exposing those services.
 Scope can remain usable when MCA or IDS devices are absent. The GUI disables
 unsupported workspaces instead of failing the complete connection.
 
+## Device front and back
+
+The **front panel** carries the labelled signal and channel connections:
+**SYNC**, **CH0 IN**, **CH1 IN**, **LOGIC IN**, the two **SiMP & GPIO**
+connectors, and the separate **CH0 HV** and **CH1 HV** connectors. Use the
+printed CH0/CH1 labels as the physical starting point, then confirm channel
+identity with a known live signal before acquiring data.
+
+![Front panel of the Nuclear Lab Digitizer, showing the signal, GPIO, and
+high-voltage channel connectors.](images/device-front-panel.png)
+
+The CH0 and CH1 HV connectors can carry high voltage. Make or change detector
+and HV connections only with the output disabled and according to the
+laboratory's approved procedure.
+
+The **back panel** contains the serial USB connection, Ethernet port, second
+USB connection, status indicators and microSD slot, and the DC power input.
+The Ethernet connection is used for the IIO workflow described below.
+
+![Back panel of the Nuclear Lab Digitizer, showing USB, Ethernet, microSD,
+status indicators, and DC power.](images/device-back-panel.png)
+
 ## Verify the board before opening the GUI
 
 Install the libiio command-line tools and inspect the remote context:
@@ -73,7 +95,8 @@ In the connection dialog:
 3. keep port `30431` unless the target is configured differently;
 4. select the number of exposed channels and connect.
 
-![Connection dialog configured for the direct IIO backend.](images/connection-dialog.png)
+![Connection dialog configured for the live two-channel `.128` IIO reference
+board.](images/readme-first-steps-connection.png)
 
 A saved YAML configuration can pre-fill the connection and hardware settings:
 
@@ -97,6 +120,27 @@ show gRPC for compatibility; switch it to IIO for current firmware.
    list-mode DMA, Current DMA, or Coincidence.
 6. Save a configuration only after checking channel identity, trigger/DAC
    values, timing, and output location.
+
+The following reference images were captured from live hardware with a Cs-137
+source on both detector channels. Detector bias had already been prepared
+outside this workflow, so the application did not read or change either PSU
+channel. Do not copy a bias value or assume that another detector is safe to
+operate with the same settings.
+
+After a verified Auto Setup, CH0 showed this inverted detector pulse:
+
+![Live inverted Cs-137 detector pulse on Scope channel 0 after Auto
+Setup.](images/readme-first-steps-scope-ch0.png)
+
+With negative polarity, threshold trigger at raw `-1024`, and binning `32`,
+the stopped CH0 MCA spectrum showed the uncalibrated Cs-137 photopeak near raw
+channel `4448`:
+
+![Live Cs-137 pulse-height spectrum on MCA channel
+0.](images/readme-first-steps-mca-ch0.png)
+
+Raw channel positions depend on detector gain and processing. Calibrate the
+energy axis before reporting peak energies from another measurement.
 
 On shutdown, the application stops acquisition workers before closing hardware
 connections. In scripts, use `try/finally`, stop Scope/MCA explicitly, and

@@ -452,7 +452,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--threshold", type=int, default=-1024)
     parser.add_argument("--binning-index", type=int, default=5)
     parser.add_argument("--seconds", type=float, default=8.0)
-    parser.add_argument("--output-dir", type=Path, default=Path("wiki/images"))
+    parser.add_argument("--output-dir", type=Path, default=Path("docs/images"))
     parser.add_argument("--comparison-run", choices=("both", "coarse", "cfd"), default="both")
     parser.add_argument("--roi-ch0", nargs=2, type=int, default=(1932, 2666))
     parser.add_argument("--roi-ch1", nargs=2, type=int, default=(1321, 1961))

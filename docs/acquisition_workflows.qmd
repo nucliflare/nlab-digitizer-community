@@ -87,6 +87,10 @@ Charge Comparison can feed the live PSD view through its own bounded subscriber;
 the subscriber cannot steal batches from recording. Online-only events without
 a consumer are intentionally discarded.
 
+For the complete Charge Comparison setup, plot interpretation, and a live
+two-population CH0 reference measurement, see [Live Pulse-Shape
+Discrimination](pulse_shape_discrimination).
+
 Current IIO list mode uses fixed 16 KiB frames containing 1,024 opaque 16-byte
 records. Low event rates can therefore delay a live update until a complete
 frame is available or the acquisition stops and drains. End-of-run driver

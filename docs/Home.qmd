@@ -15,6 +15,7 @@ gRPC/ZMQ remains available only for legacy firmware compatibility.
 | Install the application and connect a board | [Getting Started](getting_started) |
 | Understand Scope, MCA, PSD, and ownership | [Acquisition Workflows](acquisition_workflows) |
 | Monitor detector current | [Live Current Monitoring](current_monitor) |
+| Separate live pulse-shape populations | [Pulse-Shape Discrimination](pulse_shape_discrimination) |
 | Configure two-channel timing and coincidence | [Coincidence Measurement](coincidence) |
 | Choose a capture format or validate a run | [Capture Files and Integrity](data_formats) |
 | Use calibration and offline workbenches | [Analysis Tools](analysis_tools) |

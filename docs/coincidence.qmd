@@ -93,6 +93,63 @@ constant-background Gaussian-core fit. It reports centre, FWHM, formal
 uncertainty, fitted signal count, and reduced chi-square. A poor-fit warning or
 a narrow fitted core is not by itself a complete detector CTR result.
 
+## Live example: Na-22 511 keV pair
+
+This comparison was measured on the two-channel reference board at
+`192.168.10.128:30431`. The prepared inputs carried the same Na-22 event
+signal with a nominal relative delay of about 25 ns. The application did not
+read or change the PSU.
+
+Both runs used the same acquisition and selection settings:
+
+- negative pulse polarity, trigger level `-512`, and MCA binning `32`;
+- `CH0 AND CH1` logic with both MCA energy gates enabled;
+- CH0 ROI `2150–2450` and CH1 ROI `1500–1675`, covering the two 511 keV
+  photopeaks in this setup;
+- an inclusive timing gate from `-40 ns` to `-16 ns`;
+- zero CH1-minus-CH0 calibration, so the plots show the measured raw delay;
+- online-only analysis with delayed-random sidebands disabled.
+
+Raw MCA-channel positions are specific to this detector gain and processing
+configuration. Locate the 511 keV photopeak again instead of copying these
+ROI numbers to another setup.
+
+### Coarse timestamps, CFD disabled
+
+For the coarse run, hardware CFD was explicitly disabled on both MCA channels
+and **Coarse (8 ns)** was selected. The broad maximum falls in the bin centred
+at `-20 ns`; an 8 ns histogram cannot resolve the prepared delay more
+precisely. `CFD valid: 0` in the footer independently confirms that no
+fine-CFD values entered this result.
+
+![Live Na-22 511 keV coincidence measurement using coarse 8 ns timestamps
+with CFD disabled.](images/coincidence-na22-511-coarse-live.png)
+
+The screenshot is a live view and therefore says *provisional*. After it was
+captured, both streams were stopped and drained. CH0 completed 348 frames
+(356,352 records) and CH1 completed 339 frames (347,136 records); both final
+summaries reported verified continuity, zero DMA faults, and zero list
+deadtime.
+
+### CFD fine timing
+
+For the fine run, CFD was enabled on both channels with factor `0.4`, delay
+`2 ns`, and a time-walk window of `8–64 ns`. **CFD fine (62.5 ps bins)** was
+then selected without changing the trigger, energy ROIs, timing gate, or
+channel calibration. The live Gaussian-core fit placed the peak near
+`-27.14 ns` with an FWHM of about `0.15 ns`. This resolves the relative delay
+hidden inside the coarse 8 ns bins; the difference from the nominal 25 ns
+also includes the uncalibrated channel and producer timing offsets.
+
+![Live Na-22 511 keV coincidence measurement using 62.5 ps CFD timing
+bins.](images/coincidence-na22-511-cfd-live.png)
+
+This screenshot is also provisional. The subsequent drain completed with 151
+CH0 frames (154,624 records) and 146 CH1 frames (149,504 records). Both
+channels finished with verified continuity, zero DMA faults, and zero list
+deadtime. Treat the displayed Gaussian FWHM as the fitted core for this short
+validation run, not as a complete detector timing-resolution result.
+
 ## Energy matrix and random subtraction
 
 Ordinary AND analysis fills a 512 × 512 matrix. Rows are CH1, columns are CH0,
@@ -115,11 +172,26 @@ subtraction. Corrected logarithmic display uses a sign-preserving
 `sign(count) * log10(1 + abs(count))` transform. Matrix analysis is unavailable
 for veto, OR, and XOR because those rules do not produce two-member pairs.
 
-The screenshot below is a synthetic GUI example generated without hardware or
-network I/O. The matrix populations and counts are illustrative, not detector
-measurements.
+The live prompt matrix below uses the same `.128` Na-22 configuration as the
+coarse 511 keV example above: trigger `-512`, binning `32`, CH0 ROI
+`2150–2450`, CH1 ROI `1500–1675`, timing gate `-40…-16 ns`, and CFD disabled.
+The matrix and both projections are zoomed to the active energy region; this
+changes only the display, not the acquired matrix or its raw-channel axes.
+**Prompt** data and a logarithmic scale make the correlated band visible.
+Delayed-random sidebands were disabled for this short demonstration, so no
+background subtraction is implied.
 
-![Coincidence workspace showing a synthetic corrected energy matrix and its projections.](images/coincidence-matrix.png)
+![Live Na-22 511 keV prompt energy matrix and its CH0 and CH1
+projections.](images/coincidence-na22-511-matrix-live.png)
+
+The brightest 32-channel matrix cell was centred near CH0 `2256` and CH1
+`1584`, inside the two independently selected 511 keV ROIs. The diagonal
+extent reflects the correlation between the pulse-height estimates in the two
+prepared input signals; it is not an energy-calibration line. The image was
+captured while the result was still marked *Live provisional*. The final drain
+completed with 197 CH0 frames (201,728 records) and 192 CH1 frames (196,608
+records). Both channel summaries reported verified continuity, zero DMA
+faults, and zero list deadtime.
 
 ## Recording and finalization
 

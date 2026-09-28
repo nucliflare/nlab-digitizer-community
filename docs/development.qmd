@@ -66,11 +66,25 @@ Refresh the versioned GUI screenshots after a documented widget changes:
 ```bash
 python scripts/build_ui.py
 python scripts/capture_wiki_screenshots.py
+```
+
+The hardware-independent capture script runs Qt offscreen and refreshes only
+screens that contain no measurement plot, such as the connection dialog. Live
+measurement images have dedicated scripts:
+
+```bash
+python scripts/capture_live_wiki_current_coincidence.py --mode current
+python scripts/capture_live_wiki_current_coincidence.py \
+  --mode coincidence-compare --capture-matrix
+python scripts/capture_live_wiki_psd.py
+python scripts/capture_live_wiki_peak_analysis.py
 quarto render docs
 ```
 
-The capture script runs Qt offscreen, makes no hardware or network connection,
-and labels every populated plot as deterministic synthetic documentation data.
+The live scripts configure and operate the reference hardware. Run them only
+when live validation is in scope, verify the endpoint and connected sources,
+and inspect their final stop/drain summaries. Never replace a live result with
+generated counts just to refresh a screenshot.
 
 ## Driver-derived changes
 

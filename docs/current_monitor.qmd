@@ -38,11 +38,60 @@ calibration.
 The monitor deliberately starts stopped. Merely opening the workspace does not
 create a polling connection or arm DMA.
 
-The screenshot below uses deterministic synthetic data and performs no
-hardware or network I/O. Its values illustrate the controls and diagnostics;
-they are not a measurement result.
+## First measurement with IIR polling
 
-![Current workspace in Scope DMA mode with synthetic waveform data.](images/current-monitor-dma.png)
+1. Open **Current**, then select the detector channel at the bottom of the
+   workspace.
+2. Set **Mode** to **IIR polling**. The **DMA gap** and **Reset Scope defaults**
+   controls are disabled because IIR polling does not use the Scope DMA path.
+3. Leave **Display unit** set to `raw` unless a calibration for this exact
+   channel and analogue path has already been entered.
+4. Press **Start monitor**. The large value is the newest signed IIR code; the
+   plot shows the rolling history, while **Last screen interval** gives its
+   mean, minimum, maximum, and sample count.
+5. Check **Acquisition** for the achieved read rate, median transaction time,
+   and age of the newest value. The rate can be lower than the requested 1 kHz,
+   especially over a remote IIO connection.
+6. Press **Stop** before changing mode or channel. IIR polling does not arm
+   Scope DMA, so ordinary Scope acquisition remains available while this
+   lightweight monitor is running.
+
+If the input is known to represent zero current, let the history settle and
+then use **Set zero from recent samples**. This only establishes the offset;
+converting codes to amperes still requires an independently determined scale.
+
+## Live reference: Na-22 on channel 1
+
+The following screenshots are real, uncalibrated measurements from channel 1
+of the reference board at `192.168.10.128:30431`, with a Na-22 detector signal
+connected. The application did not read or change the PSU during this run.
+The numeric values are specific to that analogue path and operating point;
+they are examples of the workflow, not calibration constants.
+
+In **IIR polling** mode, select `raw`, press **Start monitor**, and wait for the
+rolling plot to fill. This live capture shows the scalar input-filter output
+near `-1387` raw. The achieved host read rate was about 122 Hz, illustrating
+why the requested 1 kHz polling cadence is not a timing guarantee over remote
+IIO.
+
+![Live Current workspace on the Na-22 channel in IIR polling
+mode.](images/current-monitor-iir-live.png)
+
+Stop IIR polling before changing mode. Select **Scope DMA**, leave the
+qualified 100 us post-frame gap, and press **Start monitor** again. The DMA
+view below shows real negative detector pulses and the gaps between periodic
+Scope frames. At the captured instant it displayed about 406 received
+frames/s, 1.668 MB/s, 0.67% timestamp-derived coverage, and no protocol
+errors.
+
+![Live Current workspace on the Na-22 channel in Scope DMA
+mode.](images/current-monitor-dma-live.png)
+
+The IIR value and the newest DMA sample differ because these modes expose
+different FPGA signals. Do not infer a physical current by comparing their
+raw codes. Press **Stop**, wait for DMA teardown to finish, and use **Reset
+Scope defaults** before returning to an ordinary Scope workflow if the
+optimized Current geometry is no longer wanted.
 
 ### IIR polling
 
