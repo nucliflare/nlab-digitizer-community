@@ -262,6 +262,56 @@ You can also run the module directly:
 python -m nlab.main
 ```
 
+### First live measurement: Cs-137
+
+The screenshots in this walkthrough contain **live hardware data**, not a
+generated or simulated spectrum. They were captured from the reference board
+at `192.168.10.128:30431` with a Cs-137 source on both detector channels
+(Scope IP v122, MCA IP v101). Detector bias had already been prepared outside
+this workflow, so the application did not read or change either PSU channel.
+
+Follow your laboratory's rules for detector bias and radioactive-source
+handling. Do not copy an HV setting from a screenshot or assume that skipping
+the Power Supply tab means a detector is unpowered.
+
+1. Start the application, select **IIO**, enter `192.168.10.128`, leave port
+   `30431`, select **2** channels, and click **Connect**.
+
+   ![IIO connection dialog for the live two-channel reference board](docs/images/readme-first-steps-connection.png)
+
+2. Open **Scope** and select the channel you want to measure. Ensure ordinary
+   acquisition is stopped and **Record DMA frames** is clear, then click
+   **Auto Setup**. Auto Setup measures the baseline, chooses the DAC offset,
+   trigger level, and edge, and finally verifies the trigger against a fresh
+   pulse. A successful result ends with `Auto Setup verified` and a clean
+   inverted pulse similar to this live Ch0 frame:
+
+   ![Live inverted Cs-137 detector pulse on Scope channel 0 after Auto Setup](docs/images/readme-first-steps-scope-ch0.png)
+
+3. Click **Stop** before moving to MCA. Repeat Auto Setup for the other channel
+   if you will measure it too; channel settings are independent.
+
+4. Open **MCA** for the same channel. For this reference setup, select
+   **Negative** polarity, **Threshold** trigger, raw trigger level `-1024`, and
+   binning `32`. Binning 32 keeps the complete pulse-height distribution
+   inside the 16,384-channel plot on both inputs. Click **Start**, allow the
+   spectrum to stabilize, then click **Stop** before changing channels or
+   configuration.
+
+   Ch0 placed the uncalibrated Cs-137 full-energy photopeak near channel 4448:
+
+   ![Live Cs-137 pulse-height spectrum on MCA channel 0](docs/images/readme-first-steps-mca-ch0.png)
+
+   Ch1 placed the same photopeak near channel 3168:
+
+   ![Live Cs-137 pulse-height spectrum on MCA channel 1](docs/images/readme-first-steps-mca-ch1.png)
+
+The two raw channel positions differ because the channels have different
+uncalibrated gains. In both plots the single narrow full-energy peak is the
+approximately 662 keV Cs-137 line; the broader low-energy structure is the
+expected continuum and does not represent a second photopeak. Calibrate the
+energy axis before reporting energy values from an unknown spectrum.
+
 ## Programmatic IIO access
 
 The hardware layer can be used without the GUI. IIO channel numbers are
