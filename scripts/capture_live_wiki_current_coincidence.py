@@ -345,6 +345,34 @@ def run_coincidence_comparison(args: argparse.Namespace) -> dict[str, object]:
             peak_ns = settings.low_ns + (peak_index + 0.5) * settings.bin_width_ns
             fit = fit_coincidence_peak(delay_counts, settings)
             live_status = coincidence.status.text()
+            matrix_index = np.unravel_index(
+                int(np.argmax(snapshot.prompt_matrix)), snapshot.prompt_matrix.shape
+            )
+            if args.capture_matrix:
+                coincidence.matrix_mode.setCurrentIndex(0)
+                coincidence.matrix_scale.setCurrentIndex(1)
+                coincidence.matrix_gate_ch0.setRegion(
+                    (roi_by_channel[0][0], roi_by_channel[0][1] + 1)
+                )
+                coincidence.matrix_gate_ch1.setRegion(
+                    (roi_by_channel[1][0], roi_by_channel[1][1] + 1)
+                )
+                coincidence.result_tabs.setCurrentIndex(coincidence._matrix_tab_index)
+                coincidence._render_matrix(snapshot)
+                coincidence.matrix_plot.setXRange(
+                    roi_by_channel[0][0] - 100, roi_by_channel[0][1] + 100, padding=0
+                )
+                coincidence.matrix_plot.setYRange(
+                    roi_by_channel[1][0] - 100, roi_by_channel[1][1] + 100, padding=0
+                )
+                coincidence.matrix_projection0_plot.setXRange(
+                    roi_by_channel[0][0] - 100, roi_by_channel[0][1] + 100, padding=0
+                )
+                coincidence.matrix_projection1_plot.setXRange(
+                    roi_by_channel[1][0] - 100, roi_by_channel[1][1] + 100, padding=0
+                )
+                filename = "coincidence-na22-511-matrix-live.png"
+                QApplication.processEvents()
             _save_window(window, args.output_dir / filename)
 
             QTest.mouseClick(coincidence.btnStop, Qt.MouseButton.LeftButton)
@@ -368,6 +396,11 @@ def run_coincidence_comparison(args: argparse.Namespace) -> dict[str, object]:
                     "random_pairs": int(snapshot.random_pairs),
                     "peak_bin_center_ns": peak_ns,
                     "peak_bin_counts": int(delay_counts[peak_index]),
+                    "matrix_max_raw_channels": [
+                        int(matrix_index[1] * 32 + 16),
+                        int(matrix_index[0] * 32 + 16),
+                    ],
+                    "matrix_max_counts": int(snapshot.prompt_matrix[matrix_index]),
                     "fit": (
                         {
                             "center_ns": fit.center_ns,
@@ -427,6 +460,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timing-high", type=float, default=48.0)
     parser.add_argument("--minimum-pairs", type=int, default=500)
     parser.add_argument("--random-sidebands", action="store_true")
+    parser.add_argument("--capture-matrix", action="store_true")
     parser.add_argument(
         "--mode", choices=("probe", "current", "coincidence-compare"), default="probe"
     )
