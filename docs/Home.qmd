@@ -1,0 +1,57 @@
+---
+title: "Nuclear Lab Digitizer — Community Edition Wiki"
+format: gfm
+---
+
+This wiki documents the current Digitizer 4.0 application, its direct-IIO
+hardware path, acquisition workflows, file formats, analysis tools, and
+failure-recovery rules. The recommended backend is Linux IIO through `iiod`;
+gRPC/ZMQ remains available only for legacy firmware compatibility.
+
+## Start here
+
+| Goal | Guide |
+|---|---|
+| Install the application and connect a board | [Getting Started](getting_started) |
+| Understand Scope, MCA, PSD, and ownership | [Acquisition Workflows](acquisition_workflows) |
+| Monitor detector current | [Live Current Monitoring](current_monitor) |
+| Configure two-channel timing and coincidence | [Coincidence Measurement](coincidence) |
+| Choose a capture format or validate a run | [Capture Files and Integrity](data_formats) |
+| Use calibration and offline workbenches | [Analysis Tools](analysis_tools) |
+| Investigate a connection or DMA failure | [Troubleshooting](troubleshooting) |
+| Understand threads, contexts, and DMA lifecycle | [Architecture](architecture) |
+| Build, test, or contribute | [Development Guide](development) |
+
+## Analysis recipes
+
+- [Scope Waveform Analysis](analyze_scope) covers native NDMA/CAEN browsing,
+  conversion, bounded programmatic access, and timing coverage.
+- [MCA List-Mode Analysis](analyze_listmode) covers NDMA v1/v2, HDF5, ROOT,
+  bounded event iteration, PSD reconstruction, and integrity metadata.
+
+## What the application contains
+
+- live Scope viewing, trigger/DAC manipulation, persistence, Auto Setup, and
+  full-resolution DMA recording;
+- MCA histograms, debug waveforms, list-mode capture, PSD, energy calibration,
+  and peak analysis;
+- scalar IIR and waveform-DMA current monitoring with saved linear calibration;
+- two-channel coincidence logic, timing histograms, energy matrices, delayed
+  random subtraction, and HDF5/ROOT matrix export;
+- IDS/HV control, global diagnostics, optional Modbus instruments, and safe
+  shutdown;
+- standalone waveform, PSD-event, spectrum, and timing-validation tools that
+  do not take ownership of live acquisition panels.
+
+## Three rules worth knowing first
+
+1. **Raw is not calibrated.** ADC, IIR, energy, and timing fields require the
+   correct mode-specific interpretation and calibration.
+2. **DMA has one owner.** Stop the current owner and let its worker drain and
+   destroy the native buffer before starting another Scope or MCA DMA task.
+3. **A clean-looking file is not proof of continuity.** Use run summaries,
+   driver counters, capture-complete markers, and session manifests.
+
+For a compact project overview and release status, see the
+[README](https://github.com/nucliflare/nlab-digitizer-community#readme) and
+[changelog](https://github.com/nucliflare/nlab-digitizer-community/blob/main/CHANGELOG.md).

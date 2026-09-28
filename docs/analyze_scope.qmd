@@ -1,134 +1,176 @@
 ---
-title: "Scope DMA Waveform Analysis"
-format:
-  gfm:
-    code-fold: false
-jupyter: python3
+title: "Scope Waveform Analysis"
+format: gfm
 ---
 
-```{python}
-#| label: config
-#| tags: [parameters]
+Native NLab Scope recordings are fixed-frame NDMA binaries. The application can
+also browse waveform-bearing CAEN CoMPASS files and can convert compatible NDMA
+v1 files to HDF5. Start with the GUI workbench unless a reproducible script is
+required.
 
-FILENAME = "D:/work/measurements/test2.h5"
+## Recommended GUI workflow
+
+Open **Tools → Waveform Analysis Workbench...** and select a native Scope NDMA
+or waveform-bearing CAEN binary. The workbench:
+
+- memory-maps fixed-frame NDMA without loading the capture into RAM;
+- builds a bounded background offset index for variable-length CAEN records;
+- copies only the selected waveform for display;
+- supports baseline removal, polarity selection, draggable integration gates,
+  PSD reconstruction, projections, and bounded batch processing;
+- never starts, stops, or reconfigures live Scope acquisition.
+
+For CAEN data, set the ADC sample period explicitly because the file does not
+store it. For NDMA, retain the capture configuration: NDMA v1 contains frame
+length and timestamps but no explicit trigger-mode or decimation metadata.
+
+## Inspect a native file in Python
+
+Use the project reader rather than hand-written byte offsets:
+
+```python
+from pathlib import Path
+
+from nlab.analysis.waveform_file import (
+    MappedWaveformFile,
+    build_waveform_file_index,
+    inspect_waveform_file,
+)
+
+path = Path("measurements/scope.bin")
+summary = inspect_waveform_file(path)
+index = build_waveform_file_index(path)
+
+print(summary.format_name, summary.channel)
+print("frames:", index.frame_count)
+print("stored sample period:", index.sample_period_ns)
+
+mapped = MappedWaveformFile(index)
+try:
+    frame = mapped.frame(0)
+    print("timestamp:", frame.timestamp)
+    print("samples:", frame.samples.shape, frame.samples.dtype)
+finally:
+    mapped.close()
 ```
 
-# Load Data
+`build_waveform_file_index()` rejects unsupported files, ignores only a logged
+trailing incomplete record, and requires at least one complete frame.
 
-```{python}
-#| label: load
+## Bounded waveform statistics
+
+Do not materialize a multi-gigabyte capture as one NumPy array. Read bounded
+batches and accumulate statistics:
+
+```python
+import numpy as np
+
+mapped = MappedWaveformFile(index)
+try:
+    first = mapped.frame(0)
+    sample_count = len(first.samples)
+    selected = min(index.frame_count, 10_000)
+    batch = mapped.batch(
+        0,
+        selected,
+        sample_count=sample_count,
+        stride=1,
+    )
+    waveforms = batch.samples[batch.complete]
+
+    frame_mean = waveforms.mean(axis=1)
+    frame_minimum = waveforms.min(axis=1)
+    print("accepted frames:", len(waveforms))
+    print("mean baseline:", float(frame_mean.mean()))
+    print("minimum range:", int(frame_minimum.min()), int(frame_minimum.max()))
+finally:
+    mapped.close()
+```
+
+For large studies, repeat over disjoint batches and retain running sums,
+histograms, or selected examples rather than concatenating every waveform.
+
+## Convert NDMA to HDF5
+
+Use **File → Convert Binary to HDF5...**. The converter validates the NDMA
+header and refuses a payload with a trailing partial frame. The result contains:
+
+| Object | Meaning |
+|---|---|
+| `/waveforms` | `int16` waveform matrix, one row per complete frame |
+| `/timestamps` | frame timestamps in 8 ns ticks |
+| `/time_ns` | converter-provided waveform-relative axis |
+| attributes | source path, format version, channel, capture time, frame geometry, total frames |
+
+A compact HDF5 analysis looks like:
+
+```python
+from pathlib import Path
+
 import h5py
 import numpy as np
-import matplotlib.pyplot as plt
 
-with h5py.File(FILENAME, "r") as f:
-    waveforms = f["waveforms"][:]
-    time_ns = f["time_ns"][:]
-    frame_timestamps = f["timestamps"][:]
-    channel = f.attrs["channel"]
-    timestamp = f.attrs["recording_timestamp"]
-    frame_samples = f.attrs["frame_samples"]
-    samples_per_frame = f.attrs["samples_per_frame"]
-    total_frames = f.attrs["total_frames"]
+path = Path("measurements/scope.h5")
+with h5py.File(path, "r") as file:
+    waveforms = file["waveforms"]
+    timestamps = file["timestamps"][:]
+    time_ns = file["time_ns"][:]
 
-print(f"File: {FILENAME}")
-print(f"Channel: {channel}")
-print(f"Total frames: {total_frames}")
-print(f"Samples per frame: {samples_per_frame}")
-print(f"Frame size (bytes): {frame_samples}")
-print(f"Waveform shape: {waveforms.shape}")
-print(f"Time axis: {time_ns[0]:.0f} - {time_ns[-1]:.0f} ns")
-print(f"Frame timestamps: {frame_timestamps[0]} - {frame_timestamps[-1]} (8 ns ticks)")
+    # Read a bounded subset, not the complete dataset.
+    count = min(len(waveforms), 10_000)
+    block = np.asarray(waveforms[:count])
+    baseline = block.mean(axis=1)
+
+print("frames analysed:", len(block))
+print("baseline mean/std:", float(baseline.mean()), float(baseline.std()))
+print("time axis:", float(time_ns[0]), float(time_ns[-1]), "ns")
 ```
 
-# Waveform Statistics
+## Timestamp spacing and coverage
 
-```{python}
-#| label: stats
-print(f"ADC range: [{waveforms.min()}, {waveforms.max()}]")
-print(f"Mean (per frame): {waveforms.mean(axis=1).mean():.1f} +/- {waveforms.mean(axis=1).std():.1f}")
-print(f"Std  (per frame): {waveforms.std(axis=1).mean():.1f} +/- {waveforms.std(axis=1).std():.1f}")
-print(f"Min amplitude (global): {waveforms.min()}")
-print(f"Max amplitude (global): {waveforms.max()}")
+Frame timestamps use 8 ns ticks. Check for duplicate/backwards transitions and
+summarize positive differences before estimating coverage:
+
+```python
+delta_ticks = np.diff(timestamps.astype(np.uint64))
+positive = delta_ticks > 0
+
+print("non-forward transitions:", int((~positive).sum()))
+if positive.any():
+    delta_ns = delta_ticks[positive].astype(np.float64) * 8.0
+    print("interval percentiles [ns]:", np.percentile(delta_ns, [0, 50, 95, 99, 100]))
 ```
 
-# Random 10 Impulses
+Coverage is transported waveform duration divided by observed timestamp span.
+Use the capture's qualified sample geometry/configuration; NDMA v1 does not
+encode trigger mode or decimation. Coverage is not the fraction of requested
+trigger opportunities accepted.
 
-```{python}
-#| label: random-impulses
-#| fig-cap: "10 randomly selected waveforms"
-rng = np.random.default_rng(42)
-indices = rng.choice(total_frames, size=min(10, total_frames), replace=False)
-indices.sort()
+The repository's `notebooks/check_dma.py` performs the native NDMA alignment,
+timestamp, and coverage checks used for capture diagnostics. Set its optional
+trigger label when comparing files because NDMA v1 does not store that mode.
 
-fig, ax = plt.subplots(figsize=(10, 5))
-for idx in indices:
-    ax.plot(time_ns[:10], waveforms[idx][:10], alpha=0.7, linewidth=0.8, label=f"#{idx}")
-ax.set_xlabel("Time [ns]")
-ax.set_ylabel("Amplitude [ADC counts]")
-ax.set_title("Random Impulses")
-ax.legend(fontsize=7, ncol=2)
-ax.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
+## PSD from waveforms
+
+The GUI workbench calculates baseline-corrected `Qshort`, `Qlong`, and:
+
+```text
+PSD = (Qlong - Qshort) / Qlong
 ```
 
-# Average Impulse
+Baseline range, polarity, and integration gates are analysis inputs, not file
+facts. Save or report them with every result. If stored CAEN gate sums exist,
+the workbench reports their scale relative to computed gates as a consistency
+check; it does not silently force them to agree.
 
-```{python}
-#| label: average-impulse
-#| fig-cap: "Average waveform with +/- 1 std band"
-avg = waveforms.mean(axis=0).astype(np.float64)
-std = waveforms.std(axis=0).astype(np.float64)
+## Common mistakes
 
-fig, ax = plt.subplots(figsize=(10, 5))
-ax.plot(time_ns, avg, color="C0", linewidth=1.5, label="Mean")
-ax.fill_between(time_ns, avg - std, avg + std, alpha=0.25, color="C0", label="+/- 1 std")
-ax.set_xlabel("Time [ns]")
-ax.set_ylabel("Amplitude [ADC counts]")
-ax.set_title(f"Average Impulse (n={total_frames})")
-ax.legend()
-ax.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
-```
+- Treating `frame_samples` as bytes; it is an int16 word count.
+- Including the four timestamp words as waveform samples.
+- Accepting a trailing partial record.
+- Assuming NDMA v1 stores trigger mode or decimation.
+- Loading all frames into memory for a statistic that can be accumulated.
+- Interpreting waveform ADC codes as volts or current without calibration.
 
-# Amplitude Distribution
-
-```{python}
-#| label: amplitude-dist
-#| fig-cap: "Distribution of peak (minimum) amplitudes across all frames"
-peaks = waveforms.min(axis=1)
-
-fig, ax = plt.subplots(figsize=(10, 4))
-ax.hist(peaks, bins=100, color="C0", alpha=0.7, edgecolor="black", linewidth=0.3)
-ax.set_xlabel("Peak Amplitude [ADC counts]")
-ax.set_ylabel("Count")
-ax.set_title("Peak Amplitude Distribution")
-ax.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
-
-print(f"Peak amplitude: mean={peaks.mean():.1f}, std={peaks.std():.1f}")
-print(f"Range: [{peaks.min()}, {peaks.max()}]")
-```
-
-# Baseline Offset vs Time
-
-```{python}
-#| label: offset-vs-time
-#| fig-cap: "Per-frame baseline offset (zero-shifted) vs. frame timestamp"
-time_s = (frame_timestamps - frame_timestamps[0]) * 8e-9
-frame_avg = waveforms.mean(axis=1).astype(np.float64)
-offset_zeroed = frame_avg - frame_avg.mean()
-
-fig, ax = plt.subplots(figsize=(10, 4))
-ax.plot(time_s, offset_zeroed, ".", color="C0", markersize=2, alpha=0.5)
-ax.set_xlabel("Time [s]")
-ax.set_ylabel("Baseline offset [ADC counts]")
-ax.set_title("Per-frame Baseline Offset vs. Time")
-ax.axhline(0, color="black", linewidth=0.8, alpha=0.5)
-ax.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
-```
+See [Capture Files and Integrity](data_formats) and
+[Analysis Tools](analysis_tools) for the broader workflow.

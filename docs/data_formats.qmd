@@ -1,0 +1,132 @@
+---
+title: "Capture Files and Integrity"
+format: gfm
+---
+
+Choose a format from the measurement you need to preserve, not only from the
+file extension. Scope and MCA binary files share an `NDMA` header but have
+different payloads and version rules.
+
+## Format overview
+
+| Capture | Format | Contents | Integrity evidence |
+|---|---|---|---|
+| Scope DMA | NDMA v1 `.bin` | Repeated complete timestamped int16 frames | Header geometry, exact frame alignment, no trailing partial frame |
+| MCA legacy DMA | NDMA v1 `.bin` | Legacy gRPC/ZMQ 16-byte events | Alignment only; transport continuity is unverified |
+| MCA IIO DMA | NDMA v2 `.bin` | Fixed 1,024 × opaque-16-byte frames | Authenticated JSON sidecar plus driver counters |
+| MCA IIO DMA | `.h5` | Appendable canonical event dataset and embedded YAML | `committed_events`, `capture_complete`, run summary |
+| MCA IIO DMA | `.root` | Canonical `events` TTree and embedded metadata | Run summary and successful close |
+| MCA IIO DMA | Online-only | No file | GUI/session diagnostics only |
+| Coincidence matrix | `.h5` or `.root` | Prompt/random/corrected matrices, axes, gates, calibration | Export metadata and session diagnostics |
+
+## NDMA header and versions
+
+The common 24-byte header stores magic, version, channel, recording timestamp,
+and `frame_samples`. For Scope, `frame_samples` is a count of int16 words—not a
+byte count. The first four int16 slots of every Scope record carry one little-
+endian uint64 timestamp; the remaining words are waveform samples.
+
+MCA NDMA uses `frame_samples=0`. Version 1 identifies the legacy semantic event
+record. Version 2 identifies the current IIO opaque-record transport. The two
+records are both 16 bytes but are not interchangeable.
+
+## Scope recording constraints
+
+Scope captures append complete frames to one file until stopped or storage
+fails; they are not rotated at an application-defined size. The client rejects
+partial frames rather than making an apparently valid truncated file.
+
+NDMA v1 cannot describe decimation or alignment padding. IP122 periodic Scope
+firmware advertises such a layout, so online Current DMA can consume it but the
+legacy Scope NDMA writer rejects it explicitly. Do not alter the advertised
+geometry or request a partial scan mask to force a file. A versioned Scope
+format is required before that layout can be saved faithfully.
+
+The headless `examples/dma_scope_periodic.py` recorder refuses to overwrite an
+existing path or take over an active Scope, configures/auto-sets the channel,
+and restores settings after capture. A maximum-frame ten-second recording can
+be hundreds of megabytes.
+
+## MCA structured output
+
+The HDF5 writer appends canonical fields (`timestamp`, `long_gate`,
+`short_gate`, `marker`, `zc_offset`, and signed `zc_estimation`) in bounded
+batches. `committed_events` marks data visible to SWMR readers and
+`capture_complete` becomes true only after successful finalization.
+
+ROOT stores the same canonical fields in an `events` TTree. HDF5 and ROOT embed
+the YAML configuration and the client record schema. They do not reinterpret
+raw channels as calibrated energy.
+
+Every file-producing MCA run writes a same-stem `.run.json` summary containing
+channel, format, start/end time, record count, average rate, continuity state,
+and transport diagnostics. A missing summary after a crash means the run was
+not finalized; it is not evidence that the capture is complete.
+
+## IIO list-mode sidecars
+
+Binary IIO list mode additionally writes:
+
+- a same-stem YAML hardware/application configuration;
+- a JSON capture sidecar with frame geometry, client schema, capture SHA-256,
+  completed-frame count, DMA fault, cumulative DMA error count, list deadtime,
+  and continuity result;
+- the format-independent `.run.json` summary.
+
+The converter authenticates the JSON sidecar against the NDMA SHA-256 before
+copying its diagnostics into HDF5. Do not separate or rename sidecars without
+preserving their relationship to the capture.
+
+## Continuity semantics
+
+For current IIO list mode, a valid run requires all of the following:
+
+- driver DMA fault is zero;
+- streamed frame count equals driver completed-frame count;
+- list deadtime is zero;
+- only complete 16 KiB frames were accepted;
+- the buffer stopped, drained, and closed successfully.
+
+`dma_error_count` is cumulative since driver initialization; interpret it with
+the current fault and run-local counters. IIO record counts include all slots
+in the final complete frame, including indistinguishable zero padding. They are
+not an exact accepted-pulse count.
+
+Legacy gRPC runs are labelled **unverified**, not lossless, because the
+transport exposes no equivalent completed-frame/deadtime counters.
+
+## Conversion
+
+Use **File → Convert Binary to HDF5...** for NDMA data. Conversion validates
+the header and full-record alignment; IIO list-mode conversion also validates
+complete 1,024-record frames and authenticated metadata when present.
+
+Converted Scope HDF5 contains:
+
+- `/waveforms` (`int16`, one row per frame);
+- `/timestamps` (8 ns ticks);
+- `/time_ns` (waveform-relative axis);
+- channel, source timestamp, frame geometry, and frame count attributes.
+
+Converted MCA HDF5 preserves the source NDMA version and raw event dtype. A
+directly recorded HDF5 file instead uses the canonical appendable schema. Use
+the project readers described in [MCA List-Mode Analysis](analyze_listmode) if
+code must accept both variants.
+
+## Storage and reproducibility checklist
+
+- Save the configuration YAML with raw captures.
+- Keep JSON/run/session sidecars beside their files.
+- Never overwrite an existing capture or export.
+- Confirm free disk space before long Scope runs.
+- Treat a live MCA histogram snapshot as non-atomic.
+- Record backend, endpoint, channel, firmware/IP version, trigger mode, and
+  whether continuity was verified.
+- Preserve raw coordinates in exported analysis; add calibrations as metadata
+  instead of rewriting source records.
+
+## Analysis routes
+
+- Native waveform files: [Scope Waveform Analysis](analyze_scope)
+- List-mode files: [MCA List-Mode Analysis](analyze_listmode)
+- GUI workbenches and supported external formats: [Analysis Tools](analysis_tools)

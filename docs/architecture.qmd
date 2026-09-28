@@ -1,0 +1,129 @@
+---
+title: "Architecture"
+format: gfm
+---
+
+## Layers
+
+```text
+PySide6 GUI
+  └─ controllers and background workers
+       └─ Digitizer / Scope / MCA / HV interfaces
+            ├─ IIO backend (current)
+            │    └─ libiio → iiod → FPGA and converter IIO devices
+            └─ gRPC backend (legacy)
+                 └─ Engine/IDS gRPC + ZMQ DMA services
+
+External workspace
+  └─ nlab-modbus → Modbus TCP / ser2net → RS-485 instruments
+```
+
+High-level hardware interfaces are shared across backends. DMA implementations
+are intentionally backend-specific because the current IIO buffer lifecycle is
+not interchangeable with the legacy server-pushed ZMQ streams.
+
+## Context and thread ownership
+
+One libiio context is not shared across GUI control, polling, viewer, and
+blocking DMA threads. Each background activity owns its context and device
+handles. This prevents a blocking refill from serializing unrelated control
+writes on the same remote connection.
+
+| Activity | Owner |
+|---|---|
+| GUI settings and direct reads | Controller-side `Digitizer` backend |
+| Scope live viewer | Isolated Scope client |
+| IIR current polling | Worker-owned current-monitor client |
+| Scope DMA refill | Scope DMA worker/backend capture context |
+| MCA list-mode refill | MCA DMA worker/backend capture context |
+| File output | Dedicated bounded writer queue/thread where applicable |
+
+Exceptions crossing a thread boundary are reduced to scalar error data. Keeping
+native exception tracebacks can retain IIO buffers and delay hardware-gate
+cleanup.
+
+## Scope DMA lifecycle
+
+The required order is:
+
+1. stop the acquisition core;
+2. configure scan elements and validate driver-advertised geometry;
+3. create the buffer and start the first blocking refill on the DMA thread;
+4. enable acquisition only after that reader is waiting;
+5. accept complete frames only;
+6. stop the core before drain/close;
+7. cancel or drain the reader, join its thread, explicitly destroy the native
+   buffer, and wait for ownership gates to clear.
+
+Buffer callbacks own the DMA gate; application code must not write
+`dma_enable` directly. Persistent `EINVAL` or `EIO` ends and latches the
+session. Recovery acknowledgement is required before rearming instead of
+recreating buffers mid-file.
+
+Current firmware can advertise four queued Scope kernel blocks. Qualified
+remote capture uses READBUF batches of 64 frames to amortize network round
+trips while preserving exact hardware frame boundaries. Firmware without the
+queue capability remains on the conservative one-block path.
+
+## MCA DMA lifecycle
+
+Current list mode transports complete 16 KiB blocks of 1,024 opaque records.
+The first reader is armed before the pulse processor starts. Stop gates event
+production, then the reader drains complete tail blocks before destroying the
+buffer. Reconfiguration is forbidden while list DMA owns the pulse processor.
+
+File output uses bounded queues. Storage that remains slower than acquisition
+causes explicit backpressure or failure; it must never silently drop records
+and leave a capture looking complete.
+
+## Current-monitor data flow
+
+IIR mode polls one signed filter register into a bounded sample buffer. The GUI
+drains it at a capped display cadence and retains a ten-second history.
+
+Scope Current DMA validates every record and updates exact signed sums/sample
+counts on the receiver thread. Only after scientific accumulation does it
+publish replaceable preview data. Scalar rendering and waveform painting have
+separate cadence limits, so skipped GUI generations do not imply skipped
+scientific observations.
+
+## MCA snapshots
+
+Histogram and debug data can be exposed as split or monolithic binary
+attributes depending on firmware. Large remote attributes may have one verified
+transport terminator; only that final NUL is removed because embedded zero
+bytes are valid. Multi-chunk histogram reads are sequential and not atomic
+while acquisition runs.
+
+## Device discovery
+
+Pulse-processor and list-mode devices use `channel_index` for stable pairing.
+Scope and input-filter discovery may use sorted `iio:deviceN` order as a
+compatibility fallback. Sorting is deterministic but does not establish the
+physical channel; validate mapping after target changes.
+
+## Important source locations
+
+| Path | Responsibility |
+|---|---|
+| `src/nlab/hardware/digitizer/backends/base.py` | Backend interfaces |
+| `src/nlab/hardware/digitizer/backends/iio_backend.py` | Scope/MCA IIO control and DMA lifecycle |
+| `src/nlab/hardware/digitizer/backends/iio_ids_backend.py` | IDS/HV and global diagnostics |
+| `src/nlab/hardware/digitizer/backends/grpc_backend.py` | Legacy control backend |
+| `src/nlab/hardware/digitizer/dma.py` | Scope and MCA streamers, buffers, NDMA formats |
+| `src/nlab/hardware/digitizer/current_monitor.py` | Current DMA accumulation and snapshots |
+| `src/nlab/workers/` | Polling, DMA, analysis, and device workers |
+| `src/nlab/controllers/` | GUI state, ownership, and coordination |
+| `src/nlab/analysis/` | Bounded offline readers and analysis models |
+
+## Source of truth
+
+Driver registers, units, ranges, scan layouts, and lifecycle rules come from
+the corresponding PetaLinux repository revision. IIO sysfs attributes normally
+already contain the user/physical value after kernel conversion. Only explicit
+`*_raw` plus `*_scale` pairs require caller-side scaling.
+
+A get-after-set round trip cannot detect a symmetric double conversion. Changes
+must be checked against driver encoding and range boundaries. Live hardware
+results, source-derived behavior, and simulated/unit-tested behavior should be
+labelled separately.

@@ -1,0 +1,134 @@
+---
+title: "Getting Started"
+format: gfm
+---
+
+## Recommended connection path
+
+Use the **IIO** backend for current firmware. It connects to `iiod`, normally
+on TCP port `30431`, and is the implementation qualified for current Scope,
+MCA, list-mode, IDS/HV, and diagnostic devices.
+
+The legacy backend uses DPP gRPC on port `50050`, IDS gRPC on port `50040`,
+and ZMQ for DMA. Keep it only for older images exposing those services.
+
+| Function | Expected IIO device |
+|---|---|
+| Scope control, viewer, and DMA | `vdpp_scope` |
+| Scope analogue offset | `vdpp_afe_dac` |
+| MCA histogram and DSP configuration | `vdpp_pulse_processor` |
+| MCA input filter and IIR current | `vdpp_input_filter` |
+| MCA list-mode DMA and PSD | `vdpp_lm_frame` |
+| Shared two-channel start | `vdpp_sync_trigger` |
+| IDS/HV and diagnostics | `ad5686r`, `mcp3564`/`mcp3564r`, `tmp117`, plus optional diagnostic devices |
+
+Scope can remain usable when MCA or IDS devices are absent. The GUI disables
+unsupported workspaces instead of failing the complete connection.
+
+## Verify the board before opening the GUI
+
+Install the libiio command-line tools and inspect the remote context:
+
+```bash
+iio_info -u "ip:192.168.10.128:30431"
+```
+
+Check device names, IP versions, advertised frame geometry, and channel
+identity. Current pulse-processor and list-mode drivers publish
+`channel_index`. Scope and input-filter discovery may fall back to sorted
+`iio:deviceN` order, which is deterministic but does not prove physical A/B
+mapping after a firmware or device-tree change.
+
+## Install from source
+
+Requirements:
+
+- Python 3.12 or newer;
+- [`uv`](https://github.com/astral-sh/uv);
+- the platform libiio native runtime (the project targets libiio 0.26);
+- Qt system libraries required by PySide6 on the host platform.
+
+```bash
+git clone https://github.com/nucliflare/nlab-digitizer-community.git
+cd nlab-digitizer-community
+
+uv sync --locked --extra dev
+python scripts/build_ui.py
+python scripts/generate_proto.py
+```
+
+Generated Qt and protobuf modules are intentionally untracked. Regenerate
+them after a fresh clone and whenever their source forms or proto files change.
+
+## Connect and run
+
+```bash
+uv run nlab
+```
+
+In the connection dialog:
+
+1. select **IIO**;
+2. enter the board address;
+3. keep port `30431` unless the target is configured differently;
+4. select the number of exposed channels and connect.
+
+A saved YAML configuration can pre-fill the connection and hardware settings:
+
+```bash
+uv run nlab --config experiment.yaml --ip 192.168.10.128 --port 30431
+```
+
+Explicit command-line address options override the saved file. The dialog also
+remembers the last successful connection. A new settings profile may initially
+show gRPC for compatibility; switch it to IIO for current firmware.
+
+## A safe first session
+
+1. Open **Global** and the system log; confirm that expected devices were
+   discovered without pairing warnings.
+2. Open one **Scope**, keep DMA off, and run **Auto Setup** or load a known
+   hardware configuration.
+3. Verify physical channel identity and signal polarity with the live viewer.
+4. Open **MCA** only if its pulse-processor/input-filter devices are present.
+5. Start with a short acquisition. Stop it before changing ownership to
+   list-mode DMA, Current DMA, or Coincidence.
+6. Save a configuration only after checking channel identity, trigger/DAC
+   values, timing, and output location.
+
+On shutdown, the application stops acquisition workers before closing hardware
+connections. In scripts, use `try/finally`, stop Scope/MCA explicitly, and
+close the `Digitizer`; a crashed script can leave `enable=1` and make the next
+configuration write fail with `EBUSY`.
+
+## Minimal programmatic connection
+
+IIO channel numbers are zero-based:
+
+```python
+from nlab.hardware.digitizer import Digitizer
+
+digitizer = Digitizer.from_iio(
+    channel=0,
+    uri="ip:192.168.10.128:30431",
+    with_ids=False,
+)
+
+try:
+    frame = digitizer.scope.acquire_frame()
+    print(frame.shape)
+finally:
+    digitizer.scope.stop()
+    digitizer.close()
+```
+
+Pass `with_ids=False` when only Scope/MCA access is required. If IDS hardware
+was requested but required devices are absent, the application logs a warning
+and continues with HV unavailable.
+
+## Next steps
+
+- [Acquisition Workflows](acquisition_workflows)
+- [Live Current Monitoring](current_monitor)
+- [Capture Files and Integrity](data_formats)
+- [Troubleshooting](troubleshooting)

@@ -1,0 +1,130 @@
+---
+title: "Troubleshooting"
+format: gfm
+---
+
+## Start with read-only discovery
+
+```bash
+iio_info -u "ip:192.168.10.128:30431"
+```
+
+Record the endpoint, board/firmware version, relevant IP version, device names,
+channel mapping, and advertised geometry. If a transport problem can be
+reproduced with `iio_info` or `iio_readdev`, include that result; it separates a
+target/libiio failure from the GUI.
+
+## Connection succeeds but a workspace is missing
+
+The application enables workspaces by detected capability. Check for the
+expected devices:
+
+- no `vdpp_pulse_processor`/`vdpp_input_filter`: MCA and IIR current are not
+  available on that channel;
+- no `vdpp_lm_frame`: list-mode, live PSD, and Coincidence are unavailable;
+- incomplete IDS converter/sensor set: Scope/MCA continue, but PSU/HV is
+  disabled;
+- no `vdpp_sync_trigger`: two-channel synchronized coincidence cannot arm.
+
+Do not map a missing hardware register to an unrelated statistic. A clear
+unsupported/capability error is preferable to plausible but false data.
+
+## Configuration fails with `EBUSY`
+
+An acquisition core or DMA buffer still owns the hardware. Stop the relevant
+Scope/MCA/Current/Coincidence activity and wait for worker teardown. A previous
+script may have crashed with `enable=1`; stop the core from a safe control path
+before writing configuration.
+
+Do not force `dma_enable` or list ownership gates. Buffer setup/teardown owns
+them, and direct writes can break the required reader-before-enable order.
+
+## List-mode buffer allocation returns `EINVAL`
+
+Superseded firmware exposes five semantic `vdpp_lm_frame` scan channels. On the
+target Linux 5.15 IIO stack, buffer allocation fails with `EINVAL` (often
+`Open unlocked: -22`), including through official `iio_readdev`.
+
+The supported ABI is IP121 with:
+
+- `frame_records=1024`;
+- `frame_bytes=16384`;
+- `record_layout=opaque[16]`;
+- one repeated-u8 scan element carrying each 16-byte record unchanged.
+
+Upgrade the target driver/firmware. Do not change Python frame geometry or use
+a partial scan mask as a workaround.
+
+## Scope DMA stops with `EIO`, `EINVAL`, or a latched fault
+
+Sustained capture can expose target-side Xilinx VDMA `DMA_INT_ERR` or
+`EOF_EARLY_ERR`. The client rejects incomplete frames, stops the core, releases
+buffer gates, and latches the session. It cannot repair a driver/FPGA fault.
+
+1. Preserve logs and capture metadata.
+2. Stop and let the reader fully tear down.
+3. Check target `dmesg` and reproduce with an official libiio reader when
+   possible.
+4. Acknowledge the recovery state before another session.
+
+Repeatedly recreating a buffer in the same file would hide a discontinuity and
+is deliberately not attempted.
+
+## Scope file recording is rejected on IP122 periodic mode
+
+The advertised periodic transport can be decimated and alignment-padded. Scope
+NDMA v1 cannot describe those fields, so online Current DMA supports the layout
+but file capture rejects it. This is a file-format limit, not a reason to alter
+the driver scan mask.
+
+## Current values look wrong
+
+- IIR and Scope DMA are different raw signals; do not share calibration without
+  a physical reference measurement.
+- Confirm `zero_code`, `scale_per_code`, unit, sign, DAC baseline, and sensor
+  polarity.
+- In DMA mode, the large raw value is the latest word, not a frame average.
+- A requested gap is not guaranteed observed spacing; inspect timestamps,
+  skipped opportunities, and coverage.
+
+## Current DMA or Auto Setup appears unavailable after stop
+
+Wait for DMA buffer teardown rather than only the button state. Current clears
+its temporary Scope DMA selection after the worker finishes. Use **Reset Scope
+defaults** while stopped if the optimized Current geometry is no longer wanted.
+
+## Histogram or debug data changes during a read
+
+Large MCA attributes are transferred in chunks and are not atomic while the
+core is accumulating. Stop acquisition before reading a stable final snapshot.
+If a remote binary attribute is absent from `iio_info` and libiio attribute
+enumeration, retries or a larger client buffer cannot make it reachable; check
+the target driver/iiod exposure.
+
+## A capture exists but may be incomplete
+
+Check the format-specific evidence in [Capture Files and Integrity](data_formats):
+
+- exact frame/record alignment;
+- `.run.json` continuity state;
+- IIO JSON sidecar and SHA-256;
+- HDF5 `committed_events` and `capture_complete`;
+- driver frame count, DMA fault, and list deadtime;
+- common Coincidence session manifest.
+
+A missing run summary after a crash means finalization did not complete. Legacy
+gRPC captures are unverified even when aligned.
+
+## Reporting a useful issue
+
+Include:
+
+- host OS and application revision;
+- backend, endpoint, and channel;
+- firmware/Linux and relevant FPGA IP versions;
+- `iio_info` device/geometry output;
+- exact action and ownership state when the failure occurred;
+- GUI/system logs and target `dmesg`;
+- whether official libiio tools reproduced it;
+- capture/run/session sidecars, without presenting simulated data as hardware
+  evidence.

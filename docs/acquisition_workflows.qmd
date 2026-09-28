@@ -1,0 +1,119 @@
+---
+title: "Acquisition Workflows"
+format: gfm
+---
+
+The application separates control, blocking acquisition, and display work so
+that a slow plot cannot silently become the measurement clock. The practical
+consequence is that each hardware data path has an explicit owner.
+
+## Ownership at a glance
+
+| Activity | Hardware/data path owned | Can run alongside |
+|---|---|---|
+| Scope live viewer | Isolated viewer connection | Scope DMA preview supplied by the DMA owner |
+| Scope file DMA | Scope DMA buffer | MCA histogram; independent channels where supported |
+| Current IIR | Input-filter direct reads on a worker-owned connection | Scope viewing/recording and MCA, subject to firmware resources |
+| Current DMA | Scope DMA buffer plus periodic Scope acquisition | No other Scope DMA on that channel |
+| MCA histogram | Pulse-processor accumulation | Scope activity |
+| MCA list-mode/PSD | MCA list-mode buffer and pulse processor | Scope activity; bounded subscribers may share accepted event batches |
+| Coincidence | Two MCA list-mode streams and shared software start | Scope activity; no separate MCA DMA owners on those channels |
+
+Stop the current owner and wait for its worker to finish before starting a
+conflicting operation. A checkbox changing state is not proof that a native IIO
+buffer has already been destroyed.
+
+## Scope
+
+The Scope workspace supports live raw and persistence views, trigger-level and
+pretrigger markers, periodic/level/edge trigger modes, frame length and gap,
+and analogue DAC baseline control.
+
+Recommended workflow:
+
+1. With acquisition stopped, run **Auto Setup** or load known trigger and DAC
+   calibration values.
+2. Confirm polarity and channel identity in the live raw view.
+3. Set frame length, pretrigger, trigger mode, and frame gap.
+4. Use the draggable trace/markers for preview, then verify the next hardware
+   frame after the setting is committed.
+5. For a file capture, choose a new destination and start DMA. Existing files
+   are not silently overwritten.
+6. Stop before reconfiguring geometry or handing Scope DMA to Current.
+
+Scope Auto Setup can provisionally search for narrow, randomly arriving pulses
+when a forced-frame survey contains only baseline. Its measured DAC sensitivity
+makes vertical drag previews meaningful; without it, the preview is only an
+approximation.
+
+The direct-IIO DMA path accepts complete frames only. It arms the blocking
+reader before enabling acquisition and stops the core before draining and
+destroying the buffer. See [Capture Files and Integrity](data_formats) for the
+NDMA v1 layout limitation on IP122 periodic geometry.
+
+## Current
+
+Use IIR mode for a lightweight scalar trend and Scope DMA mode for raw waveform
+coverage and sample-weighted statistics. The modes expose different raw
+signals and require their own calibration. The full workflow, callback example,
+and performance diagnostics are in [Live Current Monitoring](current_monitor).
+
+## MCA histogram and debug data
+
+MCA control covers low-pass, CR-RC², trapezoid, CFD, charge-comparison, and PSD
+zero-crossing settings, plus a 16,384-bin spectrum and debug waveform bank.
+
+Configuration writes are synchronized with non-DMA acquisition. Changing DSP
+settings while the histogram is running performs a controlled stop/write/restart
+and begins a new accumulation; stale histogram and elapsed-time presentation
+state is cleared. Do not reconfigure the pulse processor during list-mode DMA,
+because that requires the complete buffer stop/drain/close/rearm lifecycle.
+
+Histogram chunks are transferred sequentially and are not an atomic snapshot
+while acquisition is running. Stop acquisition before using a final histogram
+as a stable result.
+
+## MCA list mode and PSD
+
+Choose the list-mode output under **Settings → DMA Settings...**:
+
+- binary NDMA;
+- appendable HDF5;
+- ROOT `TTree`;
+- online-only (no file).
+
+Binary, HDF5, and ROOT retain records whether or not live PSD is enabled.
+Charge Comparison can feed the live PSD view through its own bounded subscriber;
+the subscriber cannot steal batches from recording. Online-only events without
+a consumer are intentionally discarded.
+
+Current IIO list mode uses fixed 16 KiB frames containing 1,024 opaque 16-byte
+records. Low event rates can therefore delay a live update until a complete
+frame is available or the acquisition stops and drains. End-of-run driver
+counters and the run summary determine whether continuity was verified.
+
+## Coincidence
+
+Coincidence is a two-channel list-mode workflow, not an extension of the MCA
+histogram viewer. It owns both list streams, energy gates, timing rules, shared
+start, and optional paired files. Use the dedicated
+[Coincidence Measurement](coincidence) guide before changing its timing schema
+or interpreting pair counts.
+
+## PSU, global diagnostics, and external instruments
+
+Per-channel IDS/HV is available only when its converter and temperature devices
+are present. Global diagnostics cover board-wide sensors and shared trigger
+state. Optional Modbus instruments are discovered through the configured
+ser2net bridge.
+
+The application performs safe acquisition and power-supply shutdown on close.
+Scripts that enable HV must provide their own `finally` cleanup and must not
+assume that closing a DPP-only connection controls an external supply.
+
+## Related pages
+
+- [Capture Files and Integrity](data_formats)
+- [Analysis Tools](analysis_tools)
+- [Architecture](architecture)
+- [Troubleshooting](troubleshooting)

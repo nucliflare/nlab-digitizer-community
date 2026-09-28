@@ -1,0 +1,130 @@
+---
+title: "Development Guide"
+format: gfm
+---
+
+## Environment
+
+Install the locked development environment:
+
+```bash
+uv sync --locked --extra dev
+```
+
+Generated Qt and protobuf modules are intentionally untracked:
+
+```bash
+python scripts/build_ui.py
+python scripts/generate_proto.py
+```
+
+Regenerate Qt output after changing `forms/*.ui` and protobuf output after
+changing legacy service definitions.
+
+## Tests and checks
+
+Run Qt tests with an offscreen platform in headless environments:
+
+```bash
+QT_QPA_PLATFORM=offscreen uv run pytest
+```
+
+PowerShell:
+
+```powershell
+$env:QT_QPA_PLATFORM = "offscreen"
+uv run pytest
+```
+
+Use focused pytest, Ruff, and mypy checks for changed modules. The repository
+contains pre-existing global lint and strict-mypy debt; unrelated findings are
+not a reason to rewrite neighbouring interfaces.
+
+Important focused DMA tests include:
+
+- `tests/test_iio_scope_dma.py`;
+- `tests/test_iio_mca_dma.py`;
+- `tests/test_current_monitor.py`;
+- `tests/test_worker_lifecycle.py`;
+- `tests/test_hardware_widget_specs.py`.
+
+## Documentation and wiki
+
+Quarto sources live in `docs/`; rendered GitHub/Gitea wiki pages live in the
+separate `wiki/` checkout. Render all documentation with:
+
+```bash
+quarto render docs
+```
+
+Do not hand-edit generated analysis output in place. Update the corresponding
+`.qmd`, render it, inspect both repository diffs, and keep wiki navigation in
+`Home.md` and `_Sidebar.md` synchronized with the source set.
+
+## Driver-derived changes
+
+Use the maintainer-supplied PetaLinux revision as the authority for registers,
+units, ranges, scan layouts, and lifecycle rules. Cite non-obvious behavior in
+comments/docstrings and distinguish:
+
+- derived from driver source;
+- covered by a unit test;
+- reproduced with an official libiio tool;
+- validated on live hardware.
+
+IIO sysfs values normally have already passed through kernel encoding. Apply a
+scale only for explicit `*_raw` plus `*_scale` pairs when the public API needs a
+physical value. Compare documented range boundaries; a symmetric get/set round
+trip cannot detect double conversion.
+
+## Live hardware discipline
+
+- Begin with read-only `iio_info` discovery.
+- Do not perform hardware writes unless live validation is in scope.
+- Use a separate context per blocking/background activity.
+- Stop armed cores in `finally` and close `Digitizer`.
+- Test changed mappings at range boundaries, not only typical values.
+- Execute walkthrough notebooks in place and verify their final cells stop
+  acquisition.
+- Record endpoint, firmware/IP version, channel, and independent libiio
+  reproduction status.
+
+## DMA review checklist
+
+- Acquisition is stopped before buffer setup.
+- Scan geometry is driver-advertised and validated.
+- The blocking reader starts before enable.
+- Only complete frames enter files/analysis.
+- The core stops before drain/close.
+- Reader thread joins and native buffer destruction is explicit.
+- Persistent transport errors latch the session.
+- File/version distinctions between Scope, legacy MCA, and IIO MCA are kept.
+- No code writes buffer-owned hardware gates directly.
+
+## Builds
+
+The reviewed release build is:
+
+```bash
+python scripts/build_pyinstaller_reviewed.py --clean
+```
+
+It emits `dist/nlab.exe` on Windows or `dist/nlab` on Linux and reports the
+artifact hash. Nuitka remains available for optional standalone-directory
+builds:
+
+```bash
+python scripts/build_nuitka.py
+```
+
+Tagged releases trigger Windows and Ubuntu workflows for the configured GitHub
+and Gitea remotes.
+
+## Change completion
+
+- Preserve public backend/controller behavior unless intentionally changed.
+- Add focused tests for lifecycle, file format, settings, or analysis changes.
+- Update README/wiki for user-visible behavior and the changelog for
+  release-visible behavior.
+- Ensure generated UI, captures, reports, and build output are not staged.
+- State exactly what was tested locally, live, source-derived, or unverified.

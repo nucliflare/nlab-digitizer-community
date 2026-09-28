@@ -28,6 +28,11 @@ The high-level `Digitizer`, `Scope`, `MultiChannelAnalyzer`, and `HVSupply`
 interfaces are shared by both backends. Backend-specific DMA implementations
 preserve the lifecycle required by each firmware generation.
 
+The task-oriented [documentation index](docs/Home.qmd) covers installation,
+acquisition ownership, current and coincidence workflows, capture integrity,
+offline analysis, troubleshooting, architecture, and development. These Quarto
+sources are also rendered into the project wiki.
+
 ## Main features
 
 ### Scope
@@ -56,91 +61,34 @@ preserve the lifecycle required by each firmware generation.
 
 ### Live current monitor
 
-The per-channel **Current** workspace has two selectable acquisition modes.
-Both preserve received observations in a rolling ten-second numeric history
-while the numeric display redraws at no more than 30 Hz. The live Scope-DMA
-waveform redraws at 2 Hz so Qt painting cannot backpressure the receiver. A
-saved linear calibration, `(raw - zero) * scale`, can display A, mA, uA, nA,
-or pA. The monitor starts stopped; select a mode and press **Start monitor**
-before it opens a polling connection or takes ownership of Scope DMA.
+Each channel has a **Current** workspace with two acquisition modes. The
+monitor starts stopped and opens no polling or DMA transport until **Start
+monitor** is pressed.
 
-- **IIR polling** (default) continuously reads the FPGA input filter's signed
-  IIR output on a dedicated transport connection. It targets 1,000 reads/s and
-  timestamps every read at the midpoint of its host transaction. The widget
-  reports measured rate, median read latency, sample age, and buffer loss. The
-  driver exposes this as direct-mode `in_voltage0_raw`, with no IIO buffer or
-  hardware timestamp, so 1 ms is a requested host spacing rather than a
-  guaranteed hardware-time grid.
-- **Scope DMA** starts the channel's Scope acquisition in online-only DMA mode.
-  On IP122 it selects the live-qualified maximum-coverage preset: zero
-  pretrigger, an 8,188-sample frame, periodic trigger, and a 12,500-cycle
-  (100 us) post-frame gap. These values are mirrored into the Scope controls;
-  earlier firmware continues to use the visible frame and gap because the IP122
-  preset is not qualified there. Complete frames are validated and reduced on
-  the receiver thread before any replaceable display hand-off. Signed sums and
-  sample counts are accumulated into 100 ms bins by default for interval
-  statistics. The trigger-level and DAC-baseline values displayed in Scope are
-  applied unchanged when Current DMA starts; the DAC affects every waveform,
-  while periodic mode preserves but does not evaluate the trigger threshold.
-  The displayed signal is not averaged into one value per frame. The GUI keeps
-  a bounded 10 ms window of complete DMA waveform records and plots every raw
-  transported word at its sample time, inserting a break between records so
-  uncovered time remains an explicit gap. The large readout is the newest raw
-  word, and the latest-fragment line reports that fragment's last, minimum,
-  maximum, and sample count. An entire short frame is still assigned to the
-  analysis bin containing its trigger timestamp for aggregate statistics and
-  zero calibration; this does not alter the displayed waveform.
+| Mode | Source | Best suited for | Important constraint |
+|---|---|---|---|
+| **IIR polling** | Signed FPGA input-filter output | Lightweight continuous scalar monitoring | Host-timed reads; the requested 1 kHz spacing is not a hardware-time grid |
+| **Scope DMA** | Complete timestamped Scope waveforms | Raw waveform inspection and sample-weighted interval statistics | Direct IIO only; owns Scope DMA while running |
 
-  Stopping online Current DMA clears its temporary Scope DMA selection after
-  the worker releases the IIO buffer, so Scope Auto Setup can run immediately.
-  **Reset Scope defaults** is available in the Current toolbar while monitoring
-  is stopped; it restores the normal Scope trigger, timing, DAC, and non-DMA
-  defaults after the optimized preset has been used.
+Both modes retain a rolling ten-second numeric history and support the saved
+linear calibration `(raw - zero) * scale`. IIR and DMA expose different raw
+signals, so each sensor/front-end path must be calibrated appropriately before
+the display can be interpreted as A, mA, uA, nA, or pA.
 
-  The stopped Scope-DMA mode also exposes a **DMA gap** control in microseconds.
-  It defaults to the qualified 100.000 us value, accepts the hardware's exact
-  0.008 us steps from 0 through 524.280 us, and is applied when **Start
-  monitor** is pressed. Changing it does not imply that every requested trigger
-  will be transported; skipped opportunities remain visible in the timestamp
-  and coverage diagnostics.
+On IP122, Current DMA applies the qualified periodic preset (8,188 configured
+samples, zero pretrigger, and a 100 us post-frame gap). Complete frames feed
+the scientific accumulator before the replaceable GUI preview. The numeric
+view is capped at 30 Hz and the waveform at 2 Hz, so display work does not
+backpressure acquisition. While stopped, the workspace can change the DMA gap
+or use **Reset Scope defaults** after the optimized preset.
 
-The widget distinguishes the configured post-frame gap, nominal start-to-start
-spacing, measured FPGA timestamp spacing/skipped opportunities, host receive
-rate (decimal MB/s and frames/s), observed waveform coverage, analysis counts,
-preview/display replacement, protocol errors, analysis lag and GUI render
-preparation time. The default 100 ms scientific bins, 30 Hz numeric cadence,
-and 2 Hz live waveform cadence do not discard observations from the scientific
-statistics. With IP122 periodic decimation, each DMA waveform word already
-represents the FPGA-provided mean of four ADC samples, or 8 ns. Software cannot
-recover the four original 2 ns ADC samples, but it applies no further waveform
-averaging. Scope DMA owns the channel while this mode is running,
-so a separate Scope recording cannot run concurrently. If the Scope panel is
-visible its preview uses only the latest owned DMA frame; a hidden panel causes
-no independent viewer IIO reads.
-
-The qualified `.128` reference transport reached 26.43 decimal MB/s and 10.63%
-timestamp-derived coverage in a 100,000-frame receiver-only confirmation using
-the IP122 preset, READBUF x64, and four kernel buffers. That receiver-only
-result is a transport reference rather than a guarantee; raw-fragment GUI paint
-performance must be qualified separately. The monitor reports the transport
-and buffer policy actually selected in each session.
-
-The two raw sources are not identical: IIR mode displays the normalized FPGA
-filter result, while DMA mode displays the FPGA-transported ADC waveform code.
-Neither is amperes until the appropriate sensor/front-end calibration is
-entered. In the saved raw-code convention, `zero_code` is an ADC-code baseline and
-`scale_per_code` is current units per ADC code (including its sign).
-
-Two headless diagnostics exercise the revised paths. The GUI profile is
-synthetic and performs no hardware I/O; the DMA diagnostic temporarily owns an
-idle Scope channel, shows and paints the Current widget on the offscreen Qt
-platform when `--render-fps` is nonzero, restores its settings in `finally`,
-and emits JSON:
+See the [live current monitoring guide](docs/current_monitor.qmd) for the GUI
+workflow, calibration semantics, ownership rules, diagnostics, and the minimal
+headless IIR/DMA callback example. The same guide is published in the project
+wiki. Run the example with:
 
 ```bash
-python examples/current_monitor_gui_profile.py
-python examples/current_monitor_dma_diagnostic.py --host 192.168.10.135 \
-  --frame-samples 8188 --gap-cycles 12500 --frames 100000 --render-fps 30
+uv run python examples/measure_current.py
 ```
 
 ### MCA and PSD
@@ -705,7 +653,7 @@ Scope DMA worker's bounded frame publisher. Neither background path shares a
 blocking transport context with the GUI.
 
 On current Scope firmware, the driver advertises a qualified four-block DMA
-queue. Remote Scope recording uses a bounded 32-frame iiod request to amortize
+queue. Remote Scope recording uses a bounded 64-frame iiod request to amortize
 Ethernet round trips while preserving one exact hardware frame per IIO block.
 Firmware without that capability stays on the conservative one-block path.
 

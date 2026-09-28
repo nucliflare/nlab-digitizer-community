@@ -1,444 +1,170 @@
 ---
-title: "MCA Listmode Event Analysis"
-format:
-  gfm:
-    code-fold: false
-jupyter: python3
+title: "MCA List-Mode Analysis"
+format: gfm
 ---
 
-```{python}
-#| label: config
-#| tags: [parameters]
+MCA event analysis must distinguish transport version, producer schema, and
+file finalization. The easiest supported route is **Tools → PSD Event
+Readback...**, which accepts NLab NDMA, HDF5, ROOT, and compatible CAEN event
+files without loading the complete run into memory.
 
-FILENAME = "D:/work/measurements/ch0_20260807_153937_001.h5"
-HIST_BINS = 16384
-TIMESTAMP_TICK_NS = 8.0
+## Formats encountered in analysis
 
-# Select the deployed client-side decoder field explicitly. The IIO transport
-# itself exposes only opaque[16], so this name is an analysis choice.
-ENERGY_FIELD = "trapezoid_energy"  # or "charge_energy"
+| Input | Event representation |
+|---|---|
+| Legacy NDMA v1 | `marker`, `zc_offset`, `zc_estimation`, `short_energy`, `energy`, `timestamp` |
+| IIO NDMA v2 | opaque transport decoded as marker, zero-crossing fields, charge/trapezoid energy, timestamp |
+| Direct HDF5/ROOT | canonical `timestamp`, `long_gate`, `short_gate`, marker and zero-crossing fields |
+| Converted NDMA HDF5 | source-version event dtype plus convenience datasets |
+| CAEN | accepted only when raw long/short energy fields pass format validation |
 
-# Use an explicit 0..15 shift, or "auto" together with a hardware histogram
-# CSV containing contiguous bin,counts columns. A value of 2 preserves the
-# earlier notebook's effective four-raw-values-per-bin behavior, but now the
-# assumption is visible and auditable.
-ENERGY_RIGHT_SHIFT = 2
-HARDWARE_HISTOGRAM_CSV = None
-FAIL_ON_NON_MONOTONIC_TIMESTAMPS = True
-REQUIRE_VALID_CAPTURE = True
+An identical 16-byte record size does not make legacy and IIO NDMA records
+interchangeable. Always inspect the NDMA version and capture metadata.
 
-# IP v121 pads the final 1024-record DMA frame with zero records when it
-# stops part-way through the frame. The transport has no valid-record count,
-# and a real event may itself contain zeros, so this is deliberately an
-# analysis policy rather than a converter rule. Disable it when every raw
-# transport slot must be retained verbatim.
-TRIM_TRAILING_ZERO_PADDING = True
+## Inspect and iterate with project readers
+
+The PSD reader normalizes discovery while yielding bounded native batches:
+
+```python
+from pathlib import Path
+
+from nlab.analysis.psd_file import (
+    inspect_psd_event_file,
+    iter_psd_event_batches,
+)
+
+path = Path("measurements/events.bin")  # .bin, .h5, .hdf5, or .root
+info = inspect_psd_event_file(path)
+
+print(info.format_name)
+print("channel:", info.channel)
+print("records:", info.total_events)
+
+for batch in iter_psd_event_batches(path):
+    print(batch.dtype.names, len(batch))
+    break
 ```
 
-# Load Data
+Binary files are memory-mapped and copied one bounded batch at a time. HDF5 is
+sliced up to `committed_events`; ROOT uses chunked tree iteration.
 
-```{python}
-#| label: load
-import h5py
+## Select long and short fields explicitly
+
+The batch keeps names appropriate to its source. Make the choice visible:
+
+```python
+def gate_fields(names: tuple[str, ...]) -> tuple[str, str]:
+    fields = set(names)
+    if {"long_gate", "short_gate"} <= fields:
+        return "long_gate", "short_gate"
+    if {"trapezoid_energy", "charge_energy"} <= fields:
+        return "trapezoid_energy", "charge_energy"
+    if {"energy", "short_energy"} <= fields:
+        return "energy", "short_energy"
+    raise ValueError(f"unsupported event fields: {sorted(fields)}")
+```
+
+For IIO data, whether trapezoid/charge values are the physically intended
+long/short quantities depends on the qualified producer configuration. Preserve
+the client schema and hardware configuration with the result.
+
+## Bounded PSD accumulation
+
+```python
 import numpy as np
-import matplotlib.pyplot as plt
-from fast_histogram import histogram1d
 
+energy_edges = np.linspace(0, 65536, 513)
+ratio_edges = np.linspace(-1.0, 1.0, 513)
+matrix = np.zeros((len(energy_edges) - 1, len(ratio_edges) - 1), dtype=np.uint64)
+records = 0
 
-def count_trailing_zero_records(records: np.ndarray) -> int:
-    """Return the final all-zero run for the selected event schema."""
-    if not len(records):
-        return 0
-    all_zero = np.ones(len(records), dtype=bool)
-    assert records.dtype.names is not None
-    for field in records.dtype.names:
-        all_zero &= records[field] == 0
-    nonzero = np.flatnonzero(~all_zero)
-    return len(records) if not len(nonzero) else len(records) - int(nonzero[-1]) - 1
+for batch in iter_psd_event_batches(path):
+    assert batch.dtype.names is not None
+    long_name, short_name = gate_fields(batch.dtype.names)
+    long_gate = batch[long_name].astype(np.float64)
+    short_gate = batch[short_name].astype(np.float64)
 
+    valid = long_gate != 0
+    ratio = np.empty(len(batch), dtype=np.float64)
+    ratio.fill(np.nan)
+    ratio[valid] = (long_gate[valid] - short_gate[valid]) / long_gate[valid]
 
-def load_hardware_histogram(filename: str | None) -> np.ndarray | None:
-    if filename is None:
-        return None
-    values = np.genfromtxt(filename, delimiter=",", names=True, dtype=np.uint64)
-    if values.dtype.names != ("bin", "counts"):
-        raise ValueError("Histogram CSV must contain bin,counts columns")
-    bins = np.atleast_1d(values["bin"])
-    counts = np.atleast_1d(values["counts"])
-    if not np.array_equal(bins, np.arange(len(bins), dtype=np.uint64)):
-        raise ValueError("Histogram CSV bins must be contiguous from zero")
-    if len(counts) != HIST_BINS:
-        raise ValueError(
-            f"Hardware histogram has {len(counts)} bins; expected {HIST_BINS}"
-        )
-    return counts
-
-
-hardware_histogram = load_hardware_histogram(HARDWARE_HISTOGRAM_CSV)
-
-with h5py.File(FILENAME, "r") as f:
-    format_version = int(f.attrs["format_version"])
-    events_raw = f["events"][:]
-    channel = int(f.attrs["channel"])
-    timestamp = float(f.attrs["recording_timestamp"])
-    stored_records = int(f.attrs["total_events"])
-    source_sha256 = str(f.attrs.get("source_sha256", "unavailable"))
-    capture_diagnostics = {
-        name: f.attrs[name]
-        for name in (
-            "total_frames",
-            "driver_completed_frames",
-            "driver_dma_fault",
-            "driver_dma_error_count",
-            "list_deadtime_raw",
-            "continuity_valid",
-        )
-        if name in f.attrs
-    }
-
-    if format_version == 1:
-        schema_name = "legacy gRPC/ZMQ"
-        energy_raw = f["energy"][:]
-        psd_zc_raw = f["psd_zc"][:]
-        charge_energy_raw = None
-        cfd_interpolation_raw = None
-    elif format_version == 2:
-        iio_fields = set(events_raw.dtype.names or ())
-        current_iio_layout = {"marker", "zc_offset", "zc_estimation"}.issubset(iio_fields)
-        schema_name = (
-            "IIO opaque[16] / zero-crossing output layout"
-            if current_iio_layout
-            else "IIO opaque[16] / earlier client interpretation"
-        )
-        if ENERGY_FIELD not in {"charge_energy", "trapezoid_energy"}:
-            raise ValueError(f"Unsupported ENERGY_FIELD: {ENERGY_FIELD}")
-        energy_raw = f[ENERGY_FIELD][:]
-        charge_energy_raw = f["charge_energy"][:]
-        trapezoid_energy_raw = f["trapezoid_energy"][:]
-        cfd_interpolation_raw = (
-            f["cfd_interpolation_ticks"][:]
-            if "cfd_interpolation_ticks" in f
-            else None
-        )
-        psd_zc_raw = None
-    else:
-        raise ValueError(f"Unsupported list-mode format version: {format_version}")
-
-if stored_records != len(events_raw):
-    raise ValueError(
-        f"HDF5 total_events={stored_records}, but events contains {len(events_raw)} records"
+    accepted = valid & np.isfinite(ratio)
+    update, _, _ = np.histogram2d(
+        long_gate[accepted],
+        ratio[accepted],
+        bins=(energy_edges, ratio_edges),
     )
-if format_version == 2:
-    if stored_records % 1024:
-        raise ValueError(
-            f"IIO HDF5 contains {stored_records} records, not complete 1024-record frames"
-        )
-    if "total_frames" in capture_diagnostics:
-        expected_records = int(capture_diagnostics["total_frames"]) * 1024
-        if expected_records != stored_records:
-            raise ValueError(
-                f"HDF5 total_frames implies {expected_records} records, "
-                f"but events contains {stored_records}"
-            )
-    if (
-        REQUIRE_VALID_CAPTURE
-        and "continuity_valid" in capture_diagnostics
-        and not bool(capture_diagnostics["continuity_valid"])
-    ):
-        raise ValueError(
-            "Capture metadata marks DMA continuity as invalid: "
-            f"{capture_diagnostics}"
-        )
+    matrix += update.astype(np.uint64)
+    records += len(batch)
 
-trailing_padding = (
-    count_trailing_zero_records(events_raw)
-    if format_version == 2 and TRIM_TRAILING_ZERO_PADDING
-    else 0
-)
-analysis_stop = len(events_raw) - trailing_padding
-events = events_raw[:analysis_stop]
-energy_unscaled = energy_raw[:analysis_stop]
-psd_zc = None if psd_zc_raw is None else psd_zc_raw[:analysis_stop]
-charge_energy = (
-    None if charge_energy_raw is None else charge_energy_raw[:analysis_stop]
-)
-trapezoid_energy = (
-    None if format_version == 1 else trapezoid_energy_raw[:analysis_stop]
-)
-cfd_interpolation = (
-    None
-    if cfd_interpolation_raw is None
-    else cfd_interpolation_raw[:analysis_stop]
-)
-event_count = len(events)
-
-if ENERGY_RIGHT_SHIFT == "auto":
-    if hardware_histogram is None:
-        raise ValueError(
-            "ENERGY_RIGHT_SHIFT='auto' requires HARDWARE_HISTOGRAM_CSV"
-        )
-    shift_scores = []
-    for candidate_shift in range(16):
-        candidate_bins = np.right_shift(energy_unscaled, candidate_shift)
-        candidate_hist = np.bincount(candidate_bins, minlength=HIST_BINS)
-        overflow = int(candidate_hist[HIST_BINS:].sum())
-        l1 = int(
-            np.abs(
-                candidate_hist[:HIST_BINS].astype(np.int64)
-                - hardware_histogram.astype(np.int64)
-            ).sum()
-        )
-        shift_scores.append(l1 + overflow)
-    energy_right_shift = int(np.argmin(shift_scores))
-    energy_shift_source = "automatic hardware-histogram L1 match"
-else:
-    energy_right_shift = int(ENERGY_RIGHT_SHIFT)
-    if not 0 <= energy_right_shift <= 15:
-        raise ValueError("ENERGY_RIGHT_SHIFT must be an integer 0..15 or 'auto'")
-    shift_scores = None
-    energy_shift_source = "explicit configuration"
-
-energy = np.right_shift(energy_unscaled, energy_right_shift)
-charge_energy = (
-    None
-    if charge_energy is None
-    else np.right_shift(charge_energy, energy_right_shift)
-)
-trapezoid_energy = (
-    None
-    if trapezoid_energy is None
-    else np.right_shift(trapezoid_energy, energy_right_shift)
-)
-
-print(f"File: {FILENAME}")
-print(f"Channel: {channel}")
-print(f"Format version: {format_version} ({schema_name})")
-print(f"Stored transport records: {stored_records}")
-print(f"Source SHA-256: {source_sha256}")
-if capture_diagnostics:
-    print(f"Capture diagnostics: {capture_diagnostics}")
-print(f"Trailing zero padding excluded from analysis: {trailing_padding}")
-print(f"Records used for analysis: {event_count}")
-print(
-    f"Energy field/shift: {ENERGY_FIELD} >> {energy_right_shift} "
-    f"({energy_shift_source})"
-)
-print(f"Event dtype: {events.dtype}")
+print("records scanned:", records)
+print("events in PSD matrix:", int(matrix.sum()))
 ```
 
-# Event Statistics
+The chosen energy axis remains raw. Apply a documented calibration afterward;
+do not overwrite source fields or silently reuse an MCA histogram binning shift.
 
-```{python}
-#| label: stats
-if event_count:
-    timestamp_ticks = events["timestamp"].astype(np.uint64)
-    timestamp_forward = timestamp_ticks[1:] > timestamp_ticks[:-1]
-    non_monotonic = int(np.count_nonzero(~timestamp_forward))
-    positive_deltas = (
-        timestamp_ticks[1:][timestamp_forward]
-        - timestamp_ticks[:-1][timestamp_forward]
-    )
-    if non_monotonic and FAIL_ON_NON_MONOTONIC_TIMESTAMPS:
-        raise ValueError(
-            f"Detected {non_monotonic} duplicate or backward timestamp transitions"
-        )
-    timestamps_s = (
-        timestamp_ticks.astype(np.float64) - float(timestamp_ticks[0])
-    ) * TIMESTAMP_TICK_NS * 1e-9
-    duration = float(timestamps_s[-1]) if event_count > 1 else 0.0
-    rate = (event_count - 1) / duration if duration > 0 else 0.0
+## Timestamp checks
 
-    print(f"Duration: {duration:.6f} s")
-    print(f"Average record rate: {rate:.1f} records/s")
-    print(f"Duplicate/backward timestamp transitions: {non_monotonic}")
-    if len(positive_deltas):
-        print(
-            "Positive timestamp delta ticks [min, p50, p95, p99, max]: "
-            + str(np.percentile(positive_deltas, [0, 50, 95, 99, 100]).tolist())
-        )
-    print()
-    print(
-        f"Selected energy: min={energy.min()}, max={energy.max()}, "
-        f"mean={energy.mean():.1f}, std={energy.std():.1f}"
-    )
+Timestamps are uint64 ticks. Current NLab list-mode ticks are 8 ns, but fine
+coincidence timing additionally depends on the named zero-crossing schema.
 
-    if format_version == 1:
-        assert psd_zc is not None
-        print(
-            f"Short energy: min={events['short_energy'].min()}, "
-            f"max={events['short_energy'].max()}"
-        )
-        print(
-            f"PSD ZC: min={psd_zc.min():.4f}, max={psd_zc.max():.4f}, "
-            f"mean={psd_zc.mean():.4f}"
-        )
-        print(f"Markers: unique={np.unique(events['marker'])}")
-    else:
-        assert charge_energy is not None
-        print(
-            f"Charge-comparison energy: min={charge_energy.min()}, "
-            f"max={charge_energy.max()}, mean={charge_energy.mean():.1f}, "
-            f"std={charge_energy.std():.1f}"
-        )
-        if current_iio_layout:
-            print(
-                "Markers: unique="
-                + str([f"0x{value:02x}" for value in np.unique(events["marker"])])
-            )
-            valid_cfd = (
-                ((events["marker"] & 0x02) != 0)
-                & ((events["marker"] & 0x08) == 0)
-            )
-            print(f"CFD zero-crossing results selected: {np.count_nonzero(valid_cfd)}")
-            if cfd_interpolation is not None and np.any(np.isfinite(cfd_interpolation)):
-                relative = cfd_interpolation[np.isfinite(cfd_interpolation)]
-                print(
-                    "CFD interpolation term [8 ns ticks; "
-                    "not an absolute timestamp]: "
-                    f"min={relative.min():.2f}, max={relative.max():.2f}, "
-                    f"mean={relative.mean():.2f}"
-                )
-        else:
-            print(
-                "Earlier converted IIO file uses the superseded flags/CFD "
-                "interpretation. Reconvert the original NDMA file to inspect "
-                "zero-crossing fields; do not treat stored CFD time as an "
-                "absolute event timestamp."
-            )
-else:
-    timestamp_ticks = np.empty(0, dtype=np.uint64)
-    timestamps_s = np.empty(0, dtype=np.float64)
-    positive_deltas = np.empty(0, dtype=np.uint64)
-    non_monotonic = 0
-    duration = 0.0
-    rate = 0.0
-    print("No non-padding records available for analysis")
-```
+Within each stream, count backwards/duplicate transitions before calculating
+rate. Subtract in uint64-safe bounded form rather than converting absolute
+timestamps to float first; floats above `2^53` cannot preserve adjacent ticks.
 
-# Energy Histogram
+For paired-channel validation, use **Developer → Validate Two-Channel
+Timing...**. Its nearest-neighbour diagnostic is not a coincidence count. For
+live pairing and the exact Q2.14 timing equation, see
+[Coincidence Measurement](coincidence).
 
-```{python}
-#| label: energy-histogram
-#| fig-cap: "Energy spectrum after the configured right shift"
-hist_with_overflow = np.bincount(energy, minlength=HIST_BINS)
-hist = hist_with_overflow[:HIST_BINS]
-hist_overflow = int(hist_with_overflow[HIST_BINS:].sum())
-bin_centers = np.arange(HIST_BINS)
+## Final-frame zero padding
 
-fig, ax = plt.subplots(figsize=(12, 5))
-ax.step(bin_centers, hist, where="mid", linewidth=0.5, color="C0")
-ax.fill_between(bin_centers, hist, step="mid", alpha=0.3, color="C0")
-ax.set_xlabel("Channel")
-ax.set_ylabel("Counts")
-ax.set_title(f"Energy Spectrum ({event_count} records, {HIST_BINS} bins)")
-ax.set_xlim(0, HIST_BINS)
-ax.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
+IP121 always transports complete 1,024-record frames. When acquisition stops
+part-way through a frame, unused slots may be all zero. The ABI provides no
+exact valid-record count, and a real event can also contain zeros.
 
-nonzero = hist[hist > 0]
-print(f"Non-zero bins: {len(nonzero)} / {HIST_BINS}")
-print(f"Max counts in single bin: {hist.max()}")
-print(f"Total counts: {hist.sum()}")
-print(f"Overflow above channel {HIST_BINS - 1}: {hist_overflow}")
-if hardware_histogram is not None:
-    histogram_l1 = int(
-        np.abs(
-            hist.astype(np.int64) - hardware_histogram.astype(np.int64)
-        ).sum()
-    ) + hist_overflow
-    print(f"Hardware histogram total: {hardware_histogram.sum()}")
-    print(f"Decoded vs hardware histogram L1 difference: {histogram_l1}")
-if shift_scores is not None:
-    print(f"Energy shift L1 candidates: {shift_scores}")
-```
+Therefore:
 
-# Energy Histogram (Log Scale)
+- raw conversion preserves every slot;
+- run summaries count transported records, not exact accepted pulses;
+- analysis may report/exclude a trailing all-zero run only as an explicit,
+  documented policy;
+- zero payload must never be treated as an infallible stream terminator.
 
-```{python}
-#| label: energy-histogram-log
-#| fig-cap: "Energy spectrum (log scale)"
-fig, ax = plt.subplots(figsize=(12, 5))
-ax.step(bin_centers, hist, where="mid", linewidth=0.5, color="C0")
-ax.fill_between(bin_centers, hist, step="mid", alpha=0.3, color="C0")
-ax.set_xlabel("Channel")
-ax.set_ylabel("Counts")
-ax.set_title("Energy Spectrum (log scale)")
-ax.set_yscale("log")
-ax.set_xlim(0, HIST_BINS)
-ax.set_ylim(bottom=0.5)
-ax.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
-```
+## Integrity before physics
 
-# Event Correlation
+Before using a distribution, verify:
 
-```{python}
-#| label: event-correlation
-#| fig-cap: "Legacy PSD or IIO charge/trapezoid energy correlation"
-max_points = min(50000, event_count)
-if event_count > max_points:
-    idx = np.random.default_rng(42).choice(event_count, max_points, replace=False)
-else:
-    idx = slice(None)
+1. NDMA version or structured schema is recognized.
+2. Binary payload is aligned to complete records/frames.
+3. `.run.json` exists and reports the expected continuity state.
+4. IIO sidecar SHA-256, frame count, DMA fault, and list deadtime are valid.
+5. HDF5 analysis does not read beyond `committed_events`; final work requires
+   `capture_complete=true`.
+6. Coincidence channel files agree with the common session manifest.
 
-fig, ax = plt.subplots(figsize=(10, 6))
-if format_version == 1:
-    assert psd_zc is not None
-    x_plot = energy[idx]
-    y_plot = psd_zc[idx]
-    x_label = "Energy [channel]"
-    y_label = "PSD ZC"
-    title = "Pulse Shape Discrimination: Energy vs PSD ZC"
-else:
-    assert charge_energy is not None and trapezoid_energy is not None
-    x_plot = trapezoid_energy[idx]
-    y_plot = charge_energy[idx]
-    x_label = "Trapezoid energy [channel]"
-    y_label = "Charge-comparison energy [channel]"
-    title = "IIO energy correlation (not legacy PSD ZC)"
+Legacy gRPC captures cannot prove transport continuity and remain unverified.
+See [Capture Files and Integrity](data_formats) for detailed metadata.
 
-ax.scatter(x_plot, y_plot, s=0.2, alpha=0.3, c="C0", rasterized=True)
-ax.set_xlabel(x_label)
-ax.set_ylabel(y_label)
-ax.set_title(f"{title} ({len(x_plot)} records)")
-ax.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
-```
+## Energy spectra
 
-# Count Rate Over Time
+Select the energy field and any right shift from the producer/configuration or
+a documented comparison with a hardware histogram. Do not infer a shift from
+field width or apply the MCA histogram binning selector twice. Keep overflow
+counts separate from in-range bins.
 
-```{python}
-#| label: count-rate
-#| fig-cap: "Record rate vs time (approximately 1 s bins)"
-if duration > 1 and event_count > 1:
-    n_bins = max(1, int(np.ceil(duration)))
-    rate_hist = histogram1d(timestamps_s, range=(0.0, duration), bins=n_bins)
-    time_edges = np.linspace(0.0, duration, n_bins + 1)
-    time_centers = 0.5 * (time_edges[:-1] + time_edges[1:])
-    bin_widths = np.diff(time_edges)
-    rate_per_second = rate_hist / bin_widths
+For fitted spectra, calibrated overlays, background subtraction, variance
+propagation, and export, use the **MCA Peak Analysis Workbench** described in
+[Analysis Tools](analysis_tools).
 
-    fig, ax = plt.subplots(figsize=(12, 4))
-    ax.step(time_centers, rate_per_second, where="mid", color="C1", linewidth=0.8)
-    ax.fill_between(
-        time_centers,
-        rate_per_second,
-        step="mid",
-        alpha=0.3,
-        color="C1",
-    )
-    ax.set_xlabel("Time from first record [s]")
-    ax.set_ylabel("Records per second")
-    ax.set_title("Record Rate")
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.show()
+## Common mistakes
 
-    print(f"Mean rate: {rate_per_second.mean():.1f} records/s")
-    print(f"Std rate: {rate_per_second.std():.1f} records/s")
-else:
-    print("Duration too short for a one-second rate plot")
-```
+- Decoding IIO NDMA v2 with the legacy v1 dtype.
+- Treating padding count as accepted-pulse count.
+- Ignoring run/driver continuity metadata.
+- Converting large absolute timestamps to float before subtraction.
+- Assuming `zc_offset` is signed or heuristically unwrapping it.
+- Treating `long_gate`/`short_gate` names as a complete producer specification.
+- Loading a complete HDF5/ROOT run when bounded iteration is available.
