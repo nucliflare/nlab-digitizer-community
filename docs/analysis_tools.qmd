@@ -9,15 +9,57 @@ hardware measurement that produced it.
 
 ## MCA energy calibration
 
-Open **Tools → MCA Energy Calibration...**, select a channel, and copy its
-current spectrum. Double-click known peaks to add draggable reference lines and
-enter their expected energies.
+Open **Tools → MCA Energy Calibration...** after the MCA has collected a useful
+spectrum. Select the channel and use **Replace with current spectrum** to copy a
+stopped snapshot into the workspace. The calibration tool does not need to keep
+the acquisition running.
 
-- two enabled references are required for a linear fit;
-- three are required for a quadratic fit;
-- the table reports individual residuals plus RMS and maximum residual;
-- overlays from other sources are accepted only when energy-processing
-  settings are compatible.
+To build a calibration:
+
+1. Double-click each known full-energy peak to create a draggable reference
+   line. Place the line at a fitted centroid rather than at one noisy maximum
+   bin when accuracy matters.
+2. Enter a short label and the accepted reference energy in keV. Clear **Use**
+   to exclude a questionable line without deleting it.
+3. Select a **Linear** or **Quadratic** model. Two enabled references are the
+   minimum for a linear fit and three are the minimum for a quadratic fit.
+4. Inspect every value in the **Residual** column as well as the RMS and maximum
+   residual below the table. Apply the result only after the point assignments
+   and fit quality have been checked.
+
+The residual for a line is `reference energy - fitted energy at its channel`.
+A positive value means that the fitted curve predicts too little energy at that
+point; a negative value means it predicts too much. A large or structured
+residual can indicate a misplaced centroid, a wrongly identified line, pile-up,
+gain drift, or a calibration model that is too simple.
+
+A two-point linear calibration is exactly determined, so both residuals are
+zero apart from floating-point rounding. That does **not** independently prove
+linearity. Add a third or later verified line to test the linear model. The same
+caution applies to a quadratic fit made from exactly three points.
+
+### Live Na-22 example
+
+The view below uses a stopped CH1 spectrum originally measured on
+`192.168.10.128:30431` with negative polarity, raw trigger `-512`, and MCA
+binning `32`. It was reconstructed from a retained native IIO list-mode file
+whose run summary reports verified continuity: 2,016,256 records over 28.688 s.
+The acquisition did not use or change the internal PSU.
+
+Independent Gaussian-plus-linear-background fits placed the Na-22 photopeak
+centroids at raw channels `1594.468` and `3905.671`. Assigning those positions
+to `511.000 keV` and `1274.537 keV` gives the illustrative linear mapping
+
+```text
+energy [keV] = -15.754008 + 0.33036344 × MCA channel
+```
+
+![MCA Energy Calibration with reference lines on the measured Na-22 511 and
+1274.5 keV peaks and the per-line residual table.](images/mca-energy-calibration-na22-live.png)
+
+The displayed residuals are approximately zero because exactly two references
+define this linear fit; the tiny values around `10^-13 keV` are numerical
+rounding, not a measurement of detector linearity.
 
 A spectrum copied while the MCA is running is labelled a live, non-atomic
 snapshot. Applying calibration changes no FPGA register, bin, ROI, or raw
@@ -50,19 +92,36 @@ statistic, AIC/BIC, component curves, residuals, and boundary/covariance
 warnings. Spectrum arithmetic creates new immutable entries, requires matching
 coordinate grids, propagates variance, and never interpolates silently.
 
-The following workbench view contains a stopped, frozen spectrum measured on
-CH0 of the reference board at `192.168.10.128:30431`. It was acquired with
-negative polarity, raw trigger level `-96`, and binning `32`; the application
-did not read or change the PSU. The online list-mode run accumulated 172,232
-events before the stream was stopped and drained.
+### Fitting the measured 511 keV peak
 
-The shaded range `2132–2772` surrounds the prominent raw peak near channel
-`2452`, and the dashed marker is the workbench's suggested starting position.
-It is not an energy calibration or a completed fit. Raw peak positions depend
-on detector gain and processing settings.
+The completed fit below uses the same stopped, verified CH1 Na-22 spectrum and
+the linear calibration above:
 
-![MCA peak-analysis workbench showing a frozen live CH0 spectrum and selected
-peak region.](images/mca-peak-analysis-live.png)
+1. Open **Tools → MCA Peak Analysis Workbench...** and copy the stopped MCA
+   spectrum, or load an exported spectrum file.
+2. Drag the shaded fit region around the 511 keV photopeak. This example uses
+   raw channels `1274.468–1914.468`; avoid including unrelated peaks.
+3. Select one Gaussian peak, a **Linear** background, and **Poisson deviance**
+   for non-negative counting data.
+4. Use **Suggest peak positions**, adjust the marker if necessary, then choose
+   **Fit selected spectrum**.
+5. Inspect the fitted curve, background component, residual trace, parameter
+   uncertainties, reduced chi-square, and warnings together. A plausible
+   centroid alone is not proof of a good model.
+
+![MCA Peak Analysis Workbench after fitting the measured Na-22 511 keV peak
+with one Gaussian and a linear background.](images/mca-peak-fit-na22-511-live.png)
+
+For this capture the fit returned raw centroid `1594.216 ± 0.164` channels,
+calibrated centroid `510.917 keV`, FWHM `205.885` channels (`68.017 keV`), and
+resolution `13.313%`. The Poisson reduced chi-square was `1.100`, and the tool
+reported no boundary or covariance warning.
+
+These values describe this detector, acquisition, selected interval, model,
+and two-point illustrative calibration. They are not a certified detector
+resolution. Recheck the background model, fit interval, residuals, gain
+stability, and calibration references before using a fitted result
+quantitatively.
 
 ## PSD event readback
 
