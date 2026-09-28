@@ -55,3 +55,27 @@ def test_release_zip_recipe_contains_executable_at_archive_root(tmp_path: Path) 
     )
     with ZipFile(tmp_path / "nlab-windows.zip") as archive:
         assert archive.namelist() == ["nlab.exe"]
+
+
+def test_github_windows_installs_pinned_libiio_runtime() -> None:
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load(
+        (root / ".github/workflows/build.yaml").read_text(encoding="utf-8")
+    )
+    steps = workflow["jobs"]["build"]["steps"]
+
+    install = next(
+        step
+        for step in steps
+        if step.get("name") == "Install native libiio runtime (Windows only)"
+    )
+    assert install["if"] == "matrix.name == 'windows'"
+    assert install["shell"] == "pwsh"
+    assert "releases/download/v0.26/Windows.zip" in install["run"]
+    assert "4AD4A8C6B3F7145922C122DCFC51D693F0D3F9A0054FB2228814CE58C538A6CA" in install["run"]
+    assert "Windows-VS-2022-x64" in install["run"]
+    assert "$env:GITHUB_PATH" in install["run"]
+
+    verify = next(step for step in steps if step.get("name") == "Verify native libiio runtime")
+    assert "if" not in verify
+    assert "import iio" in verify["run"]

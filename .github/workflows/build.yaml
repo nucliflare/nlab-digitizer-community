@@ -44,14 +44,36 @@ jobs:
             libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
             libxcb-xinerama0 patchelf
 
+      - name: Install native libiio runtime (Windows only)
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "libiio-v0.26-windows.zip"
+          $destination = Join-Path $env:RUNNER_TEMP "libiio-v0.26"
+          Invoke-WebRequest `
+            -Uri "https://github.com/analogdevicesinc/libiio/releases/download/v0.26/Windows.zip" `
+            -OutFile $archive
+
+          $expectedHash = "4AD4A8C6B3F7145922C122DCFC51D693F0D3F9A0054FB2228814CE58C538A6CA"
+          $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash
+          if ($actualHash -ne $expectedHash) {
+            throw "Unexpected SHA-256 for the libiio v0.26 Windows archive: $actualHash"
+          }
+
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination -Force
+          $runtime = Join-Path $destination "Windows-VS-2022-x64"
+          if (-not (Test-Path -LiteralPath (Join-Path $runtime "libiio.dll"))) {
+            throw "The libiio v0.26 Windows runtime does not contain libiio.dll"
+          }
+          $runtime | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Install uv
         run: ${{ matrix.python-exe }} -m pip install --upgrade uv
 
       - name: Install locked dependencies
         run: ${{ matrix.python-exe }} -m uv sync --locked --extra dev
 
-      - name: Verify native libiio runtime (Linux only)
-        if: matrix.name == 'ubuntu'
+      - name: Verify native libiio runtime
         run: ${{ matrix.venv-python }} -c "import iio; print(f'libiio {iio.version}')"
 
       - name: Generate UI modules

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- GitHub-hosted Windows release builds now install and checksum the official
+  libiio v0.26 native runtime before importing the `pylibiio` wrapper, so test
+  collection and PyInstaller packaging no longer depend on a runner-global DLL.
+
 ## [0.6.0] — 2026-09-28
 
 ### Added
