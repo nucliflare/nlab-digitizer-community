@@ -1,34 +1,25 @@
 #!/usr/bin/env python
-"""Minimalny przykład ciągłego pomiaru prądu metodą IIR albo Scope DMA.
+"""Minimal example of continuous current monitoring with IIR or Scope DMA.
 
-Tryb IIR odczytuje pojedynczą, przefiltrowaną wartość bezpośrednio z układu
-FPGA. Tryb DMA odbiera kompletne ramki przebiegu z oscyloskopu i przekazuje
-do dalszego użycia wyłącznie najnowszą z nich. Oba pomiary działają w pętli
-bez sztucznego opóźnienia i kończą się po naciśnięciu Ctrl+C.
+IIR reads one filtered value at a time. DMA receives waveform frames and keeps
+only the newest frame for the callback. Both modes run without an added delay
+and stop when you press Ctrl+C.
 
-Otrzymywane liczby są surowymi kodami związanymi z przetwornikiem ADC, a nie
-wartościami w amperach. Przeliczenie na prąd wymaga kalibracji odpowiedniej
-dla użytego czujnika oraz analogowego toru wejściowego. Opcjonalny callback
-może wyświetlać, zapisywać lub przekazywać najnowsze dane do innego wątku.
+The values are raw device readings, not amperes. Converting them to current
+requires calibration for the sensor and input circuit.
 
-Callback to zwykła funkcja przekazana jako argument innej funkcji. Kod
-pomiarowy wywołuje ją automatycznie po uzyskaniu nowych danych. W tym
-przykładzie callback przyjmuje dokładnie jeden argument: liczbę ``int`` dla
-IIR albo tablicę próbek ``numpy.ndarray`` dla DMA. Wynik zwracany przez
-callback jest ignorowany. Callback może na przykład:
+A callback is a function passed to another function. The measurement code
+calls it whenever new data is ready. In this example, the IIR callback receives
+one integer, while the DMA callback receives a NumPy array containing the
+newest waveform. Its return value is ignored. A callback can print the data,
+convert it to amperes, save it, update a plot, or place it in a queue for
+another worker.
 
-* wypisać bieżącą wartość w terminalu,
-* przeliczyć surowe kody na ampery,
-* zapisać dane do pliku lub bazy danych,
-* zaktualizować wykres,
-* umieścić dane w kolejce obsługiwanej przez inny wątek.
+The callbacks in ``main()`` only print a short result. Replace them with your
+own functions if needed. If a callback reports an error, the measurement stops
+and the device is still closed safely.
 
-W ``main()`` callbacki są krótkimi funkcjami ``lambda``, które tylko drukują
-wynik. Można je zastąpić własną funkcją. Wyjątek zgłoszony wewnątrz callbacku
-przerywa pomiar, ale sekcja ``finally`` nadal zamyka urządzenie.
-
-Ustaw ``USE_DMA = True``, aby uruchomić pomiar DMA. Wartość ``False`` wybiera
-prostszy odczyt IIR.
+Set ``USE_DMA = True`` to use DMA. Set it to ``False`` to use IIR.
 """
 
 from __future__ import annotations
@@ -51,23 +42,21 @@ def measure_current_iir(
     digitizer: Digitizer,
     callback: Callable[[int], None] | None = None,
 ) -> None:
-    """Odczytuje kolejne wartości prądu z filtra IIR aż do Ctrl+C.
+    """Read IIR values until Ctrl+C.
 
-    Każdy obrót pętli wykonuje jeden bezpośredni odczyt z FPGA. Nie ma tutaj
-    wywołania ``sleep()``, dlatego częstotliwość próbkowania ogranicza jedynie
-    czas komunikacji z urządzeniem oraz czas działania callbacku. Jeżeli
-    ``callback`` nie jest ``None``, otrzymuje najnowszy surowy kod jako ``int``.
-    Callback działa w tej samej pętli, dlatego długie obliczenia, zapis na
-    wolny dysk lub komunikacja sieciowa zmniejszą częstotliwość odczytów IIR.
-    W takim przypadku callback powinien jedynie szybko przekazać wartość do
-    kolejki, a właściwe przetwarzanie należy wykonać w osobnym wątku.
+    Each loop reads one value. There is no ``sleep()``, so the next read starts
+    as soon as the previous read and callback finish. If provided, ``callback``
+    receives the newest raw value as an ``int``.
+
+    Keep the callback short. Slow calculations, file writes, or network work
+    will slow the reading loop. For heavier work, place the value in a queue
+    and let another worker handle it.
     """
     while True:
         value = int(digitizer.mca.filters.lp.get_iir_average())
         if callback is not None:
-            # Przy kosztownym przetwarzaniu można tutaj wstawić ``value`` do
-            # kolejki, a kolejkę obsługiwać w osobnym wątku roboczym. Dzięki
-            # temu callback nie będzie opóźniał następnego odczytu z FPGA.
+            # For heavier work, put ``value`` in a queue here and process it
+            # in another worker so the next reading can start quickly.
             callback(value)
 
 
@@ -75,19 +64,19 @@ def measure_current_dma(
     digitizer: Digitizer,
     callback: Callable[[np.ndarray], None] | None = None,
 ) -> None:
-    """Odbiera ramki Scope DMA aż do Ctrl+C i przekazuje najnowszą ramkę.
+    """Receive Scope DMA frames until Ctrl+C and pass on the newest frame.
 
-    Oscyloskop jest ustawiany w okresowym trybie wyzwalania. Osobny wątek
-    nieprzerwanie odbiera kompletne ramki DMA, natomiast bieżący wątek pobiera
-    najnowszą dostępną ramkę z bufora o rozmiarze jeden. Jeżeli konsument jest
-    wolniejszy od DMA, starsze ramki podglądu są zastępowane, ale sam odbiór
-    danych nie jest blokowany. Callback otrzymuje tablicę próbek ``int16``.
-    Może na przykład obliczyć średnią ramki, zastosować kalibrację, zbudować
-    wykres albo przekazać ramkę do dalszej analizy. Nie powinien zakładać, że
-    zobaczy każdą ramkę: bufor celowo zachowuje wyłącznie najnowszą dostępną.
+    A background worker receives complete waveform frames. This function keeps
+    only the newest available frame and gives it to ``callback`` as a NumPy
+    ``int16`` array. If the callback is slow, older waiting frames may be
+    replaced, but receiving continues.
 
-    Blok ``finally`` zatrzymuje oscyloskop, anuluje ewentualny blokujący odczyt
-    i czeka na zakończenie wątku DMA przed zamknięciem połączenia.
+    The callback can calculate a value, apply calibration, update a plot, or
+    pass the frame to other code. This small example is meant for viewing the
+    latest data, not for processing every frame.
+
+    Cleanup stops Scope, ends any waiting read, and waits for the background
+    worker before the device connection is closed.
     """
     streamer = digitizer.scope_dma
     if not isinstance(streamer, IIOScopeDmaStreamer):
@@ -100,7 +89,7 @@ def measure_current_dma(
     errors: list[str] = []
 
     def capture() -> None:
-        """Odbiera pełne ramki DMA w osobnym wątku pomiarowym."""
+        """Receive complete DMA frames in the background."""
         try:
             streamer.stream_to_file(
                 None,
@@ -128,8 +117,8 @@ def measure_current_dma(
             frame_ready.clear()
             frames, _ = latest_only.drain()
             if frames and callback is not None:
-                # Wątek ``worker`` nadal odbiera DMA, gdy ten wątek przetwarza
-                # najnowszą ramkę. Wolniejszy callback nie zatrzyma więc DMA.
+                # The background worker keeps receiving data while this
+                # callback handles the newest frame.
                 callback(np.asarray(frames[-1].samples, dtype=np.int16))
             if errors:
                 raise RuntimeError(f"Scope DMA failed: {errors[0]}")
@@ -146,7 +135,7 @@ def measure_current_dma(
 
 
 def main() -> None:
-    """Łączy się z urządzeniem i uruchamia wybrany tryb aż do Ctrl+C."""
+    """Connect to the device and run the selected mode until Ctrl+C."""
     digitizer = Digitizer.from_iio(CHANNEL, URI, with_ids=False)
     try:
         if USE_DMA:
