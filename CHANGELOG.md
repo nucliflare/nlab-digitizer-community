@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-28
+
 ### Added
 
 - Per-channel live Current workspace backed by the FPGA input-filter IIR
@@ -37,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The stopped Current Scope-DMA mode exposes its post-frame gap as an exact
   8 ns-step control, allowing operators to compare coverage and skipped-trigger
   behavior without editing the Scope workspace or source code.
+- A minimal `examples/measure_current.py` demonstrates continuous IIR polling
+  and Scope-DMA current measurement, optional callbacks, and where a non-blocking
+  consumer worker can be connected.
 
 ### Fixed
 
@@ -65,6 +70,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   external-device polling. GUI-side completion handlers are explicitly queued
   back to the main thread so rendering a completed large-file analysis cannot
   update Qt widgets from the worker thread.
+
+### Documentation
+
+- Rebuilt the project wiki from Quarto sources with dedicated installation,
+  acquisition, Current, PSD, coincidence, analysis, data-format, architecture,
+  development, and troubleshooting guides.
+- Replaced generated demonstration plots with real `.128` hardware captures,
+  including Current IIR/DMA views, Cs-137/Na-22 MCA workflows, coarse and CFD
+  coincidence timing, the prompt energy matrix, PSD, MCA energy calibration,
+  and a completed 511 keV peak fit. Added device front- and back-panel images.
 
 ## [0.5.0] — 2026-09-22
 
@@ -417,7 +432,8 @@ Initial open-source release of the Nuclear Lab Digitizer Community Edition.
 
 ---
 
-[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.5.0...main
+[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.6.0...main
+[0.6.0]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.6.0
 [0.5.0]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.5.0
 [0.4.0]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.4.0
 [0.3.2]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.3.2
