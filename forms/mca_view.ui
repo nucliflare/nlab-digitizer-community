@@ -186,11 +186,13 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
          <layout class="QVBoxLayout" name="vRefresh">
           <item>
            <widget class="QLabel" name="labelRefreshRate">
+            <property name="visible"><bool>false</bool></property>
             <property name="text"><string>Refresh (Hz)</string></property>
            </widget>
           </item>
           <item>
            <widget class="QSpinBox" name="spinRefreshRate">
+            <property name="visible"><bool>false</bool></property>
             <property name="minimum"><number>1</number></property>
             <property name="maximum"><number>60</number></property>
             <property name="value"><number>5</number></property>

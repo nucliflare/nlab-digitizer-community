@@ -350,6 +350,9 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string>
      </item>
      <item>
       <widget class="QGroupBox" name="groupDisplay">
+       <property name="visible">
+        <bool>false</bool>
+       </property>
        <property name="title">
         <string>Display</string>
        </property>

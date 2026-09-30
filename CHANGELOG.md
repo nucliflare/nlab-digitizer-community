@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- General Settings panel with an opt-in automatic configuration snapshot. It
+  saves all connected Scope, MCA, and Power Supply settings when enabled and on
+  clean exit, then restores them on startup unless `--config` was supplied.
+  Snapshots are isolated by device IP so configurations cannot be mixed between
+  digitizers.
+- Scope display and refresh defaults, MCA refresh, PSU polling/history, DMA
+  destination and output format, and histogram ROI/log options are now edited
+  application-wide in General Settings instead of being scattered across
+  channel panels and menus. Long explanatory text is available as tooltips.
+- Coincidence controls use compact labels; detailed gate, timing, matrix, and
+  recording explanations are available as hover tooltips.
+
 ### Fixed
 
 - GitHub-hosted Windows release builds now install and checksum the official

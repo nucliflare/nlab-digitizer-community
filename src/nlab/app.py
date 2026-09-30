@@ -21,7 +21,12 @@ from nlab.utils.remote_board_power import (
 from nlab.views.dma_settings_dialog import (
     DMA_FOLDER_KEY,
     MCA_DMA_OUTPUT_MODE_KEY,
-    DmaSettingsDialog,
+)
+from nlab.views.general_settings_dialog import (
+    GeneralSettingsDialog,
+    auto_configuration_enabled,
+    auto_configuration_path,
+    set_auto_configuration_enabled,
 )
 from nlab.views.license_dialog import LicenseDialog
 from nlab.views.timing_validation_dialog import TimingValidationDialog
@@ -46,6 +51,14 @@ _KEY_MCA_DMA_OUTPUT_MODE = MCA_DMA_OUTPUT_MODE_KEY
 _KEY_SHOW_ROI = "view/show_roi"
 _KEY_LOG_Y = "view/log_y"
 _KEY_TIMING_OFFSET_NS = "timing/channel_b_offset_ns"
+_GENERAL_CONTROLLER_KEYS = {
+    "scope_display_mode": "general/scope_display_mode",
+    "scope_persistence": "general/scope_persistence",
+    "scope_refresh_rate_hz": "general/scope_refresh_rate_hz",
+    "mca_refresh_rate_hz": "general/mca_refresh_rate_hz",
+    "psu_refresh_interval_ms": "general/psu_refresh_interval_ms",
+    "psu_plot_time_range_s": "general/psu_plot_time_range_s",
+}
 
 
 class MainAppWindow(QMainWindow):
@@ -83,15 +96,21 @@ class MainAppWindow(QMainWindow):
             channels=channels,
             on_progress=on_progress,
         )
+        self._apply_stored_general_settings()
         if config_path is not None:
             if on_progress is not None:
                 on_progress("Applying saved settings...")
             self._controller.load_all_settings(config_path)
+        elif auto_configuration_enabled():
+            self._restore_auto_configuration(on_progress)
+        self._persist_current_general_settings()
         if on_progress is not None:
             on_progress("Restoring the workspace...")
         self._apply_view_state()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if auto_configuration_enabled():
+            self._save_auto_configuration(show_error=False)
         self._save_developer_settings()
         self._controller.shutdown()
         super().closeEvent(event)
@@ -126,7 +145,7 @@ class MainAppWindow(QMainWindow):
         self.ui.actionLogY.toggled.connect(self._on_log_y_toggled)
         self.ui.actionSaveSettings.triggered.connect(self._on_save_settings)
         self.ui.actionLoadSettings.triggered.connect(self._on_load_settings)
-        self.ui.actionDmaSaveFolder.triggered.connect(self._on_dma_settings)
+        self.ui.actionGeneralSettings.triggered.connect(self._on_general_settings)
         self.ui.actionAbout.triggered.connect(self._on_about)
         self.ui.actionThirdPartyLicenses.triggered.connect(self._on_third_party_licenses)
         self.ui.actionShowSystemLog.toggled.connect(self._on_show_system_log_toggled)
@@ -282,6 +301,89 @@ class MainAppWindow(QMainWindow):
         """Re-apply persisted view toggles to the (re)built MCA controllers."""
         self._controller.set_roi_visible(self.ui.actionShowRoi.isChecked())
         self._controller.set_log_y(self.ui.actionLogY.isChecked())
+
+    def _general_settings_values(self) -> dict[str, object]:
+        getter = getattr(self._controller, "general_configuration_settings", None)
+        values: dict[str, object] = dict(getter()) if callable(getter) else {}
+        settings = QSettings()
+        values.update(
+            {
+                "dma_save_folder": str(settings.value(_KEY_DMA_FOLDER, "measurements")),
+                "mca_dma_output_mode": str(
+                    settings.value(
+                        _KEY_MCA_DMA_OUTPUT_MODE,
+                        McaDmaOutputMode.BINARY.value,
+                    )
+                ),
+                "show_roi": self.ui.actionShowRoi.isChecked(),
+                "log_y": self.ui.actionLogY.isChecked(),
+            }
+        )
+        return values
+
+    def _apply_general_settings(self, values: dict[str, object]) -> None:
+        settings = QSettings()
+        for name, key in _GENERAL_CONTROLLER_KEYS.items():
+            if name in values:
+                settings.setValue(key, int(cast(int, values[name])))
+        apply_controller = getattr(
+            self._controller,
+            "apply_general_configuration_settings",
+            None,
+        )
+        if callable(apply_controller):
+            apply_controller(values)
+
+        settings.setValue(
+            _KEY_DMA_FOLDER,
+            str(values.get("dma_save_folder", "measurements")),
+        )
+        settings.setValue(
+            _KEY_MCA_DMA_OUTPUT_MODE,
+            str(values.get("mca_dma_output_mode", McaDmaOutputMode.BINARY.value)),
+        )
+        self.ui.actionShowRoi.setChecked(bool(values.get("show_roi", False)))
+        self.ui.actionLogY.setChecked(bool(values.get("log_y", False)))
+        self._save_developer_settings()
+        self._controller.refresh_dma_output_settings()
+
+    def _apply_stored_general_settings(self) -> None:
+        getter = getattr(self._controller, "general_configuration_settings", None)
+        apply_controller = getattr(
+            self._controller,
+            "apply_general_configuration_settings",
+            None,
+        )
+        if not callable(getter) or not callable(apply_controller):
+            return
+        current = getter()
+        settings = QSettings()
+        values = {
+            name: int(
+                cast(
+                    int,
+                    settings.value(
+                        key,
+                        int(cast(int, current[name])),
+                        type=int,
+                    ),
+                )
+            )
+            for name, key in _GENERAL_CONTROLLER_KEYS.items()
+        }
+        apply_controller(values)
+        for name, key in _GENERAL_CONTROLLER_KEYS.items():
+            settings.setValue(key, values[name])
+
+    def _persist_current_general_settings(self) -> None:
+        getter = getattr(self._controller, "general_configuration_settings", None)
+        if not callable(getter):
+            return
+        values = getter()
+        settings = QSettings()
+        for name, key in _GENERAL_CONTROLLER_KEYS.items():
+            if name in values:
+                settings.setValue(key, int(values[name]))
 
     def _set_log_tab_visible(self, visible: bool) -> None:
         idx = self.ui.mainTabs.indexOf(self.ui.tabSystemLog)
@@ -559,6 +661,64 @@ class MainAppWindow(QMainWindow):
             logging.getLogger(__name__).exception("Failed to save settings")
             QMessageBox.critical(self, "Save Failed", str(e))
 
+    def _on_general_settings(self) -> None:
+        dialog = GeneralSettingsDialog(self._host, self._general_settings_values(), self)
+        if not dialog.exec():
+            return
+
+        self._apply_general_settings(dialog.settings)
+        enabled = dialog.auto_configuration_is_enabled
+        if enabled and not self._save_auto_configuration(show_error=True):
+            set_auto_configuration_enabled(False)
+            return
+        set_auto_configuration_enabled(enabled)
+        if enabled:
+            self.statusBar().showMessage(
+                f"Automatic configuration saved to {auto_configuration_path(self._host)}",
+                5000,
+            )
+        else:
+            self.statusBar().showMessage(
+                "General settings updated; automatic restore disabled",
+                5000,
+            )
+
+    def _save_auto_configuration(self, *, show_error: bool) -> bool:
+        path = auto_configuration_path(self._host)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._controller.save_all_settings(path)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Failed to save automatic configuration")
+            if show_error:
+                QMessageBox.critical(
+                    self,
+                    "Automatic Save Failed",
+                    f"The automatic configuration could not be saved:\n{exc}",
+                )
+            return False
+        return True
+
+    def _restore_auto_configuration(
+        self,
+        on_progress: Callable[[str], None] | None,
+    ) -> None:
+        path = auto_configuration_path(self._host)
+        if not path.is_file():
+            return
+        if on_progress is not None:
+            on_progress("Restoring the last configuration...")
+        try:
+            self._controller.load_all_settings(path)
+        except Exception as exc:
+            logging.getLogger(__name__).exception(
+                "Failed to restore automatic configuration from %s", path
+            )
+            self.statusBar().showMessage(
+                f"Automatic configuration was not restored: {exc}",
+                10000,
+            )
+
     def _on_load_settings(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -571,6 +731,7 @@ class MainAppWindow(QMainWindow):
 
         try:
             self._controller.load_all_settings(Path(path))
+            self._persist_current_general_settings()
         except Exception as e:
             logging.getLogger(__name__).exception("Failed to load settings")
             QMessageBox.critical(self, "Load Failed", str(e))
@@ -596,6 +757,7 @@ class MainAppWindow(QMainWindow):
             return
         try:
             self._controller.reconnect()
+            self._apply_stored_general_settings()
             self._apply_view_state()
             self.ui.mainTabs.setEnabled(True)
             QMessageBox.information(self, "Reconnect", "Device reconnected successfully.")
@@ -605,16 +767,6 @@ class MainAppWindow(QMainWindow):
 
     def _on_reset_docks(self) -> None:
         self._controller.reset_dock_layout()
-
-    def _on_dma_settings(self) -> None:
-        if DmaSettingsDialog(self).exec():
-            self._controller.refresh_dma_output_settings()
-            settings = QSettings()
-            logging.getLogger(__name__).info(
-                "DMA settings updated: folder=%s, MCA output=%s",
-                settings.value(_KEY_DMA_FOLDER, "measurements"),
-                settings.value(_KEY_MCA_DMA_OUTPUT_MODE, McaDmaOutputMode.BINARY.value),
-            )
 
     def _on_about(self) -> None:
         QMessageBox.about(self, "About Nuclear Lab Digitizer", _ABOUT_TEXT)

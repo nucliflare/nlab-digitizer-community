@@ -141,6 +141,14 @@ uv run python examples/measure_current.py
 - Convert Scope and MCA binary captures to HDF5 from the File menu
 - Remote board reboot and shutdown controls
 - Persistent layout, connection, plotting, and developer settings
+- Central **General Settings** controls for Scope display/refresh, MCA refresh,
+  PSU monitoring history, acquisition destinations/formats, and histogram views
+- Optional **Settings → General Settings...** snapshot of the complete Scope,
+  MCA, and Power Supply configuration, saved on clean exit and restored at the
+  next startup. Snapshots are kept separately for each connected device IP, and
+  an explicit `--config` file takes precedence. See the
+  [General Settings ownership review](docs/general-settings-candidates.md) for
+  the centralized controls and the hardware operations that remain channel-local.
 
 ## Hardware and firmware requirements
 
@@ -403,7 +411,7 @@ Scope recording remains binary with an `NDMA` header. Scope files are not
 rotated at an application-defined size; the GUI reports KiB, MiB, or GiB while
 the same file grows until recording stops or storage reports an error. The
 v122 Periodic-layout restriction described above applies. MCA
-list-mode output is selected under **Settings → DMA Settings...** and creates a
+list-mode output is selected under **Settings → General Settings...** and creates a
 new file for every measurement. Available modes are binary NDMA, a ROOT
 `TTree`, appendable HDF5 with SWMR metadata, and online-only DMA with no file.
 Binary, ROOT, and HDF5 save list-mode events whether or not Charge Comparison

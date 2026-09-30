@@ -155,14 +155,18 @@ class CoincidenceController(QWidget):
         self.duration.setRange(0, 86_400)
         self.duration.setSuffix(" s")
         self.duration.setToolTip("Common MCA acquisition limit; 0 runs until stopped.")
-        run_layout.addWidget(QLabel("Duration (both channels):"))
+        run_layout.addWidget(QLabel("Duration:"))
         run_layout.addWidget(self.duration)
         self.status = QLabel("Ready; both MCA channels must be idle.")
         self.status.setWordWrap(True)
         run_layout.addWidget(self.status)
         left.addWidget(run_box)
 
-        gate_box = QGroupBox("Energy gates from MCA histograms")
+        gate_box = QGroupBox("Energy gates")
+        gate_box.setToolTip(
+            "A hidden MCA ROI means the full energy range. Gates use raw MCA "
+            "histogram channels, not calibrated energy values."
+        )
         gate_layout = QVBoxLayout(gate_box)
         self.use_roi = (QCheckBox("Use CH0 MCA ROI"), QCheckBox("Use CH1 MCA ROI"))
         self.roi_label = (QLabel(), QLabel())
@@ -170,12 +174,6 @@ class CoincidenceController(QWidget):
             check.setChecked(True)
             gate_layout.addWidget(check)
             gate_layout.addWidget(label)
-        hint = QLabel(
-            "A hidden MCA ROI means the full energy range. Gates use MCA histogram channels, "
-            "not calibrated keV."
-        )
-        hint.setWordWrap(True)
-        gate_layout.addWidget(hint)
         left.addWidget(gate_box)
 
         logic_box = QGroupBox("Event logic")
@@ -192,8 +190,8 @@ class CoincidenceController(QWidget):
         logic_form.addRow(self.expression)
         left.addWidget(logic_box)
 
-        timing_box = QGroupBox("Timing")
-        timing_form = QFormLayout(timing_box)
+        self.timing_box = QGroupBox("Timing")
+        timing_form = QFormLayout(self.timing_box)
         self.timing_mode = QComboBox()
         self.timing_mode.addItem("Coarse (8 ns)", "coarse")
         self.timing_mode.addItem("CFD fine (62.5 ps bins)", "cfd")
@@ -223,14 +221,13 @@ class CoincidenceController(QWidget):
         timing_form.addRow("Lower Δt:", self.low)
         timing_form.addRow("Upper Δt:", self.high)
         timing_form.addRow("CH1−CH0 calibration:", self.offset)
-        self.timing_hint = QLabel()
-        self.timing_hint.setWordWrap(True)
-        timing_form.addRow(self.timing_hint)
-        left.addWidget(timing_box)
+        self.timing_hint = QLabel(self.timing_box)
+        self.timing_hint.setVisible(False)
+        left.addWidget(self.timing_box)
 
         matrix_box = QGroupBox("Coincidence matrix")
         matrix_form = QFormLayout(matrix_box)
-        self.random_sidebands = QCheckBox("Accumulate delayed random sidebands")
+        self.random_sidebands = QCheckBox("Random sidebands")
         self.random_sidebands.setChecked(True)
         self.random_sidebands.setToolTip(
             "Accumulate two delayed windows, each the width of the prompt timing gate."
@@ -245,27 +242,24 @@ class CoincidenceController(QWidget):
         )
         matrix_form.addRow(self.random_sidebands)
         matrix_form.addRow("Sideband gap:", self.random_gap)
-        matrix_note = QLabel(
+        matrix_box.setToolTip(
             f"Fixed {COINCIDENCE_MATRIX_BINS}x{COINCIDENCE_MATRIX_BINS} matrix; "
             "each bin spans 32 raw MCA channels."
         )
-        matrix_note.setWordWrap(True)
-        matrix_form.addRow(matrix_note)
         left.addWidget(matrix_box)
 
         output_box = QGroupBox("Raw DMA recording")
+        output_box.setToolTip(
+            "Each run records both complete raw streams in the selected MCA DMA "
+            "format. ROI and event logic affect only live analysis."
+        )
         output_layout = QVBoxLayout(output_box)
         self.output_label = QLabel()
         self.output_label.setWordWrap(True)
-        output_layout.addWidget(self.output_label)
-        self.btnFolder = QPushButton("Measurement location…")
-        output_layout.addWidget(self.btnFolder)
-        note = QLabel(
-            "Each run records both complete raw streams in the selected MCA DMA format. "
-            "ROI and logic affect only the live analysis."
+        self.output_label.setToolTip(
+            "Change the destination and output format in General Settings."
         )
-        note.setWordWrap(True)
-        output_layout.addWidget(note)
+        output_layout.addWidget(self.output_label)
         left.addWidget(output_box)
         left.addStretch(1)
 
@@ -293,8 +287,9 @@ class CoincidenceController(QWidget):
         self.counts_label = QLabel("Pairs: 0  •  CH0: 0  •  CH1: 0")
         self.counts_label.setWordWrap(True)
         plot_layout.addWidget(self.counts_label)
-        self.timing_fit_label = QLabel(
-            "Gaussian core fit is available for qualified CFD fine timing."
+        self.timing_fit_label = QLabel("Timing fit: waiting for CFD data")
+        self.timing_fit_label.setToolTip(
+            "A Gaussian core fit is available for qualified CFD fine-timing data."
         )
         self.timing_fit_label.setWordWrap(True)
         plot_layout.addWidget(self.timing_fit_label)
@@ -384,8 +379,9 @@ class CoincidenceController(QWidget):
         )
         matrix_layout.addWidget(self.matrix_projection0_plot, 1)
         matrix_layout.addWidget(self.matrix_projection1_plot, 1)
-        self.matrix_status = QLabel(
-            "Matrix is available for ordinary CH0 AND CH1 coincidence analysis."
+        self.matrix_status = QLabel("Matrix ready for CH0 AND CH1 analysis")
+        self.matrix_status.setToolTip(
+            "The energy matrix is available for ordinary CH0 AND CH1 coincidence analysis."
         )
         self.matrix_status.setWordWrap(True)
         matrix_layout.addWidget(self.matrix_status)
@@ -524,13 +520,18 @@ class CoincidenceController(QWidget):
         self.matrix_projection1_curve.setData(edges, projection1)
         scale_description = "signed log10(1 + |count|)" if logarithmic else "linear counts"
         completeness = "Live provisional" if self._state in {"arming", "running"} else "Drained"
-        self.matrix_status.setText(
+        matrix_detail = (
             f"{completeness} {COINCIDENCE_MATRIX_BINS}x{COINCIDENCE_MATRIX_BINS} {mode} matrix; "
             f"prompt pairs {snapshot.pairs:,}; delayed-random pairs {snapshot.random_pairs:,}; "
             f"random scale {settings.random_scale:g}; display {scale_description}. "
             f"CH0 gate {min(gate0):.0f}-{max(gate0):.0f}; "
             f"CH1 gate {min(gate1):.0f}-{max(gate1):.0f} raw MCA channels."
         )
+        self.matrix_status.setText(
+            f"{completeness} {mode} matrix • {snapshot.pairs:,} prompt pairs • "
+            f"random scale {settings.random_scale:g}"
+        )
+        self.matrix_status.setToolTip(matrix_detail)
         self.btnExportMatrix.setEnabled(True)
 
     def _export_matrix(self) -> None:
@@ -590,7 +591,6 @@ class CoincidenceController(QWidget):
     def _connect_signals(self) -> None:
         self.btnStart.clicked.connect(self.start)
         self.btnStop.clicked.connect(lambda: self._begin_stop(None))
-        self.btnFolder.clicked.connect(self._choose_folder)
         self.timing_mode.currentIndexChanged.connect(self._analysis_settings_changed)
         self.random_sidebands.toggled.connect(self._analysis_settings_changed)
         self.random_sidebands.toggled.connect(self.random_gap.setEnabled)
@@ -726,6 +726,7 @@ class CoincidenceController(QWidget):
                 "The qualified VDPP Q2.14 profile is fixed. Fine timing requires CFD on "
                 "both channels."
             )
+            self.timing_box.setToolTip(self.timing_hint.text())
             return
         self._current_settings = settings
         mode_hint = (
@@ -741,6 +742,7 @@ class CoincidenceController(QWidget):
             f"{settings.channel_delay_ns:.6g} ns. Live results remain provisional "
             "until both streams stop and drain."
         )
+        self.timing_box.setToolTip(self.timing_hint.text())
         if self._analysis is not None:
             self._last_rendered_snapshot = self._analysis.result()[0]
         if self._analysis is not None and self._state in {"arming", "running"}:
@@ -772,13 +774,6 @@ class CoincidenceController(QWidget):
             if mode is not McaDmaOutputMode.ONLINE
             else "Online only • no files"
         )
-
-    def _choose_folder(self) -> None:
-        current = str(QSettings().value("dma/save_folder", "measurements"))
-        chosen = QFileDialog.getExistingDirectory(self, "Coincidence measurement location", current)
-        if chosen:
-            QSettings().setValue("dma/save_folder", chosen)
-            self.refresh_dma_output_settings()
 
     def _prepare_paths(self, mode: McaDmaOutputMode) -> tuple[Path | None, Path | None]:
         if mode is McaDmaOutputMode.ONLINE:
@@ -936,7 +931,6 @@ class CoincidenceController(QWidget):
             self.btnStart.setEnabled(False)
             self.btnStop.setChecked(False)
             self.btnStop.setEnabled(True)
-            self.btnFolder.setEnabled(False)
             self._global_view.set_coincidence_locked(True)
             self.status.setText("Preparing shared software start…")
             # PetaLinux b08ad28 vdpp-sync-trigger.c: this is a level-sensitive
@@ -1116,7 +1110,6 @@ class CoincidenceController(QWidget):
         self.btnStart.setEnabled(True)
         self.btnStop.setChecked(True)
         self.btnStop.setEnabled(False)
-        self.btnFolder.setEnabled(True)
         self.status.setText(
             f"Coincidence run failed: {self._run_error}"
             if self._run_error

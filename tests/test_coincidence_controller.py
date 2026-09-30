@@ -9,7 +9,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QApplication, QCheckBox, QSpinBox
+from PySide6.QtWidgets import QApplication, QCheckBox, QGroupBox, QSpinBox
 
 from nlab.analysis.coincidence import CoincidenceAnalyzer, CoincidencePeakFit, CoincidenceSettings
 from nlab.controllers import coincidence_controller as coincidence_module
@@ -229,6 +229,20 @@ def test_coincidence_buttons_match_scope_and_mca_color_scheme(
     assert "QPushButton:disabled" in controller.btnStop.styleSheet()
     assert controller.btnStart.isCheckable()
     assert controller.btnStop.isCheckable()
+
+
+def test_coincidence_explanations_are_compact_tooltips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _make_controller(monkeypatch)
+    groups = {group.title(): group for group in controller.findChildren(QGroupBox)}
+
+    assert controller.random_sidebands.text() == "Random sidebands"
+    assert controller.timing_hint.isHidden()
+    assert "coarse 8 ns" in controller.timing_box.toolTip()
+    assert "hidden MCA ROI" in groups["Energy gates"].toolTip()
+    assert "both complete raw streams" in groups["Raw DMA recording"].toolTip()
+    assert "32 raw MCA channels" in groups["Coincidence matrix"].toolTip()
 
 
 def test_matrix_tab_renders_log_corrected_counts_and_interactive_projections(

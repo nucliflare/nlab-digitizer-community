@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from PySide6.QtCore import QByteArray, QSettings, Qt, QThread, QThreadPool
 from PySide6.QtWidgets import QDockWidget, QMainWindow, QWidget
@@ -497,6 +497,53 @@ class MainWindowController:
             ctrl.refresh_dma_output_settings()
         if self._coincidence_controller is not None:
             self._coincidence_controller.refresh_dma_output_settings()
+
+    def general_configuration_settings(self) -> dict[str, int]:
+        """Return the application-wide controls now edited in General Settings."""
+        scope = (
+            self._scope_controllers[0].configuration_settings()
+            if self._scope_controllers
+            else {}
+        )
+        mca = (
+            self._mca_controllers[0].configuration_settings()
+            if self._mca_controllers
+            else {}
+        )
+        psu = (
+            self._psu_controllers[0].configuration_settings()
+            if self._psu_controllers
+            else {}
+        )
+        return {
+            "scope_display_mode": int(scope.get("display_mode", 0)),
+            "scope_persistence": int(scope.get("persistence", 900)),
+            "scope_refresh_rate_hz": int(scope.get("refresh_rate_hz", 10)),
+            "mca_refresh_rate_hz": int(cast(int, mca.get("refresh_rate_hz", 5))),
+            "psu_refresh_interval_ms": int(psu.get("refresh_interval_ms", 1000)),
+            "psu_plot_time_range_s": int(psu.get("plot_time_range_s", 60)),
+        }
+
+    def apply_general_configuration_settings(self, settings: object) -> None:
+        """Apply one set of display/polling values to every applicable channel."""
+        if not isinstance(settings, dict):
+            return
+        scope_settings = {
+            "display_mode": settings.get("scope_display_mode", 0),
+            "persistence": settings.get("scope_persistence", 900),
+            "refresh_rate_hz": settings.get("scope_refresh_rate_hz", 10),
+        }
+        mca_settings = {"refresh_rate_hz": settings.get("mca_refresh_rate_hz", 5)}
+        psu_settings = {
+            "refresh_interval_ms": settings.get("psu_refresh_interval_ms", 1000),
+            "plot_time_range_s": settings.get("psu_plot_time_range_s", 60),
+        }
+        for scope_ctrl in self._scope_controllers:
+            scope_ctrl.apply_configuration_settings(scope_settings)
+        for mca_ctrl in self._mca_controllers:
+            mca_ctrl.apply_configuration_settings(mca_settings)
+        for psu_ctrl in self._psu_controllers:
+            psu_ctrl.apply_configuration_settings(psu_settings)
 
     def show_energy_calibration(self) -> None:
         """Open one modeless calibration workspace for all available MCAs."""

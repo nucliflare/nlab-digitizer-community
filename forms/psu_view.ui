@@ -311,11 +311,13 @@
        <layout class="QFormLayout" name="formMonitoring">
         <item row="0" column="0">
          <widget class="QLabel" name="labelRefreshRate">
+          <property name="visible"><bool>false</bool></property>
           <property name="text"><string>Refresh (ms):</string></property>
          </widget>
         </item>
         <item row="0" column="1">
          <widget class="QSpinBox" name="spinRefreshRate">
+          <property name="visible"><bool>false</bool></property>
           <property name="minimum"><number>100</number></property>
           <property name="maximum"><number>10000</number></property>
           <property name="singleStep"><number>100</number></property>
@@ -324,11 +326,13 @@
         </item>
         <item row="1" column="0">
          <widget class="QLabel" name="labelTimeRange">
+          <property name="visible"><bool>false</bool></property>
           <property name="text"><string>Time range (s):</string></property>
          </widget>
         </item>
         <item row="1" column="1">
          <widget class="QSpinBox" name="spinTimeRange">
+          <property name="visible"><bool>false</bool></property>
           <property name="minimum"><number>10</number></property>
           <property name="maximum"><number>3600</number></property>
           <property name="value"><number>60</number></property>

@@ -100,6 +100,70 @@ def _bare_controller(*, backend: str = "iio") -> MainWindowController:
     return controller
 
 
+def test_general_settings_read_first_channel_and_apply_to_every_channel() -> None:
+    controller = _bare_controller()
+    scope0 = SimpleNamespace(
+        configuration_settings=lambda: {
+            "display_mode": 1,
+            "persistence": 750,
+            "refresh_rate_hz": 20,
+        },
+        apply_configuration_settings=Mock(),
+    )
+    scope1 = SimpleNamespace(
+        configuration_settings=lambda: {},
+        apply_configuration_settings=Mock(),
+    )
+    mca0 = SimpleNamespace(
+        configuration_settings=lambda: {"refresh_rate_hz": 8},
+        apply_configuration_settings=Mock(),
+    )
+    mca1 = SimpleNamespace(
+        configuration_settings=lambda: {},
+        apply_configuration_settings=Mock(),
+    )
+    psu0 = SimpleNamespace(
+        configuration_settings=lambda: {
+            "refresh_interval_ms": 500,
+            "plot_time_range_s": 120,
+        },
+        apply_configuration_settings=Mock(),
+    )
+    psu1 = SimpleNamespace(
+        configuration_settings=lambda: {},
+        apply_configuration_settings=Mock(),
+    )
+    controller._scope_controllers = [scope0, scope1]
+    controller._mca_controllers = [mca0, mca1]
+    controller._psu_controllers = [psu0, psu1]
+
+    settings = controller.general_configuration_settings()
+
+    assert settings == {
+        "scope_display_mode": 1,
+        "scope_persistence": 750,
+        "scope_refresh_rate_hz": 20,
+        "mca_refresh_rate_hz": 8,
+        "psu_refresh_interval_ms": 500,
+        "psu_plot_time_range_s": 120,
+    }
+
+    controller.apply_general_configuration_settings(settings)
+
+    for scope in (scope0, scope1):
+        scope.apply_configuration_settings.assert_called_once_with(
+            {"display_mode": 1, "persistence": 750, "refresh_rate_hz": 20}
+        )
+    for mca in (mca0, mca1):
+        mca.apply_configuration_settings.assert_called_once_with(
+            {"refresh_rate_hz": 8}
+        )
+    for psu in (psu0, psu1):
+        psu.apply_configuration_settings.assert_called_once_with(
+            {"refresh_interval_ms": 500, "plot_time_range_s": 120}
+        )
+
+
 def test_iio_startup_explicitly_requests_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     controller = _bare_controller()
     expected = object()
