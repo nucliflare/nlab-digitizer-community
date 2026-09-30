@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-09-30
+
 ### Added
 
 - General Settings panel with an opt-in automatic configuration snapshot. It
@@ -452,7 +454,8 @@ Initial open-source release of the Nuclear Lab Digitizer Community Edition.
 
 ---
 
-[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.6.0...main
+[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.6.1...main
+[0.6.1]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.6.1
 [0.6.0]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.6.0
 [0.5.0]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.5.0
 [0.4.0]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.4.0
