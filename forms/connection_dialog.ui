@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>360</width>
-    <height>155</height>
+    <height>190</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -48,23 +48,37 @@
       </widget>
      </item>
      <item row="1" column="1">
-      <widget class="QComboBox" name="comboIp">
-       <property name="sizePolicy">
-        <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
-         <horstretch>0</horstretch>
-         <verstretch>0</verstretch>
-        </sizepolicy>
-       </property>
-       <property name="editable">
-        <bool>true</bool>
-       </property>
-       <property name="insertPolicy">
-        <enum>QComboBox::NoInsert</enum>
-       </property>
-       <property name="placeholderText">
-        <string>e.g. 192.168.1.100</string>
-       </property>
-      </widget>
+      <layout class="QHBoxLayout" name="addressLayout">
+       <item>
+        <widget class="QComboBox" name="comboIp">
+         <property name="sizePolicy">
+          <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+           <horstretch>1</horstretch>
+           <verstretch>0</verstretch>
+          </sizepolicy>
+         </property>
+         <property name="editable">
+          <bool>true</bool>
+         </property>
+         <property name="insertPolicy">
+          <enum>QComboBox::NoInsert</enum>
+         </property>
+         <property name="placeholderText">
+          <string>Address or hostname</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="buttonRescan">
+         <property name="text">
+          <string>Rescan</string>
+         </property>
+         <property name="toolTip">
+          <string>Scan the local network and check the USB-network address 192.168.3.1</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
      </item>
      <item row="2" column="0">
       <widget class="QLabel" name="labelPort">
@@ -107,6 +121,16 @@
       </widget>
      </item>
     </layout>
+   </item>
+   <item>
+    <widget class="QLabel" name="labelDiscoveryStatus">
+     <property name="text">
+      <string>Ready to scan for digitizers.</string>
+     </property>
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+    </widget>
    </item>
    <item>
     <widget class="QDialogButtonBox" name="buttonBox">

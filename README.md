@@ -249,13 +249,17 @@ uv run nlab
 In the connection dialog:
 
 1. Select **IIO**.
-2. Enter the board address, for example `192.168.10.128`.
+2. Select a discovered board or enter its address, for example `192.168.10.128`.
 3. Use port `30431` unless the target's `iiod` configuration differs.
 4. Select the number of channels exposed by the board and connect.
 
-The dialog remembers a successful selection. For compatibility with existing
-installations, a completely new settings profile may initially show gRPC;
-switch it to IIO for current firmware.
+When opened, the dialog scans for network `iiod` services with libiio's
+DNS-SD/mDNS discovery (Avahi on Linux) and also probes `192.168.3.1:30431`, the
+fixed address used by the board's USB network connection. **Rescan** repeats
+both checks without blocking the window. Manual addresses remain supported,
+and the dialog remembers a successful selection. For compatibility with
+existing installations, a completely new settings profile may initially show
+gRPC; choosing a discovered board selects IIO automatically.
 
 A saved configuration can pre-fill the backend, address, port, and channel
 count, while explicit address options override values from the file:

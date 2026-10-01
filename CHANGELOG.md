@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The startup connection dialog now discovers `iiod` boards through the local
+  DNS-SD/mDNS (Avahi) scan, independently probes the USB-network endpoint at
+  `192.168.3.1:30431`, and provides a non-blocking **Rescan** button.
+
 ## [0.6.1] — 2026-09-30
 
 ### Added
