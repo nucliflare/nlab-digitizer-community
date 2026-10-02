@@ -30,7 +30,6 @@ from nlab.hardware.digitizer.current_monitor import (
 from nlab.hardware.digitizer.dma import (
     FILE_HEADER_STRUCT,
     IIOScopeDmaStreamer,
-    ScopeDmaStreamer,
     ScopeFrameBuffer,
 )
 from nlab.hardware.digitizer.scope import (
@@ -46,7 +45,7 @@ from nlab.ui.ui_scope_view import Ui_ScopeView
 from nlab.views.plot_viewbox import DraggableScopeCurve, ModifierZoomViewBox
 from nlab.views.responsive_layout import configure_scope_layout
 from nlab.views.time_axis import format_duration_ns, time_axis_scale
-from nlab.workers.dma_workers import IIOScopeDmaWorker, ScopeDmaWorker
+from nlab.workers.dma_workers import IIOScopeDmaWorker
 from nlab.workers.scope_auto_setup_worker import (
     ScopeAutoSetupResult,
     ScopeAutoSetupWorker,
@@ -129,8 +128,8 @@ class ScopeController(QWidget):
     def __init__(
         self,
         scope: Scope,
-        scope_dma: ScopeDmaStreamer | IIOScopeDmaStreamer | None = None,
-        channel: int = 1,
+        scope_dma: IIOScopeDmaStreamer | None = None,
+        channel: int = 0,
         parent: QWidget | None = None,
         *,
         dma_frame_buffer: ScopeFrameBuffer | None = None,
@@ -154,7 +153,7 @@ class ScopeController(QWidget):
         self._viewer_scope: Scope | None = None
         self._viewer_scope_lock = threading.Lock()
 
-        self._dma_worker: ScopeDmaWorker | IIOScopeDmaWorker | None = None
+        self._dma_worker: IIOScopeDmaWorker | None = None
         self._dma_thread: QThread | None = None
         self._dma_filepath: Path | None = None
         self._dma_counter = 0
@@ -791,7 +790,7 @@ class ScopeController(QWidget):
     def current_dma_supported(self) -> bool:
         """Whether this Scope can feed the Current view without a file."""
         return (
-            isinstance(self._scope_dma, IIOScopeDmaStreamer)
+            self._scope_dma is not None
             and self._current_accumulator is not None
             and self._scope.frame_period_cycles_supported()
         )
@@ -901,7 +900,7 @@ class ScopeController(QWidget):
         self._update_frame_gap_enabled()
         self._update_viewer_transport_hint()
 
-        assert isinstance(self._scope_dma, IIOScopeDmaStreamer)
+        assert self._scope_dma is not None
         assert self._current_accumulator is not None
         geometry = self._scope_dma.capture_geometry()
         if geometry.waveform_samples <= 0:
@@ -994,36 +993,20 @@ class ScopeController(QWidget):
         )
         self._dma_filepath = None
 
-        if isinstance(self._scope_dma, IIOScopeDmaStreamer):
-            log.debug(
-                "Scope ch%d IIO DMA [1/4]: creating worker, destination=%s",
-                self._channel,
-                filepath or "live Current view",
-            )
-            self._dma_worker = IIOScopeDmaWorker(
-                streamer=self._scope_dma,
-                filepath=filepath,
-                frame_buffer=(None if self._dma_online_current else self._dma_frame_buffer),
-                current_accumulator=(
-                    self._current_accumulator if self._dma_online_current else None
-                ),
-            )
-        else:
-            if filepath is None:
-                raise RuntimeError("online Scope DMA is unavailable on the legacy backend")
-            assert isinstance(self._scope_dma, ScopeDmaStreamer)
-            frame_samples = self._frame_samples_from_ui()
-            log.debug(
-                "Scope ch%d DMA [1/6]: creating worker, file=%s, frame_samples=%d",
-                self._channel,
-                filepath,
-                frame_samples,
-            )
-            self._dma_worker = ScopeDmaWorker(
-                streamer=self._scope_dma,
-                filepath=filepath,
-                frame_samples=frame_samples,
-            )
+        assert self._scope_dma is not None
+        log.debug(
+            "Scope ch%d IIO DMA [1/4]: creating worker, destination=%s",
+            self._channel,
+            filepath or "live Current view",
+        )
+        self._dma_worker = IIOScopeDmaWorker(
+            streamer=self._scope_dma,
+            filepath=filepath,
+            frame_buffer=(None if self._dma_online_current else self._dma_frame_buffer),
+            current_accumulator=(
+                self._current_accumulator if self._dma_online_current else None
+            ),
+        )
         self._dma_thread = QThread(self)
         self._dma_worker.moveToThread(self._dma_thread)
 
@@ -1042,9 +1025,9 @@ class ScopeController(QWidget):
         )
 
         self._set_controls_enabled(False)
-        self.ui.lblRecordingStatus.setText("Connecting...")
+        self.ui.lblRecordingStatus.setText("Arming IIO DMA...")
         log.debug(
-            "Scope ch%d DMA [2/6]: starting worker thread (ZMQ connect + subscribe)", self._channel
+            "Scope ch%d IIO DMA [2/4]: starting worker thread", self._channel
         )
         self._dma_thread.start()
         log.info(
@@ -1056,25 +1039,13 @@ class ScopeController(QWidget):
     def _on_dma_ready(self) -> None:
         if self._dma_stopping:
             return
-        if isinstance(self._scope_dma, IIOScopeDmaStreamer):
-            # The backend's first read starts the blocking refill and then
-            # writes enable=1 in that order. The queued ready signal is only
-            # a UI transition; a second start write here would race it.
-            log.debug(
-                "Scope ch%d IIO DMA [3/4]: backend reader owns ordered start",
-                self._channel,
-            )
-        else:
-            log.debug(
-                "Scope ch%d DMA [3/6]: ZMQ socket ready, DMA already enabled via checkbox",
-                self._channel,
-            )
-            log.debug(
-                "Scope ch%d DMA [4/6]: calling scope.start() -> set_enable(True) "
-                "(HW fires start_irq -> server sends StreamSTART)",
-                self._channel,
-            )
-            self._scope.start()
+        # The backend's first read starts the blocking refill and then writes
+        # enable=1 in that order. The queued ready signal is only a UI
+        # transition; a second start write here would race it.
+        log.debug(
+            "Scope ch%d IIO DMA [3/4]: backend reader owns ordered start",
+            self._channel,
+        )
         interval_ms = 1000 // self.ui.spinRefreshRate.value()
         self._refresh_timer.start(interval_ms)
         self.ui.btnStop.setEnabled(True)
@@ -1090,7 +1061,7 @@ class ScopeController(QWidget):
                 else "Recording..."
             )
         self._start_measurement_timer()
-        log.info("Scope ch%d: DMA + acquisition started (socket was ready)", self._channel)
+        log.info("Scope ch%d: IIO DMA + acquisition started", self._channel)
 
     def _on_stop(self) -> None:
         self._raw_curve.cancelDrag()
@@ -1107,15 +1078,11 @@ class ScopeController(QWidget):
         if self._dma_worker is not None:
             self._dma_stopping = True
             log.debug("Scope ch%d: stopping with DMA", self._channel)
-            if isinstance(self._scope_dma, IIOScopeDmaStreamer):
-                # Current vdpp_scope explicitly accepts enable=0 while a
-                # buffer is armed. Stop new triggers first, then have the
-                # worker cancel any blocked refill and close the buffer.
-                self._scope.stop()
-                self._dma_worker.stop()
-            else:
-                self._scope.stop()
-                self._dma_worker.stop()
+            # Current vdpp_scope explicitly accepts enable=0 while a buffer
+            # is armed. Stop new triggers first, then have the worker cancel
+            # any blocked refill and close the buffer.
+            self._scope.stop()
+            self._dma_worker.stop()
             self._acquiring = False
             self.ui.btnStart.setChecked(False)
             self.ui.btnStart.setEnabled(False)
@@ -1290,12 +1257,7 @@ class ScopeController(QWidget):
         if self._acquiring:
             return
         self._acquiring = True
-        scope_source = (
-            self._viewer_scope_for_worker
-            if isinstance(self._scope_dma, IIOScopeDmaStreamer)
-            else self._scope
-        )
-        worker = ScopeWorker(scope_source)
+        worker = ScopeWorker(self._viewer_scope_for_worker)
         worker.signals.ready.connect(self._on_viewer_frame_received)
         QThreadPool.globalInstance().start(worker)
 

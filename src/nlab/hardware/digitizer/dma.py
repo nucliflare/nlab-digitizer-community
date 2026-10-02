@@ -1,8 +1,7 @@
-"""DMA streaming for scope waveforms and MCA list-mode events.
+"""IIO DMA streaming for scope waveforms and MCA list-mode events.
 
-The legacy streamers manage ZMQ SUB connections to the gRPC Engine. The
-IIO streamers pull complete blocks from IIODigitizerBackend on dedicated
-worker threads.
+The streamers pull complete blocks from IIODigitizerBackend on dedicated
+worker threads. Readers retain support for legacy NDMA v1 capture files.
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Protocol
 
 import numpy as np
-import zmq
 
 from nlab.hardware.digitizer.iio_listmode import (
     IIO_LM_EVENT_DTYPE,
@@ -71,15 +69,6 @@ class _IIOMcaBackend(Protocol):
 
 log = logging.getLogger(__name__)
 
-SCOPE_DMA_BASE_PORT = 50152
-MCA_DMA_BASE_PORT = 50162
-
-STREAM_START = b"StreamSTART\x00"
-STREAM_END = b"StreamEND\x00"
-
-EVENT_STRUCT = struct.Struct("<BBHHHQ")
-EVENT_SIZE = EVENT_STRUCT.size  # 16 bytes
-
 FILE_HEADER_STRUCT = struct.Struct("<4sHBBdI4x")  # 24 bytes
 FILE_MAGIC = b"NDMA"
 FILE_VERSION = 1
@@ -106,14 +95,16 @@ _IIO_SCOPE_WRITE_QUEUE_FRAMES = 256
 _IIO_SCOPE_WRITE_QUEUE_POLL_SECONDS = 0.050
 _IIO_SCOPE_WRITER_STOP = object()
 
-_EVENT_DTYPE = np.dtype([
-    ("marker", np.uint8),
-    ("zc_offset", np.uint8),
-    ("zc_estimation", np.uint16),
-    ("short_energy", np.uint16),
-    ("energy", np.uint16),
-    ("timestamp", np.uint64),
-])
+_EVENT_DTYPE = np.dtype(
+    [
+        ("marker", np.uint8),
+        ("zc_offset", np.uint8),
+        ("zc_estimation", np.uint16),
+        ("short_energy", np.uint16),
+        ("energy", np.uint16),
+        ("timestamp", np.uint64),
+    ]
+)
 
 # Preserve the historical private name for callers of the NDMA v2 reader.
 _LM_EVENT_DTYPE = IIO_LM_EVENT_DTYPE
@@ -327,7 +318,12 @@ def _write_file_header(
     version: int = FILE_VERSION,
 ) -> None:
     header = FILE_HEADER_STRUCT.pack(
-        FILE_MAGIC, version, channel, 0, time.time(), frame_samples,
+        FILE_MAGIC,
+        version,
+        channel,
+        0,
+        time.time(),
+        frame_samples,
     )
     f.write(header)
     f.flush()
@@ -339,7 +335,12 @@ def _file_header_bytes(
     version: int = FILE_VERSION,
 ) -> bytes:
     return FILE_HEADER_STRUCT.pack(
-        FILE_MAGIC, version, channel, 0, time.time(), frame_samples,
+        FILE_MAGIC,
+        version,
+        channel,
+        0,
+        time.time(),
+        frame_samples,
     )
 
 
@@ -365,11 +366,7 @@ def _write_iio_mca_metadata(
 ) -> Path:
     """Write the auditable sidecar used by the reference capture workflow."""
     metadata_path = path.with_suffix(".json")
-    continuity_valid = (
-        dma_fault == 0
-        and completed_frames == frame_count
-        and deadtime_records == 0
-    )
+    continuity_valid = dma_fault == 0 and completed_frames == frame_count and deadtime_records == 0
     metadata = {
         "format": "nlab-iio-mca-ndma-v2",
         "capture": str(path.resolve()),
@@ -400,125 +397,12 @@ def _write_iio_mca_metadata(
     return metadata_path
 
 
-class ScopeDmaStreamer:
-    """Manages ZMQ SUB connection for scope DMA waveform streaming.
-
-    Not a backend -- a standalone connection manager.  Create via
-    Digitizer, use from a dedicated worker thread.
-    """
-
-    def __init__(self, channel: int, hostname: str = "192.168.10.20") -> None:
-        self._channel = channel
-        self._hostname = hostname
-        self._port = SCOPE_DMA_BASE_PORT + channel - 1
-        self._endpoint = f"tcp://{hostname}:{self._port}"
-
-    def stream_to_file(
-        self,
-        filepath: Path,
-        frame_samples: int,
-        stop_event: threading.Event,
-        on_ready: Callable[[], None] | None = None,
-        on_progress: Callable[[int], None] | None = None,
-    ) -> int:
-        """Connect, signal ready, wait for StreamSTART, write frames until StreamEND or stop.
-
-        *on_ready* is called after the ZMQ socket is connected and
-        subscribed — the caller should enable DMA on the hardware at
-        this point so the StreamSTART sentinel is not missed.
-
-        Returns total bytes written.  Runs in caller's thread --
-        creates and destroys its own ZMQ context (thread-local).
-        """
-        ctx = zmq.Context()
-        socket = ctx.socket(zmq.SUB)
-        socket.setsockopt(zmq.LINGER, 0)      # don't block ctx.term() on unsent messages
-        socket.setsockopt(zmq.SUBSCRIBE, b"")
-        poller = zmq.Poller()
-        poller.register(socket, zmq.POLLIN)
-
-        log.debug("Scope DMA [worker 2a]: connecting ZMQ SUB to %s", self._endpoint)
-        socket.connect(self._endpoint)
-        time.sleep(0.2)
-        log.debug("Scope DMA [worker 2b]: ZMQ connected, emitting ready "
-                  "(controller will enable DMA + call start)")
-        if on_ready is not None:
-            on_ready()
-
-        total_bytes = 0
-        frame_count = 0
-        started = False
-
-        try:
-            with open(filepath, "wb") as f:
-                log.info("Scope DMA: recording to %s", filepath)
-                _write_file_header(f, self._channel, frame_samples)
-                log.debug("Scope DMA [worker 6/6]: polling for StreamSTART "
-                          "(waiting for HW start_irq after scope.start())")
-
-                while not stop_event.is_set():
-                    events = dict(poller.poll(100))
-                    if socket not in events:
-                        continue
-
-                    message = socket.recv()
-
-                    if not started:
-                        if message == STREAM_START:
-                            log.info("Scope DMA: StreamSTART received "
-                                     "(HW start_irq fired, DMA engine running)")
-                            started = True
-                            continue
-                        if message != STREAM_END and len(message) > len(STREAM_START):
-                            log.warning("Scope DMA: data arrived before StreamSTART "
-                                        "(%d bytes) — server missed sentinel, "
-                                        "treating as stream active", len(message))
-                            started = True
-                            f.write(message)
-                            total_bytes += len(message)
-                            frame_count += 1
-                            continue
-                        log.debug("Scope DMA: pre-start message, %d bytes (ignoring)",
-                                  len(message))
-                        continue
-
-                    if message == STREAM_END:
-                        log.info("Scope DMA: StreamEND received "
-                                 "(HW stop_irq fired, scope.stop() was called)")
-                        break
-
-                    f.write(message)
-                    total_bytes += len(message)
-                    frame_count += 1
-                    if frame_count == 1:
-                        log.debug("Scope DMA: first data frame received, %d bytes "
-                                  "(DMA transfers active)", len(message))
-
-                    if on_progress is not None:
-                        on_progress(total_bytes)
-
-        except zmq.ZMQError:
-            log.exception("Scope DMA: ZMQ error during streaming")
-            raise
-        finally:
-            reason = "stop_event" if stop_event.is_set() else "StreamEND"
-            log.info("Scope DMA: finished -- %d frames, %d bytes to %s (reason: %s)",
-                     frame_count, total_bytes, filepath, reason)
-            socket.close()
-            ctx.term()
-
-        return total_bytes
-
-
 class IIOScopeDmaStreamer:
     """Complete Scope DMA records for files and bounded live consumers.
 
-    Not a drop-in replacement for ScopeDmaStreamer: that class is a ZMQ SUB
-    client fed by the gRPC Engine's own push-based DMA server, which
-    continuously streams frames captured by hardware running free. The IIO
-    scope core exposes a pull-based IIO buffer rather than the legacy ZMQ
-    push stream. This class arms one buffer for the measurement, repeatedly
-    refills it and publishes decoded complete records to live subscribers.
+    The IIO scope core exposes a pull-based IIO buffer. This class arms one
+    buffer for the measurement, repeatedly refills it and publishes decoded
+    complete records to live subscribers.
     Legacy-compatible records can additionally be handed to a dedicated file
     writer. New periodic v122 layouts can decimate and align the transport;
     their exact geometry is driver-advertised and is currently online-only
@@ -579,19 +463,16 @@ class IIOScopeDmaStreamer:
         refill and propagate to the caller.
 
         *on_progress* is called by the writer thread with the total bytes
-        accepted by Python's buffered file object so far, not
-        a frame count -- matching ScopeDmaStreamer's convention (which
-        passes total_bytes), since ScopeController._on_dma_progress()
-        treats the value as a byte count for its KB/MB display regardless
-        of which streamer is in use. Passing frame_count here instead
+        accepted by Python's buffered file object so far, not a frame count,
+        because ScopeController._on_dma_progress() treats the value as a byte
+        count for its KB/MB display. Passing frame_count here instead
         used to make the GUI display a wildly wrong size (e.g. "20 KB"
         for what was actually a 56 MB file, since 20,000-ish frames were
         being read as 20,000-ish bytes).
 
-        Like ScopeDmaStreamer, the one-time file header written by
-        _write_file_header() is not included in the count -- both
-        streamers under-report the true file size by that fixed 24-byte
-        header, consistently, not a new inconsistency introduced here.
+        The one-time file header written by _write_file_header() is not
+        included in the count, so the displayed byte count excludes that
+        fixed 24-byte header.
 
         Always closes the DMA capture buffer before returning, success,
         stop_event, or exception alike -- per vdpp-scope.c's predisable(),
@@ -637,9 +518,7 @@ class IIOScopeDmaStreamer:
                         if record is _IIO_SCOPE_WRITER_STOP:
                             break
                         if not isinstance(record, bytes):
-                            raise TypeError(
-                                "scope DMA writer received a non-bytes record"
-                            )
+                            raise TypeError("scope DMA writer received a non-bytes record")
                         bytes_written = f.write(record)
                         if bytes_written != len(record):
                             raise OSError(
@@ -660,9 +539,7 @@ class IIOScopeDmaStreamer:
                 try:
                     self._backend.request_dma_stop()
                 except Exception:
-                    log.exception(
-                        "IIO scope DMA: failed to cancel capture after writer error"
-                    )
+                    log.exception("IIO scope DMA: failed to cancel capture after writer error")
 
         writer_thread: threading.Thread | None = None
         if filepath is not None:
@@ -766,13 +643,9 @@ class IIOScopeDmaStreamer:
                             current_accumulator.update_runtime_transport(
                                 transport=str(metadata.get("transport", "unknown")),
                                 kernel_buffers=int(metadata.get("kernel_buffers", 0)),
-                                readbuf_batch_frames=int(
-                                    metadata.get("readbuf_batch_frames", 0)
-                                ),
+                                readbuf_batch_frames=int(metadata.get("readbuf_batch_frames", 0)),
                                 queued_blocks=int(metadata.get("queued_blocks", 0)),
-                                queue_high_watermark=int(
-                                    metadata.get("queue_high_watermark", 0)
-                                ),
+                                queue_high_watermark=int(metadata.get("queue_high_watermark", 0)),
                             )
 
                 if frame_buffer is not None:
@@ -833,9 +706,8 @@ class IIOScopeDmaStreamer:
 class IIOMcaDmaStreamer:
     """Pull fixed 16 KiB MCA list-mode blocks from the IIO backend.
 
-    This is not interchangeable with McaDmaStreamer. The IIO driver has no
-    ZMQ sentinels: the first backend read arms the single opaque u8[16] scan
-    element, starts a blocking reader, and only then writes
+    The first backend read arms the single opaque u8[16] scan element,
+    starts a blocking reader, and only then writes
     pulse_processor.enable=1.
     Shutdown is likewise backend-owned: enable=0, drain complete blocks for
     the documented one-second inactivity window, then destroy the buffer.
@@ -887,7 +759,7 @@ class IIOMcaDmaStreamer:
         """Read complete 1024-record blocks until stopped.
 
         Raw IIO records are written unchanged. NDMA version 2 identifies
-        their layout; version 1 remains the legacy gRPC/ZMQ layout. The
+        their layout; version 1 remains the legacy event-record layout. The
         count includes zero-padded slots in the final complete frame: v121
         publishes no valid-record count and mca-architecture.md forbids
         treating zero payloads as an end marker because a real event may
@@ -920,8 +792,7 @@ class IIOMcaDmaStreamer:
             # file or the GUI's shared event buffer.
             if events.dtype != _LM_EVENT_DTYPE:
                 raise RuntimeError(
-                    f"unexpected IIO MCA event dtype {events.dtype!r}; "
-                    f"expected {_LM_EVENT_DTYPE!r}"
+                    f"unexpected IIO MCA event dtype {events.dtype!r}; expected {_LM_EVENT_DTYPE!r}"
                 )
             if writer is not None:
                 writer.append(events.tobytes(), events)
@@ -965,8 +836,7 @@ class IIOMcaDmaStreamer:
             except BaseException:
                 if capture_failed:
                     log.exception(
-                        "IIO MCA DMA: buffer close also failed while handling "
-                        "the capture error"
+                        "IIO MCA DMA: buffer close also failed while handling the capture error"
                     )
                 else:
                     if writer is not None:
@@ -977,7 +847,9 @@ class IIOMcaDmaStreamer:
             log.info(
                 "IIO MCA DMA: finished -- %d records in %d frames "
                 "(%d frame(s) received during close drain)",
-                total_records, frame_count, drained,
+                total_records,
+                frame_count,
+                drained,
             )
 
         try:
@@ -989,9 +861,7 @@ class IIOMcaDmaStreamer:
                 writer.close(complete=False)
             raise
         continuity_valid = (
-            dma_fault == 0
-            and completed_frames == frame_count
-            and deadtime_records == 0
+            dma_fault == 0 and completed_frames == frame_count and deadtime_records == 0
         )
         # vdpp-lm-frame.c exposes completed_frames, dma_fault,
         # dma_error_count (cumulative since driver initialization), and
@@ -1041,7 +911,8 @@ class IIOMcaDmaStreamer:
         log.info(
             "IIO MCA DMA: continuity verified -- %d driver frames, "
             "dma_fault=0, dma_error_count=%d, list_deadtime_raw=0",
-            completed_frames, dma_error_count,
+            completed_frames,
+            dma_error_count,
         )
 
         return total_records
@@ -1050,8 +921,7 @@ class IIOMcaDmaStreamer:
     def parse_events(raw: bytes) -> np.ndarray:
         if len(raw) % _LM_EVENT_DTYPE.itemsize:
             raise ValueError(
-                f"IIO list-mode payload is not aligned to "
-                f"{_LM_EVENT_DTYPE.itemsize}-byte records"
+                f"IIO list-mode payload is not aligned to {_LM_EVENT_DTYPE.itemsize}-byte records"
             )
         return np.frombuffer(raw, dtype=_LM_EVENT_DTYPE)
 
@@ -1059,158 +929,3 @@ class IIOMcaDmaStreamer:
     def compute_cfd_time(events: np.ndarray) -> np.ndarray:
         """Return the selected signed CFD interpolation in ADC-sample units."""
         return cfd_interpolation_samples(events)
-
-
-class McaDmaStreamer:
-    """Manages ZMQ SUB connection for MCA list-mode DMA streaming.
-
-    Not a backend -- a standalone connection manager.  Create via
-    Digitizer, use from a dedicated worker thread.
-    """
-
-    def __init__(self, channel: int, hostname: str = "192.168.10.20") -> None:
-        self._channel = channel
-        self._hostname = hostname
-        self._port = MCA_DMA_BASE_PORT + channel - 1
-        self._endpoint = f"tcp://{hostname}:{self._port}"
-
-    def stream_events(
-        self,
-        stop_event: threading.Event,
-        filepath: Path | None = None,
-        event_buffer: McaEventBuffer | tuple[list[np.ndarray], threading.Lock] | None = None,
-        on_ready: Callable[[], None] | None = None,
-        on_progress: Callable[[int], None] | None = None,
-        output_mode: McaDmaOutputMode = McaDmaOutputMode.BINARY,
-        configuration_yaml: str = "",
-    ) -> int:
-        """Connect, signal ready, wait for StreamSTART, read events until StreamEND or stop.
-
-        *on_ready* is called after the ZMQ socket is connected and
-        subscribed — the caller should enable DMA and start the
-        measurement at this point so the StreamSTART sentinel is not missed.
-
-        Events are simultaneously:
-        - Written to *filepath* as raw binary (if provided)
-        - Parsed and appended to *event_buffer* (if provided)
-
-        Returns total event count.  Runs in caller's thread.
-        """
-        ctx = zmq.Context()
-        socket = ctx.socket(zmq.SUB)
-        socket.setsockopt(zmq.LINGER, 0)      # don't block ctx.term() on unsent messages
-        socket.setsockopt(zmq.SUBSCRIBE, b"")
-        poller = zmq.Poller()
-        poller.register(socket, zmq.POLLIN)
-
-        total_events = 0
-        msg_count = 0
-        started = False
-        writer: McaCaptureWriter | None = None
-        capture_failed = False
-
-        try:
-            if filepath is not None:
-                writer = McaCaptureWriter(
-                    path=filepath,
-                    mode=output_mode,
-                    configuration_yaml=configuration_yaml,
-                    binary_header=_file_header_bytes(self._channel),
-                )
-                log.info("MCA DMA: recording %s to %s", output_mode.value, filepath)
-
-            log.debug("MCA DMA [worker 2a]: connecting ZMQ SUB to %s", self._endpoint)
-            socket.connect(self._endpoint)
-            time.sleep(0.2)
-            log.debug("MCA DMA [worker 2b]: ZMQ connected, emitting ready "
-                      "(controller will enable DMA + call start)")
-            if on_ready is not None:
-                on_ready()
-
-            log.debug("MCA DMA [worker 6/6]: polling for StreamSTART "
-                      "(waiting for HW list_start_irq after mca.start())")
-
-            while not stop_event.is_set():
-                events = dict(poller.poll(100))
-                if socket not in events:
-                    continue
-
-                message = socket.recv()
-
-                if not started:
-                    if message == STREAM_START:
-                        log.info("MCA DMA: StreamSTART received "
-                                 "(HW list_start_irq fired, DMA engine running)")
-                        started = True
-                        continue
-                    if message != STREAM_END and len(message) > len(STREAM_START):
-                        log.warning("MCA DMA: data arrived before StreamSTART "
-                                    "(%d bytes) — server missed sentinel, "
-                                    "treating as stream active", len(message))
-                        started = True
-                        # Fall through to process this message as data
-                    else:
-                        log.debug("MCA DMA: pre-start message, %d bytes (ignoring)",
-                                  len(message))
-                        continue
-
-                if message == STREAM_END:
-                    log.info("MCA DMA: StreamEND received "
-                             "(HW list_stop_irq fired, mca.stop() was called)")
-                    break
-
-                n_events = len(message) // EVENT_SIZE
-                if len(message) % EVENT_SIZE != 0:
-                    log.warning(
-                        "MCA DMA: message size %d not aligned to event size %d, truncating",
-                        len(message), EVENT_SIZE,
-                    )
-
-                parsed = self.parse_events(message[:n_events * EVENT_SIZE])
-                if writer is not None:
-                    writer.append(message, parsed)
-
-                total_events += n_events
-                msg_count += 1
-                if msg_count == 1:
-                    log.debug("MCA DMA: first event frame received, %d bytes, %d events "
-                              "(DMA transfers active)", len(message), n_events)
-
-                if event_buffer is not None and n_events > 0:
-                    _append_mca_event_batch(event_buffer, parsed)
-
-                if on_progress is not None:
-                    on_progress(total_events)
-
-        except BaseException:
-            capture_failed = True
-            log.exception("MCA DMA: error during streaming")
-            raise
-        finally:
-            reason = "stop_event" if stop_event.is_set() else "StreamEND"
-            log.info("MCA DMA: finished -- %d events from %d messages (reason: %s)",
-                     total_events, msg_count, reason)
-            if writer is not None:
-                writer.close(complete=not capture_failed)
-                log.info("MCA DMA: file closed: %s", filepath)
-            socket.close()
-            ctx.term()
-
-        return total_events
-
-    @staticmethod
-    def parse_events(raw: bytes) -> np.ndarray:
-        """Parse raw binary into structured numpy array."""
-        return np.frombuffer(raw, dtype=_EVENT_DTYPE)
-
-    @staticmethod
-    def compute_psd(events: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Compute PSD from structured event array.
-
-        Returns (energy, psd_zc) arrays.
-        """
-        energy = events["energy"].astype(np.float64)
-        psd_zc = events["zc_offset"].astype(np.float64) + (
-            events["zc_estimation"].view(np.int16).astype(np.float64) / 2**14
-        )
-        return energy, psd_zc

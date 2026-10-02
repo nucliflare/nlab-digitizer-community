@@ -49,7 +49,7 @@ def _wait_for_scan(qtbot: QtBot, dialog: ConnectionDialog) -> None:
     )
 
 
-def test_startup_scan_selects_discovered_board_and_iio(
+def test_startup_scan_selects_discovered_board(
     qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
@@ -64,8 +64,8 @@ def test_startup_scan_selects_discovered_board_and_iio(
     _wait_for_scan(qtbot, dialog)
 
     assert dialog.ip == "192.168.3.1"
-    assert dialog.backend == "iio"
     assert dialog.port == 30431
+    assert not hasattr(dialog._ui, "comboBackend")
     assert dialog._ui.buttonRescan.text() == "Rescan"
     assert dialog._ui.labelDiscoveryStatus.text().startswith("Found 1 digitizer")
 
@@ -78,15 +78,14 @@ def test_explicit_address_is_preserved_while_discoveries_are_added(
         "discover_iio_digitizers",
         lambda: DiscoveryResult((_digitizer("board.local"),)),
     )
-    dialog = ConnectionDialog(ip="configured.local", backend="grpc", port=50050)
+    dialog = ConnectionDialog(ip="configured.local", port=31000)
     qtbot.addWidget(dialog)
     dialog.show()
 
     _wait_for_scan(qtbot, dialog)
 
     assert dialog.ip == "configured.local"
-    assert dialog.backend == "grpc"
-    assert dialog.port == 50050
+    assert dialog.port == 31000
     assert dialog._ui.comboIp.findText("board.local", Qt.MatchFlag.MatchFixedString) >= 0
 
 
@@ -139,3 +138,30 @@ def test_rescan_button_is_disabled_while_scan_runs(
     assert not dialog._ui.buttonRescan.isEnabled()
     release_scan.set()
     _wait_for_scan(qtbot, dialog)
+
+
+@pytest.mark.parametrize(
+    ("legacy_backend", "legacy_port", "expected_port"),
+    [("iio", 31000, 31000), ("grpc", 50050, 30431)],
+)
+def test_port_settings_migrate_only_from_legacy_iio_selection(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_backend: str,
+    legacy_port: int,
+    expected_port: int,
+) -> None:
+    _Settings.values = {
+        "connection/last_backend": legacy_backend,
+        "connection/last_port": legacy_port,
+    }
+    monkeypatch.setattr(
+        connection_dialog_module,
+        "discover_iio_digitizers",
+        lambda: DiscoveryResult(()),
+    )
+
+    dialog = ConnectionDialog()
+    qtbot.addWidget(dialog)
+
+    assert dialog.port == expected_port

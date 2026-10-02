@@ -20,19 +20,14 @@ log = logging.getLogger(__name__)
 
 _MAX_RECENT_IPS = 10
 _DEFAULT_CHANNELS = 2
+_DEFAULT_PORT = 30431
 _DISCOVERY_ROLE = Qt.ItemDataRole.UserRole
 
-# Backend combo index -> internal key -> default port. gRPC's default here
-# matches Digitizer.from_grpc's own default (50050); IIO's matches the
-# ewt-scope IIO device tree's iiod port (30431).
-_BACKENDS = ("grpc", "iio")
-_DEFAULT_BACKEND = "grpc"
-_BACKEND_DEFAULT_PORTS = {"grpc": 50050, "iio": 30431}
-
 _KEY_RECENT_IPS = "connection/recent_ips"
-_KEY_LAST_BACKEND = "connection/last_backend"
-_KEY_LAST_PORT = "connection/last_port"
+_KEY_IIO_PORT = "connection/iio_port"
 _KEY_LAST_CHANNELS = "connection/last_channels"
+_LEGACY_KEY_LAST_BACKEND = "connection/last_backend"
+_LEGACY_KEY_LAST_PORT = "connection/last_port"
 
 
 class ConnectionDialog(QDialog):
@@ -51,7 +46,6 @@ class ConnectionDialog(QDialog):
         *,
         ip: str | None = None,
         port: int | None = None,
-        backend: str | None = None,
         channels: int | None = None,
     ) -> None:
         super().__init__(parent)
@@ -60,7 +54,6 @@ class ConnectionDialog(QDialog):
         self._ui.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setText("Connect")
         self._ui.buttonBox.accepted.connect(self._on_accept)
         self._ui.buttonBox.rejected.connect(self.reject)
-        self._ui.comboBackend.currentIndexChanged.connect(self._on_backend_changed)
         self._ui.comboIp.currentIndexChanged.connect(self._on_address_selected)
         line_edit = self._ui.comboIp.lineEdit()
         if line_edit is not None:
@@ -75,17 +68,12 @@ class ConnectionDialog(QDialog):
         self._discovered_hosts: set[str] = set()
         apply_taskbar_icon(self)
         self._load_settings()
-        self._apply_initial_values(ip=ip, port=port, backend=backend, channels=channels)
+        self._apply_initial_values(ip=ip, port=port, channels=channels)
         QTimer.singleShot(0, self._start_discovery)
 
     # ------------------------------------------------------------------
     # Public properties — read after exec() == Accepted
     # ------------------------------------------------------------------
-
-    @property
-    def backend(self) -> str:
-        """Internal backend key: "grpc" or "iio"."""
-        return _BACKENDS[self._ui.comboBackend.currentIndex()]
 
     @property
     def ip(self) -> str:
@@ -103,16 +91,6 @@ class ConnectionDialog(QDialog):
     # Internal
     # ------------------------------------------------------------------
 
-    def _on_backend_changed(self, index: int) -> None:
-        """Snap the port to the newly-selected backend's default.
-
-        Only a live user interaction reaches this (see _load_settings,
-        which blocks signals while restoring the saved index), so this
-        never fights with a restored last-used port on startup.
-        """
-        backend = _BACKENDS[index]
-        self._ui.spinPort.setValue(_BACKEND_DEFAULT_PORTS[backend])
-
     def _on_address_edited(self, _text: str) -> None:
         self._address_edited_since_scan = True
 
@@ -120,7 +98,6 @@ class ConnectionDialog(QDialog):
         endpoint = self._ui.comboIp.itemData(index, _DISCOVERY_ROLE)
         if not isinstance(endpoint, DiscoveredDigitizer):
             return
-        self._ui.comboBackend.setCurrentIndex(_BACKENDS.index("iio"))
         self._ui.spinPort.setValue(endpoint.port)
 
     def _start_discovery(self) -> None:
@@ -239,20 +216,19 @@ class ConnectionDialog(QDialog):
         if recent:
             self._ui.comboIp.setCurrentIndex(0)
 
-        saved_backend = settings.value(_KEY_LAST_BACKEND, _DEFAULT_BACKEND)
-        backend = saved_backend if isinstance(saved_backend, str) else _DEFAULT_BACKEND
-        backend_index = (
-            _BACKENDS.index(backend) if backend in _BACKENDS else _BACKENDS.index(_DEFAULT_BACKEND)
-        )
-        self._ui.comboBackend.blockSignals(True)
-        self._ui.comboBackend.setCurrentIndex(backend_index)
-        self._ui.comboBackend.blockSignals(False)
-
-        default_port = _BACKEND_DEFAULT_PORTS[_BACKENDS[backend_index]]
-        saved_port = settings.value(_KEY_LAST_PORT, default_port)
+        saved_port = settings.value(_KEY_IIO_PORT)
+        if saved_port is None:
+            # Migrate only a previously selected IIO endpoint. A legacy gRPC
+            # port (normally 50050) must not silently become the IIO default.
+            legacy_backend = settings.value(_LEGACY_KEY_LAST_BACKEND)
+            saved_port = (
+                settings.value(_LEGACY_KEY_LAST_PORT, _DEFAULT_PORT)
+                if legacy_backend == "iio"
+                else _DEFAULT_PORT
+            )
         saved_channels = settings.value(_KEY_LAST_CHANNELS, _DEFAULT_CHANNELS)
         self._ui.spinPort.setValue(
-            int(saved_port) if isinstance(saved_port, (int, str)) else default_port
+            int(saved_port) if isinstance(saved_port, (int, str)) else _DEFAULT_PORT
         )
         self._ui.spinChannels.setValue(
             int(saved_channels) if isinstance(saved_channels, (int, str)) else _DEFAULT_CHANNELS
@@ -263,14 +239,9 @@ class ConnectionDialog(QDialog):
         *,
         ip: str | None,
         port: int | None,
-        backend: str | None,
         channels: int | None,
     ) -> None:
         """Apply YAML/CLI defaults after persistent QSettings are restored."""
-        if backend in _BACKENDS:
-            self._ui.comboBackend.blockSignals(True)
-            self._ui.comboBackend.setCurrentIndex(_BACKENDS.index(backend))
-            self._ui.comboBackend.blockSignals(False)
         if ip is not None:
             self._ui.comboIp.setEditText(ip)
         if port is not None:
@@ -286,8 +257,7 @@ class ConnectionDialog(QDialog):
             recent.remove(ip)
         recent.insert(0, ip)
         settings.setValue(_KEY_RECENT_IPS, recent[:_MAX_RECENT_IPS])
-        settings.setValue(_KEY_LAST_BACKEND, self.backend)
-        settings.setValue(_KEY_LAST_PORT, self.port)
+        settings.setValue(_KEY_IIO_PORT, self.port)
         settings.setValue(_KEY_LAST_CHANNELS, self.channels)
 
     def _on_accept(self) -> None:

@@ -34,14 +34,13 @@ def test_startup_reports_connection_and_view_progress(monkeypatch: pytest.Monkey
 
     MainWindowController(
         SimpleNamespace(),
-        backend="iio",
         host="192.0.2.10",
         port=30431,
         channels=2,
         on_progress=progress.append,
     )
 
-    assert connected == [1, 2]
+    assert connected == [0, 1]
     assert progress == [
         "Connecting channel 1 of 2...",
         "Connecting channel 2 of 2...",
@@ -91,11 +90,10 @@ def test_psd_file_opens_standalone_readback_workbench(
     dialog.open_path.assert_called_once_with(path)
 
 
-def _bare_controller(*, backend: str = "iio") -> MainWindowController:
+def _bare_controller() -> MainWindowController:
     controller = object.__new__(MainWindowController)
-    controller._backend = backend
     controller._host = "board.local"
-    controller._port = 30431 if backend == "iio" else 50050
+    controller._port = 30431
     controller._current_monitor_controllers = []
     return controller
 
@@ -170,29 +168,12 @@ def test_iio_startup_explicitly_requests_ids(monkeypatch: pytest.MonkeyPatch) ->
     factory = Mock(return_value=expected)
     monkeypatch.setattr(main_window_module.Digitizer, "from_iio", factory)
 
-    result = controller._connect_channel(1)
+    result = controller._connect_channel(0)
 
     assert result is expected
     factory.assert_called_once_with(
         channel=0,
         uri="ip:board.local:30431",
-        with_ids=True,
-    )
-
-
-def test_grpc_startup_explicitly_requests_ids(monkeypatch: pytest.MonkeyPatch) -> None:
-    controller = _bare_controller(backend="grpc")
-    expected = object()
-    factory = Mock(return_value=expected)
-    monkeypatch.setattr(main_window_module.Digitizer, "from_grpc", factory)
-
-    result = controller._connect_channel(1)
-
-    assert result is expected
-    factory.assert_called_once_with(
-        channel=1,
-        hostname="board.local",
-        port=50050,
         with_ids=True,
     )
 

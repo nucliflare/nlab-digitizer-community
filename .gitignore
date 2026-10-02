@@ -21,10 +21,6 @@ env/
 src/nlab/ui/ui_*.py
 src/nlab/ui/*_rc.py
 
-# Generated protobuf / gRPC stubs (produced by scripts/generate_proto.py)
-src/nlab/hardware/grpc/generated/*_pb2.py
-src/nlab/hardware/grpc/generated/*_pb2_grpc.py
-
 # Nuitka build artefacts
 *.build/
 *.dist/

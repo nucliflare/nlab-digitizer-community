@@ -5,8 +5,8 @@ format: gfm
 
 This wiki documents the current Digitizer 4.0 application, its direct-IIO
 hardware path, acquisition workflows, file formats, analysis tools, and
-failure-recovery rules. The recommended backend is Linux IIO through `iiod`;
-gRPC/ZMQ remains available only for legacy firmware compatibility.
+failure-recovery rules. Linux IIO through `iiod` is the only runtime transport.
+The final legacy gRPC/ZMQ version is archived on the `grpc-final` branch.
 
 ## Start here
 

@@ -30,7 +30,7 @@ from nlab.hardware.digitizer.dma import (
     ScopeFrameBuffer,
 )
 from nlab.utils.dma_converter import convert_scope
-from nlab.workers.dma_workers import IIOScopeDmaWorker, ScopeDmaWorker
+from nlab.workers.dma_workers import IIOScopeDmaWorker
 
 
 def test_binary_viewer_returns_complete_4096_sample_frame(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -153,10 +153,8 @@ def test_iio_scope_worker_coalesces_frame_progress(tmp_path: Path) -> None:
     assert updates == [0, 999]
 
 
-@pytest.mark.parametrize("worker_kind", ["legacy", "iio"])
 def test_scope_worker_preserves_progress_beyond_eight_gibibytes(
     tmp_path: Path,
-    worker_kind: str,
 ) -> None:
     expected = 8 * 1024**3 + 123_456
 
@@ -169,10 +167,7 @@ def test_scope_worker_preserves_progress_beyond_eight_gibibytes(
         stream_to_file=stream_to_file,
         request_stop=lambda: None,
     )
-    if worker_kind == "legacy":
-        worker = ScopeDmaWorker(streamer, tmp_path / "legacy.bin", frame_samples=8)
-    else:
-        worker = IIOScopeDmaWorker(streamer, tmp_path / "iio.bin")
+    worker = IIOScopeDmaWorker(streamer, tmp_path / "iio.bin")
     updates: list[int] = []
     worker.progress.connect(updates.append)
 

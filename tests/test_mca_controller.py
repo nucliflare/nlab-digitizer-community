@@ -227,7 +227,7 @@ def test_shutdown_stops_externally_armed_channel_even_when_not_in_progress() -> 
     mca.get_measurement_in_progress.return_value = False
     controller = SimpleNamespace(_mca=mca, _channel=0)
 
-    MCAController._ensure_disarmed(controller, had_dma_worker=False)
+    MCAController._ensure_disarmed(controller)
 
     mca.stop.assert_called_once_with()
     mca.get_measurement_in_progress.assert_not_called()

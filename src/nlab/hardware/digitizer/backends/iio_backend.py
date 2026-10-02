@@ -1394,7 +1394,7 @@ class IIODigitizerBackend(DigitizerBackend):
         readiness can be reported at the correct lifecycle boundary. The
         lazy-start fallback is retained for direct callers. The returned
         structured dtype follows vdpp-lm-frame.c exactly and deliberately
-        differs from the legacy gRPC/ZMQ event dtype.
+        differs from the legacy NDMA v1 event dtype.
         """
         if self._mca_dma_buf is None:
             return self.start_mca_dma_capture()
@@ -1707,12 +1707,9 @@ class IIODigitizerBackend(DigitizerBackend):
     def set_dma_enable(self, val: bool) -> None:
         """No-op for this backend -- see get_dma_enable()'s docstring.
 
-        Part of the shared ScopeBackend/MCABackend interface (also used
-        by the gRPC backend, where a direct write is the correct and only
-        way to control this bit) and still wired to a GUI checkbox in
-        ScopeController for backend-agnostic code -- kept present so both
-        remain usable unmodified. For vdpp_scope specifically, writing
-        this register directly while no buffer is open sets a state the
+        This method remains part of the shared ScopeBackend/MCABackend
+        interface and is wired to the GUI's DMA checkbox. For vdpp_scope,
+        writing this register directly while no buffer is open sets a state the
         driver never expects a client to set on its own (dma_enable=1
         with no IIO descriptor behind it), and writing it while a buffer
         *is* open races the driver's own close/drain and is explicitly

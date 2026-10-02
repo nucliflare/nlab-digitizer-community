@@ -3,14 +3,14 @@ title: "Getting Started"
 format: gfm
 ---
 
-## Recommended connection path
+## Connection path
 
-Use the **IIO** backend for current firmware. It connects to `iiod`, normally
-on TCP port `30431`, and is the implementation qualified for current Scope,
-MCA, list-mode, IDS/HV, and diagnostic devices.
+The application connects through IIO to `iiod`, normally on TCP port `30431`.
+This is the implementation qualified for current Scope, MCA, list-mode,
+IDS/HV, and diagnostic devices.
 
-The legacy backend uses DPP gRPC on port `50050`, IDS gRPC on port `50040`,
-and ZMQ for DMA. Keep it only for older images exposing those services.
+The removed gRPC/ZMQ implementation is preserved on the `grpc-final` branch
+for older images that still expose those services.
 
 | Function | Expected IIO device |
 |---|---|
@@ -76,11 +76,10 @@ cd nlab-digitizer-community
 
 uv sync --locked --extra dev
 python scripts/build_ui.py
-python scripts/generate_proto.py
 ```
 
-Generated Qt and protobuf modules are intentionally untracked. Regenerate
-them after a fresh clone and whenever their source forms or proto files change.
+Generated Qt modules are intentionally untracked. Regenerate them after a
+fresh clone and whenever their source forms or resource files change.
 
 ## Connect and run
 
@@ -90,10 +89,9 @@ uv run nlab
 
 In the connection dialog:
 
-1. select **IIO**;
-2. enter the board address;
-3. keep port `30431` unless the target is configured differently;
-4. select the number of exposed channels and connect.
+1. select a discovered board or enter its address;
+2. keep port `30431` unless the target is configured differently;
+3. select the number of exposed channels and connect.
 
 ![Connection dialog configured for the live two-channel `.128` IIO reference
 board.](images/readme-first-steps-connection.png)
@@ -105,8 +103,9 @@ uv run nlab --config experiment.yaml --ip 192.168.10.128 --port 30431
 ```
 
 Explicit command-line address options override the saved file. The dialog also
-remembers the last successful connection. A new settings profile may initially
-show gRPC for compatibility; switch it to IIO for current firmware.
+remembers the last successful connection. It scans local DNS-SD/mDNS services
+and directly probes the USB-network endpoint at `192.168.3.1:30431`; **Rescan**
+repeats both checks.
 
 ## A safe first session
 

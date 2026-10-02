@@ -64,6 +64,24 @@ def test_full_configuration_rejects_incompatible_format_version() -> None:
         raise AssertionError("incompatible settings format was accepted")
 
 
+@pytest.mark.parametrize(
+    "connection",
+    [
+        {"ip": "192.0.2.5", "port": 30431},
+        {"backend": "iio", "ip": "192.0.2.5", "port": 30431},
+    ],
+)
+def test_configuration_accepts_current_and_legacy_iio_connection_settings(
+    connection: dict[str, object],
+) -> None:
+    validate_configuration_version({"connection": connection})
+
+
+def test_configuration_rejects_removed_grpc_transport() -> None:
+    with pytest.raises(ValueError, match="grpc-final"):
+        validate_configuration_version({"connection": {"backend": "grpc"}})
+
+
 def test_scope_settings_reject_time_not_aligned_to_hardware_step() -> None:
     scope = Mock()
 

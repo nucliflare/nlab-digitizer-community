@@ -59,6 +59,7 @@ def validate_configuration_version(settings: Mapping[str, Any]) -> None:
     the current format so renamed/unit-bearing fields cannot be silently
     ignored.
     """
+    validate_connection_transport(settings)
     if "hardware" not in settings:
         return
     version = settings.get("format_version")
@@ -67,6 +68,22 @@ def validate_configuration_version(settings: Mapping[str, Any]) -> None:
             f"Unsupported settings format_version {version!r}; "
             f"expected {FORMAT_VERSION}"
         )
+
+
+def validate_connection_transport(settings: Mapping[str, Any]) -> None:
+    """Accept current IIO settings and reject configurations for removed transports."""
+    connection = settings.get("connection")
+    if not isinstance(connection, Mapping):
+        return
+    backend = connection.get("backend")
+    if backend is None or backend == "iio":
+        return
+    if backend == "grpc":
+        raise ValueError(
+            "This settings file targets the removed gRPC backend. "
+            "Use the grpc-final branch with legacy firmware."
+        )
+    raise ValueError(f"Unsupported connection backend {backend!r}; this application uses IIO")
 
 
 def connection_settings(settings: Mapping[str, Any]) -> dict[str, Any]:

@@ -363,7 +363,6 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
     mca = None
     try:
         window = MainAppWindow(
-            backend="iio",
             host=args.host,
             port=args.port,
             channels=2,

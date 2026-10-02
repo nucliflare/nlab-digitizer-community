@@ -13,7 +13,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import sys
 import time
 
 from nlab.hardware.digitizer import Digitizer
@@ -21,14 +20,20 @@ from nlab.hardware.digitizer import Digitizer
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Dual-channel IIR average measurement")
-    parser.add_argument("--host", default="192.168.10.134")
-    parser.add_argument("--port", type=int, default=50050)
-    parser.add_argument("--duration", type=float, default=120.0, help="Measurement duration in seconds")
+    parser.add_argument("--host", default="192.168.10.128")
+    parser.add_argument("--port", type=int, default=30431)
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=120.0,
+        help="Measurement duration in seconds",
+    )
     args = parser.parse_args()
 
     print(f"Connecting to {args.host}:{args.port} …")
-    ch1 = Digitizer.from_grpc(channel=1, hostname=args.host, port=args.port)
-    ch2 = Digitizer.from_grpc(channel=2, hostname=args.host, port=args.port)
+    uri = f"ip:{args.host}:{args.port}"
+    ch0 = Digitizer.from_iio(channel=0, uri=uri, with_ids=False)
+    ch1 = Digitizer.from_iio(channel=1, uri=uri, with_ids=False)
     print("Connected.\n")
 
     ts_ch1: list[float] = []
@@ -46,21 +51,20 @@ def main() -> None:
             if now >= deadline:
                 break
 
+            v0 = ch0.mca.filters.lp.get_iir_average()
+            t0 = time.perf_counter()
+            ts_ch1.append(t0)
+            vals_ch1.append(v0)
+
             v1 = ch1.mca.filters.lp.get_iir_average()
             t1 = time.perf_counter()
-            ts_ch1.append(t1)
-            vals_ch1.append(v1)
-
-            v2 = ch2.mca.filters.lp.get_iir_average()
-            t2 = time.perf_counter()
-            ts_ch2.append(t2)
-            vals_ch2.append(v2)
+            ts_ch2.append(t1)
+            vals_ch2.append(v1)
 
             n += 1
-            elapsed = t2 - t_start
+            elapsed = t1 - t_start
             print(
-                f"  [{elapsed:7.2f}s / {args.duration:.0f}s]  "
-                f"n={n}  Ch1={v1}  Ch2={v2}",
+                f"  [{elapsed:7.2f}s / {args.duration:.0f}s]  n={n}  Ch0={v0}  Ch1={v1}",
                 end="\r",
             )
 
@@ -76,8 +80,8 @@ def main() -> None:
     print(f"{'═' * 56}")
 
     for label, timestamps, values in [
-        ("Ch 1", ts_ch1, vals_ch1),
-        ("Ch 2", ts_ch2, vals_ch2),
+        ("Ch 0", ts_ch1, vals_ch1),
+        ("Ch 1", ts_ch2, vals_ch2),
     ]:
         count = len(timestamps)
         if count < 2:
@@ -100,8 +104,8 @@ def main() -> None:
 
     print(f"{'═' * 56}")
 
+    ch0.close()
     ch1.close()
-    ch2.close()
     print("Disconnected.")
 
 

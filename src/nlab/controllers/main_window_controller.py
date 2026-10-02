@@ -47,24 +47,22 @@ class MainWindowController:
     def __init__(
         self,
         window: MainAppWindow,
-        backend: str = "grpc",
         host: str = "",
-        port: int = 50050,
+        port: int = 30431,
         channels: int = 2,
         on_progress: Callable[[str], None] | None = None,
     ) -> None:
         self._window = window
-        self._backend = backend
         self._host = host
         self._port = port
         self._channels = channels
         self._devices: list[Digitizer] = []
         self._on_progress = on_progress
 
-        log.info("Connecting via %s to %s:%d, %d channel(s)", backend, host, port, channels)
-        for ch in range(1, 1 + self._channels):
-            self._report_progress(f"Connecting channel {ch} of {self._channels}...")
-            self._devices.append(self._connect_channel(ch))
+        log.info("Connecting via IIO to %s:%d, %d channel(s)", host, port, channels)
+        for channel in range(self._channels):
+            self._report_progress(f"Connecting channel {channel + 1} of {self._channels}...")
+            self._devices.append(self._connect_channel(channel))
         log.info("All %d device(s) connected", len(self._devices))
 
         self._scope_controllers: list[ScopeController] = []
@@ -119,41 +117,17 @@ class MainWindowController:
         if callback is not None:
             callback(message)
 
-    def _connect_channel(self, ch: int) -> Digitizer:
-        """Connect one channel using the selected backend.
-
-        gRPC channels are 1-based (GrpcDigitizerBackend's own convention,
-        matching hw_def's channel numbering); IIO channels are 0-based
-        (ewt-scope0/ewt-scope1 device names), so ch is shifted down by one
-        for that backend. Either way self._devices stays a plain list in
-        connection order — ch itself is never used as a storage key.
-        """
-        if self._backend == "iio":
-            return Digitizer.from_iio(
-                channel=ch - 1,
-                uri=f"ip:{self._host}:{self._port}",
-                with_ids=True,
-            )
-        return Digitizer.from_grpc(
-            channel=ch,
-            hostname=self._host,
-            port=self._port,
+    def _connect_channel(self, channel: int) -> Digitizer:
+        """Connect one zero-based IIO hardware channel."""
+        return Digitizer.from_iio(
+            channel=channel,
+            uri=f"ip:{self._host}:{self._port}",
             with_ids=True,
         )
 
     def _display_channel(self, idx: int) -> int:
-        """Channel number the way the connected backend's own hardware
-        labels it -- 0-based for IIO (vdpp_scope instance 0/1, matching
-        iio_info's device discovery order), 1-based for gRPC (hw_def's
-        channel numbering, unchanged from before). Used for tab labels,
-        dock object names, and settings filenames so a channel number
-        mentioned anywhere (GUI, logs, saved files, a live debugging
-        session cross-referencing the board) means the same physical
-        channel everywhere -- instead of the GUI always showing one
-        higher than what dmesg/iio_info call it, and needing the
-        ch-1 IIO offset in your head to translate between them.
-        """
-        return idx if self._backend == "iio" else idx + 1
+        """Return the zero-based IIO channel number shown throughout the UI."""
+        return idx
 
     # ------------------------------------------------------------------
     # Dock construction
@@ -339,8 +313,7 @@ class MainWindowController:
 
     def _build_coincidence_tab(self) -> None:
         available = (
-            self._backend == "iio"
-            and len(self._mca_controllers) >= 2
+            len(self._mca_controllers) >= 2
             and len(self._devices) >= 2
             and all(isinstance(device.mca_dma, IIOMcaDmaStreamer) for device in self._devices[:2])
             and self._global_controller is not None
@@ -368,7 +341,7 @@ class MainWindowController:
 
         The SiPM bias board, Geiger-Mueller probe, and PMT HV supply share the
         digitizer's RS-485 bus via a ser2net TCP bridge — same host as the
-        gRPC digitizer connection. A device that doesn't respond (not present,
+        IIO digitizer connection. A device that doesn't respond (not present,
         or bus not bridged) is simply absent from the discovery results.
         """
         if devices is None:
@@ -721,7 +694,7 @@ class MainWindowController:
         for mca_controller in self._mca_controllers:
             mca_controller.stop_worker_sync()
 
-        # 4. Current monitors own independent direct-IIO/gRPC connections.
+        # 4. Current monitors own independent direct-IIO connections.
         for current_controller in self._current_monitor_controllers:
             current_controller.stop_monitor_sync()
 
@@ -839,14 +812,13 @@ class MainWindowController:
         self._external_controllers.clear()
 
         log.info(
-            "Reconnect: connecting via %s to %s:%d, %d channel(s)",
-            self._backend,
+            "Reconnect: connecting via IIO to %s:%d, %d channel(s)",
             self._host,
             self._port,
             self._channels,
         )
-        for ch in range(1, 1 + self._channels):
-            self._devices.append(self._connect_channel(ch))
+        for channel in range(self._channels):
+            self._devices.append(self._connect_channel(channel))
         log.info("Reconnect: all %d device(s) connected", len(self._devices))
 
         self._build_global_tab()
@@ -944,7 +916,6 @@ class MainWindowController:
         document = {
             "format_version": FORMAT_VERSION,
             "connection": {
-                "backend": self._backend,
                 "ip": self._host,
                 "port": self._port,
                 "channels": self._channels,

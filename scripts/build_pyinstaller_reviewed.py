@@ -37,21 +37,10 @@ ROOT = Path(__file__).resolve().parent.parent
 ENTRY = ROOT / "src" / "nlab" / "main.py"
 ICON = ROOT / "resources" / "icons" / "ewt.ico"
 VERSION_SOURCE = ROOT / "src" / "nlab" / "_version.py"
-GENERATED_PROTO_DIR = ROOT / "src" / "nlab" / "hardware" / "grpc" / "generated"
 DIST = ROOT / "dist"
 WORK = ROOT / "build" / "pyinstaller-reviewed"
 SPEC = WORK / "spec"
 OUTPUT_NAME = "nlab"
-
-REQUIRED_PROTO_FILES = (
-    "__init__.py",
-    "base_pb2.py",
-    "base_pb2_grpc.py",
-    "IDS_pb2.py",
-    "IDS_pb2_grpc.py",
-    "settings_pb2.py",
-    "settings_pb2_grpc.py",
-)
 
 # These packages are installed by the development extra, or are optional
 # interactive integrations discovered by dependency hooks.  The application
@@ -71,7 +60,6 @@ EXCLUDED_MODULES = (
     "nbformat",
     "notebook",
     "jedi",
-    "grpc_tools",
     "setuptools",
 )
 
@@ -173,7 +161,6 @@ def _preflight() -> None:
         ENTRY,
         ICON,
         VERSION_SOURCE,
-        *(GENERATED_PROTO_DIR / name for name in REQUIRED_PROTO_FILES),
     ]
     missing = [path for path in required_paths if not path.is_file()]
     if missing:
@@ -200,7 +187,6 @@ def _build_arguments(*, clean: bool, version: str) -> list[str]:
         f"--distpath={DIST}",
         f"--workpath={WORK}",
         f"--specpath={SPEC}",
-        f"--paths={GENERATED_PROTO_DIR}",
         f"--add-data={ICON}{os.pathsep}resources/icons",
     ]
     if clean:

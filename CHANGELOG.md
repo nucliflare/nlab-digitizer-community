@@ -16,6 +16,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workers and docks, and preserves display preferences for rediscovered
   modules.
 
+### Changed
+
+- The application now uses the direct IIO backend exclusively. Startup,
+  connection settings, acquisition workers, examples, and standalone builds no
+  longer expose a transport selector or require gRPC/protobuf/ZMQ components.
+- Older settings that omit `connection.backend` or specify `iio` remain
+  compatible. Settings that explicitly request `grpc` are rejected with a
+  pointer to the preserved `grpc-final` branch.
+
+### Removed
+
+- Removed the legacy gRPC control backend, ZMQ DMA streamers, protobuf sources
+  and generation step, and their direct dependencies. Offline reading of
+  existing NDMA v1 files is retained.
+
 ## [0.6.2] — 2026-10-01
 
 ### Added

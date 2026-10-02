@@ -7,8 +7,8 @@ hardware backends. Keep it short and durable. Release history, hardware inventor
 and one-off debugging transcripts belong in `CHANGELOG.md`, focused tests, or a dated
 report rather than here.
 
-The direct IIO backend is the current implementation. The gRPC/ZMQ backend remains for
-legacy firmware compatibility.
+The direct IIO backend is the only runtime implementation. The final gRPC/ZMQ version
+is archived on the `grpc-final` branch for legacy firmware compatibility.
 
 ## Source of truth
 
@@ -28,7 +28,6 @@ legacy firmware compatibility.
 - `src/nlab/hardware/digitizer/backends/iio_backend.py`: IIO Scope and MCA control,
   readout, and DMA lifecycle.
 - `src/nlab/hardware/digitizer/backends/iio_ids_backend.py`: IIO HV/IDS and diagnostics.
-- `src/nlab/hardware/digitizer/backends/grpc_backend.py`: legacy backend.
 - `src/nlab/hardware/digitizer/dma.py`: streamers and NDMA formats.
 - `src/nlab/workers/`: polling and DMA workers.
 - `src/nlab/controllers/`: GUI coordination and acquisition state.
@@ -88,8 +87,8 @@ Additional rules:
 - Scope refills must equal `frame_samples * 2` bytes. Scope NDMA headers store an int16
   sample count, not a byte count; reject trailing partial frames during conversion.
 - Current MCA list mode transports one unchanged 16 KiB frame containing 1024 opaque
-  16-byte records. Keep the IIO record layout distinct from the same-sized legacy gRPC
-  event record and preserve the NDMA version distinction.
+  16-byte records. Keep the IIO record layout distinct from the same-sized legacy NDMA
+  v1 event record and preserve the NDMA version distinction.
 
 ## MCA configuration and snapshots
 
@@ -114,12 +113,11 @@ Install the locked development environment with:
 uv sync --locked --extra dev
 ```
 
-Generated Qt and protobuf modules are intentionally untracked. Regenerate them when
-their source forms or proto files change:
+Generated Qt modules are intentionally untracked. Regenerate them when their source
+forms or resource files change:
 
 ```bash
 python scripts/build_ui.py
-python scripts/generate_proto.py
 ```
 
 Run tests with an offscreen Qt platform in headless environments:
@@ -159,7 +157,7 @@ rewrite neighboring code.
 
 ## Completion checklist
 
-- Preserve public backend and controller behavior unless the task explicitly changes it.
+- Preserve public IIO and controller behavior unless the task explicitly changes it.
 - Add or update focused tests for lifecycle, format, or settings changes.
 - Verify no generated artifacts, captures, audit reports, or build outputs are staged.
 - Update `README.md` for user-facing behavior and `CHANGELOG.md` for release-visible

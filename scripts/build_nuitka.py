@@ -18,20 +18,6 @@ Nuitka notes
 - --include-module=PySide6.QtOpenGL(Widgets): pyqtgraph imports these for
                        optional GPU acceleration; Nuitka's static analyzer
                        doesn't discover them on its own.
-- --nofollow-import-to / --include-data-files for grpc/generated: the
-                       protoc-generated *_pb2.py files use bare `import x_pb2`
-                       (pre-3.20 protoc codegen style) instead of relative
-                       imports — see grpc/generated/__init__.py. The app
-                       works around this at runtime by inserting that
-                       directory into sys.path, which only works if those
-                       files exist as real on-disk .py files (in the onefile
-                       self-extraction temp dir). Excluding the package from
-                       compilation and shipping the .py files as data
-                       preserves that dev-mode behavior inside the archive.
-- --include-package=google.protobuf: the *_pb2.py files are loaded
-                       dynamically (excluded from static analysis), so
-                       Nuitka never sees their google.protobuf imports either
-                       — include it explicitly.
 - nlab.utils.windows_icon bundles resources/icons/ewt.ico as a real file
                        so its native LoadImage/WM_SETICON override works at
                        runtime inside the self-extraction temp dir.
@@ -52,7 +38,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ENTRY = ROOT / "src" / "nlab" / "main.py"
 ICON = ROOT / "resources" / "icons" / "ewt.ico"
-GENERATED_PROTO_DIR = ROOT / "src" / "nlab" / "hardware" / "grpc" / "generated"
 DIST = ROOT / "dist"
 
 # On Linux, the executable has no .exe extension so it would be named "nlab"
@@ -70,9 +55,6 @@ args = [
     "--include-package=nlab",
     "--include-module=PySide6.QtOpenGL",
     "--include-module=PySide6.QtOpenGLWidgets",
-    "--nofollow-import-to=nlab.hardware.grpc.generated",
-    "--include-package=google.protobuf",
-    f"--include-data-files={GENERATED_PROTO_DIR}/*.py=nlab/hardware/grpc/generated/",
     f"--include-data-files={ICON}=resources/icons/ewt.ico",
 ]
 

@@ -112,15 +112,15 @@ Check the format-specific evidence in [Capture Files and Integrity](data_formats
 - driver frame count, DMA fault, and list deadtime;
 - common Coincidence session manifest.
 
-A missing run summary after a crash means finalization did not complete. Legacy
-gRPC captures are unverified even when aligned.
+A missing run summary after a crash means finalization did not complete.
+Existing legacy NDMA v1 captures are unverified even when aligned.
 
 ## Reporting a useful issue
 
 Include:
 
 - host OS and application revision;
-- backend, endpoint, and channel;
+- endpoint and channel;
 - firmware/Linux and relevant FPGA IP versions;
 - `iio_info` device/geometry output;
 - exact action and ownership state when the failure occurred;

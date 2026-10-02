@@ -9,7 +9,11 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QSplashScreen
 
 from nlab import __version__
 from nlab.app import MainAppWindow
-from nlab.utils.settings_io import connection_settings, read_configuration
+from nlab.utils.settings_io import (
+    connection_settings,
+    read_configuration,
+    validate_connection_transport,
+)
 from nlab.utils.windows_icon import apply_taskbar_icon
 from nlab.views.connection_dialog import ConnectionDialog
 
@@ -67,10 +71,10 @@ def main() -> None:
     config: dict[str, object] = {}
     if args.config is not None:
         config = read_configuration(args.config)
+        validate_connection_transport(config)
     connection = connection_settings(config)
     config_ip = _string_value(connection.get("ip"))
     config_port = _int_value(connection.get("port"))
-    config_backend = _string_value(connection.get("backend"))
     config_channels = _int_value(connection.get("channels"))
 
     splash = _show_splash()
@@ -78,7 +82,6 @@ def main() -> None:
     dialog = ConnectionDialog(
         ip=args.ip if args.ip is not None else config_ip,
         port=args.port if args.port is not None else config_port,
-        backend=config_backend,
         channels=config_channels,
     )
     splash.finish(dialog)  # splash closes as soon as the dialog is shown
@@ -87,9 +90,8 @@ def main() -> None:
         sys.exit(0)
 
     log.info(
-        "Application starting — v%s, backend=%s, host=%s, port=%d, channels=%d",
+        "Application starting — v%s, IIO host=%s, port=%d, channels=%d",
         __version__,
-        dialog.backend,
         dialog.ip,
         dialog.port,
         dialog.channels,
@@ -97,7 +99,6 @@ def main() -> None:
     connection_splash = _show_connection_splash()
     try:
         window = MainAppWindow(
-            backend=dialog.backend,
             host=dialog.ip,
             port=dialog.port,
             channels=dialog.channels,

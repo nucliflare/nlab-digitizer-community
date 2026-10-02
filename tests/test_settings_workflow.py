@@ -17,7 +17,6 @@ def test_menu_save_writes_one_document_with_each_channel(
     tmp_path: Path,
 ) -> None:
     controller = cast(Any, object.__new__(MainWindowController))
-    controller._backend = "iio"
     controller._host = "board.local"
     controller._port = 30431
     controller._channels = 2
@@ -123,7 +122,6 @@ def test_menu_save_writes_one_document_with_each_channel(
     assert "current" in document["application"]["dock_layout"]
     assert "psd" in document["application"]["dock_layout"]
     assert document["connection"] == {
-        "backend": "iio",
         "ip": "board.local",
         "port": 30431,
         "channels": 2,

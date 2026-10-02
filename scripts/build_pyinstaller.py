@@ -30,7 +30,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ENTRY = ROOT / "src" / "nlab" / "main.py"
 ICON = ROOT / "resources" / "icons" / "ewt.ico"
-GENERATED_PROTO_DIR = ROOT / "src" / "nlab" / "hardware" / "grpc" / "generated"
 DIST = ROOT / "dist"
 WORK = ROOT / "build" / "pyinstaller"
 
@@ -43,18 +42,10 @@ args = [
     f"--distpath={DIST}",
     f"--workpath={WORK}",
     f"--specpath={ROOT / 'build' / 'pyinstaller'}",
-    # The protoc-generated *_pb2.py files use bare `import x_pb2` (not a
-    # relative/package import) — see grpc/generated/__init__.py, which
-    # inserts this same directory into sys.path at runtime. Without this,
-    # PyInstaller's static analysis never finds `settings_pb2` etc. since
-    # they're not reachable from the `nlab` package namespace.
-    f"--paths={GENERATED_PROTO_DIR}",
     # nlab.utils.windows_icon's native taskbar-icon override needs a real
     # on-disk .ico at runtime (relative to the onefile extraction dir) — see
     # the matching note in scripts/build_nuitka.py.
     f"--add-data={ICON}{os.pathsep}resources/icons",
-    # Add hidden imports if PyInstaller misses them at analysis time:
-    # "--hidden-import", "nlab.backend.grpc_device",
     str(ENTRY),
 ]
 
