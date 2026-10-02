@@ -21,7 +21,7 @@ class PSUController(QWidget):
     """View + controller for a single channel's power supply (IDS subsystem).
 
     Loaded from ui_psu_view.ui.  Accepts an HVSupply instance which wraps
-    the IDS gRPC backend for SiPM/HV bias and temperature monitoring.
+    the IDS IIO backend for SiPM/HV bias and temperature monitoring.
     """
 
     def __init__(self, hv: HVSupply, parent: QWidget | None = None) -> None:

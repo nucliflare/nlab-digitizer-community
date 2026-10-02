@@ -1,15 +1,17 @@
 """Versioned, human-readable YAML persistence for GUI and hardware settings.
 
-Version 3 stores every connected channel in one document and names Scope and
-MCA time values with an explicit ``_ns`` suffix. Hardware-backed values live
-under ``hardware``; presentation and worker values live under ``application``
-so non-hardware state is explicit.
+Version 4 keeps DMA mode selection under ``application`` because the IIO
+``dma_enable``/``list_buffer_active`` attributes are driver-owned buffer gates,
+not writable hardware configuration. Version 3 documents are migrated while
+loading. Hardware-backed values live under ``hardware``; presentation and
+worker values live under ``application`` so non-hardware state is explicit.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
 
@@ -25,7 +27,8 @@ from nlab.hardware.digitizer.scope import (
 )
 
 log = logging.getLogger(__name__)
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
+_MIGRATABLE_FORMAT_VERSIONS = frozenset({3})
 
 
 def read_configuration(path: Path) -> dict[str, Any]:
@@ -36,7 +39,51 @@ def read_configuration(path: Path) -> dict[str, Any]:
         return {}
     if not isinstance(loaded, dict):
         raise ValueError("Settings YAML must contain a mapping at its top level")
-    return loaded
+    return migrate_configuration(loaded)
+
+
+def migrate_configuration(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a current-schema copy of a complete settings document."""
+    migrated = deepcopy(dict(settings))
+    if "hardware" not in migrated or migrated.get("format_version") != 3:
+        return migrated
+
+    hardware_channels = _mapping(_mapping(migrated, "hardware"), "channels")
+    application = migrated.setdefault("application", {})
+    if not isinstance(application, dict):
+        application = {}
+        migrated["application"] = application
+    application_channels = application.setdefault("channels", {})
+    if not isinstance(application_channels, dict):
+        application_channels = {}
+        application["channels"] = application_channels
+
+    for channel, raw_hardware_channel in hardware_channels.items():
+        if not isinstance(raw_hardware_channel, dict):
+            continue
+        app_channel = application_channels.setdefault(str(channel), {})
+        if not isinstance(app_channel, dict):
+            app_channel = {}
+            application_channels[str(channel)] = app_channel
+
+        scope = raw_hardware_channel.get("scope")
+        if isinstance(scope, dict) and "dma_enabled" in scope:
+            app_scope = app_channel.setdefault("scope", {})
+            if isinstance(app_scope, dict):
+                app_scope.setdefault("dma_enabled", bool(scope["dma_enabled"]))
+            scope.pop("dma_enabled", None)
+
+        mca = raw_hardware_channel.get("mca")
+        if isinstance(mca, dict):
+            acquisition = mca.get("acquisition")
+            if isinstance(acquisition, dict) and "dma_enabled" in acquisition:
+                app_mca = app_channel.setdefault("mca", {})
+                if isinstance(app_mca, dict):
+                    app_mca.setdefault("dma_enabled", bool(acquisition["dma_enabled"]))
+                acquisition.pop("dma_enabled", None)
+
+    migrated["format_version"] = FORMAT_VERSION
+    return migrated
 
 
 def write_configuration(path: Path, settings: Mapping[str, Any]) -> None:
@@ -55,18 +102,34 @@ def validate_configuration_version(settings: Mapping[str, Any]) -> None:
     """Reject full GUI settings written with an incompatible schema.
 
     The unversioned, single-channel mapping used by ``save_settings`` remains
-    supported. Documents containing the full ``hardware`` section must match
-    the current format so renamed/unit-bearing fields cannot be silently
-    ignored.
+    supported. Documents containing the full ``hardware`` section must use
+    the current format or a schema with an explicit migration path.
     """
+    validate_connection_transport(settings)
     if "hardware" not in settings:
         return
     version = settings.get("format_version")
-    if version != FORMAT_VERSION:
+    if version != FORMAT_VERSION and version not in _MIGRATABLE_FORMAT_VERSIONS:
         raise ValueError(
             f"Unsupported settings format_version {version!r}; "
             f"expected {FORMAT_VERSION}"
         )
+
+
+def validate_connection_transport(settings: Mapping[str, Any]) -> None:
+    """Accept current IIO settings and reject configurations for removed transports."""
+    connection = settings.get("connection")
+    if not isinstance(connection, Mapping):
+        return
+    backend = connection.get("backend")
+    if backend is None or backend == "iio":
+        return
+    if backend == "grpc":
+        raise ValueError(
+            "This settings file targets the removed gRPC backend. "
+            "Use the grpc-final branch with legacy firmware."
+        )
+    raise ValueError(f"Unsupported connection backend {backend!r}; this application uses IIO")
 
 
 def connection_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
@@ -120,7 +183,6 @@ def collect_channel_hardware(
             ),
             "edge_mode": scope.get_trigger_mode().value,
             "dac_value": scope.get_dac_value(),
-            "dma_enabled": scope.get_dma_enable(),
         }
     }
     if mca is not None:
@@ -139,7 +201,6 @@ def collect_channel_hardware(
                 "energy_bin": mca.get_energy_bin(),
                 "pileup_window": mca.get_pileup_window(),
                 "time_limit": mca.get_time_limit(),
-                "dma_enabled": mca.get_dma_enable(),
             },
             "debug": {
                 "mem1_sig_select": mca.get_mem1_sig_select(),
@@ -250,7 +311,6 @@ def _apply_mca(mca: MultiChannelAnalyzer, settings: Mapping[str, Any]) -> None:
             ("time_limit", mca.set_time_limit),
         ),
     )
-    _apply_bools(acquisition, (("dma_enabled", mca.set_dma_enable),))
 
     debug = _mapping(settings, "debug")
     if "mem1_sig_select" in debug:
@@ -354,7 +414,6 @@ def apply_channel_hardware(
         SCOPE_DATAPATH_CLOCK_PERIOD_NS,
         scope.set_frame_period_cycles,
     )
-    _apply_bools(scope_settings, (("dma_enabled", scope.set_dma_enable),))
     if "edge_mode" in scope_settings:
         scope.set_trigger_mode(TriggerMode(int(scope_settings["edge_mode"])))
 

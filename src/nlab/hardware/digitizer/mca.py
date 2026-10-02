@@ -56,7 +56,6 @@ class MCAParam(IntEnum):
     PSD_ZC_HIGH = 74
     # --- internal — no JSON widget id ---
     GLOBAL_ENABLE = 200
-    DMA_ENABLED = 201
     LP_PRESET = 202  # preset selector (0=200 MHz, 1=70 MHz, 2=moving average)
 
 
@@ -330,13 +329,7 @@ class LPFilter:
         return self._b.get_lp_coeffs()
 
     def set_coeffs(self, val: list[int]) -> None:
-        """Write custom FIR coefficients.
-
-        WARNING: the legacy gRPC server has no handler for
-        VDPP_dpp_set_lp_coeffs (it is in server_ignore). Calling this
-        will raise RuntimeError from the server's EINVAL response.
-        Use set_preset() instead until the server is fixed.
-        """
+        """Write custom FIR coefficients."""
         self._b.set_lp_coeffs(val)
 
     def set_preset(self, preset_index: int) -> None:
@@ -377,7 +370,7 @@ class MCAStatistics:
         scaled_reader = getattr(self._b, "get_pulse_deadtime_ms", None)
         if scaled_reader is not None:
             return float(scaled_reader())
-        # The legacy gRPC API exposes only its already-interpreted value.
+        # Retain the generic backend fallback for lightweight test doubles.
         return float(self._b.get_pulse_deadtime())
 
     def get_events_lost(self) -> int:
@@ -531,11 +524,9 @@ class MultiChannelAnalyzer:
         with self._configuration_lock:
             self._b.set_global_enable(val)
 
-    def get_dma_enable(self) -> bool:
-        return self._b.get_dpp_dma_enable()
-
-    def set_dma_enable(self, val: bool) -> None:
-        self._b.set_dpp_dma_enable(val)
+    def dma_active(self) -> bool:
+        """Whether the driver currently owns an armed MCA list buffer."""
+        return self._b.mca_dma_active()
 
     def get_time_limit(self) -> int:
         """Return time limit in seconds. 0 = no limit."""
@@ -594,7 +585,7 @@ class MultiChannelAnalyzer:
             if not was_enabled:
                 write()
                 return False
-            if self._b.get_dpp_dma_enable():
+            if self._b.mca_dma_active():
                 raise RuntimeError(
                     "cannot reconfigure MCA while list-mode DMA is active; "
                     "stop the DMA measurement first"

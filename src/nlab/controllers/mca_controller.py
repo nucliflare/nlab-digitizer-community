@@ -18,7 +18,7 @@ from nlab.analysis.energy_calibration import (
     FingerprintValue,
     SpectrumSnapshot,
 )
-from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaDmaStreamer, McaEventBuffer
+from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaEventBuffer
 from nlab.hardware.digitizer.mca import MCA_PARAMETER_SPECS, MCAParam, MultiChannelAnalyzer
 from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode, McaRunSummary
 from nlab.hardware.digitizer.scope import RangeSpec
@@ -27,7 +27,7 @@ from nlab.views.energy_axis import CalibratedEnergyAxis
 from nlab.views.plot_viewbox import ModifierZoomViewBox
 from nlab.views.responsive_layout import configure_mca_layout
 from nlab.views.time_axis import format_duration_ns, time_axis_scale
-from nlab.workers.dma_workers import IIOMcaDmaWorker, McaDmaWorker
+from nlab.workers.dma_workers import IIOMcaDmaWorker
 from nlab.workers.mca_worker import MCAReadback, MCAWorker
 
 log = logging.getLogger(__name__)
@@ -125,8 +125,8 @@ class MCAController(QWidget):
     def __init__(
         self,
         mca: MultiChannelAnalyzer,
-        mca_dma: McaDmaStreamer | IIOMcaDmaStreamer | None = None,
-        channel: int = 1,
+        mca_dma: IIOMcaDmaStreamer | None = None,
+        channel: int = 0,
         parent: QWidget | None = None,
         event_buffer: McaEventBuffer | None = None,
         psd_capture: _PsdCaptureSink | None = None,
@@ -146,7 +146,7 @@ class MCAController(QWidget):
         self._worker: MCAWorker | None = None
         self._worker_thread: QThread | None = None
 
-        self._dma_worker: McaDmaWorker | IIOMcaDmaWorker | None = None
+        self._dma_worker: IIOMcaDmaWorker | None = None
         self._dma_thread: QThread | None = None
         self._dma_filepath: Path | None = None
         self._dma_counter = 0
@@ -799,7 +799,7 @@ class MCAController(QWidget):
         """Start this channel as one half of a coordinated IIO run."""
         if self.coincidence_busy or self._coincidence_session:
             raise RuntimeError(f"MCA ch{self._channel} is already in use")
-        if not isinstance(self._mca_dma, IIOMcaDmaStreamer):
+        if self._mca_dma is None:
             raise RuntimeError("coincidence requires IIO MCA list-mode DMA")
         event_buffer.clear()
         self._event_buffer.subscribe(event_buffer)
@@ -884,6 +884,7 @@ class MCAController(QWidget):
         settings: dict[str, object] = {
             "refresh_rate_hz": self.ui.spinRefreshRate.value(),
             "roi": [float(value) for value in self._roi.getRegion()],
+            "dma_enabled": self.ui.cbDmaEnable.isChecked(),
         }
         if self._energy_calibration is not None:
             settings["energy_calibration"] = self._energy_calibration.to_dict()
@@ -894,6 +895,8 @@ class MCAController(QWidget):
             return
         if "refresh_rate_hz" in settings:
             self.ui.spinRefreshRate.setValue(int(settings["refresh_rate_hz"]))
+        if "dma_enabled" in settings:
+            self.ui.cbDmaEnable.setChecked(bool(settings["dma_enabled"]))
         roi = settings.get("roi")
         if isinstance(roi, list) and len(roi) == 2:
             self._roi.setRegion((float(roi[0]), float(roi[1])))
@@ -1156,7 +1159,6 @@ class MCAController(QWidget):
         self.ui.btnStop.clicked.connect(self._on_stop)
         self.ui.btnClearSpectrum.clicked.connect(self._on_clear_spectrum)
         self.ui.btnExportCsv.clicked.connect(self._on_export_csv)
-        self.ui.cbDmaEnable.toggled.connect(lambda v: self._mca.set_dma_enable(v))
         self.ui.btnDmaFile.clicked.connect(self._on_dma_file)
         self.ui.spinRefreshRate.valueChanged.connect(self._on_refresh_rate_changed)
 
@@ -1407,18 +1409,13 @@ class MCAController(QWidget):
         if self._dma_worker is not None:
             log.debug("MCA ch%d: stopping with DMA", self._channel)
             self._stop_worker()
-            if isinstance(self._mca_dma, IIOMcaDmaStreamer):
-                # Set the worker's stop flag first so it cannot begin a new
-                # steady-state refill after the final block. Then stop the
-                # pulse processor; either the in-flight refill receives the
-                # padded final frame or streamer's close path performs the
-                # same stop and one-second inactivity drain.
-                self._dma_worker.stop()
-                self._mca.stop()
-            else:
-                self._mca.stop()
-                self._mca.set_dma_enable(False)
-                self._dma_worker.stop()
+            # Set the worker's stop flag first so it cannot begin a new
+            # steady-state refill after the final block. Then stop the pulse
+            # processor; either the in-flight refill receives the padded
+            # final frame or the streamer's close path performs the same stop
+            # and one-second inactivity drain.
+            self._dma_worker.stop()
+            self._mca.stop()
             self._set_controls_enabled(True)
         else:
             self._stop_worker()
@@ -1444,15 +1441,10 @@ class MCAController(QWidget):
             self.coincidence_stop_requested.emit()
             return
         if self._dma_worker is not None:
-            if isinstance(self._mca_dma, IIOMcaDmaStreamer):
-                # Match the manual-stop ordering: prevent another refill,
-                # then release enable so the close path can drain the tail.
-                self._dma_worker.stop()
-                self._mca.stop()
-            else:
-                self._mca.stop()
-                self._mca.set_dma_enable(False)
-                self._dma_worker.stop()
+            # Match the manual-stop ordering: prevent another refill, then
+            # release enable so the close path can drain the tail.
+            self._dma_worker.stop()
+            self._mca.stop()
             self._set_controls_enabled(True)
         else:
             self._mca.stop()
@@ -1512,7 +1504,7 @@ class MCAController(QWidget):
         log.info("MCA ch%d: spectrum exported to %s", self._channel, path)
 
     # ------------------------------------------------------------------
-    # Polling worker lifecycle (gRPC histogram/stats)
+    # Polling worker lifecycle
     # ------------------------------------------------------------------
 
     def _start_worker(self) -> None:
@@ -1649,6 +1641,8 @@ class MCAController(QWidget):
     def _start_with_dma(self) -> None:
         from nlab.utils.settings_io import configuration_yaml, write_configuration
 
+        if self._mca_dma is None:
+            raise RuntimeError("IIO MCA list-mode DMA is unavailable")
         mode = self._output_mode()
         self._active_dma_mode = mode
         self._dma_summary = None
@@ -1694,55 +1688,38 @@ class MCAController(QWidget):
             }
             if metadata := getattr(self, "_coincidence_metadata", None):
                 configuration["measurement"]["coincidence"] = metadata
-            hardware = configuration.get("hardware")
-            if isinstance(hardware, dict):
-                channels = hardware.get("channels")
+            application = configuration.get("application")
+            if isinstance(application, dict):
+                channels = application.get("channels")
                 if isinstance(channels, dict):
                     channel_settings = channels.get(str(self._channel))
                     if isinstance(channel_settings, dict):
                         mca_settings = channel_settings.get("mca")
                         if isinstance(mca_settings, dict):
-                            acquisition = mca_settings.get("acquisition")
-                            if isinstance(acquisition, dict):
-                                # IIO reports the driver-owned list buffer gate,
-                                # which is necessarily still false at this safe
-                                # pre-arm snapshot boundary. Record the requested
-                                # measurement mode rather than that transient gate.
-                                acquisition["dma_enabled"] = True
+                            mca_settings["dma_enabled"] = True
         embedded_configuration = configuration_yaml(configuration)
         if filepath is not None and mode is McaDmaOutputMode.BINARY:
             write_configuration(filepath.with_suffix(".yaml"), configuration)
 
-        if isinstance(self._mca_dma, IIOMcaDmaStreamer):
-            # Pulse-processor fields are immutable while list_buffer_active
-            # is set, so apply the duration before the worker's first read
-            # creates/arms the lm_frame buffer.
-            client_record_schema = None
-            if metadata := getattr(self, "_coincidence_metadata", None):
-                analysis = metadata.get("analysis")
-                if isinstance(analysis, dict):
-                    schema = analysis.get("record_schema")
-                    if isinstance(schema, str):
-                        client_record_schema = schema
-            self._dma_worker = IIOMcaDmaWorker(
-                streamer=self._mca_dma,
-                filepath=filepath,
-                event_buffer=display_buffer,
-                output_mode=mode,
-                configuration_yaml=embedded_configuration,
-                channel=self._channel,
-                client_record_schema=client_record_schema,
-            )
-        else:
-            assert isinstance(self._mca_dma, McaDmaStreamer)
-            self._dma_worker = McaDmaWorker(
-                streamer=self._mca_dma,
-                filepath=filepath,
-                event_buffer=display_buffer,
-                output_mode=mode,
-                configuration_yaml=embedded_configuration,
-                channel=self._channel,
-            )
+        # Pulse-processor fields are immutable while list_buffer_active is
+        # set, so apply the duration before the worker's first read creates
+        # and arms the lm_frame buffer.
+        client_record_schema = None
+        if metadata := getattr(self, "_coincidence_metadata", None):
+            analysis = metadata.get("analysis")
+            if isinstance(analysis, dict):
+                schema = analysis.get("record_schema")
+                if isinstance(schema, str):
+                    client_record_schema = schema
+        self._dma_worker = IIOMcaDmaWorker(
+            streamer=self._mca_dma,
+            filepath=filepath,
+            event_buffer=display_buffer,
+            output_mode=mode,
+            configuration_yaml=embedded_configuration,
+            channel=self._channel,
+            client_record_schema=client_record_schema,
+        )
         self._dma_thread = QThread(self)
         self._dma_worker.moveToThread(self._dma_thread)
 
@@ -1764,32 +1741,24 @@ class MCAController(QWidget):
         self._set_controls_enabled(False)
         if mode is McaDmaOutputMode.ONLINE:
             status = (
-                "Connecting (online coincidence, no file)..."
+                "Arming IIO DMA (online coincidence, no file)..."
                 if getattr(self, "_coincidence_session", False)
                 else (
-                    "Connecting (online PSD, no file)..."
+                    "Arming IIO DMA (online PSD, no file)..."
                     if self._psd_capture_enabled
-                    else "Connecting (online-only: no file or PSD)..."
+                    else "Arming IIO DMA (online-only: no file or PSD)..."
                 )
             )
         else:
-            status = f"Connecting ({mode.value} file)..."
+            status = f"Arming IIO DMA ({mode.value} file)..."
         self.ui.lblDmaStatus.setText(status)
-        if isinstance(self._mca_dma, IIOMcaDmaStreamer):
-            log.debug(
-                "MCA ch%d DMA [2/6]: starting worker thread (IIO buffer arm)",
-                self._channel,
-            )
-        else:
-            log.debug(
-                "MCA ch%d DMA [2/6]: starting worker thread (ZMQ connect + subscribe)",
-                self._channel,
-            )
+        log.debug(
+            "MCA ch%d DMA [2/6]: starting worker thread (IIO buffer arm)",
+            self._channel,
+        )
         self._dma_thread.start()
-        readiness = "IIO DMA arm" if isinstance(self._mca_dma, IIOMcaDmaStreamer) else "ZMQ socket"
         log.info(
-            "MCA DMA: worker started, waiting for %s, file=%s",
-            readiness,
+            "MCA DMA: worker started, waiting for IIO DMA arm, file=%s",
             filepath,
         )
 
@@ -1812,26 +1781,13 @@ class MCAController(QWidget):
         return getattr(self, "_coincidence_buffer", None)
 
     def _on_dma_ready(self) -> None:
-        if isinstance(self._mca_dma, IIOMcaDmaStreamer):
-            # The backend emits ready only after it has armed all eight
-            # kernel blocks, entered the first blocking refill and written
-            # enable=1. A GUI-thread mca.start() here would duplicate backend
-            # ownership of that lifecycle.
-            log.debug(
-                "MCA ch%d IIO DMA: buffer armed, reader active, measurement started",
-                self._channel,
-            )
-        else:
-            log.debug(
-                "MCA ch%d DMA [3/6]: ZMQ socket ready, DMA already enabled via checkbox",
-                self._channel,
-            )
-            log.debug(
-                "MCA ch%d DMA [4/6]: calling mca.start() -> set_global_enable(True) "
-                "(HW fires list_start_irq -> server sends StreamSTART)",
-                self._channel,
-            )
-            self._mca.start()
+        # The backend emits ready only after it has armed all eight kernel
+        # blocks, entered the first blocking refill and written enable=1. A
+        # GUI-thread mca.start() here would duplicate backend ownership.
+        log.debug(
+            "MCA ch%d IIO DMA: buffer armed, reader active, measurement started",
+            self._channel,
+        )
         log.debug(
             "MCA ch%d DMA: starting polling worker (time_limit=%d s)",
             self._channel,
@@ -1857,7 +1813,7 @@ class MCAController(QWidget):
             self.coincidence_ready.emit(self._channel)
 
     def _on_dma_progress(self, event_count: int) -> None:
-        unit = "records" if isinstance(self._mca_dma, IIOMcaDmaStreamer) else "events"
+        unit = "records"
         if self._active_dma_mode is McaDmaOutputMode.ONLINE:
             action = (
                 "Coincidence stream (no file)"
@@ -1942,7 +1898,7 @@ class MCAController(QWidget):
         Handles both halves of what the UI's own Stop button does (see
         _on_stop()): an in-progress DMA worker (if any), and -- regardless
         of whether DMA was involved -- the hardware measurement-enable bit
-        itself, via mca.stop()/set_dma_enable(False). Mirrors the same
+        itself, via mca.stop(). Mirrors the same
         fix in ScopeController.stop_dma_sync(): closing the app (or
         reconnecting) without clicking Stop first used to leave a
         measurement armed indefinitely, since nothing in the shutdown
@@ -1952,47 +1908,41 @@ class MCAController(QWidget):
         thread = self._dma_thread
         if worker is not None:
             worker.stop()
-            if isinstance(self._mca_dma, IIOMcaDmaStreamer):
-                # Unblock a possibly empty partial frame so the worker can
-                # receive the final padded block and run its drain/close.
-                try:
-                    self._mca.stop()
-                except Exception:
-                    log.warning(
-                        "MCA ch%d: failed to stop before IIO DMA shutdown",
-                        self._channel,
-                        exc_info=True,
-                    )
+            # Unblock a possibly empty partial frame so the worker can
+            # receive the final padded block and run its drain/close.
+            try:
+                self._mca.stop()
+            except Exception:
+                log.warning(
+                    "MCA ch%d: failed to stop before IIO DMA shutdown",
+                    self._channel,
+                    exc_info=True,
+                )
         if thread is not None:
             if not thread.wait(3000):
                 log.warning("MCA DMA thread did not stop in time, terminating")
                 thread.terminate()
                 thread.wait()
             thread.deleteLater()
-        had_dma_worker = worker is not None
         self._dma_thread = None
         self._dma_worker = None
 
-        self._ensure_disarmed(had_dma_worker)
+        self._ensure_disarmed()
         self._finish_psd_capture()
         self._end_coincidence_capture()
 
-    def _ensure_disarmed(self, had_dma_worker: bool) -> None:
-        """Best-effort mca.stop()/set_dma_enable(False) for shutdown or
-        reconnect -- see stop_dma_sync()'s docstring for why this exists.
-        """
+    def _ensure_disarmed(self) -> None:
+        """Best-effort mca.stop() for shutdown or reconnect."""
         try:
             # Stop unconditionally. An externally armed channel may have
             # measurement_in_progress=0 while global enable remains one;
             # testing the former was what left hardware owned across restart.
             self._mca.stop()
-            if had_dma_worker:
-                self._mca.set_dma_enable(False)
         except Exception:
             log.warning("MCA ch%d: failed to disarm during shutdown", self._channel, exc_info=True)
 
     # ------------------------------------------------------------------
-    # Readback handling (gRPC polling)
+    # Readback handling
     # ------------------------------------------------------------------
 
     def _on_readback(self, rb: MCAReadback) -> None:

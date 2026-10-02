@@ -18,10 +18,7 @@ from nlab.controllers.psu_controller import PSUController
 from nlab.controllers.scope_controller import ScopeController
 from nlab.hardware.digitizer.current_monitor import ScopeCurrentAccumulator
 from nlab.hardware.digitizer.digitizer import Digitizer
-from nlab.hardware.digitizer.dma import (
-    IIOMcaDmaStreamer,
-    McaEventBuffer,
-)
+from nlab.hardware.digitizer.dma import McaEventBuffer
 from nlab.hardware.modbus_devices import ExternalDevices, ExternalDeviceScan
 from nlab.views.energy_calibration_dialog import EnergyCalibrationDialog
 from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
@@ -47,29 +44,29 @@ class MainWindowController:
     def __init__(
         self,
         window: MainAppWindow,
-        backend: str = "grpc",
         host: str = "",
-        port: int = 50050,
+        port: int = 30431,
         channels: int = 2,
         on_progress: Callable[[str], None] | None = None,
     ) -> None:
         self._window = window
-        self._backend = backend
         self._host = host
         self._port = port
         self._channels = channels
         self._devices: list[Digitizer] = []
         self._on_progress = on_progress
 
-        log.info("Connecting via %s to %s:%d, %d channel(s)", backend, host, port, channels)
-        for ch in range(1, 1 + self._channels):
-            self._report_progress(f"Connecting channel {ch} of {self._channels}...")
-            self._devices.append(self._connect_channel(ch))
+        log.info("Connecting via IIO to %s:%d, %d channel(s)", host, port, channels)
+        for channel in range(self._channels):
+            self._report_progress(f"Connecting channel {channel + 1} of {self._channels}...")
+            self._devices.append(self._connect_channel(channel))
         log.info("All %d device(s) connected", len(self._devices))
 
         self._scope_controllers: list[ScopeController] = []
         self._current_monitor_controllers: list[CurrentMonitorController] = []
+        self._current_monitor_controller_by_device: dict[int, CurrentMonitorController] = {}
         self._mca_controllers: list[MCAController] = []
+        self._mca_controller_by_device: dict[int, MCAController] = {}
         self._psd_controllers: list[PSDController] = []
         self._psd_controller_by_device: dict[int, PSDController] = {}
         self._psu_controllers: list[PSUController] = []
@@ -119,41 +116,17 @@ class MainWindowController:
         if callback is not None:
             callback(message)
 
-    def _connect_channel(self, ch: int) -> Digitizer:
-        """Connect one channel using the selected backend.
-
-        gRPC channels are 1-based (GrpcDigitizerBackend's own convention,
-        matching hw_def's channel numbering); IIO channels are 0-based
-        (ewt-scope0/ewt-scope1 device names), so ch is shifted down by one
-        for that backend. Either way self._devices stays a plain list in
-        connection order — ch itself is never used as a storage key.
-        """
-        if self._backend == "iio":
-            return Digitizer.from_iio(
-                channel=ch - 1,
-                uri=f"ip:{self._host}:{self._port}",
-                with_ids=True,
-            )
-        return Digitizer.from_grpc(
-            channel=ch,
-            hostname=self._host,
-            port=self._port,
+    def _connect_channel(self, channel: int) -> Digitizer:
+        """Connect one zero-based IIO hardware channel."""
+        return Digitizer.from_iio(
+            channel=channel,
+            uri=f"ip:{self._host}:{self._port}",
             with_ids=True,
         )
 
     def _display_channel(self, idx: int) -> int:
-        """Channel number the way the connected backend's own hardware
-        labels it -- 0-based for IIO (vdpp_scope instance 0/1, matching
-        iio_info's device discovery order), 1-based for gRPC (hw_def's
-        channel numbering, unchanged from before). Used for tab labels,
-        dock object names, and settings filenames so a channel number
-        mentioned anywhere (GUI, logs, saved files, a live debugging
-        session cross-referencing the board) means the same physical
-        channel everywhere -- instead of the GUI always showing one
-        higher than what dmesg/iio_info call it, and needing the
-        ch-1 IIO offset in your head to translate between them.
-        """
-        return idx if self._backend == "iio" else idx + 1
+        """Return the zero-based IIO channel number shown throughout the UI."""
+        return idx
 
     # ------------------------------------------------------------------
     # Dock construction
@@ -206,6 +179,9 @@ class MainWindowController:
 
         self._psu_controller_by_device = {}
         self._psd_controller_by_device = {}
+        self._current_monitor_controller_by_device = {}
+        self._mca_controller_by_device = {}
+        missing_mca_channels: list[int] = []
         missing_psu_channels: list[int] = []
 
         # IIODigitizerBackend now implements MCABackend against
@@ -216,12 +192,9 @@ class MainWindowController:
         # Only skip MCA docks if this channel's firmware genuinely lacks
         # the pulse-processor/input-filter devices (older/scope-only
         # builds) -- MCAController.__init__ would otherwise crash on the
-        # RuntimeError those methods raise instead. Digitizer.mca_available()
-        # asks the backend rather than special-casing "iio" by name here,
-        # so this doesn't need updating if another backend gains the same
-        # per-device variability later.
-        build_mca = all(device.mca_available() for device in self._devices)
-
+        # RuntimeError those methods raise instead. Capabilities are frozen
+        # when each Digitizer is connected, so dock construction does not
+        # repeat transport-specific discovery or inspect backend classes.
         for idx, device in enumerate(self._devices):
             ch = self._display_channel(idx)
             self._report_progress(f"Initializing channel {ch} controls...")
@@ -237,7 +210,7 @@ class MainWindowController:
             self._scope_controllers.append(scope_ctrl)
             scope_docks.append(self._make_dock(f"scope_ch{ch}", ch_label, scope_ctrl))
 
-            if build_mca:
+            if device.capabilities.mca:
                 current_ctrl = CurrentMonitorController(
                     device.mca,
                     channel=ch,
@@ -246,6 +219,7 @@ class MainWindowController:
                     scope_current_accumulator=scope_current_accumulator,
                 )
                 self._current_monitor_controllers.append(current_ctrl)
+                self._current_monitor_controller_by_device[idx] = current_ctrl
                 current_docks.append(
                     self._make_dock(f"current_ch{ch}", ch_label, current_ctrl)
                 )
@@ -266,7 +240,10 @@ class MainWindowController:
                     measurement_configuration=self.configuration_document,
                 )
                 self._mca_controllers.append(mca_ctrl)
+                self._mca_controller_by_device[idx] = mca_ctrl
                 mca_docks.append(self._make_dock(f"mca_ch{ch}", ch_label, mca_ctrl))
+            else:
+                missing_mca_channels.append(ch)
 
             hv = device.hv
             if hv is None:
@@ -291,22 +268,26 @@ class MainWindowController:
         self._window.ui.layoutTabPSU.addWidget(self._psu_dock_host)
 
         current_tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabCurrent)
-        self._window.ui.mainTabs.setTabEnabled(current_tab_index, build_mca)
-        self._window.ui.tabCurrent.setToolTip(
-            ""
-            if build_mca
-            else "Current monitor is disabled: no input-filter device was found "
-            "for one or more connected channels."
-        )
+        self._window.ui.mainTabs.setTabEnabled(current_tab_index, bool(current_docks))
+        if not current_docks:
+            current_tooltip = "Current monitor is disabled: no input-filter device was found."
+        elif missing_mca_channels:
+            channels = ", ".join(str(channel) for channel in missing_mca_channels)
+            current_tooltip = f"Current monitor unavailable for channel(s): {channels}."
+        else:
+            current_tooltip = ""
+        self._window.ui.tabCurrent.setToolTip(current_tooltip)
 
         mca_tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabMCA)
-        self._window.ui.mainTabs.setTabEnabled(mca_tab_index, build_mca)
-        self._window.ui.tabMCA.setToolTip(
-            ""
-            if build_mca
-            else "MCA is disabled: no pulse-processor/input-filter device found "
-            "for one or more connected channels (older or scope-only firmware)."
-        )
+        self._window.ui.mainTabs.setTabEnabled(mca_tab_index, bool(mca_docks))
+        if not mca_docks:
+            mca_tooltip = "MCA is disabled: no pulse-processor/input-filter device was found."
+        elif missing_mca_channels:
+            channels = ", ".join(str(channel) for channel in missing_mca_channels)
+            mca_tooltip = f"MCA controls unavailable for channel(s): {channels}."
+        else:
+            mca_tooltip = ""
+        self._window.ui.tabMCA.setToolTip(mca_tooltip)
 
         psd_tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabPSD)
         self._window.ui.mainTabs.setTabEnabled(psd_tab_index, bool(psd_docks))
@@ -338,11 +319,11 @@ class MainWindowController:
             layout.addWidget(self._global_dock_host)
 
     def _build_coincidence_tab(self) -> None:
+        mca_pair = tuple(self._mca_controller_by_device.get(index) for index in range(2))
         available = (
-            self._backend == "iio"
-            and len(self._mca_controllers) >= 2
-            and len(self._devices) >= 2
-            and all(isinstance(device.mca_dma, IIOMcaDmaStreamer) for device in self._devices[:2])
+            len(self._devices) >= 2
+            and all(controller is not None for controller in mca_pair)
+            and all(device.capabilities.mca_dma for device in self._devices[:2])
             and self._global_controller is not None
             and self._global_controller.sync_available
         )
@@ -355,8 +336,10 @@ class MainWindowController:
         )
         if available:
             assert self._global_controller is not None
+            mca_a, mca_b = mca_pair
+            assert mca_a is not None and mca_b is not None
             self._coincidence_controller = CoincidenceController(
-                self._devices[:2], self._mca_controllers[:2], self._global_controller
+                self._devices[:2], [mca_a, mca_b], self._global_controller
             )
             self._window.ui.layoutTabCoincidence.addWidget(self._coincidence_controller)
 
@@ -368,7 +351,7 @@ class MainWindowController:
 
         The SiPM bias board, Geiger-Mueller probe, and PMT HV supply share the
         digitizer's RS-485 bus via a ser2net TCP bridge — same host as the
-        gRPC digitizer connection. A device that doesn't respond (not present,
+        IIO digitizer connection. A device that doesn't respond (not present,
         or bus not bridged) is simply absent from the discovery results.
         """
         if devices is None:
@@ -721,7 +704,7 @@ class MainWindowController:
         for mca_controller in self._mca_controllers:
             mca_controller.stop_worker_sync()
 
-        # 4. Current monitors own independent direct-IIO/gRPC connections.
+        # 4. Current monitors own independent direct-IIO connections.
         for current_controller in self._current_monitor_controllers:
             current_controller.stop_monitor_sync()
 
@@ -839,14 +822,13 @@ class MainWindowController:
         self._external_controllers.clear()
 
         log.info(
-            "Reconnect: connecting via %s to %s:%d, %d channel(s)",
-            self._backend,
+            "Reconnect: connecting via IIO to %s:%d, %d channel(s)",
             self._host,
             self._port,
             self._channels,
         )
-        for ch in range(1, 1 + self._channels):
-            self._devices.append(self._connect_channel(ch))
+        for channel in range(self._channels):
+            self._devices.append(self._connect_channel(channel))
         log.info("Reconnect: all %d device(s) connected", len(self._devices))
 
         self._build_global_tab()
@@ -864,7 +846,7 @@ class MainWindowController:
             len(self._external_controllers),
         )
 
-    def save_all_settings(self, path) -> None:
+    def save_all_settings(self, path: Path) -> None:
         """Save settings for all channels to a single YAML file."""
         from nlab.utils.settings_io import write_configuration
 
@@ -873,7 +855,8 @@ class MainWindowController:
 
     @staticmethod
     def _encoded_dock_state(host: QMainWindow) -> str:
-        return bytes(host.saveState().toBase64()).decode("ascii")
+        encoded = cast(bytes, host.saveState().toBase64().data())
+        return encoded.decode("ascii")
 
     def configuration_document(self) -> dict[str, object]:
         """Snapshot the same complete document used by Save Settings."""
@@ -883,7 +866,8 @@ class MainWindowController:
         application_channels: dict[str, object] = {}
         for idx, device in enumerate(self._devices):
             channel = self._display_channel(idx)
-            mca_ctrl = self._mca_controllers[idx] if idx < len(self._mca_controllers) else None
+            mca_ctrl = self._mca_controller_by_device.get(idx)
+            current_ctrl = self._current_monitor_controller_by_device.get(idx)
             psu_ctrl = self._psu_controller_by_device.get(idx)
             lp_preset = None
             if mca_ctrl is not None:
@@ -900,10 +884,8 @@ class MainWindowController:
             application_channel: dict[str, object] = {
                 "scope": self._scope_controllers[idx].configuration_settings(),
             }
-            if idx < len(self._current_monitor_controllers):
-                application_channel["current_monitor"] = (
-                    self._current_monitor_controllers[idx].configuration_settings()
-                )
+            if current_ctrl is not None:
+                application_channel["current_monitor"] = current_ctrl.configuration_settings()
             if psu_ctrl is not None:
                 application_channel["psu"] = psu_ctrl.configuration_settings()
             if mca_ctrl is not None:
@@ -944,7 +926,6 @@ class MainWindowController:
         document = {
             "format_version": FORMAT_VERSION,
             "connection": {
-                "backend": self._backend,
                 "ip": self._host,
                 "port": self._port,
                 "channels": self._channels,
@@ -967,7 +948,7 @@ class MainWindowController:
         }
         return document
 
-    def load_all_settings(self, path) -> None:
+    def load_all_settings(self, path: Path) -> None:
         """Load settings from YAML and apply to hardware, then refresh UI."""
         if self._coincidence_controller is not None and self._coincidence_controller.active:
             raise RuntimeError("Stop the coincidence measurement before loading settings")
@@ -1006,16 +987,17 @@ class MainWindowController:
 
         for idx, device in enumerate(self._devices):
             self._scope_controllers[idx]._load_hardware_state()
-            if idx < len(self._mca_controllers):
-                self._mca_controllers[idx]._load_hardware_state()
+            mca_ctrl = self._mca_controller_by_device.get(idx)
+            if mca_ctrl is not None:
+                mca_ctrl._load_hardware_state()
             channel = self._display_channel(idx)
             hardware = channel_entry(document, channel)
             if hardware is not None:
                 mca_settings = hardware.get("mca", {})
-                if idx < len(self._mca_controllers) and isinstance(mca_settings, dict):
+                if mca_ctrl is not None and isinstance(mca_settings, dict):
                     low_pass = mca_settings.get("low_pass", {})
                     if isinstance(low_pass, dict) and "preset" in low_pass:
-                        self._mca_controllers[idx].populate_hardware_configuration_settings(
+                        mca_ctrl.populate_hardware_configuration_settings(
                             {"low_pass_preset": low_pass["preset"]}
                         )
                 psu_ctrl = self._psu_controller_by_device.get(idx)
@@ -1026,15 +1008,16 @@ class MainWindowController:
             app_channel = channel_application_entry(document, channel)
             if app_channel is not None:
                 self._scope_controllers[idx].apply_configuration_settings(app_channel.get("scope"))
-                if idx < len(self._current_monitor_controllers):
-                    self._current_monitor_controllers[idx].apply_configuration_settings(
+                current_ctrl = self._current_monitor_controller_by_device.get(idx)
+                if current_ctrl is not None:
+                    current_ctrl.apply_configuration_settings(
                         app_channel.get("current_monitor")
                     )
                 psu_ctrl = self._psu_controller_by_device.get(idx)
                 if psu_ctrl is not None:
                     psu_ctrl.apply_configuration_settings(app_channel.get("psu"))
-                if idx < len(self._mca_controllers):
-                    self._mca_controllers[idx].apply_configuration_settings(app_channel.get("mca"))
+                if mca_ctrl is not None:
+                    mca_ctrl.apply_configuration_settings(app_channel.get("mca"))
                 psd_ctrl = self._psd_controller_by_device.get(idx)
                 if psd_ctrl is not None:
                     psd_ctrl.apply_configuration_settings(app_channel.get("psd"))

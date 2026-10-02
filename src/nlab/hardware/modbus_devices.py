@@ -33,7 +33,7 @@ class ExternalDevices:
 
     The SiPM bias board, Geiger-Mueller probe, and PMT HV supply share the
     digitizer's RS-485 bus, bridged to TCP via ser2net — same host as the
-    gRPC digitizer connection, different port(s).  Wraps nlab_modbus's
+    IIO digitizer connection, different port(s). Wraps nlab_modbus's
     DeviceManager so the rest of the app only deals with discovered device
     instances and never imports nlab_modbus or touches connection details
     directly.

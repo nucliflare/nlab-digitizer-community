@@ -89,7 +89,6 @@ def _prepare_fake_main(monkeypatch: pytest.MonkeyPatch) -> tuple[list[object], M
 
     class FakeDialog:
         DialogCode = SimpleNamespace(Accepted=1)
-        backend = "iio"
         ip = "192.0.2.10"
         port = 30431
         channels = 2

@@ -17,7 +17,6 @@ def test_menu_save_writes_one_document_with_each_channel(
     tmp_path: Path,
 ) -> None:
     controller = cast(Any, object.__new__(MainWindowController))
-    controller._backend = "iio"
     controller._host = "board.local"
     controller._port = 30431
     controller._channels = 2
@@ -60,6 +59,14 @@ def test_menu_save_writes_one_document_with_each_channel(
             configuration_settings=lambda: {"refresh_rate_hz": 6},
         ),
     ]
+    controller._mca_controller_by_device = {
+        0: controller._mca_controllers[0],
+        1: controller._mca_controllers[1],
+    }
+    controller._current_monitor_controller_by_device = {
+        0: controller._current_monitor_controllers[0],
+        1: controller._current_monitor_controllers[1],
+    }
     controller._psd_controllers = [
         SimpleNamespace(configuration_settings=lambda: {"ratio_cut": 0.2}),
         SimpleNamespace(configuration_settings=lambda: {"ratio_cut": 0.3}),
@@ -123,7 +130,6 @@ def test_menu_save_writes_one_document_with_each_channel(
     assert "current" in document["application"]["dock_layout"]
     assert "psd" in document["application"]["dock_layout"]
     assert document["connection"] == {
-        "backend": "iio",
         "ip": "board.local",
         "port": 30431,
         "channels": 2,

@@ -278,6 +278,8 @@ def test_factory_can_disable_iio_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     result = digitizer.Digitizer.from_iio(0, "ip:test", with_ids=False)
 
     assert result.hv is None
+    assert not result.capabilities.ids
+    assert not result.capabilities.mca_dma
 
 
 def test_factory_enables_iio_ids_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -301,6 +303,7 @@ def test_factory_enables_iio_ids_by_default(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert result.hv is not None
     assert result.hv._b is fake_ids
+    assert result.capabilities.ids
 
 
 def test_factory_continues_when_channel_ids_devices_are_absent(

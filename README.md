@@ -9,24 +9,14 @@ two-channel oscilloscope, multi-channel analyser (MCA), pulse-shape
 discrimination (PSD), high-voltage control, board diagnostics, and optional
 Modbus instruments in one dockable interface.
 
-The application is developed around the board's **direct Linux IIO interface**.
-It connects to `iiod` with libiio and uses the board's IIO attributes and
-buffers for configuration, live data, and DMA capture.
+The application uses the board's **direct Linux IIO interface**. It connects to
+`iiod` with libiio and uses the board's IIO attributes and buffers for
+configuration, live data, and DMA capture, normally on TCP port `30431`.
 
-The gRPC backend is **legacy compatibility support for boards running older
-firmware**. It remains usable, but new firmware integration and feature work
-target IIO.
-
-## Backend status
-
-| Backend | Status | Transport | Intended use |
-|---|---|---|---|
-| **IIO** | Recommended | libiio over `iiod`, normally port `30431` | Current Digitizer 4.0 firmware; Scope, MCA, PSD/list mode, IDS/HV, and diagnostics |
-| **gRPC** | Legacy | gRPC control plus ZMQ DMA | Compatibility with old firmware exposing the Engine/IDS services |
-
-The high-level `Digitizer`, `Scope`, `MultiChannelAnalyzer`, and `HVSupply`
-interfaces are shared by both backends. Backend-specific DMA implementations
-preserve the lifecycle required by each firmware generation.
+The legacy gRPC/ZMQ runtime was removed from the current codebase. Its final
+supported snapshot is preserved on the
+[`grpc-final`](https://github.com/nucliflare/nlab-digitizer-community/tree/grpc-final)
+branch for boards that still run older firmware.
 
 The task-oriented [documentation index](docs/Home.qmd) covers installation,
 acquisition ownership, current and coincidence workflows, capture integrity,
@@ -176,8 +166,6 @@ whole connection.
 The standard project configuration uses:
 
 - IIO/iiod: TCP port `30431`
-- Legacy DPP gRPC: TCP port `50050`
-- Legacy IDS gRPC: TCP port `50040`
 - Optional ser2net bridges: TCP ports `5001` and `5002`
 
 The board address is deployment-specific. Examples below use
@@ -237,12 +225,10 @@ cd nlab-digitizer-community
 uv sync --locked --extra dev
 
 python scripts/build_ui.py
-python scripts/generate_proto.py
 ```
 
-The generated Qt modules and protobuf stubs are intentionally not committed.
-Generate both after a fresh clone. The protobuf files are still packaged so
-the legacy backend can be selected at runtime.
+The generated Qt modules are intentionally not committed. Generate them after
+a fresh clone and whenever a Qt Designer form or resource changes.
 
 ## Running the application
 
@@ -252,21 +238,19 @@ uv run nlab
 
 In the connection dialog:
 
-1. Select **IIO**.
-2. Select a discovered board or enter its address, for example `192.168.10.128`.
-3. Use port `30431` unless the target's `iiod` configuration differs.
-4. Select the number of channels exposed by the board and connect.
+1. Select a discovered board or enter its address, for example `192.168.10.128`.
+2. Use port `30431` unless the target's `iiod` configuration differs.
+3. Select the number of channels exposed by the board and connect.
 
 When opened, the dialog scans for network `iiod` services with libiio's
 DNS-SD/mDNS discovery (Avahi on Linux) and also probes `192.168.3.1:30431`, the
 fixed address used by the board's USB network connection. **Rescan** repeats
 both checks without blocking the window. Manual addresses remain supported,
-and the dialog remembers a successful selection. For compatibility with
-existing installations, a completely new settings profile may initially show
-gRPC; choosing a discovered board selects IIO automatically.
+and the dialog remembers a successful selection. A port saved by an older IIO
+installation is migrated; the obsolete gRPC default is not reused.
 
-A saved configuration can pre-fill the backend, address, port, and channel
-count, while explicit address options override values from the file:
+A saved configuration can pre-fill the address, port, and channel count, while
+explicit address options override values from the file:
 
 ```bash
 uv run nlab --config experiment.yaml --ip 192.168.10.128 --port 30431
@@ -290,8 +274,8 @@ Follow your laboratory's rules for detector bias and radioactive-source
 handling. Do not copy an HV setting from a screenshot or assume that skipping
 the Power Supply tab means a detector is unpowered.
 
-1. Start the application, select **IIO**, enter `192.168.10.128`, leave port
-   `30431`, select **2** channels, and click **Connect**.
+1. Start the application, enter `192.168.10.128`, leave port `30431`, select
+   **2** channels, and click **Connect**.
 
    ![IIO connection dialog for the live two-channel reference board](docs/images/readme-first-steps-connection.png)
 
@@ -346,7 +330,7 @@ try:
     digitizer.scope.set_frame_samples(1024)
     frame = digitizer.scope.acquire_frame()
 
-    if digitizer.mca_available():
+    if digitizer.capabilities.mca:
         digitizer.mca.set_energy_bin(4)
         digitizer.mca.start()
         spectrum = digitizer.mca.acquire_spectrum()
@@ -357,7 +341,7 @@ try:
         print(digitizer.hv.get_hv_adc_voltage())
 finally:
     digitizer.scope.stop()
-    if digitizer.mca_available():
+    if digitizer.capabilities.mca:
         digitizer.mca.stop()
     digitizer.close()
 ```
@@ -365,6 +349,10 @@ finally:
 Pass `with_ids=False` to `Digitizer.from_iio()` when only Scope/MCA access is
 needed. If required IDS devices are missing, construction logs a warning and
 continues with `digitizer.hv` set to `None`.
+
+`digitizer.capabilities` is the immutable feature snapshot discovered at
+connection time. It reports Scope DMA, MCA, MCA list-mode DMA, and IDS/HV
+availability without requiring callers to inspect backend types.
 
 For a headless periodic Scope DMA recording, use the direct-IIO example:
 
@@ -375,7 +363,7 @@ uv run python examples/dma_scope_periodic.py capture.bin --duration-s 10
 It defaults to channel 0 at `192.168.10.128:30431`, Periodic trigger,
 16,376 ns frames (8,188 samples), 1,000 ns gap, Raw NDMA output, and DMA on.
 Without `--config`, it runs Scope Auto Setup to calibrate the DAC and trigger
-threshold before switching to the requested trigger mode. A GUI v3 settings
+threshold before switching to the requested trigger mode. A GUI v4 settings
 YAML or a single-channel YAML with `scope.dac_value` and
 `scope.trigger_level` skips Auto Setup; YAML frame/gap/mode values apply unless
 overridden by `--frame-ns`, `--gap-ns`, or `--trigger-mode`. For example:
@@ -400,18 +388,9 @@ v122 Periodic file capture explicitly instead of writing a misleading file;
 the Current workspace's online Scope DMA mode supports that layout. A future
 versioned Scope file format is needed before those records can be saved.
 
-For an older firmware board, the legacy factory remains available:
-
-```python
-digitizer = Digitizer.from_grpc(
-    channel=1,
-    hostname="192.168.10.20",
-    port=50050,
-    ids_port=50040,
-)
-```
-
-Legacy gRPC channel numbers are one-based, matching the old service API.
+Boards that still require the removed gRPC services must use the preserved
+`grpc-final` branch. Settings files that explicitly select `backend: grpc` are
+rejected by this branch so they cannot be applied accidentally over IIO.
 
 ## Capture files and analysis
 
@@ -602,7 +581,7 @@ perfectly from real zero-time events and are reported as ambiguous exclusions;
 the current producer has no fully qualified control-record or heartbeat ABI.
 
 IIO MCA NDMA files use format version 2 to distinguish the opaque IIO record
-from the same-sized legacy gRPC/ZMQ event record. A JSON sidecar stores IIO
+from the same-sized legacy NDMA v1 event record. A JSON sidecar stores IIO
 capture geometry, schema, continuity, and driver diagnostics, while a
 same-stem YAML file stores the complete digitizer configuration. ROOT and
 HDF5 files embed that YAML snapshot and expose `timestamp`, `long_gate`, and
@@ -616,12 +595,12 @@ Every recorded MCA run also writes a same-stem `.run.json` with channel,
 format, start/end time, record count, average rate, and continuity status.
 The MCA panel shows this outcome after stopping and its tooltip lists IIO
 driver counters (`dma_error_count` is cumulative since driver initialization).
-Legacy gRPC runs are marked **unverified** because that
-transport does not expose equivalent loss counters. IIO record counts include
-any zero-padded slots in the final complete frame; they are not an exact
-accepted-pulse count. Online-only DMA still creates no file and shows the
-summary only in the panel. A missing `.run.json` after a crash means the run
-was not finalized; it is not evidence that the capture is complete.
+IIO record counts include any zero-padded slots in the final complete frame;
+they are not an exact accepted-pulse count. Online-only DMA still creates no
+file and shows the summary only in the panel. A missing `.run.json` after a
+crash means the run was not finalized; it is not evidence that the capture is
+complete. Existing NDMA v1 files remain readable for offline analysis, but the
+current application no longer creates them.
 
 Use **Tools → PSD Event Readback...** to reconstruct the PSD matrix and both
 projections from NDMA, CAEN CoMPASS, legacy `caen.py`, HDF5, or ROOT events in
@@ -698,14 +677,18 @@ and may reflect the address and firmware installed at the time they were run.
 PySide6 GUI
   └─ controllers and background workers
        └─ Digitizer / Scope / MCA / HV interfaces
-            ├─ IIO backend (current)
-            │    └─ libiio → iiod → FPGA and converter IIO devices
-            └─ gRPC backend (legacy)
-                 └─ Engine/IDS gRPC + ZMQ DMA services
+            └─ IIO backend
+                 └─ libiio → iiod → FPGA and converter IIO devices
 
 External workspace
   └─ nlab-modbus → Modbus TCP / ser2net → RS-485 instruments
 ```
+
+The DMA checkboxes select an application workflow; they do not write an FPGA
+configuration register. The IIO `dma_enable` and `list_buffer_active`
+attributes are read-only ownership gates controlled by buffer arm/close.
+Accordingly, DMA selections are stored under `application.channels` in v4
+settings. Version 3 settings are migrated automatically when loaded.
 
 The IIO implementation uses separate libiio contexts for GUI operations,
 background polling, and blocking DMA reads. This is intentional: a blocking
@@ -729,7 +712,7 @@ Important source locations:
 |---|---|
 | `src/nlab/hardware/digitizer/backends/iio_backend.py` | Scope and MCA IIO control plus DMA lifecycle |
 | `src/nlab/hardware/digitizer/backends/iio_ids_backend.py` | IDS/HV IIO devices and diagnostics |
-| `src/nlab/hardware/digitizer/dma.py` | IIO and legacy capture streamers and NDMA formats |
+| `src/nlab/hardware/digitizer/dma.py` | IIO capture streamers and current/legacy NDMA readers |
 | `src/nlab/controllers/` | GUI coordination and acquisition state |
 | `src/nlab/workers/` | Background polling and DMA workers |
 | `tests/` | Unit, lifecycle, format, settings, and GUI tests |
@@ -740,12 +723,6 @@ After editing a Qt Designer form or resource file, regenerate the UI modules:
 
 ```bash
 python scripts/build_ui.py
-```
-
-After editing a legacy `.proto` file, regenerate its compatibility stubs:
-
-```bash
-python scripts/generate_proto.py
 ```
 
 Run the test suite with an offscreen Qt platform on headless systems:
@@ -775,8 +752,8 @@ tests. When running hardware checks, always stop an armed MCA/Scope in a
 
 ## Standalone builds
 
-Install the development dependencies and generate the UI/protobuf modules
-before packaging.
+Install the development dependencies and generate the Qt UI modules before
+packaging.
 
 The reviewed PyInstaller script is used for release builds. It produces a
 single-file executable, retains the required SciPy, Matplotlib, and Pillow
@@ -827,9 +804,9 @@ of hardware validation.
 ## Contributing
 
 Bug reports, documentation improvements, hardware traces, and pull requests
-are welcome. Please include the backend, firmware/IP version, device discovery
-output, host operating system, and whether a result was reproduced with an
-official libiio utility when reporting transport or DMA failures.
+are welcome. Please include the firmware/IP version, device discovery output,
+host operating system, and whether a result was reproduced with an official
+libiio utility when reporting transport or DMA failures.
 
 Submit changes against `main`, add focused tests where practical, and cite the
 corresponding authoritative source for driver-derived claims.

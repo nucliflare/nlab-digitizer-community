@@ -64,8 +64,6 @@ class ScopeParam(IntEnum):
     FRAME_SAMPLES = 3
     EDGE_MODE = 4
     DAC_VALUE = 5
-    # Internal — no JSON widget id (scope ids 6/7 are software DMA config, not this flag)
-    DMA_ENABLED = 100
     FRAME_PERIOD_CYCLES = 101
 
 
@@ -93,9 +91,8 @@ PARAMETER_SPECS: dict[ScopeParam, ParameterSpec] = {
     # 0-1023: confirmed live against vdpp_afe_dac's baseline_available
     # (min=0, step=1, max=1023) -- 1024 is rejected by the driver with
     # ERANGE, so the spec must match the hardware's real range, not just
-    # the round-number ceiling the old gRPC-only comment assumed.
+    # the round-number ceiling an older comment assumed.
     ScopeParam.DAC_VALUE: RangeSpec(min_val=0, max_val=1023, step=1, default=512),
-    ScopeParam.DMA_ENABLED: ListSpec(items=(False, True), default=False),
 }
 
 
@@ -147,11 +144,9 @@ class Scope:
     def set_enable(self, val: bool) -> None:
         self._b.set_enable(val)
 
-    def get_dma_enable(self) -> bool:
-        return self._b.get_dma_enable()
-
-    def set_dma_enable(self, val: bool) -> None:
-        self._b.set_dma_enable(val)
+    def dma_active(self) -> bool:
+        """Whether the driver currently owns an armed Scope DMA buffer."""
+        return self._b.scope_dma_active()
 
     def start(self) -> None:
         self._b.set_enable(True)
@@ -183,10 +178,9 @@ class Scope:
     def get_frame_period_cycles(self) -> int:
         """Return the gap after a periodic frame, in 8 ns datapath clocks.
 
-        The legacy gRPC API has no matching command. Its safe software-only
-        fallback is the documented reset/default value so GUI construction
-        remains backend-agnostic; the controller keeps the editor disabled
-        when :meth:`frame_period_cycles_supported` is false.
+        Older backend implementations may have no matching command. Their
+        safe software-only fallback is the documented reset/default value;
+        the controller disables the editor when support is absent.
         """
         reader = getattr(self._b, "get_frame_period_cycles", None)
         if reader is None:
@@ -238,8 +232,7 @@ class Scope:
         """Return a backend-specific live-viewer limit, if one exists.
 
         The current IIO driver transports viewer data as page-sized text,
-        which is more restrictive than its binary DMA frame geometry. The
-        legacy gRPC backend has no separate documented viewer limit.
+        which is more restrictive than its binary DMA frame geometry.
         """
         reader = getattr(self._b, "get_viewer_frame_samples_limit", None)
         if reader is None:
@@ -248,11 +241,9 @@ class Scope:
         return int(value) if value is not None else None
 
     # ---- DMA fault recovery ----
-    # Extension methods, only meaningful for backends that latch a fault on
-    # a genuine DMA session error (currently the IIO backend -- see
-    # IIODigitizerBackend._refill_dma_buffer()'s docstring). Backends
-    # without this concept (e.g. the gRPC backend) are no-ops here rather
-    # than an AttributeError, so callers don't need an isinstance check.
+    # Extension methods for backends that latch a genuine DMA session error;
+    # see IIODigitizerBackend._refill_dma_buffer(). Implementations without
+    # this concept remain no-ops so callers need no concrete-type check.
 
     def dma_fault_is_latched(self) -> bool:
         return bool(getattr(self._b, "dma_fault_is_latched", lambda: False)())

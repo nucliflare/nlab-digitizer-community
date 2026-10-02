@@ -254,7 +254,7 @@ def run(options: CaptureOptions) -> int:
     try:
         original = {
             "enabled": scope.get_enable(),
-            "dma_enabled": scope.get_dma_enable(),
+            "dma_active": scope.dma_active(),
             "frame_samples": scope.get_frame_samples(),
             "pretrigger_samples": scope.get_pretrigger_samples(),
             "gap_cycles": scope.get_frame_period_cycles(),
@@ -262,7 +262,7 @@ def run(options: CaptureOptions) -> int:
             "trigger_level": scope.get_trigger_level(),
             "dac_value": scope.get_dac_value(),
         }
-        if original["enabled"] or original["dma_enabled"]:
+        if original["enabled"] or original["dma_active"]:
             raise RuntimeError("Scope is already active; refusing to alter another acquisition")
         if scope.dma_fault_is_latched():
             raise RuntimeError("Scope DMA fault is latched; acknowledge recovery before recording")

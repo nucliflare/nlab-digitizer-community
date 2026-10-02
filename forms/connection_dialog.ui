@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>360</width>
-    <height>190</height>
+    <height>165</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -20,34 +20,13 @@
    <item>
     <layout class="QFormLayout" name="formLayout">
      <item row="0" column="0">
-      <widget class="QLabel" name="labelBackend">
-       <property name="text">
-        <string>Backend:</string>
-       </property>
-      </widget>
-     </item>
-     <item row="0" column="1">
-      <widget class="QComboBox" name="comboBackend">
-       <item>
-        <property name="text">
-         <string>gRPC</string>
-        </property>
-       </item>
-       <item>
-        <property name="text">
-         <string>IIO</string>
-        </property>
-       </item>
-      </widget>
-     </item>
-     <item row="1" column="0">
       <widget class="QLabel" name="labelIp">
        <property name="text">
         <string>IP Address:</string>
        </property>
       </widget>
      </item>
-     <item row="1" column="1">
+     <item row="0" column="1">
       <layout class="QHBoxLayout" name="addressLayout">
        <item>
         <widget class="QComboBox" name="comboIp">
@@ -80,14 +59,14 @@
        </item>
       </layout>
      </item>
-     <item row="2" column="0">
+     <item row="1" column="0">
       <widget class="QLabel" name="labelPort">
        <property name="text">
         <string>Port:</string>
        </property>
       </widget>
      </item>
-     <item row="2" column="1">
+     <item row="1" column="1">
       <widget class="QSpinBox" name="spinPort">
        <property name="minimum">
         <number>1</number>
@@ -96,18 +75,18 @@
         <number>65535</number>
        </property>
        <property name="value">
-        <number>50050</number>
+        <number>30431</number>
        </property>
       </widget>
      </item>
-     <item row="3" column="0">
+     <item row="2" column="0">
       <widget class="QLabel" name="labelChannels">
        <property name="text">
         <string>Channels:</string>
        </property>
       </widget>
      </item>
-     <item row="3" column="1">
+     <item row="2" column="1">
       <widget class="QSpinBox" name="spinChannels">
        <property name="minimum">
         <number>1</number>

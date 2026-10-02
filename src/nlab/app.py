@@ -70,9 +70,8 @@ class MainAppWindow(QMainWindow):
 
     def __init__(
         self,
-        backend: str = "grpc",
         host: str = "",
-        port: int = 50050,
+        port: int = 30431,
         channels: int = 2,
         config_path: Path | None = None,
         on_progress: Callable[[str], None] | None = None,
@@ -93,10 +92,9 @@ class MainAppWindow(QMainWindow):
         # main.py's post-show callback — calling it before show() targets a
         # provisional HWND that QMainWindow replaces when it first settles its
         # dock layout on the screen, discarding the pre-show WM_SETICON.
-        self.setWindowTitle(f"Nuclear Lab Digitizer — {backend}://{host}:{port}")
+        self.setWindowTitle(f"Nuclear Lab Digitizer — {host}:{port}")
         self._controller = MainWindowController(
             self,
-            backend=backend,
             host=host,
             port=port,
             channels=channels,

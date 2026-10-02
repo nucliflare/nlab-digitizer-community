@@ -1,46 +1,27 @@
-import sys as _sys
-import os as _os
-
-_grpc_path = _os.path.abspath(
-    _os.path.join(_os.path.dirname(__file__), "..", "grpc", "generated")
-)
-if _os.path.isdir(_grpc_path) and _grpc_path not in _sys.path:
-    _sys.path.insert(0, _grpc_path)
-
-from .digitizer import Digitizer
-from .scope import (
-    Scope,
-    ScopeParam,
-    TriggerMode,
-    RangeSpec,
-    ListSpec,
-    ParameterSpec,
-    ScopeSettingEntry,
-    PARAMETER_SPECS,
-)
-from .mca import (
-    MultiChannelAnalyzer,
-    MCAParam,
-    MCASettingEntry,
-    MCA_PARAMETER_SPECS,
-)
-from .hv import (
-    HVSupply,
-    HVParam,
-    HVSettingEntry,
-    HV_PARAMETER_SPECS,
-)
 from .backends import (
     DigitizerBackend,
-    GrpcDigitizerBackend,
-    IIOIDSBackend,
     IIODigitizerBackend,
+    IIOIDSBackend,
     MCABackend,
     ScopeBackend,
+)
+from .digitizer import Digitizer, DigitizerCapabilities
+from .hv import HV_PARAMETER_SPECS, HVParam, HVSettingEntry, HVSupply
+from .mca import MCA_PARAMETER_SPECS, MCAParam, MCASettingEntry, MultiChannelAnalyzer
+from .scope import (
+    PARAMETER_SPECS,
+    ListSpec,
+    ParameterSpec,
+    RangeSpec,
+    Scope,
+    ScopeParam,
+    ScopeSettingEntry,
+    TriggerMode,
 )
 
 __all__ = [
     "Digitizer",
+    "DigitizerCapabilities",
     "Scope",
     "ScopeParam",
     "TriggerMode",
@@ -60,7 +41,6 @@ __all__ = [
     "ScopeBackend",
     "MCABackend",
     "DigitizerBackend",
-    "GrpcDigitizerBackend",
     "IIODigitizerBackend",
     "IIOIDSBackend",
 ]

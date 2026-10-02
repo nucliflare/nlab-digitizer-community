@@ -158,8 +158,8 @@ class ScopeAutoSetupProcedure:
         state = self._read_state()
         if state.enabled:
             raise RuntimeError("stop the scope before running Auto Setup")
-        if self._scope.get_dma_enable():
-            raise RuntimeError("disable scope DMA before running Auto Setup")
+        if self._scope.dma_active():
+            raise RuntimeError("stop scope DMA before running Auto Setup")
 
         try:
             self._check_cancelled()

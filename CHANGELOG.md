@@ -16,6 +16,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workers and docks, and preserves display preferences for rediscovered
   modules.
 
+### Changed
+
+- The application now uses the direct IIO backend exclusively. Startup,
+  connection settings, acquisition workers, examples, and standalone builds no
+  longer expose a transport selector or require gRPC/protobuf/ZMQ components.
+- Older settings that omit `connection.backend` or specify `iio` remain
+  compatible. Settings that explicitly request `grpc` are rejected with a
+  pointer to the preserved `grpc-final` branch.
+- Digitizer feature discovery is exposed as one immutable capability snapshot
+  instead of repeated backend introspection. GUI coincidence availability now
+  consumes that snapshot rather than checking concrete streamer classes.
+- Optional Current, MCA, and PSD controllers are keyed to their hardware
+  channel, so a scope-only channel no longer disables or shifts MCA-capable
+  channels on mixed firmware.
+- Scope and MCA DMA checkboxes are application-owned capture choices. Settings
+  format v4 moves them out of hardware configuration; v3 files migrate on
+  load.
+- Coincidence timing controls explicitly disable digit grouping, and the
+  sideband gap is shown as whole nanoseconds so locale-specific decimal marks
+  cannot make `10 ns` look like `10000 ns`.
+
+### Removed
+
+- Removed the legacy gRPC control backend, ZMQ DMA streamers, protobuf sources
+  and generation step, and their direct dependencies. Offline reading of
+  existing NDMA v1 files is retained.
+- Removed the no-op Scope/MCA DMA setters. The remaining `dma_active()` calls
+  report driver-owned buffer gates and cannot write them.
+
 ## [0.6.2] — 2026-10-01
 
 ### Added

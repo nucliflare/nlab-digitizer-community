@@ -22,7 +22,7 @@ def _scope_mock() -> MagicMock:
     scope.get_frame_period_cycles.return_value = 0
     scope.get_trigger_mode.return_value = TriggerMode.ANY_BELOW
     scope.frame_period_cycles_supported.return_value = True
-    scope.get_dma_enable.return_value = False
+    scope.dma_active.return_value = False
     scope.get_enable.return_value = False
     scope.get_viewer_frame_samples_limit.return_value = None
     return scope

@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QLocale, QObject, Signal
 from PySide6.QtWidgets import QApplication, QCheckBox, QGroupBox, QSpinBox
 
 from nlab.analysis.coincidence import CoincidenceAnalyzer, CoincidencePeakFit, CoincidenceSettings
@@ -243,6 +243,18 @@ def test_coincidence_explanations_are_compact_tooltips(
     assert "hidden MCA ROI" in groups["Energy gates"].toolTip()
     assert "both complete raw streams" in groups["Raw DMA recording"].toolTip()
     assert "32 raw MCA channels" in groups["Coincidence matrix"].toolTip()
+
+
+def test_sideband_gap_uses_ungrouped_whole_nanoseconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _make_controller(monkeypatch)
+    controller.random_gap.setLocale(QLocale("pl_PL"))
+    controller.random_gap.setValue(10_000)
+
+    assert controller.random_gap.decimals() == 0
+    assert not controller.random_gap.isGroupSeparatorShown()
+    assert controller.random_gap.text() == "10000 ns"
 
 
 def test_matrix_tab_renders_log_corrected_counts_and_interactive_projections(

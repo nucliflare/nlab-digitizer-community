@@ -104,7 +104,7 @@ def test_hdf5_native_metadata_is_accepted(tmp_path: Path) -> None:
         path=path_b,
         mode=McaDmaOutputMode.HDF5,
         configuration_yaml=(
-            "connection:\n  backend: iio\n  ip: 192.0.2.1\nmeasurement:\n  channel: 1\n"
+            "connection:\n  ip: 192.0.2.1\nmeasurement:\n  channel: 1\n"
         ),
         binary_header=b"",
     )
@@ -128,7 +128,7 @@ def test_root_native_metadata_is_accepted(tmp_path: Path) -> None:
         path=path_b,
         mode=McaDmaOutputMode.ROOT,
         configuration_yaml=(
-            "connection:\n  backend: iio\n  ip: 192.0.2.1\nmeasurement:\n  channel: 1\n"
+            "connection:\n  ip: 192.0.2.1\nmeasurement:\n  channel: 1\n"
         ),
         binary_header=b"",
     )
@@ -167,10 +167,10 @@ def test_mismatched_device_configurations_are_rejected(tmp_path: Path) -> None:
     path_a = _native_file(tmp_path / "ch0.bin", 0, ticks)
     path_b = _native_file(tmp_path / "ch1.bin", 1, ticks + 1)
     path_a.with_suffix(".yaml").write_text(
-        "connection:\n  backend: iio\n  ip: 192.0.2.1\n", encoding="utf-8"
+        "connection:\n  ip: 192.0.2.1\n", encoding="utf-8"
     )
     path_b.with_suffix(".yaml").write_text(
-        "connection:\n  backend: iio\n  ip: 192.0.2.2\n", encoding="utf-8"
+        "connection:\n  ip: 192.0.2.2\n", encoding="utf-8"
     )
 
     with pytest.raises(ValueError, match="different digitizer endpoints"):
@@ -188,6 +188,18 @@ def test_matching_device_configurations_are_reported(tmp_path: Path) -> None:
     result = validate_two_channel_timing(path_a, path_b)
 
     assert result.same_device_metadata is True
+
+
+def test_legacy_grpc_capture_configuration_is_rejected(tmp_path: Path) -> None:
+    ticks = np.array([100, 200, 300], dtype=np.uint64)
+    path_a = _native_file(tmp_path / "ch0.bin", 0, ticks)
+    path_b = _native_file(tmp_path / "ch1.bin", 1, ticks + 1)
+    path_b.with_suffix(".yaml").write_text(
+        "connection:\n  backend: grpc\n  ip: 192.0.2.1\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="IIO capture configuration"):
+        validate_two_channel_timing(path_a, path_b)
 
 
 def test_timing_dialog_has_background_analysis_controls(qtbot: QtBot, qapp: QApplication) -> None:
@@ -256,7 +268,7 @@ def test_timing_offset_survives_application_settings_round_trip(
             refresh_dma_output_settings=Mock(), shutdown=Mock()
         ),
     )
-    window = MainAppWindow(backend="iio")
+    window = MainAppWindow()
     qtbot.addWidget(window)
 
     window.apply_configuration_settings({"timing_channel_b_offset_ns": 40})

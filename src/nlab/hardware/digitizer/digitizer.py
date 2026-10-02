@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from .backends.base import DigitizerBackend, IDSBackend
-from .backends.grpc_backend import GrpcDigitizerBackend
 from .diagnostics import GlobalDiagnosticReading
-from .dma import IIOMcaDmaStreamer, IIOScopeDmaStreamer, McaDmaStreamer, ScopeDmaStreamer
+from .dma import IIOMcaDmaStreamer, IIOScopeDmaStreamer
 from .hv import HVSupply
 from .mca import MultiChannelAnalyzer
 from .scope import Scope
@@ -13,30 +13,38 @@ from .scope import Scope
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class DigitizerCapabilities:
+    """Hardware features discovered once while a channel is connected."""
+
+    scope_dma: bool
+    mca: bool
+    mca_dma: bool
+    ids: bool
+
+
 class Digitizer:
     """Entry point for instrument access.
 
-    Construct via a factory classmethod, then access subsystems through
-    .scope, .mca, and .hv.  The scope/mca share one gRPC service
-    (DPP_reg_access on port 50050); the HV supply uses a separate IDS
-    service (IDS_access on port 50040) on the **same physical device**.
-    The split is a legacy issue that will be merged in a future firmware
-    revision.
+    Construct with :meth:`from_iio`, then access subsystems through
+    ``scope``, ``mca``, and ``hv``. Scope/MCA and IDS/HV use the digitizer's
+    IIO device tree through independent context owners where threading or
+    blocking I/O requires it.
 
     Hardware I/O uses explicit get_*/set_* methods rather than properties.
     This makes the I/O cost visible at call sites and avoids surprising side
     effects inside expressions.
 
-    Example — gRPC::
+    Example::
 
-        d = Digitizer.from_grpc(channel=1)
+        d = Digitizer.from_iio(channel=0, uri="ip:192.168.3.1:30431")
         d.scope.set_trigger_level(5000)
         d.mca.set_energy_bin(4)
         d.hv.set_voltage(30.0)
 
     Example — without HV (e.g. bench testing DPP only)::
 
-        d = Digitizer.from_grpc(channel=1, with_ids=False)
+        d = Digitizer.from_iio(channel=0, with_ids=False)
         # d.hv is None
     """
 
@@ -44,8 +52,8 @@ class Digitizer:
         self,
         backend: DigitizerBackend,
         ids_backend: IDSBackend | None = None,
-        scope_dma: ScopeDmaStreamer | IIOScopeDmaStreamer | None = None,
-        mca_dma: McaDmaStreamer | IIOMcaDmaStreamer | None = None,
+        scope_dma: IIOScopeDmaStreamer | None = None,
+        mca_dma: IIOMcaDmaStreamer | None = None,
     ) -> None:
         self._backend = backend
         self._ids_backend = ids_backend
@@ -54,6 +62,13 @@ class Digitizer:
         self.hv: HVSupply | None = HVSupply(ids_backend) if ids_backend else None
         self.scope_dma = scope_dma
         self.mca_dma = mca_dma
+        mca_present = getattr(backend, "mca_hardware_present", lambda: True)()
+        self.capabilities = DigitizerCapabilities(
+            scope_dma=scope_dma is not None,
+            mca=bool(mca_present),
+            mca_dma=bool(mca_present and mca_dma is not None),
+            ids=ids_backend is not None,
+        )
 
     def close(self) -> None:
         if self.hv is not None:
@@ -65,46 +80,16 @@ class Digitizer:
     def mca_available(self) -> bool:
         """Whether d.mca's methods are expected to work on this channel.
 
-        True for backends that always implement MCABackend in full (e.g.
-        gRPC). Backends where MCA hardware presence varies per channel
-        (currently only the IIO backend, whose pulse-processor/input-filter
-        devices depend on the firmware build) opt in via an optional
-        mca_hardware_present() extension method; delegating here instead of
-        checking the backend type by name keeps this generic across future
-        backends with the same variability.
+        Kept as a compatibility convenience for callers written before the
+        explicit :attr:`capabilities` model was introduced.
         """
-        check = getattr(self._backend, "mca_hardware_present", None)
-        return check() if check is not None else True
+        return self.capabilities.mca
 
     def get_global_diagnostics(self) -> list[GlobalDiagnosticReading]:
         """Read sensors shared by the complete digitizer, not one channel."""
         if self.hv is None:
             return []
         return self.hv.get_global_diagnostics()
-
-    @classmethod
-    def from_grpc(
-        cls,
-        channel: int,
-        hostname: str = "192.168.10.20",
-        port: int = 50050,
-        *,
-        ids_port: int = 50040,
-        with_ids: bool = True,
-    ) -> Digitizer:
-        """Create a Digitizer backed by gRPC.
-
-        Both the DPP and IDS services run on the same device (same
-        hostname, different ports).  Pass with_ids=False to skip the
-        IDS connection (d.hv will be None).
-        """
-        from .backends.grpc_ids_backend import GrpcIDSBackend
-
-        dpp = GrpcDigitizerBackend(channel, hostname, port)
-        ids = GrpcIDSBackend(channel, hostname, ids_port) if with_ids else None
-        scope_dma = ScopeDmaStreamer(channel, hostname)
-        mca_dma = McaDmaStreamer(channel, hostname)
-        return cls(dpp, ids, scope_dma, mca_dma)
 
     @classmethod
     def from_iio(
@@ -133,10 +118,8 @@ class Digitizer:
         devices; if not, d.mca's methods raise RuntimeError instead of
         NotImplementedError, since that's a firmware/device-tree gap on a
         specific board, not a gap in this backend.
-        d.scope_dma is an IIOScopeDmaStreamer (see dma.py) — pulls
-        full-resolution frames by looping read_dma_raw_frame() rather than
-        subscribing to a continuous push like the gRPC ZMQ streamers, since
-        the IIO scope core has no continuous-streaming hardware path.
+        d.scope_dma is an IIOScopeDmaStreamer (see dma.py) and pulls
+        full-resolution frames by looping read_dma_raw_frame().
         """
         from .backends.iio_backend import IIODigitizerBackend
         from .backends.iio_ids_backend import IIOIDSBackend, IIOIDSUnavailableError

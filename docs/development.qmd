@@ -11,15 +11,13 @@ Install the locked development environment:
 uv sync --locked --extra dev
 ```
 
-Generated Qt and protobuf modules are intentionally untracked:
+Generated Qt modules are intentionally untracked:
 
 ```bash
 python scripts/build_ui.py
-python scripts/generate_proto.py
 ```
 
-Regenerate Qt output after changing `forms/*.ui` and protobuf output after
-changing legacy service definitions.
+Regenerate Qt output after changing `forms/*.ui` or Qt resource files.
 
 ## Tests and checks
 
@@ -123,7 +121,7 @@ trip cannot detect double conversion.
 - The core stops before drain/close.
 - Reader thread joins and native buffer destruction is explicit.
 - Persistent transport errors latch the session.
-- File/version distinctions between Scope, legacy MCA, and IIO MCA are kept.
+- File/version distinctions between Scope, legacy NDMA v1, and IIO MCA are kept.
 - No code writes buffer-owned hardware gates directly.
 
 ## Builds
@@ -147,7 +145,7 @@ and Gitea remotes.
 
 ## Change completion
 
-- Preserve public backend/controller behavior unless intentionally changed.
+- Preserve public IIO/controller behavior unless intentionally changed.
 - Add focused tests for lifecycle, file format, settings, or analysis changes.
 - Update README/wiki for user-visible behavior and the changelog for
   release-visible behavior.

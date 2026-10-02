@@ -73,14 +73,8 @@ class HVSettingEntry(TypedDict):
 class HVSupply:
     """High-voltage / SiPM bias supply and temperature monitoring.
 
-    Wraps the IDS gRPC service — a separate service on the same physical
-    device as the DPP engine (different port, different proto).  This
-    split is a legacy issue that will be merged in a future firmware
-    revision.
-
-    The IDS proto exposes parallel SiPM and HV command sets, each with
-    independent voltage control and temperature compensation.  Parameter
-    IDs match hw_def.json "hv" section (101–119).
+    Wraps the digitizer's IDS IIO devices. SiPM and HV command sets have
+    independent voltage control and temperature compensation.
     """
 
     specs: dict[HVParam, ParameterSpec] = HV_PARAMETER_SPECS

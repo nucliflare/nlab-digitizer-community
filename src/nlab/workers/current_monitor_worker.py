@@ -99,9 +99,9 @@ class CurrentMonitorWorker(BaseWorker):
             self._finish()
             return
         try:
-            # Construct the connection on the thread that will use it.  This
-            # is mandatory for the direct-IIO backend and also keeps gRPC
-            # completion-queue activity away from the GUI thread.
+            # Construct the connection on the thread that will use it. This
+            # is mandatory for direct IIO and keeps blocking activity away
+            # from the GUI thread.
             self._client = self._client_factory()
         except Exception as exc:
             message = f"Could not open current monitor: {exc}"

@@ -85,7 +85,6 @@ def run_current_capture(args: argparse.Namespace) -> dict[str, object]:
     current = None
     try:
         window = MainAppWindow(
-            backend="iio",
             host=args.host,
             port=args.port,
             channels=2,
@@ -159,7 +158,6 @@ def run_probe(args: argparse.Namespace) -> dict[str, object]:
     coincidence = None
     try:
         window = MainAppWindow(
-            backend="iio",
             host=args.host,
             port=args.port,
             channels=2,
@@ -258,7 +256,6 @@ def run_coincidence_comparison(args: argparse.Namespace) -> dict[str, object]:
     runs: list[dict[str, object]] = []
     try:
         window = MainAppWindow(
-            backend="iio",
             host=args.host,
             port=args.port,
             channels=2,

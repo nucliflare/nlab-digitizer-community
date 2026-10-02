@@ -37,10 +37,9 @@ class ScopeBackend(ABC):
     def set_enable(self, val: bool) -> None: ...
 
     @abstractmethod
-    def get_dma_enable(self) -> bool: ...
-
-    @abstractmethod
-    def set_dma_enable(self, val: bool) -> None: ...
+    def scope_dma_active(self) -> bool:
+        """Return the driver-owned Scope buffer ownership gate."""
+        ...
 
     @abstractmethod
     def get_trigger_level(self) -> int: ...
@@ -86,7 +85,7 @@ class MCABackend(ABC):
 
         A transport must opt in explicitly.  Falling back to ``self`` would
         share one remote connection between the GUI and worker threads, which
-        is not safe for libiio and can also serialize unrelated gRPC calls.
+        is not safe for libiio.
         """
         raise NotImplementedError(
             "this backend does not support isolated current-monitor access"
@@ -141,10 +140,9 @@ class MCABackend(ABC):
     def set_global_enable(self, val: bool) -> None: ...
 
     @abstractmethod
-    def get_dpp_dma_enable(self) -> bool: ...
-
-    @abstractmethod
-    def set_dpp_dma_enable(self, val: bool) -> None: ...
+    def mca_dma_active(self) -> bool:
+        """Return the driver-owned MCA list-buffer ownership gate."""
+        ...
 
     @abstractmethod
     def get_time_limit(self) -> int: ...
@@ -440,8 +438,7 @@ class MCABackend(ABC):
 class IDSBackend(ABC):
     """Abstract interface for the IDS subsystem.
 
-    Power-supply and temperature-sensor access, provided either by the
-    legacy separate gRPC service or directly by IIO devices.
+    Power-supply and temperature-sensor access provided by IIO devices.
     """
 
     # ---- versions ----
@@ -525,8 +522,8 @@ class IDSBackend(ABC):
 class DigitizerBackend(ScopeBackend, MCABackend, ABC):
     """Combined backend that satisfies both scope and MCA interfaces.
 
-    All concrete backends (gRPC, IIO, …) should inherit from this class.
-    IDSBackend is intentionally separate — it connects to a different server.
+    Concrete backends should inherit from this class. IDSBackend remains
+    separate because the IDS converters and sensors have their own handles.
     """
 
     def close(self) -> None:

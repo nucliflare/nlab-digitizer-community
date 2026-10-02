@@ -90,7 +90,7 @@ def _require_native_file(path: Path) -> int:
     return info.channel
 
 
-def _capture_device(path: Path) -> tuple[str, str] | None:
+def _capture_device(path: Path) -> tuple[str | None, str] | None:
     """Read the saved connection identity, never infer it from a filename."""
     suffix = path.suffix.lower()
     if suffix == ".bin":
@@ -123,7 +123,11 @@ def _capture_device(path: Path) -> tuple[str, str] | None:
     if not isinstance(connection, Mapping):
         return None
     backend, host = connection.get("backend"), connection.get("ip")
-    if not isinstance(backend, str) or not isinstance(host, str) or not host:
+    if (
+        (backend is not None and not isinstance(backend, str))
+        or not isinstance(host, str)
+        or not host
+    ):
         return None
     return backend, host
 
@@ -229,10 +233,10 @@ def validate_two_channel_timing(
         # have no versioned transport header, so require their saved IIO
         # connection identity before interpreting 8 ns event timestamps.
         if (path.suffix.lower() != ".bin" and device is None) or (
-            device is not None and device[0] != "iio"
+            device is not None and device[0] not in (None, "iio")
         ):
             raise ValueError(f"{path.name}: an IIO capture configuration is required")
-    if device_a is not None and device_b is not None and device_a != device_b:
+    if device_a is not None and device_b is not None and device_a[1] != device_b[1]:
         raise ValueError("Files identify different digitizer endpoints; do not correlate them")
     same_device_metadata = True if device_a is not None and device_b is not None else None
     if progress is not None:

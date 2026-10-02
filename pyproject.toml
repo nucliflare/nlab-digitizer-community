@@ -20,9 +20,6 @@ dependencies = [
     "lmfit>=1.3.4,<2",
     "matplotlib>=3.9",
     "fast_histogram>=0.11",
-    "grpcio>=1.64",
-    "protobuf>=5.26",
-    "pyzmq>=26.0",
     "h5py>=3.11",
     "uproot>=5.7",
     "pyyaml>=6.0",
@@ -34,7 +31,6 @@ dependencies = [
 dev = [
     # Build & code generation
     "nuitka>=2.4",
-    "grpcio-tools>=1.64",
     "ordered-set",          # required by nuitka --onefile
     "zstandard",            # required by nuitka --onefile compression
     "pyinstaller>=6.8",

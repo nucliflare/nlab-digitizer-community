@@ -12,7 +12,7 @@ different payloads and version rules.
 | Capture | Format | Contents | Integrity evidence |
 |---|---|---|---|
 | Scope DMA | NDMA v1 `.bin` | Repeated complete timestamped int16 frames | Header geometry, exact frame alignment, no trailing partial frame |
-| MCA legacy DMA | NDMA v1 `.bin` | Legacy gRPC/ZMQ 16-byte events | Alignment only; transport continuity is unverified |
+| MCA legacy file | NDMA v1 `.bin` | Legacy 16-byte events | Alignment only; transport continuity is unverified |
 | MCA IIO DMA | NDMA v2 `.bin` | Fixed 1,024 × opaque-16-byte frames | Authenticated JSON sidecar plus driver counters |
 | MCA IIO DMA | `.h5` | Appendable canonical event dataset and embedded YAML | `committed_events`, `capture_complete`, run summary |
 | MCA IIO DMA | `.root` | Canonical `events` TTree and embedded metadata | Run summary and successful close |
@@ -92,8 +92,9 @@ the current fault and run-local counters. IIO record counts include all slots
 in the final complete frame, including indistinguishable zero padding. They are
 not an exact accepted-pulse count.
 
-Legacy gRPC runs are labelled **unverified**, not lossless, because the
-transport exposes no equivalent completed-frame/deadtime counters.
+Existing legacy NDMA v1 captures are labelled **unverified**, not lossless,
+because they contain no equivalent completed-frame/deadtime counters. The
+current application reads but does not create this format.
 
 ## Conversion
 
@@ -120,7 +121,7 @@ code must accept both variants.
 - Never overwrite an existing capture or export.
 - Confirm free disk space before long Scope runs.
 - Treat a live MCA histogram snapshot as non-atomic.
-- Record backend, endpoint, channel, firmware/IP version, trigger mode, and
+- Record endpoint, channel, firmware/IP version, trigger mode, and
   whether continuity was verified.
 - Preserve raw coordinates in exported analysis; add calibrations as metadata
   instead of rewriting source records.

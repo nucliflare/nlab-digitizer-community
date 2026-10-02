@@ -15,7 +15,7 @@ from nlab.hardware.digitizer.mca_capture import (
     McaDmaOutputMode,
     McaRunSummary,
 )
-from nlab.workers.dma_workers import IIOMcaDmaWorker, McaDmaWorker, _finish_mca_run
+from nlab.workers.dma_workers import IIOMcaDmaWorker, _finish_mca_run
 
 _IIO_EVENTS = np.dtype(
     [
@@ -162,7 +162,7 @@ def test_run_summary_is_written_beside_each_capture_format(
         summary.write_sidecar()
 
 
-def test_online_summary_has_no_sidecar_and_legacy_is_unverified() -> None:
+def test_online_summary_without_diagnostics_is_unverified() -> None:
     summary = _finish_mca_run(
         channel=0,
         mode=McaDmaOutputMode.ONLINE,
@@ -233,23 +233,3 @@ def test_iio_worker_emits_verified_summary_for_online_run() -> None:
     assert summaries[0].continuity == "verified"
     assert summaries[0].sidecar_path is None
     assert received["client_record_schema"] == VDPP_ZC_CALC_SCHEMA
-
-
-def test_legacy_worker_reports_unverified_without_loss_counters() -> None:
-    class FakeStreamer:
-        def stream_events(self, **kwargs: object) -> int:
-            kwargs["on_progress"](123)  # type: ignore[operator]
-            return 123
-
-    worker = McaDmaWorker(
-        streamer=FakeStreamer(),  # type: ignore[arg-type]
-        output_mode=McaDmaOutputMode.ONLINE,
-        channel=1,
-    )
-    summaries: list[McaRunSummary] = []
-    worker.summary.connect(summaries.append)
-
-    worker.run()
-
-    assert summaries[0].records == 123
-    assert summaries[0].continuity == "unverified"

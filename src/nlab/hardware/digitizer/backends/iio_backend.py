@@ -468,7 +468,7 @@ class IIODigitizerBackend(DigitizerBackend):
         # multiple threads. Confirmed live, twice, independently: this is
         # a *different* problem from the "never write dma_enable directly"
         # bug the driver author's architecture doc identifies -- that bug
-        # is real and fixed (see set_dma_enable()'s docstring), but fixing
+        # is real and fixed (see scope_dma_active()'s docstring), but fixing
         # it and then reverting to a single context (on the theory that it
         # was the *only* problem) reintroduced this one. The GUI
         # deliberately restarts the viewer-refresh timer alongside every
@@ -948,7 +948,7 @@ class IIODigitizerBackend(DigitizerBackend):
     # which only ever runs on the DMA worker thread, so these never
     # contend with the GUI thread's self._scope/_attr_get()/_attr_set()
     # calls. No _dma_set_dma_enable() -- dma_enable is never written on
-    # either context; see set_dma_enable()'s docstring.
+    # either context; see scope_dma_active()'s docstring.
 
     def _dma_attr_get(self, name: str) -> str:
         return self._dma_scope.attrs[name].value
@@ -1394,7 +1394,7 @@ class IIODigitizerBackend(DigitizerBackend):
         readiness can be reported at the correct lifecycle boundary. The
         lazy-start fallback is retained for direct callers. The returned
         structured dtype follows vdpp-lm-frame.c exactly and deliberately
-        differs from the legacy gRPC/ZMQ event dtype.
+        differs from the legacy NDMA v1 event dtype.
         """
         if self._mca_dma_buf is None:
             return self.start_mca_dma_capture()
@@ -1692,41 +1692,17 @@ class IIODigitizerBackend(DigitizerBackend):
         """
         self._attr_set("enable", "1" if val else "0")
 
-    def get_dma_enable(self) -> bool:
+    def scope_dma_active(self) -> bool:
         """Read-only diagnostic: the driver-owned DMA stream-gate state.
 
         Per the driver author's architecture note (scope-architecture.md):
         dma_enable belongs entirely to the buffer arm/close lifecycle
         (_create_dma_buffer()/_close_dma_buffer()) -- "a GUI control
         labelled DMA represents buffer arm/close, not a direct write to
-        that register." There is deliberately no set_dma_enable() write
-        path left in this backend; see set_dma_enable()'s docstring.
+        that register." There is deliberately no public write path for this
+        gate; the DMA buffer lifecycle is its only owner.
         """
         return bool(int(self._attr_get("dma_enable")))
-
-    def set_dma_enable(self, val: bool) -> None:
-        """No-op for this backend -- see get_dma_enable()'s docstring.
-
-        Part of the shared ScopeBackend/MCABackend interface (also used
-        by the gRPC backend, where a direct write is the correct and only
-        way to control this bit) and still wired to a GUI checkbox in
-        ScopeController for backend-agnostic code -- kept present so both
-        remain usable unmodified. For vdpp_scope specifically, writing
-        this register directly while no buffer is open sets a state the
-        driver never expects a client to set on its own (dma_enable=1
-        with no IIO descriptor behind it), and writing it while a buffer
-        *is* open races the driver's own close/drain and is explicitly
-        rejected with -EBUSY. Confirmed live: retrying that -EBUSY (a
-        prior revision did, for up to 2.5 s) never succeeds, because the
-        write itself is illegitimate, not delayed -- only
-        _close_dma_buffer() dropping the buffer reference is allowed to
-        clear this bit.
-        """
-        log.debug(
-            "IIO backend ch%d: set_dma_enable(%s) ignored -- dma_enable is "
-            "driver-owned, controlled only via buffer arm/close",
-            self._ch, val,
-        )
 
     def get_trigger_level(self) -> int:
         return int(self._attr_get("trigger_level_raw"))
@@ -2718,8 +2694,8 @@ class IIODigitizerBackend(DigitizerBackend):
     def set_global_enable(self, val: bool) -> None:
         self._pp_attr_set("enable", "1" if val else "0")
 
-    def get_dpp_dma_enable(self) -> bool:
-        """Read-only diagnostic, not the real gate.
+    def mca_dma_active(self) -> bool:
+        """Read the driver-owned MCA list-buffer ownership gate.
 
         Per mca-architecture.md: "The list_dma_enable register physically
         lives in this core but is owned by vdpp-lm-frame... Keeping that
@@ -2729,25 +2705,9 @@ class IIODigitizerBackend(DigitizerBackend):
         list_buffer_active, set internally via the exported
         vdpp_pulse_set_list_buffer() when a vdpp-lm-frame buffer is
         armed/closed. The IIO list-mode extension methods in this backend
-        now create and destroy that buffer; callers still never write the
-        gate directly.
+        create and destroy that buffer; callers never write the gate directly.
         """
         return bool(int(self._pp_attr_get("list_buffer_active")))
-
-    def set_dpp_dma_enable(self, val: bool) -> None:
-        """No-op -- see get_dpp_dma_enable()'s docstring. list_dma_enable
-        is not a writable sysfs attribute on this driver at all (unlike
-        vdpp-scope.c's dma_enable, which is at least readable+driver-owned);
-        it is entirely internal to the pulse-processor/lm-frame device
-        link. Present so MCAController's `cbDmaEnable.toggled` signal (a
-        shared, backend-agnostic connection) has something safe to call.
-        """
-        log.debug(
-            "IIO backend ch%d: set_dpp_dma_enable(%s) ignored -- "
-            "list_dma_enable has no writable sysfs attribute on this "
-            "driver, see get_dpp_dma_enable()'s docstring",
-            self._ch, val,
-        )
 
     def get_time_limit(self) -> int:
         """Seconds, per mca.py's documented contract for this method.

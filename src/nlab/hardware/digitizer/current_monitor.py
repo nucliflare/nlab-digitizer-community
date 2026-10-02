@@ -537,8 +537,8 @@ class CurrentMonitorClient(ABC):
 
     The client deliberately exposes only the one operation needed by the
     current monitor.  Keeping it separate from ``Digitizer`` prevents a
-    background polling thread from sharing an IIO context or gRPC channel
-    with GUI/configuration calls.
+    background polling thread from sharing an IIO context with
+    GUI/configuration calls.
     """
 
     @abstractmethod

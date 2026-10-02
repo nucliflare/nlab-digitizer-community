@@ -70,10 +70,9 @@ def main(argv: list[str] | None = None) -> int:
         dialog = ConnectionDialog(
             ip="192.168.10.128",
             port=30_431,
-            backend="iio",
             channels=2,
         )
-        _save_widget(app, dialog, args.output_dir / "connection-dialog.png")
+        _save_widget(app, dialog, args.output_dir / "readme-first-steps-connection.png")
     return 0
 
 

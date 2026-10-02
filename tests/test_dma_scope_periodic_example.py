@@ -16,7 +16,7 @@ from nlab.utils.settings_io import write_configuration
 def _scope() -> Mock:
     scope = Mock()
     scope.get_enable.return_value = False
-    scope.get_dma_enable.return_value = False
+    scope.dma_active.return_value = False
     scope.get_frame_samples.return_value = 1024
     scope.get_pretrigger_samples.return_value = 0
     scope.get_frame_period_cycles.return_value = 256
@@ -53,7 +53,7 @@ def test_gui_yaml_is_used_and_explicit_cli_capture_values_override_it(
     write_configuration(
         config,
         {
-            "format_version": 3,
+            "format_version": 4,
             "hardware": {
                 "channels": {
                     "0": {
@@ -64,7 +64,6 @@ def test_gui_yaml_is_used_and_explicit_cli_capture_values_override_it(
                             "frame_gap_ns": 2048,
                             "pretrigger_ns": 16,
                             "edge_mode": 2,
-                            "dma_enabled": False,
                         }
                     }
                 }

@@ -144,13 +144,13 @@ def run(options: Options) -> dict[str, object]:
     try:
         original = {
             "enabled": scope.get_enable(),
-            "dma_enabled": scope.get_dma_enable(),
+            "dma_active": scope.dma_active(),
             "frame_samples": scope.get_frame_samples(),
             "pretrigger_samples": scope.get_pretrigger_samples(),
             "gap_cycles": scope.get_frame_period_cycles(),
             "trigger_mode": scope.get_trigger_mode(),
         }
-        if original["enabled"] or original["dma_enabled"]:
+        if original["enabled"] or original["dma_active"]:
             raise RuntimeError("Scope is already active; refusing to alter its acquisition")
         if scope.dma_fault_is_latched():
             raise RuntimeError("Scope DMA fault is latched; recovery must be acknowledged first")

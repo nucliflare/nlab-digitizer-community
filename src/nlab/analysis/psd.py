@@ -1,6 +1,6 @@
 """Incremental pulse-shape-discrimination histogram analysis.
 
-The legacy gRPC list-mode record named its two charge estimates ``energy``
+The legacy NDMA v1 list-mode record named its two charge estimates ``energy``
 and ``short_energy``.  The deployed IIO client decoder names the equivalent
 analysis inputs ``trapezoid_energy`` and ``charge_energy``.  The IIO transport
 itself exposes only an opaque 16-byte record (see mca-architecture.md); this
