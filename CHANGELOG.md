@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- External-device settings and telemetry tables use a compact layout with
+  bounded register-name columns, aligned table edges, and full-name tooltips,
+  keeping every column visible beside the live plot at the default window size.
 - The application now uses the direct IIO backend exclusively. Startup,
   connection settings, acquisition workers, examples, and standalone builds no
   longer expose a transport selector or require gRPC/protobuf/ZMQ components.

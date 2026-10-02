@@ -120,6 +120,9 @@ uv run python examples/measure_current.py
   bridges; **Connection → Refresh Modbus Devices** updates the External
   workspace without reconnecting the digitizer
 - Support for SiPM bias, Geiger-Mueller, and PMT high-voltage Modbus devices
+- Compact External workspace tables fill the control pane while keeping every
+  column visible beside the live plot; hover an elided register label to see
+  its full name
 - Safe acquisition and power-supply shutdown when the application closes
 
 ### Application workflow

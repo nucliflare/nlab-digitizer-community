@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
     QHeaderView,
+    QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -23,6 +24,9 @@ from nlab.views.responsive_layout import configure_external_layout
 from nlab.workers.external_device_worker import ExternalDeviceWorker
 
 log = logging.getLogger(__name__)
+
+_SETTINGS_COLUMN_MAX_WIDTHS = (180, 96, 58)
+_TELEMETRY_COLUMN_MAX_WIDTHS = (180, 96, 58, 48)
 
 
 def _is_boolean_spec(spec: RegisterSpec) -> bool:
@@ -156,8 +160,14 @@ class ExternalDeviceController(QWidget):
 
         self._populate_settings_rows()
         self._populate_telemetry_rows()
-        self._shrink_table_to_contents(self.ui.settingsTable)
-        self._shrink_table_to_contents(self.ui.telemetryTable)
+        self._shrink_table_to_contents(
+            self.ui.settingsTable,
+            _SETTINGS_COLUMN_MAX_WIDTHS,
+        )
+        self._shrink_table_to_contents(
+            self.ui.telemetryTable,
+            _TELEMETRY_COLUMN_MAX_WIDTHS,
+        )
         for row in range(self.ui.telemetryTable.rowCount()):
             item = self.ui.telemetryTable.item(row, 1)
             if item is not None:
@@ -165,37 +175,58 @@ class ExternalDeviceController(QWidget):
 
     @staticmethod
     def _configure_table(table: QTableWidget) -> None:
+        font = table.font()
+        if font.pointSizeF() > 0:
+            font.setPointSizeF(max(8.0, font.pointSizeF() - 1.0))
+        elif font.pixelSize() > 0:
+            font.setPixelSize(max(10, font.pixelSize() - 1))
+        table.setFont(font)
+        table.horizontalHeader().setFont(font)
+        table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        table.setWordWrap(False)
         table.verticalHeader().setVisible(False)
         header_view = table.horizontalHeader()
         for col in range(table.columnCount()):
             header_view.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
 
     @staticmethod
-    def _shrink_table_to_contents(table: QTableWidget) -> None:
-        """Size the table exactly to its rows/columns so it doesn't stretch.
+    def _shrink_table_to_contents(
+        table: QTableWidget,
+        maximum_widths: tuple[int, ...],
+    ) -> None:
+        """Size the table to compact, bounded columns so it doesn't stretch.
 
         Without this, QTableWidget's default Expanding size policy makes it
         fill all leftover vertical space in the layout — wasted, since these
         tables have a small, fixed row count set once at construction.
 
-        Columns are measured once with ResizeToContents, then frozen to Fixed
-        at that width. Left in ResizeToContents, a cell widget's checked-state
-        indicator (e.g. QCheckBox) can paint slightly wider than unchecked,
-        and the header reflows every column to fit the still-fixed table
-        width — clipping the Register column's text.
+        Columns are measured once with ResizeToContents and bounded by their
+        per-column caps. Value, Unit, and Plot remain fixed while Register
+        stretches to use any spare group-box width. Full register labels remain
+        available in tooltips when the view elides them. Leaving every column
+        in ResizeToContents can make checkbox state changes recalculate widths.
         """
+        if len(maximum_widths) != table.columnCount():
+            raise ValueError("Each table column needs a maximum width")
+
         table.resizeColumnsToContents()
         table.resizeRowsToContents()
         header_view = table.horizontalHeader()
-        widths = [table.columnWidth(c) for c in range(table.columnCount())]
+        widths = [
+            min(table.columnWidth(col), maximum_widths[col])
+            for col in range(table.columnCount())
+        ]
         for col, w in enumerate(widths):
             header_view.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
             table.setColumnWidth(col, w)
+        header_view.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         width = sum(widths) + table.frameWidth() * 2
         height = table.horizontalHeader().height()
         height += sum(table.rowHeight(r) for r in range(table.rowCount()))
         height += table.frameWidth() * 2
-        table.setFixedSize(width, height)
+        table.setMinimumWidth(width)
+        table.setFixedHeight(height)
+        table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def _holding_specs(self) -> list[tuple[str, RegisterSpec]]:
         """Holding (writable) registers, excluding password-protected and service ones."""
@@ -232,7 +263,10 @@ class ExternalDeviceController(QWidget):
         specs = self._holding_specs()
         self.ui.settingsTable.setRowCount(len(specs))
         for row, (name, spec) in enumerate(specs):
-            self.ui.settingsTable.setItem(row, 0, QTableWidgetItem(_label_for(name)))
+            label = _label_for(name)
+            label_item = QTableWidgetItem(label)
+            label_item.setToolTip(f"{label}\nModbus register: {name}")
+            self.ui.settingsTable.setItem(row, 0, label_item)
             self.ui.settingsTable.setItem(row, 2, QTableWidgetItem(spec.unit or ""))
             self.ui.settingsTable.setCellWidget(row, 1, self._make_editor(name, spec))
             self._row_by_name[f"settings:{name}"] = row
@@ -241,7 +275,10 @@ class ExternalDeviceController(QWidget):
         specs = self._input_specs()
         self.ui.telemetryTable.setRowCount(len(specs))
         for row, (name, spec) in enumerate(specs):
-            self.ui.telemetryTable.setItem(row, 0, QTableWidgetItem(_label_for(name)))
+            label = _label_for(name)
+            label_item = QTableWidgetItem(label)
+            label_item.setToolTip(f"{label}\nModbus register: {name}")
+            self.ui.telemetryTable.setItem(row, 0, label_item)
             self.ui.telemetryTable.setItem(row, 1, QTableWidgetItem(_value_placeholder(spec)))
             self.ui.telemetryTable.setItem(row, 2, QTableWidgetItem(spec.unit or ""))
             self._row_by_name[f"telemetry:{name}"] = row

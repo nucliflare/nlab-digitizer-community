@@ -397,6 +397,8 @@ def configure_external_layout(view: QWidget, ui: Ui_ExternalDeviceView) -> None:
     del view
     _compact_forms((ui.formMonitoring,))
     scroll = _wrap_layout(ui.horizontalLayout, ui.controlLayout, "externalControlScroll")
-    scroll.setMinimumWidth(320)
+    # Includes the compact table/group margins and the vertical scroll bar, so
+    # the control pane does not introduce a second, horizontal scroll bar.
+    scroll.setMinimumWidth(430)
     scroll.setMaximumWidth(650)
     ui.plotWidget.setMinimumSize(300, 220)
