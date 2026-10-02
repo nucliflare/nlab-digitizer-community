@@ -58,6 +58,18 @@ def test_debug_markers_match_hardware_ranges_widgets_and_colors(
     assert offset.bounds() == (0.0, 4.094)
 
 
+def test_mca_dma_selection_is_application_configuration(
+    qtbot: QtBot, monkeypatch: MonkeyPatch
+) -> None:
+    controller, _mca = _controller(qtbot, monkeypatch)
+
+    controller.ui.cbDmaEnable.setChecked(True)
+    assert controller.configuration_settings()["dma_enabled"] is True
+
+    controller.apply_configuration_settings({"dma_enabled": False})
+    assert not controller.ui.cbDmaEnable.isChecked()
+
+
 def test_threshold_marker_commits_once_via_live_reconfiguration(
     qtbot: QtBot, monkeypatch: MonkeyPatch
 ) -> None:

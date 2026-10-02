@@ -330,7 +330,7 @@ try:
     digitizer.scope.set_frame_samples(1024)
     frame = digitizer.scope.acquire_frame()
 
-    if digitizer.mca_available():
+    if digitizer.capabilities.mca:
         digitizer.mca.set_energy_bin(4)
         digitizer.mca.start()
         spectrum = digitizer.mca.acquire_spectrum()
@@ -341,7 +341,7 @@ try:
         print(digitizer.hv.get_hv_adc_voltage())
 finally:
     digitizer.scope.stop()
-    if digitizer.mca_available():
+    if digitizer.capabilities.mca:
         digitizer.mca.stop()
     digitizer.close()
 ```
@@ -349,6 +349,10 @@ finally:
 Pass `with_ids=False` to `Digitizer.from_iio()` when only Scope/MCA access is
 needed. If required IDS devices are missing, construction logs a warning and
 continues with `digitizer.hv` set to `None`.
+
+`digitizer.capabilities` is the immutable feature snapshot discovered at
+connection time. It reports Scope DMA, MCA, MCA list-mode DMA, and IDS/HV
+availability without requiring callers to inspect backend types.
 
 For a headless periodic Scope DMA recording, use the direct-IIO example:
 
@@ -359,7 +363,7 @@ uv run python examples/dma_scope_periodic.py capture.bin --duration-s 10
 It defaults to channel 0 at `192.168.10.128:30431`, Periodic trigger,
 16,376 ns frames (8,188 samples), 1,000 ns gap, Raw NDMA output, and DMA on.
 Without `--config`, it runs Scope Auto Setup to calibrate the DAC and trigger
-threshold before switching to the requested trigger mode. A GUI v3 settings
+threshold before switching to the requested trigger mode. A GUI v4 settings
 YAML or a single-channel YAML with `scope.dac_value` and
 `scope.trigger_level` skips Auto Setup; YAML frame/gap/mode values apply unless
 overridden by `--frame-ns`, `--gap-ns`, or `--trigger-mode`. For example:
@@ -679,6 +683,12 @@ PySide6 GUI
 External workspace
   └─ nlab-modbus → Modbus TCP / ser2net → RS-485 instruments
 ```
+
+The DMA checkboxes select an application workflow; they do not write an FPGA
+configuration register. The IIO `dma_enable` and `list_buffer_active`
+attributes are read-only ownership gates controlled by buffer arm/close.
+Accordingly, DMA selections are stored under `application.channels` in v4
+settings. Version 3 settings are migrated automatically when loaded.
 
 The IIO implementation uses separate libiio contexts for GUI operations,
 background polling, and blocking DMA reads. This is intentional: a blocking

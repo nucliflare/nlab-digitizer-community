@@ -204,6 +204,7 @@ class CoincidenceController(QWidget):
         self.high = QDoubleSpinBox()
         for spin in (self.low, self.high):
             spin.setDecimals(3)
+            spin.setGroupSeparatorShown(False)
             spin.setRange(-1_000.0, 1_000.0)
             spin.setSingleStep(1.0)
             spin.setSuffix(" ns")
@@ -211,6 +212,7 @@ class CoincidenceController(QWidget):
         self.high.setValue(48.0)
         self.offset = QDoubleSpinBox()
         self.offset.setDecimals(3)
+        self.offset.setGroupSeparatorShown(False)
         self.offset.setRange(-100_000.0, 100_000.0)
         self.offset.setSingleStep(0.1)
         self.offset.setSuffix(" ns")
@@ -233,7 +235,8 @@ class CoincidenceController(QWidget):
             "Accumulate two delayed windows, each the width of the prompt timing gate."
         )
         self.random_gap = QDoubleSpinBox()
-        self.random_gap.setDecimals(3)
+        self.random_gap.setDecimals(0)
+        self.random_gap.setGroupSeparatorShown(False)
         self.random_gap.setRange(0.0, 100_000.0)
         self.random_gap.setSingleStep(1.0)
         self.random_gap.setSuffix(" ns")

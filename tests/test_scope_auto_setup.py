@@ -39,7 +39,7 @@ class _FakePulseScope:
     def get_enable(self) -> bool:
         return self.enabled
 
-    def get_dma_enable(self) -> bool:
+    def dma_active(self) -> bool:
         return self.dma_enabled
 
     def get_dac_value(self) -> int:

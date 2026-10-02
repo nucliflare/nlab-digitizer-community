@@ -5,7 +5,7 @@ from .backends import (
     MCABackend,
     ScopeBackend,
 )
-from .digitizer import Digitizer
+from .digitizer import Digitizer, DigitizerCapabilities
 from .hv import HV_PARAMETER_SPECS, HVParam, HVSettingEntry, HVSupply
 from .mca import MCA_PARAMETER_SPECS, MCAParam, MCASettingEntry, MultiChannelAnalyzer
 from .scope import (
@@ -21,6 +21,7 @@ from .scope import (
 
 __all__ = [
     "Digitizer",
+    "DigitizerCapabilities",
     "Scope",
     "ScopeParam",
     "TriggerMode",

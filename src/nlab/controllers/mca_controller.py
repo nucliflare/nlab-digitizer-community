@@ -884,6 +884,7 @@ class MCAController(QWidget):
         settings: dict[str, object] = {
             "refresh_rate_hz": self.ui.spinRefreshRate.value(),
             "roi": [float(value) for value in self._roi.getRegion()],
+            "dma_enabled": self.ui.cbDmaEnable.isChecked(),
         }
         if self._energy_calibration is not None:
             settings["energy_calibration"] = self._energy_calibration.to_dict()
@@ -894,6 +895,8 @@ class MCAController(QWidget):
             return
         if "refresh_rate_hz" in settings:
             self.ui.spinRefreshRate.setValue(int(settings["refresh_rate_hz"]))
+        if "dma_enabled" in settings:
+            self.ui.cbDmaEnable.setChecked(bool(settings["dma_enabled"]))
         roi = settings.get("roi")
         if isinstance(roi, list) and len(roi) == 2:
             self._roi.setRegion((float(roi[0]), float(roi[1])))
@@ -1156,7 +1159,6 @@ class MCAController(QWidget):
         self.ui.btnStop.clicked.connect(self._on_stop)
         self.ui.btnClearSpectrum.clicked.connect(self._on_clear_spectrum)
         self.ui.btnExportCsv.clicked.connect(self._on_export_csv)
-        self.ui.cbDmaEnable.toggled.connect(lambda v: self._mca.set_dma_enable(v))
         self.ui.btnDmaFile.clicked.connect(self._on_dma_file)
         self.ui.spinRefreshRate.valueChanged.connect(self._on_refresh_rate_changed)
 
@@ -1686,21 +1688,15 @@ class MCAController(QWidget):
             }
             if metadata := getattr(self, "_coincidence_metadata", None):
                 configuration["measurement"]["coincidence"] = metadata
-            hardware = configuration.get("hardware")
-            if isinstance(hardware, dict):
-                channels = hardware.get("channels")
+            application = configuration.get("application")
+            if isinstance(application, dict):
+                channels = application.get("channels")
                 if isinstance(channels, dict):
                     channel_settings = channels.get(str(self._channel))
                     if isinstance(channel_settings, dict):
                         mca_settings = channel_settings.get("mca")
                         if isinstance(mca_settings, dict):
-                            acquisition = mca_settings.get("acquisition")
-                            if isinstance(acquisition, dict):
-                                # IIO reports the driver-owned list buffer gate,
-                                # which is necessarily still false at this safe
-                                # pre-arm snapshot boundary. Record the requested
-                                # measurement mode rather than that transient gate.
-                                acquisition["dma_enabled"] = True
+                            mca_settings["dma_enabled"] = True
         embedded_configuration = configuration_yaml(configuration)
         if filepath is not None and mode is McaDmaOutputMode.BINARY:
             write_configuration(filepath.with_suffix(".yaml"), configuration)

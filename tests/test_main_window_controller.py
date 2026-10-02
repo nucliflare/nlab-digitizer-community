@@ -190,6 +190,7 @@ def test_startup_builds_one_psu_controller_and_dock_per_channel(
             mca=object(),
             mca_dma=None,
             hv=supply,
+            capabilities=SimpleNamespace(mca=False, mca_dma=False),
             mca_available=lambda: False,
         )
         for supply in supplies
@@ -269,6 +270,7 @@ def test_startup_disables_psu_tab_when_backend_is_missing(
             mca=object(),
             mca_dma=None,
             hv=None,
+            capabilities=SimpleNamespace(mca=False, mca_dma=False),
             mca_available=lambda: False,
         )
     ]
@@ -320,7 +322,7 @@ def test_startup_disables_psu_tab_when_backend_is_missing(
     assert "no IDS/HV backend" in tab_psu.setToolTip.call_args.args[0]
 
 
-def test_startup_shares_bounded_event_buffer_with_mca_and_psd(
+def test_startup_builds_mca_features_only_for_capable_channels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _bare_controller()
@@ -332,8 +334,18 @@ def test_startup_shares_bounded_event_buffer_with_mca_and_psd(
             mca=object(),
             mca_dma=dma,
             hv=None,
+            capabilities=SimpleNamespace(mca=True, mca_dma=True),
             mca_available=lambda: True,
-        )
+        ),
+        SimpleNamespace(
+            scope=object(),
+            scope_dma=None,
+            mca=object(),
+            mca_dma=None,
+            hv=None,
+            capabilities=SimpleNamespace(mca=False, mca_dma=False),
+            mca_available=lambda: False,
+        ),
     ]
     controller._scope_controllers = []
     controller._mca_controllers = []
@@ -366,10 +378,10 @@ def test_startup_shares_bounded_event_buffer_with_mca_and_psd(
         )
     )
 
-    scope = object()
+    scopes = [object(), object()]
     psd = object()
     mca = object()
-    scope_factory = Mock(return_value=scope)
+    scope_factory = Mock(side_effect=scopes)
     current_factory = Mock(return_value=object())
     psd_factory = Mock(return_value=psd)
     mca_factory = Mock(return_value=mca)
@@ -382,7 +394,7 @@ def test_startup_shares_bounded_event_buffer_with_mca_and_psd(
 
     controller._build_channel_docks()
 
-    current_accumulator = scope_factory.call_args.kwargs["current_accumulator"]
+    current_accumulator = scope_factory.call_args_list[0].kwargs["current_accumulator"]
     assert isinstance(
         current_accumulator, main_window_module.ScopeCurrentAccumulator
     )
@@ -390,17 +402,22 @@ def test_startup_shares_bounded_event_buffer_with_mca_and_psd(
         controller._devices[0].mca,
         channel=0,
         auto_start=False,
-        scope_controller=scope,
+        scope_controller=scopes[0],
         scope_current_accumulator=current_accumulator,
     )
     assert controller._current_monitor_controllers == [current_factory.return_value]
+    assert controller._current_monitor_controller_by_device == {
+        0: current_factory.return_value
+    }
     psd_buffer = psd_factory.call_args.kwargs["event_buffer"]
     assert isinstance(psd_buffer, main_window_module.McaEventBuffer)
     assert mca_factory.call_args.kwargs["event_buffer"] is psd_buffer
     assert mca_factory.call_args.kwargs["psd_capture"] is psd
     assert controller._psd_controllers == [psd]
     assert controller._psd_controller_by_device == {0: psd}
+    assert controller._mca_controller_by_device == {0: mca}
     main_tabs.setTabEnabled.assert_any_call(1, True)
+    assert "channel(s): 1" in tab_mca.setToolTip.call_args.args[0]
 
 
 def test_startup_builds_one_global_controller_for_all_channels(

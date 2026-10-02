@@ -59,6 +59,14 @@ def test_menu_save_writes_one_document_with_each_channel(
             configuration_settings=lambda: {"refresh_rate_hz": 6},
         ),
     ]
+    controller._mca_controller_by_device = {
+        0: controller._mca_controllers[0],
+        1: controller._mca_controllers[1],
+    }
+    controller._current_monitor_controller_by_device = {
+        0: controller._current_monitor_controllers[0],
+        1: controller._current_monitor_controllers[1],
+    }
     controller._psd_controllers = [
         SimpleNamespace(configuration_settings=lambda: {"ratio_cut": 0.2}),
         SimpleNamespace(configuration_settings=lambda: {"ratio_cut": 0.3}),

@@ -29,7 +29,7 @@ class _Backend:
         self.events.append(("enable", enabled))
         self.enabled = enabled
 
-    def get_dpp_dma_enable(self) -> bool:
+    def mca_dma_active(self) -> bool:
         return self.dma_enabled
 
     def get_measurement_in_progress(self) -> bool:

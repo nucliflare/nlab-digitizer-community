@@ -59,7 +59,7 @@ def test_full_configuration_rejects_incompatible_format_version() -> None:
     try:
         validate_configuration_version({"format_version": 2, "hardware": {}})
     except ValueError as exc:
-        assert "expected 3" in str(exc)
+        assert f"expected {FORMAT_VERSION}" in str(exc)
     else:
         raise AssertionError("incompatible settings format was accepted")
 
@@ -80,6 +80,46 @@ def test_configuration_accepts_current_and_legacy_iio_connection_settings(
 def test_configuration_rejects_removed_grpc_transport() -> None:
     with pytest.raises(ValueError, match="grpc-final"):
         validate_configuration_version({"connection": {"backend": "grpc"}})
+
+
+def test_version_3_dma_choices_migrate_to_application_settings(tmp_path: Path) -> None:
+    path = tmp_path / "version-3.yaml"
+    path.write_text(
+        """\
+format_version: 3
+hardware:
+  channels:
+    '0':
+      scope:
+        trigger_level: 12
+        dma_enabled: true
+      mca:
+        acquisition:
+          energy_bin: 2
+          dma_enabled: false
+application:
+  channels:
+    '0':
+      scope:
+        refresh_rate_hz: 20
+""",
+        encoding="utf-8",
+    )
+
+    loaded = read_configuration(path)
+
+    assert loaded["format_version"] == FORMAT_VERSION
+    assert loaded["hardware"]["channels"]["0"]["scope"] == {"trigger_level": 12}
+    assert loaded["hardware"]["channels"]["0"]["mca"]["acquisition"] == {
+        "energy_bin": 2
+    }
+    assert loaded["application"]["channels"]["0"]["scope"] == {
+        "refresh_rate_hz": 20,
+        "dma_enabled": True,
+    }
+    assert loaded["application"]["channels"]["0"]["mca"] == {
+        "dma_enabled": False
+    }
 
 
 def test_scope_settings_reject_time_not_aligned_to_hardware_step() -> None:
@@ -104,7 +144,6 @@ def test_nanosecond_settings_survive_yaml_save_and_load(tmp_path: Path) -> None:
     source_scope.get_frame_period_cycles.return_value = 1234
     source_scope.get_trigger_mode.return_value = TriggerMode.RISING_EDGE
     source_scope.get_dac_value.return_value = 7
-    source_scope.get_dma_enable.return_value = False
 
     source_mca = Mock()
     source_mca.filters = SimpleNamespace(
@@ -126,7 +165,6 @@ def test_nanosecond_settings_survive_yaml_save_and_load(tmp_path: Path) -> None:
     source_mca.get_energy_bin.return_value = 2
     source_mca.get_pileup_window.return_value = 10
     source_mca.get_time_limit.return_value = 60
-    source_mca.get_dma_enable.return_value = True
     source_mca.get_mem1_sig_select.return_value = 6
     source_mca.get_mem2_sig_select.return_value = 8
     source_mca.filters.crrc2.get_Cdelay.return_value = 128
@@ -258,10 +296,10 @@ def test_apply_channel_hardware_includes_write_only_and_previously_missing_value
     scope.set_frame_samples.assert_called_once_with(1024)
     scope.set_frame_period_cycles.assert_called_once_with(1234)
     scope.set_trigger_mode.assert_called_once_with(TriggerMode(1))
-    scope.set_dma_enable.assert_called_once_with(True)
+    scope.set_dma_enable.assert_not_called()
     mca.reconfigure_while_running.assert_called_once()
     mca.set_ext_trig_enable.assert_called_once_with(True)
-    mca.set_dma_enable.assert_called_once_with(False)
+    mca.set_dma_enable.assert_not_called()
     mca.filters.lp.set_preset.assert_called_once_with(2)
     hv.set_hv_voltage.assert_called_once_with(500.0)
     hv.set_hv_compens_tref.assert_called_once_with(21.5)

@@ -56,7 +56,6 @@ class MCAParam(IntEnum):
     PSD_ZC_HIGH = 74
     # --- internal — no JSON widget id ---
     GLOBAL_ENABLE = 200
-    DMA_ENABLED = 201
     LP_PRESET = 202  # preset selector (0=200 MHz, 1=70 MHz, 2=moving average)
 
 
@@ -525,11 +524,9 @@ class MultiChannelAnalyzer:
         with self._configuration_lock:
             self._b.set_global_enable(val)
 
-    def get_dma_enable(self) -> bool:
-        return self._b.get_dpp_dma_enable()
-
-    def set_dma_enable(self, val: bool) -> None:
-        self._b.set_dpp_dma_enable(val)
+    def dma_active(self) -> bool:
+        """Whether the driver currently owns an armed MCA list buffer."""
+        return self._b.mca_dma_active()
 
     def get_time_limit(self) -> int:
         """Return time limit in seconds. 0 = no limit."""
@@ -588,7 +585,7 @@ class MultiChannelAnalyzer:
             if not was_enabled:
                 write()
                 return False
-            if self._b.get_dpp_dma_enable():
+            if self._b.mca_dma_active():
                 raise RuntimeError(
                     "cannot reconfigure MCA while list-mode DMA is active; "
                     "stop the DMA measurement first"

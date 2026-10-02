@@ -64,8 +64,6 @@ class ScopeParam(IntEnum):
     FRAME_SAMPLES = 3
     EDGE_MODE = 4
     DAC_VALUE = 5
-    # Internal — no JSON widget id (scope ids 6/7 are software DMA config, not this flag)
-    DMA_ENABLED = 100
     FRAME_PERIOD_CYCLES = 101
 
 
@@ -95,7 +93,6 @@ PARAMETER_SPECS: dict[ScopeParam, ParameterSpec] = {
     # ERANGE, so the spec must match the hardware's real range, not just
     # the round-number ceiling an older comment assumed.
     ScopeParam.DAC_VALUE: RangeSpec(min_val=0, max_val=1023, step=1, default=512),
-    ScopeParam.DMA_ENABLED: ListSpec(items=(False, True), default=False),
 }
 
 
@@ -147,11 +144,9 @@ class Scope:
     def set_enable(self, val: bool) -> None:
         self._b.set_enable(val)
 
-    def get_dma_enable(self) -> bool:
-        return self._b.get_dma_enable()
-
-    def set_dma_enable(self, val: bool) -> None:
-        self._b.set_dma_enable(val)
+    def dma_active(self) -> bool:
+        """Whether the driver currently owns an armed Scope DMA buffer."""
+        return self._b.scope_dma_active()
 
     def start(self) -> None:
         self._b.set_enable(True)

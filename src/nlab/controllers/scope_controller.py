@@ -235,9 +235,7 @@ class ScopeController(QWidget):
         if spec.default in spec.items:
             self.ui.comboTriggerMode.setCurrentIndex(list(spec.items).index(spec.default))
 
-        spec = specs[ScopeParam.DMA_ENABLED]
-        assert isinstance(spec, ListSpec)
-        self.ui.cbDmaEnable.setChecked(bool(spec.default))
+        self.ui.cbDmaEnable.setChecked(False)
 
     @staticmethod
     def _apply_range_to_spinbox(spinbox: QSpinBox, spec: RangeSpec) -> None:
@@ -278,7 +276,6 @@ class ScopeController(QWidget):
             int(specs[ScopeParam.FRAME_PERIOD_CYCLES].default)
         )
         self._scope.set_trigger_mode(TriggerMode(specs[ScopeParam.EDGE_MODE].default))
-        self._scope.set_dma_enable(bool(specs[ScopeParam.DMA_ENABLED].default))
 
     def _load_hardware_state(self) -> None:
         self.ui.spinTriggerLevel.setValue(self._scope.get_trigger_level())
@@ -295,7 +292,6 @@ class ScopeController(QWidget):
             self._scope.get_frame_period_cycles() * self._VIEWER_POINT_PERIOD_NS
         )
         self.ui.comboTriggerMode.setCurrentIndex(self._scope.get_trigger_mode().value)
-        self.ui.cbDmaEnable.setChecked(self._scope.get_dma_enable())
 
     # ------------------------------------------------------------------
     # Display settings persistence
@@ -319,13 +315,14 @@ class ScopeController(QWidget):
         s.setValue(self._settings_key("persistence"), self.ui.dialPersistence.value())
         s.setValue(self._settings_key("refresh_rate"), self.ui.spinRefreshRate.value())
 
-    def configuration_settings(self) -> dict[str, int]:
+    def configuration_settings(self) -> dict[str, int | bool]:
         """Return settings owned by this view rather than by scope hardware."""
         return {
             "display_mode": self.ui.comboDisplayMode.currentIndex(),
             "persistence": self.ui.dialPersistence.value(),
             "refresh_rate_hz": self.ui.spinRefreshRate.value(),
             "measurement_time_s": self.ui.spinTime.value(),
+            "dma_enabled": self.ui.cbDmaEnable.isChecked(),
         }
 
     def apply_configuration_settings(self, settings: object) -> None:
@@ -340,6 +337,8 @@ class ScopeController(QWidget):
             self.ui.spinRefreshRate.setValue(int(settings["refresh_rate_hz"]))
         if "measurement_time_s" in settings:
             self.ui.spinTime.setValue(int(settings["measurement_time_s"]))
+        if "dma_enabled" in settings:
+            self.ui.cbDmaEnable.setChecked(bool(settings["dma_enabled"]))
         self.save_display_settings()
 
     def reset_zoom(self) -> None:
@@ -383,6 +382,7 @@ class ScopeController(QWidget):
         self._cancel_pretrigger_line_drag()
         self._send_defaults()
         self._load_hardware_state()
+        self._set_dma_checkbox_without_write(False)
         self._display_nx = self._frame_samples_from_ui() // 4
         self._display_ny = self._display_nx * self._Y_SCALE_FACTOR
         self._persistence_buffer = np.zeros(
@@ -863,7 +863,6 @@ class ScopeController(QWidget):
         self._scope.set_frame_samples(frame_samples)
         self._scope.set_trigger_mode(TriggerMode.TIMED)
         self._scope.set_frame_period_cycles(gap_cycles)
-        self._scope.set_dma_enable(True)
 
         def set_without_signal(
             widget: QWidget,
@@ -940,8 +939,7 @@ class ScopeController(QWidget):
                 self._set_dma_checkbox_without_write(False)
                 self.current_dma_state_changed.emit(False, "Scope DMA stopped.")
 
-    def _on_dma_toggled(self, enabled: bool) -> None:
-        self._scope.set_dma_enable(enabled)
+    def _on_dma_toggled(self, _enabled: bool) -> None:
         self._update_viewer_transport_hint()
 
     def _on_start(self) -> None:

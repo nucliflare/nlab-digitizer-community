@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from .backends.base import DigitizerBackend, IDSBackend
 from .diagnostics import GlobalDiagnosticReading
@@ -10,6 +11,16 @@ from .mca import MultiChannelAnalyzer
 from .scope import Scope
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class DigitizerCapabilities:
+    """Hardware features discovered once while a channel is connected."""
+
+    scope_dma: bool
+    mca: bool
+    mca_dma: bool
+    ids: bool
 
 
 class Digitizer:
@@ -51,6 +62,13 @@ class Digitizer:
         self.hv: HVSupply | None = HVSupply(ids_backend) if ids_backend else None
         self.scope_dma = scope_dma
         self.mca_dma = mca_dma
+        mca_present = getattr(backend, "mca_hardware_present", lambda: True)()
+        self.capabilities = DigitizerCapabilities(
+            scope_dma=scope_dma is not None,
+            mca=bool(mca_present),
+            mca_dma=bool(mca_present and mca_dma is not None),
+            ids=ids_backend is not None,
+        )
 
     def close(self) -> None:
         if self.hv is not None:
@@ -62,14 +80,10 @@ class Digitizer:
     def mca_available(self) -> bool:
         """Whether d.mca's methods are expected to work on this channel.
 
-        IIO pulse-processor/input-filter devices depend on the firmware
-        build. Backends with variable MCA presence opt in via an optional
-        mca_hardware_present() extension method; delegating here instead of
-        checking the backend type by name keeps this generic across future
-        backends with the same variability.
+        Kept as a compatibility convenience for callers written before the
+        explicit :attr:`capabilities` model was introduced.
         """
-        check = getattr(self._backend, "mca_hardware_present", None)
-        return check() if check is not None else True
+        return self.capabilities.mca
 
     def get_global_diagnostics(self) -> list[GlobalDiagnosticReading]:
         """Read sensors shared by the complete digitizer, not one channel."""

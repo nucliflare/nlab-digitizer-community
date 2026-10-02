@@ -105,7 +105,7 @@ def _scope_model_for_controller() -> MagicMock:
     scope.get_frame_period_cycles.return_value = 0
     scope.get_trigger_mode.return_value = TriggerMode.ANY_BELOW
     scope.frame_period_cycles_supported.return_value = True
-    scope.get_dma_enable.return_value = False
+    scope.dma_active.return_value = False
     scope.get_enable.return_value = False
     scope.get_ip_version.return_value = 122
     scope.get_viewer_frame_samples_limit.return_value = 2328
@@ -243,12 +243,24 @@ def test_scope_reset_defaults_restores_hardware_and_widgets(qtbot: QtBot) -> Non
     scope.set_frame_samples.assert_called_once_with(1024)
     scope.set_frame_period_cycles.assert_called_once_with(0)
     scope.set_trigger_mode.assert_called_once_with(TriggerMode.ANY_BELOW)
-    scope.set_dma_enable.assert_called_once_with(False)
     assert controller.ui.spinPretrigger.value() == 64
     assert controller.ui.spinFrameSamples.value() == 2048
     assert controller.ui.spinFrameGap.value() == 0
     assert not controller.ui.cbDmaEnable.isChecked()
     assert controller.ui.lblRecordingStatus.text() == "Scope defaults restored"
+
+
+def test_scope_dma_selection_is_application_configuration(qtbot: QtBot) -> None:
+    scope = _scope_model_for_controller()
+    controller = ScopeController(scope, scope_dma=None, channel=0)
+    qtbot.addWidget(controller)
+
+    controller.ui.cbDmaEnable.setChecked(True)
+    assert controller.configuration_settings()["dma_enabled"] is True
+
+    controller.apply_configuration_settings({"dma_enabled": False})
+    assert not controller.ui.cbDmaEnable.isChecked()
+    scope.dma_active.assert_not_called()
 
 
 def test_online_current_dma_finish_clears_stale_dma_selection(qtbot: QtBot) -> None:
@@ -270,7 +282,6 @@ def test_online_current_dma_finish_clears_stale_dma_selection(qtbot: QtBot) -> N
     assert controller._dma_thread is None
     assert controller._dma_worker is None
     assert not controller.ui.cbDmaEnable.isChecked()
-    scope.set_dma_enable.assert_not_called()
     thread.deleteLater.assert_called_once_with()
 
 
@@ -292,7 +303,6 @@ def test_synchronous_current_dma_stop_clears_stale_dma_selection(
     controller.stop_dma_sync.assert_called_once_with()
     assert not controller._dma_online_current
     assert not controller.ui.cbDmaEnable.isChecked()
-    scope.set_dma_enable.assert_not_called()
 
 
 def test_scope_dma_progress_formats_large_file_without_wrapping(qtbot: QtBot) -> None:
