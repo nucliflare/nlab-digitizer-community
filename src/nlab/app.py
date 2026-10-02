@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
-from PySide6.QtCore import QProcess, QSettings, QStandardPaths, QTimer
+from PySide6.QtCore import QProcess, QSettings, QStandardPaths, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QIcon, QScreen, QShowEvent
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
 from nlab import __version__
 from nlab.controllers.main_window_controller import MainWindowController
 from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
+from nlab.hardware.modbus_devices import ExternalDeviceScan
 from nlab.ui.ui_main_window import Ui_MainWindow
 from nlab.utils.remote_board_power import (
     BoardPowerCommand,
@@ -64,6 +66,8 @@ _GENERAL_CONTROLLER_KEYS = {
 class MainAppWindow(QMainWindow):
     """Top-level application window. Owns the UI and its controller."""
 
+    _modbus_refresh_finished = Signal(object, object)
+
     def __init__(
         self,
         backend: str = "grpc",
@@ -75,6 +79,8 @@ class MainAppWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self._host = host
+        self._closing = False
+        self._modbus_refresh_running = False
         self._screen_change_connected = False
         self._board_power_process: QProcess | None = None
         self._board_power_command: BoardPowerCommand | None = None
@@ -109,6 +115,7 @@ class MainAppWindow(QMainWindow):
         self._apply_view_state()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        self._closing = True
         if auto_configuration_enabled():
             self._save_auto_configuration(show_error=False)
         self._save_developer_settings()
@@ -139,6 +146,8 @@ class MainAppWindow(QMainWindow):
         self.ui.actionValidateTiming.triggered.connect(self._on_validate_timing)
         self.ui.actionConvertToHdf5.triggered.connect(self._on_convert_to_hdf5)
         self.ui.actionReconnectDevice.triggered.connect(self._on_reconnect_device)
+        self.ui.actionRefreshModbus.triggered.connect(self._on_refresh_modbus_devices)
+        self._modbus_refresh_finished.connect(self._on_modbus_refresh_finished)
         self.ui.actionResetDocks.triggered.connect(self._on_reset_docks)
         self.ui.actionResetZoom.triggered.connect(self._on_reset_zoom)
         self.ui.actionShowRoi.toggled.connect(self._on_show_roi_toggled)
@@ -764,6 +773,82 @@ class MainAppWindow(QMainWindow):
         except Exception as e:
             logging.getLogger(__name__).exception("Reconnect failed")
             QMessageBox.critical(self, "Reconnect Failed", str(e))
+
+    def _on_refresh_modbus_devices(self) -> None:
+        """Start a non-blocking scan of both digitizer ser2net bridges."""
+        if self._modbus_refresh_running:
+            return
+        self._modbus_refresh_running = True
+        self.ui.actionRefreshModbus.setEnabled(False)
+        self.ui.actionReconnectDevice.setEnabled(False)
+        try:
+            self._controller.prepare_external_device_refresh()
+        except Exception as exc:
+            self._modbus_refresh_running = False
+            self.ui.actionRefreshModbus.setEnabled(True)
+            self.ui.actionReconnectDevice.setEnabled(True)
+            logging.getLogger(__name__).exception("Failed to prepare Modbus refresh")
+            self.statusBar().showMessage("Modbus refresh failed", 10000)
+            QMessageBox.critical(self, "Modbus Refresh Failed", str(exc))
+            return
+        self.statusBar().showMessage("Scanning for external Modbus devices…")
+        threading.Thread(
+            target=self._scan_modbus_in_background,
+            name="modbus-discovery",
+            daemon=True,
+        ).start()
+
+    def _scan_modbus_in_background(self) -> None:
+        scan: ExternalDeviceScan | None = None
+        error: Exception | None = None
+        try:
+            scan = self._controller.scan_external_devices()
+        except Exception as exc:
+            error = exc
+            logging.getLogger(__name__).exception("Modbus refresh scan failed")
+
+        try:
+            self._modbus_refresh_finished.emit(scan, error)
+        except RuntimeError:
+            # The window may have been destroyed while the bounded scan ran.
+            if scan is not None:
+                scan.manager.close()
+
+    def _on_modbus_refresh_finished(self, scan_object: object, error_object: object) -> None:
+        """Adopt a completed scan on the GUI thread and rebuild External docks."""
+        self._modbus_refresh_running = False
+
+        scan = scan_object if isinstance(scan_object, ExternalDeviceScan) else None
+        error = error_object if isinstance(error_object, Exception) else None
+        if self._closing:
+            if scan is not None:
+                scan.manager.close()
+            return
+
+        self.ui.actionRefreshModbus.setEnabled(True)
+        self.ui.actionReconnectDevice.setEnabled(True)
+        if error is not None or scan is None:
+            if scan is not None:
+                scan.manager.close()
+            message = str(error) if error is not None else "Invalid discovery result"
+            self.statusBar().showMessage("Modbus refresh failed", 10000)
+            QMessageBox.critical(self, "Modbus Refresh Failed", message)
+            return
+
+        try:
+            count = self._controller.apply_external_device_scan(scan)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Failed to install refreshed Modbus devices")
+            self.statusBar().showMessage("Modbus refresh failed", 10000)
+            QMessageBox.critical(self, "Modbus Refresh Failed", str(exc))
+            return
+
+        if count:
+            noun = "device" if count == 1 else "devices"
+            message = f"Found {count} external Modbus {noun}."
+        else:
+            message = "No external Modbus devices found."
+        self.statusBar().showMessage(message, 10000)
 
     def _on_reset_docks(self) -> None:
         self._controller.reset_dock_layout()

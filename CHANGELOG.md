@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A new **Connection → Refresh Modbus Devices** action rescans both ser2net
+  bridges without blocking the GUI, safely replaces external-device polling
+  workers and docks, and preserves display preferences for rediscovered
+  modules.
+
 ## [0.6.2] — 2026-10-01
 
 ### Added

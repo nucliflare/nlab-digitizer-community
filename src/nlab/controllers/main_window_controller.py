@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -22,13 +22,15 @@ from nlab.hardware.digitizer.dma import (
     IIOMcaDmaStreamer,
     McaEventBuffer,
 )
-from nlab.hardware.modbus_devices import ExternalDevices
+from nlab.hardware.modbus_devices import ExternalDevices, ExternalDeviceScan
 from nlab.views.energy_calibration_dialog import EnergyCalibrationDialog
 from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
 from nlab.views.psd_readback_dialog import PsdReadbackDialog
 from nlab.views.waveform_analysis_dialog import WaveformAnalysisDialog
 
 if TYPE_CHECKING:
+    from nlab_modbus.core.base_modbus_device import BaseModbusDevice
+
     from nlab.app import MainAppWindow
 
 log = logging.getLogger(__name__)
@@ -73,6 +75,7 @@ class MainWindowController:
         self._psu_controllers: list[PSUController] = []
         self._psu_controller_by_device: dict[int, PSUController] = {}
         self._external_controllers: list[ExternalDeviceController] = []
+        self._external_refresh_application_settings: dict[str, dict[str, object]] = {}
         self._global_controller: GlobalController | None = None
         self._coincidence_controller: CoincidenceController | None = None
         self._energy_calibration_dialog: EnergyCalibrationDialog | None = None
@@ -357,15 +360,19 @@ class MainWindowController:
             )
             self._window.ui.layoutTabCoincidence.addWidget(self._coincidence_controller)
 
-    def _build_external_docks(self) -> None:
-        """Discover Modbus devices on the digitizer host and dock one tab each.
+    def _build_external_docks(
+        self,
+        devices: Sequence[BaseModbusDevice] | None = None,
+    ) -> None:
+        """Discover or install Modbus devices and dock one tab for each.
 
         The SiPM bias board, Geiger-Mueller probe, and PMT HV supply share the
         digitizer's RS-485 bus via a ser2net TCP bridge — same host as the
         gRPC digitizer connection. A device that doesn't respond (not present,
         or bus not bridged) is simply absent from the discovery results.
         """
-        devices = self._external_devices.discover(self._host)
+        if devices is None:
+            devices = self._external_devices.discover(self._host)
         docks: list[QDockWidget] = []
         for idx, device in enumerate(devices):
             ctrl = ExternalDeviceController(device)
@@ -384,6 +391,79 @@ class MainWindowController:
         self._window.ui.tabExternal.setToolTip(
             "" if docks else "No external Modbus modules were detected on the digitizer host."
         )
+
+    def scan_external_devices(self) -> ExternalDeviceScan:
+        """Perform a full Modbus scan using a fresh connection owner.
+
+        This method touches no Qt widgets and is safe to call on a background
+        thread. The result must later be adopted with
+        :meth:`apply_external_device_scan` or explicitly closed.
+        """
+        return ExternalDevices.scan_new(self._host)
+
+    def prepare_external_device_refresh(self) -> None:
+        """Quiesce and close the current Modbus transport before rescanning.
+
+        The board's ser2net configuration may permit only one useful client at
+        a time. Keeping the polling connection open while a scanner connects
+        can therefore disrupt both. This GUI-thread phase is short: it stops
+        the bounded polling transactions, detaches the old docks, and leaves a
+        valid empty owner in place for shutdown while discovery runs.
+        """
+        if self._external_controllers:
+            self._external_refresh_application_settings = {
+                controller.configuration_id: controller.configuration_settings()
+                for controller in self._external_controllers
+            }
+        self._clear_external_docks()
+        previous_owner = self._external_devices
+        self._external_devices = ExternalDevices()
+        previous_owner.close()
+
+        tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabExternal)
+        self._window.ui.mainTabs.setTabEnabled(tab_index, False)
+        self._window.ui.tabExternal.setToolTip("Refreshing external Modbus devices…")
+        log.info("Modbus refresh: old polling stopped; starting a fresh scan")
+
+    def apply_external_device_scan(self, scan: ExternalDeviceScan) -> int:
+        """Replace the runtime Modbus device set with a completed scan.
+
+        Existing polling workers are stopped before their shared clients are
+        closed. Display preferences are restored by stable device type/address
+        when the same module is rediscovered; hardware setpoints are only
+        read, never rewritten, during refresh.
+        """
+        application_settings = self._external_refresh_application_settings
+        placeholder_owner = self._external_devices
+        self._external_devices = scan.manager
+        placeholder_owner.close()
+
+        self._build_external_docks(scan.devices)
+        for controller in self._external_controllers:
+            settings = application_settings.get(controller.configuration_id)
+            if settings is not None:
+                controller.apply_configuration_settings(settings)
+        self._external_refresh_application_settings = {}
+
+        count = len(scan.devices)
+        log.info("Modbus refresh complete: %d external device(s)", count)
+        return count
+
+    def _clear_external_docks(self) -> None:
+        """Stop external pollers and detach their dock widgets."""
+        for controller in self._external_controllers:
+            controller.request_polling_stop()
+        for controller in self._external_controllers:
+            controller.stop_polling_sync()
+
+        for dock in self._external_dock_host.findChildren(QDockWidget):
+            self._external_dock_host.removeDockWidget(dock)
+            dock.setParent(None)
+            widget = dock.widget()
+            if widget is not None:
+                widget.deleteLater()
+            dock.deleteLater()
+        self._external_controllers.clear()
 
     # ------------------------------------------------------------------
     # Dock state persistence

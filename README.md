@@ -126,7 +126,9 @@ uv run python examples/measure_current.py
 - Per-channel high-voltage output, feedback, and temperature monitoring when the
   IDS IIO devices are present
 - Shared trigger control and board-wide diagnostic readings
-- Optional RS-485 device discovery through the board's ser2net bridge
+- Startup and on-demand RS-485 device discovery through the board's ser2net
+  bridges; **Connection → Refresh Modbus Devices** updates the External
+  workspace without reconnecting the digitizer
 - Support for SiPM bias, Geiger-Mueller, and PMT high-voltage Modbus devices
 - Safe acquisition and power-supply shutdown when the application closes
 
@@ -140,6 +142,8 @@ uv run python examples/measure_current.py
 - Save and restore hardware plus application settings in YAML
 - Convert Scope and MCA binary captures to HDF5 from the File menu
 - Remote board reboot and shutdown controls
+- A dedicated **Connection** menu for full digitizer reconnects and background
+  external Modbus rescans
 - Persistent layout, connection, plotting, and developer settings
 - Central **General Settings** controls for Scope display/refresh, MCA refresh,
   PSU monitoring history, acquisition destinations/formats, and histogram views
