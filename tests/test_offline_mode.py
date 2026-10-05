@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QCheckBox
 from pytestqt.qtbot import QtBot
 
 from nlab.controllers.external_device_controller import ExternalDeviceController
+from nlab.controllers.psu_controller import PSUController
 from nlab.hardware.digitizer.offline import (
     create_offline_digitizer,
     create_offline_external_device,
@@ -51,3 +52,60 @@ def test_recorded_external_module_is_read_only_and_accepts_replay_values(
     assert controller._worker_thread is None
     plotted = controller.ui.telemetryTable.cellWidget(row, 3)
     assert isinstance(plotted, QCheckBox)
+
+
+def test_hv_only_psu_replay_hides_unrecorded_sipm_fields(qtbot: QtBot) -> None:
+    digitizer = create_offline_digitizer(0)
+    assert digitizer.hv is not None
+    controller = PSUController(digitizer.hv)
+    qtbot.addWidget(controller)
+    controller.begin_session_replay()
+
+    controller.display_session_replay_readback(
+        {
+            "timestamp": 1.0,
+            "hv_voltage": 120.0,
+            "hv_compens_output": 1.5,
+            "temp_analog": 25.0,
+            "temp_digital": 26.0,
+            "temp_digital_status": 0,
+            "ads_temp": 27.0,
+            "sipm_voltage": None,
+            "sipm_current": None,
+            "sipm_overload": None,
+            "sipm_compens_output": None,
+        }
+    )
+
+    assert controller.ui.lblHvVoltage.text() == "120.0"
+    assert controller.ui.groupSipm.isHidden()
+    assert controller.ui.groupSipmCompens.isHidden()
+
+
+def test_recorded_external_schema_preserves_units_and_ranges() -> None:
+    schema = {
+        "registers": [
+            {
+                "name": "cpu_temp",
+                "register_type": "input",
+                "address": 10,
+                "dtype": "int16",
+                "min": -400,
+                "max": 1250,
+                "count": 1,
+                "scale": 0.1,
+                "unit": "degC",
+                "password_protected": False,
+                "description": "CPU temperature",
+            }
+        ],
+        "readout_start": 10,
+        "readout_stop": 11,
+    }
+    device = create_offline_external_device("SIPM:3", {}, {}, schema)
+
+    spec = device.REGISTER_MAP["cpu_temp"]
+    assert spec.min == -400
+    assert spec.max == 1250
+    assert spec.scale == 0.1
+    assert spec.unit == "degC"

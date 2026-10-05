@@ -197,6 +197,7 @@ class OfflineExternalDevice:
         configuration_id: str,
         holding_values: Mapping[str, int | float],
         telemetry_values: Mapping[str, object],
+        schema: object = None,
     ) -> None:
         type_name, separator, raw_id = configuration_id.rpartition(":")
         if not separator:
@@ -209,18 +210,72 @@ class OfflineExternalDevice:
         self.device_id = device_id
         self._holding_values = dict(holding_values)
 
-        register_map: dict[str, RegisterSpec] = {}
-        for address, (name, value) in enumerate(sorted(telemetry_values.items())):
-            register_map[name] = _register_spec(RegisterType.INPUT, address, value)
-        self.READOUT_START = 0
-        self.READOUT_STOP = len(register_map)
-        holding_address = max(1_000, self.READOUT_STOP)
-        for offset, (name, value) in enumerate(sorted(self._holding_values.items())):
-            register_map.setdefault(
-                name,
-                _register_spec(RegisterType.HOLDING, holding_address + offset, value),
+        register_map = self._register_map_from_schema(schema)
+        if register_map:
+            schema_map = schema if isinstance(schema, Mapping) else {}
+            input_addresses = [
+                spec.address
+                for spec in register_map.values()
+                if spec.reg_type == RegisterType.INPUT
+            ]
+            default_start = min(input_addresses, default=0)
+            default_stop = max(input_addresses, default=-1) + 1
+            saved_start = schema_map.get("readout_start")
+            saved_stop = schema_map.get("readout_stop")
+            self.READOUT_START = (
+                int(saved_start) if isinstance(saved_start, int) else default_start
             )
+            self.READOUT_STOP = (
+                int(saved_stop) if isinstance(saved_stop, int) else default_stop
+            )
+        else:
+            for address, (name, value) in enumerate(sorted(telemetry_values.items())):
+                register_map[name] = _register_spec(RegisterType.INPUT, address, value)
+            self.READOUT_START = 0
+            self.READOUT_STOP = len(register_map)
+            holding_address = max(1_000, self.READOUT_STOP)
+            for offset, (name, value) in enumerate(sorted(self._holding_values.items())):
+                register_map.setdefault(
+                    name,
+                    _register_spec(RegisterType.HOLDING, holding_address + offset, value),
+                )
         self.REGISTER_MAP = register_map
+
+    @staticmethod
+    def _register_map_from_schema(schema: object) -> dict[str, RegisterSpec]:
+        if not isinstance(schema, Mapping):
+            return {}
+        documents = schema.get("registers")
+        if not isinstance(documents, list):
+            return {}
+        result: dict[str, RegisterSpec] = {}
+        for document in documents:
+            if not isinstance(document, Mapping) or not isinstance(
+                document.get("name"), str
+            ):
+                continue
+            try:
+                result[str(document["name"])] = RegisterSpec(
+                    reg_type=RegisterType(str(document["register_type"])),
+                    address=int(document["address"]),
+                    dtype=str(document["dtype"]),
+                    min=int(document["min"]),
+                    max=int(document["max"]),
+                    count=int(document.get("count", 1)),
+                    scale=float(document.get("scale", 1.0)),
+                    unit=(
+                        str(document["unit"])
+                        if document.get("unit") is not None
+                        else None
+                    ),
+                    password_protected=bool(
+                        document.get("password_protected", False)
+                    ),
+                    description=str(document.get("description", "")),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        return result
 
     def connection_info(self) -> str:
         return "recorded session (offline)"
@@ -239,9 +294,15 @@ def create_offline_external_device(
     configuration_id: str,
     holding_values: Mapping[str, int | float],
     telemetry_values: Mapping[str, object],
+    schema: object = None,
 ) -> BaseModbusDevice:
     """Return a typed facade for :class:`ExternalDeviceController`."""
     return cast(
         BaseModbusDevice,
-        OfflineExternalDevice(configuration_id, holding_values, telemetry_values),
+        OfflineExternalDevice(
+            configuration_id,
+            holding_values,
+            telemetry_values,
+            schema,
+        ),
     )

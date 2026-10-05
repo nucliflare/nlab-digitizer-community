@@ -499,10 +499,23 @@ class PSUController(QWidget):
             sipm_overload=optional_int("sipm_overload"),
             sipm_compens_output=optional_float("sipm_compens_output"),
         )
+        recorded_sipm = all(
+            value is not None
+            for value in (
+                readback.sipm_voltage,
+                readback.sipm_current,
+                readback.sipm_overload,
+                readback.sipm_compens_output,
+            )
+        )
+        self.ui.groupSipm.setVisible(recorded_sipm)
+        self.ui.groupSipmCompens.setVisible(recorded_sipm)
         self._display_readback(readback)
 
     def end_session_replay(self) -> None:
         self._session_replay_active = False
+        self.ui.groupSipm.setVisible(self._sipm_available)
+        self.ui.groupSipmCompens.setVisible(self._sipm_available)
 
     def _update_plot(self) -> None:
         if not self._ts:
@@ -514,7 +527,15 @@ class PSUController(QWidget):
         vb.setXRange(t[-1] - self.ui.spinTimeRange.value(), t[-1], padding=0.02)
 
     def _update_readback_labels(self, rb: PSUReadback) -> None:
-        if self._sipm_available:
+        if self._sipm_available and all(
+            value is not None
+            for value in (
+                rb.sipm_voltage,
+                rb.sipm_current,
+                rb.sipm_overload,
+                rb.sipm_compens_output,
+            )
+        ):
             self.ui.lblSipmVoltage.setText(f"{rb.sipm_voltage:.2f}")
             self.ui.lblSipmCurrent.setText(f"{rb.sipm_current:.4f}")
             self.ui.lblSipmOverload.setText(str(rb.sipm_overload))

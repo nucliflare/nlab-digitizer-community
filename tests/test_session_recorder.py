@@ -100,7 +100,7 @@ def test_replay_indicator_is_persistent_and_warns_that_hardware_is_live(
     assert not window.ui.actionStartSessionRecording.isEnabled()
     assert not window._replay_indicator.isHidden()
     assert "REPLAY" in window._replay_indicator.text()
-    assert "Recorded Scope, MCA, PSU, and external-module updates play once" in (
+    assert "Recorded Scope, Current, MCA, PSU, global, and external-module" in (
         window._replay_indicator.toolTip()
     )
     assert "all hardware-setting controls are locked" in (
@@ -252,6 +252,26 @@ def test_session_records_streams_and_replays_mca_deterministically(tmp_path: Pat
     telemetry = replay.telemetry_events()
     assert [event.source for event in telemetry] == ["psu.ch0", "external.sipm:3"]
     assert telemetry[0].payload["readback"]["hv_voltage"] == 42.5
+    current = list(replay.iter_current_samples())
+    assert len(current) == 1
+    assert current[0].channel == 0
+    assert current[0].sample.sequence == 7
+    assert current[0].sample.raw_code == 12.5
+    assert current[0].sample.hardware_timestamp == 42
+    assert replay.current_summary().counts == {0: 1}
+    assert set(replay.recorded_channels()) == {0, 1}
+    assert [
+        (item.channel, item.sequence, item.source)
+        for item in replay.iter_scope_frames()
+    ] == [(item.channel, item.sequence, item.source) for item in scope_frames]
+    assert [
+        (item.channel, item.sequence) for item in replay.iter_mca_event_batches()
+    ] == [(item.channel, item.sequence) for item in replay_batches]
+    assert [item.sequence for item in replay.iter_mca_readbacks()] == [0]
+    assert [event.source for event in replay.iter_telemetry_events()] == [
+        "psu.ch0",
+        "external.sipm:3",
+    ]
     assert replay.has_explicit_mca_batch_timing()
     coincidence_intervals = replay.coincidence_intervals()
     assert len(coincidence_intervals) == 1

@@ -392,6 +392,33 @@ class ExternalDeviceController(QWidget):
                 values[name] = widget.value()
         return values
 
+    def replay_schema(self) -> dict[str, object]:
+        """Describe visible registers so offline replay preserves units and ranges."""
+
+        def document(name: str, spec: RegisterSpec) -> dict[str, object]:
+            return {
+                "name": name,
+                "register_type": spec.reg_type.value,
+                "address": spec.address,
+                "dtype": spec.dtype,
+                "min": spec.min,
+                "max": spec.max,
+                "count": spec.count,
+                "scale": spec.scale,
+                "unit": spec.unit,
+                "password_protected": spec.password_protected,
+                "description": spec.description,
+            }
+
+        return {
+            "registers": [
+                document(name, spec)
+                for name, spec in (*self._holding_specs(), *self._input_specs())
+            ],
+            "readout_start": getattr(self.device, "READOUT_START", None),
+            "readout_stop": getattr(self.device, "READOUT_STOP", None),
+        }
+
     def apply_hardware_configuration_settings(self, settings: object) -> None:
         if self._replay_hardware_interlocked:
             raise RuntimeError("exit session replay before applying external settings")

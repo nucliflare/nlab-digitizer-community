@@ -40,7 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timestamps. PSU and external module polling is suspended during replay and
   their recorded timestamped telemetry is played once into the normal views,
   holding the final values at EOF and resuming only previously active pollers
-  on exit.
+  on exit. Current-monitor samples, global diagnostics, and temperature-
+  correction readbacks now replay on the same clock as Scope/MCA/telemetry.
+  Numerical streams use bounded lazy HDF5 iterators, HV-only PSU recordings no
+  longer assume SiPM fields, external-module schemas survive offline replay
+  (including configured modules with no samples), and undersized offline
+  workspaces reject a session explicitly instead of omitting channels.
 - A new **Connection → Refresh Modbus Devices** action rescans both ser2net
   bridges without blocking the GUI, safely replaces external-device polling
   workers and docks, and preserves display preferences for rediscovered

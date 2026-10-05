@@ -11,11 +11,14 @@ from nlab.controllers import main_window_controller as main_window_module
 from nlab.controllers.global_controller import GlobalController
 from nlab.controllers.main_window_controller import MainWindowController
 from nlab.session.replay import (
+    CurrentReplaySample,
     McaReplayBatch,
     McaReplayReadback,
+    ReplayStreamSummary,
     ScopeReplayFrame,
     TelemetryReplayEvent,
 )
+from nlab.workers.current_monitor_worker import CurrentSample
 
 
 def test_startup_reports_connection_and_view_progress(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -105,17 +108,23 @@ def test_offline_external_replay_panels_are_derived_from_recorded_schema(
     controller = _bare_controller()
     controller._offline = True
     controller._external_controllers = []
-    panel = SimpleNamespace(
-        configuration_id="GEIGER:7",
-        apply_configuration_settings=Mock(),
-    )
+    panels = [
+        SimpleNamespace(
+            configuration_id="GEIGER:7",
+            apply_configuration_settings=Mock(),
+        ),
+        SimpleNamespace(
+            configuration_id="PMT:9",
+            apply_configuration_settings=Mock(),
+        ),
+    ]
 
     def install(devices: object) -> None:
-        assert list(devices) == ["recorded-device"]  # type: ignore[arg-type]
-        controller._external_controllers = [panel]
+        assert list(devices) == ["recorded-device", "config-only-device"]  # type: ignore[arg-type]
+        controller._external_controllers = panels
 
     controller._build_external_docks = Mock(side_effect=install)  # type: ignore[method-assign]
-    device_factory = Mock(return_value="recorded-device")
+    device_factory = Mock(side_effect=["recorded-device", "config-only-device"])
     monkeypatch.setattr(
         main_window_module,
         "create_offline_external_device",
@@ -125,7 +134,10 @@ def test_offline_external_replay_panels_are_derived_from_recorded_schema(
         configuration_snapshot=Mock(
             return_value={
                 "hardware": {
-                    "external_devices": {"GEIGER:7": {"pwm_enable": 1}},
+                    "external_devices": {
+                        "GEIGER:7": {"pwm_enable": 1},
+                        "PMT:9": {"pwm_enable": 0},
+                    },
                 },
                 "application": {
                     "external_devices": {
@@ -149,14 +161,14 @@ def test_offline_external_replay_panels_are_derived_from_recorded_schema(
 
     controller._install_offline_external_replay_controllers(replay, events)
 
-    device_factory.assert_called_once_with(
-        "GEIGER:7",
-        {"pwm_enable": 1},
-        {"pulses_per_sec": 42},
-    )
-    panel.apply_configuration_settings.assert_called_once_with(
+    assert device_factory.call_args_list == [
+        call("GEIGER:7", {"pwm_enable": 1}, {"pulses_per_sec": 42}),
+        call("PMT:9", {"pwm_enable": 0}, {}),
+    ]
+    panels[0].apply_configuration_settings.assert_called_once_with(
         {"plotted_registers": ["pulses_per_sec"]}
     )
+    panels[1].apply_configuration_settings.assert_called_once_with(None)
 
 
 def test_waveform_file_opens_standalone_workbench(
@@ -297,6 +309,28 @@ def test_replay_state_is_retained_until_explicitly_cleared(
     assert controller.session_replay_path is None
 
 
+def test_offline_replay_rejects_missing_channel_before_clearing_current_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _bare_controller()
+    old_replay = object()
+    controller._session_replay = old_replay
+    controller._session_recorder = None
+    controller._coincidence_controller = None
+    controller._offline = True
+    controller._channels = 1
+    replay = SimpleNamespace(
+        replay_mca_spectra=Mock(return_value=[]),
+        recorded_channels=Mock(return_value=[0, 1]),
+    )
+    monkeypatch.setattr(main_window_module, "SessionReplay", Mock(return_value=replay))
+
+    with pytest.raises(RuntimeError, match="at least 2 channels"):
+        controller.replay_session(Path("two-channel.nlab-session"))
+
+    assert controller._session_replay is old_replay
+
+
 def test_scope_replay_uses_recorded_timing_and_holds_at_eof(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -424,6 +458,105 @@ def test_telemetry_replay_uses_recorded_timing_for_psu_and_external(
         2.0,
         {"cpu_temp": 31.5},
     )
+
+
+def test_current_replay_uses_recorded_timing_and_holds_at_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _bare_controller()
+    controller._session_replay = object()
+    controller._session_current_replay_timer = SimpleNamespace(start=Mock(), stop=Mock())
+    current = SimpleNamespace(
+        channel=0,
+        begin_session_replay=Mock(),
+        display_session_replay_samples=Mock(),
+        finish_session_replay=Mock(),
+    )
+    controller._current_monitor_controllers = [current]
+    samples = [
+        CurrentReplaySample(0, 200, CurrentSample(0, 200, 10.0, 50)),
+        CurrentReplaySample(0, 300, CurrentSample(1, 300, 11.0, 60)),
+    ]
+    replay = SimpleNamespace(
+        manifest={"started_monotonic_ns": 100},
+        current_summary=Mock(return_value=ReplayStreamSummary({0: 2}, 200, 300)),
+        iter_current_samples=Mock(return_value=iter(samples)),
+        current_dropped_samples=Mock(return_value=3),
+        configuration_snapshot=Mock(
+            return_value={
+                "application": {
+                    "channels": {"0": {"current_monitor": {"unit": "nA"}}}
+                }
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        main_window_module,
+        "monotonic_ns",
+        Mock(side_effect=[1_000, 1_000, 1_100, 1_200]),
+    )
+
+    controller._start_session_current_replay(replay)
+
+    current.begin_session_replay.assert_called_once_with(
+        settings={"unit": "nA"},
+        dropped_samples=3,
+    )
+    current.display_session_replay_samples.assert_not_called()
+    controller._advance_session_current_replay()
+    assert current.display_session_replay_samples.call_args.args[0][0].raw_code == 10.0
+    controller._advance_session_current_replay()
+    assert current.display_session_replay_samples.call_count == 2
+    current.finish_session_replay.assert_called_once_with()
+
+
+def test_global_telemetry_is_dispatched_during_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _bare_controller()
+    controller._session_replay = object()
+    controller._session_telemetry_replay_timer = SimpleNamespace(start=Mock(), stop=Mock())
+    controller._psu_controller_by_device = {}
+    controller._external_controllers = []
+    global_controller = SimpleNamespace(
+        begin_session_replay=Mock(),
+        display_session_replay_temperature=Mock(),
+        display_session_replay_diagnostics=Mock(),
+        finish_session_replay=Mock(),
+    )
+    controller._global_controller = global_controller
+    events = [
+        TelemetryReplayEvent(
+            0,
+            100,
+            "global.temperature_correction",
+            {"readback": {"temperature": 68.0}},
+        ),
+        TelemetryReplayEvent(
+            1,
+            200,
+            "global.diagnostics",
+            {"readings": [{"key": "pll", "value": True}]},
+        ),
+    ]
+    replay = SimpleNamespace(manifest={"started_monotonic_ns": 100})
+    monkeypatch.setattr(
+        main_window_module,
+        "monotonic_ns",
+        Mock(side_effect=[1_000, 1_000, 1_100]),
+    )
+
+    controller._start_session_telemetry_replay(replay, events)
+
+    global_controller.begin_session_replay.assert_called_once_with()
+    global_controller.display_session_replay_temperature.assert_called_once_with(
+        {"temperature": 68.0}
+    )
+    controller._advance_session_telemetry_replay()
+    global_controller.display_session_replay_diagnostics.assert_called_once_with(
+        [{"key": "pll", "value": True}]
+    )
+    global_controller.finish_session_replay.assert_called_once_with()
 
 
 def test_analysis_replay_feeds_recorded_events_to_psd_and_coincidence() -> None:

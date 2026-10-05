@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -24,6 +25,7 @@ from nlab.hardware.digitizer.iio_listmode import (
     VDPP_ZC_CALC_SCHEMA,
 )
 from nlab.session.recorder import SESSION_FORMAT, SESSION_FORMAT_VERSION
+from nlab.workers.current_monitor_worker import CurrentSample
 from nlab.workers.mca_worker import MCAReadback
 
 ScopeReplaySource = Literal["viewer", "dma"]
@@ -63,6 +65,24 @@ class TelemetryReplayEvent:
     host_monotonic_ns: int
     source: str
     payload: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class CurrentReplaySample:
+    """One recorded current-monitor sample on the shared replay timeline."""
+
+    channel: int
+    host_monotonic_ns: int
+    sample: CurrentSample
+
+
+@dataclass(frozen=True)
+class ReplayStreamSummary:
+    """Small, payload-free index used to prepare a streamed replay."""
+
+    counts: Mapping[int, int]
+    first_timestamp_ns: int | None
+    last_timestamp_ns: int | None
 
 
 @dataclass(frozen=True)
@@ -205,9 +225,13 @@ class SessionReplay:
             raise ValueError("session configuration must contain a mapping")
         return dict(loaded)
 
-    def telemetry_events(self) -> list[TelemetryReplayEvent]:
-        """Return timestamped PSU/global/external telemetry in recorded order."""
-        events: list[TelemetryReplayEvent] = []
+    def iter_telemetry_events(
+        self,
+        *,
+        sources: Iterable[str] | None = None,
+    ) -> Iterator[TelemetryReplayEvent]:
+        """Yield telemetry in file order without retaining the JSONL timeline."""
+        selected = None if sources is None else set(sources)
         for record in self.timeline():
             if record.get("kind") != "telemetry":
                 continue
@@ -226,16 +250,46 @@ class SessionReplay:
                 or not isinstance(payload, Mapping)
             ):
                 raise ValueError("session contains an invalid telemetry timeline record")
-            events.append(
-                TelemetryReplayEvent(
-                    sequence=sequence,
-                    host_monotonic_ns=timestamp,
-                    source=source,
-                    payload=dict(payload),
-                )
+            if selected is not None and source not in selected:
+                continue
+            yield TelemetryReplayEvent(
+                sequence=sequence,
+                host_monotonic_ns=timestamp,
+                source=source,
+                payload=dict(payload),
             )
+
+    def telemetry_events(self) -> list[TelemetryReplayEvent]:
+        """Return timestamped telemetry (compatibility materialization API)."""
+        events = list(self.iter_telemetry_events())
         events.sort(key=lambda event: (event.host_monotonic_ns, event.sequence))
         return events
+
+    def latest_telemetry_events(self) -> dict[str, TelemetryReplayEvent]:
+        """Return only the most recent event per source, bounded by source count."""
+        latest: dict[str, TelemetryReplayEvent] = {}
+        for event in self.iter_telemetry_events():
+            previous = latest.get(event.source)
+            if previous is None or (
+                event.host_monotonic_ns,
+                event.sequence,
+            ) >= (previous.host_monotonic_ns, previous.sequence):
+                latest[event.source] = event
+        return latest
+
+    def replay_origin_ns(self) -> int:
+        """Return the single host-clock origin used by every replay stream."""
+        value = self.manifest.get("started_monotonic_ns")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+        candidates: list[int] = []
+        for summary in (self.scope_summary(), self.current_summary()):
+            if summary.first_timestamp_ns is not None:
+                candidates.append(summary.first_timestamp_ns)
+        for event in self.iter_telemetry_events():
+            candidates.append(event.host_monotonic_ns)
+            break
+        return min(candidates, default=0)
 
     def coincidence_intervals(self) -> list[tuple[int, int | None]]:
         """Return host-time intervals explicitly marked as coincidence runs."""
@@ -391,27 +445,32 @@ class SessionReplay:
 
     @staticmethod
     def _committed_rows(dataset: h5py.Dataset) -> np.ndarray:
-        committed = int(dataset.attrs.get("committed_records", len(dataset)))
-        if committed < 0 or committed > len(dataset):
-            raise ValueError(f"invalid committed-record count for {dataset.name}")
+        committed = SessionReplay._committed_count(dataset)
         return np.asarray(dataset[:committed])
 
     @staticmethod
-    def _scope_frames_from_group(
+    def _committed_count(dataset: h5py.Dataset) -> int:
+        committed = int(dataset.attrs.get("committed_records", len(dataset)))
+        if committed < 0 or committed > len(dataset):
+            raise ValueError(f"invalid committed-record count for {dataset.name}")
+        return committed
+
+    @staticmethod
+    def _iter_scope_frames_from_group(
         group: h5py.Group,
         *,
         channel: int,
         source: ScopeReplaySource,
-    ) -> list[ScopeReplayFrame]:
+    ) -> Iterator[ScopeReplayFrame]:
         rows = group.get("frames")
         sample_values = group.get("samples")
         if not isinstance(rows, h5py.Dataset) or not isinstance(
             sample_values,
             h5py.Dataset,
         ):
-            return []
-        result: list[ScopeReplayFrame] = []
-        for row in SessionReplay._committed_rows(rows):
+            return
+        for index in range(SessionReplay._committed_count(rows)):
+            row = rows[index]
             offset = int(row["sample_offset"])
             count = int(row["sample_count"])
             end = offset + count
@@ -419,17 +478,102 @@ class SessionReplay:
                 raise ValueError(
                     f"Scope ch{channel} {source} frame references invalid samples"
                 )
-            result.append(
-                ScopeReplayFrame(
-                    channel=channel,
-                    sequence=int(row["sequence"]),
-                    host_monotonic_ns=int(row["host_monotonic_ns"]),
-                    samples=np.asarray(sample_values[offset:end], dtype="<i2"),
-                    sample_period_ns=int(row["sample_period_ns"]),
-                    source=source,
-                )
+            yield ScopeReplayFrame(
+                channel=channel,
+                sequence=int(row["sequence"]),
+                host_monotonic_ns=int(row["host_monotonic_ns"]),
+                samples=np.asarray(sample_values[offset:end], dtype="<i2"),
+                sample_period_ns=int(row["sample_period_ns"]),
+                source=source,
             )
-        return result
+
+    @staticmethod
+    def _scope_group_for_channel(
+        channel_group: h5py.Group,
+    ) -> tuple[h5py.Group, ScopeReplaySource] | None:
+        candidates: tuple[tuple[str, ScopeReplaySource], ...] = (
+            ("viewer", "viewer"),
+            ("dma", "dma"),
+        )
+        for name, source in candidates:
+            group = channel_group.get(name)
+            if not isinstance(group, h5py.Group):
+                continue
+            rows = group.get("frames")
+            if isinstance(rows, h5py.Dataset) and SessionReplay._committed_count(rows):
+                return group, source
+        return None
+
+    def scope_summary(self) -> ReplayStreamSummary:
+        """Return frame counts and bounds without reading waveform payloads."""
+        counts: dict[int, int] = {}
+        first: int | None = None
+        last: int | None = None
+        with h5py.File(self.streams_path, "r") as h5:
+            root = h5.get("scope")
+            if not isinstance(root, h5py.Group):
+                return ReplayStreamSummary(counts, None, None)
+            for name, channel_group in root.items():
+                if not name.startswith("ch") or not isinstance(channel_group, h5py.Group):
+                    continue
+                try:
+                    channel = int(name[2:])
+                except ValueError:
+                    continue
+                selected = self._scope_group_for_channel(channel_group)
+                if selected is None:
+                    continue
+                group, _source = selected
+                rows = group["frames"]
+                assert isinstance(rows, h5py.Dataset)
+                count = self._committed_count(rows)
+                counts[channel] = count
+                channel_first = int(rows[0]["host_monotonic_ns"])
+                channel_last = int(rows[count - 1]["host_monotonic_ns"])
+                first = channel_first if first is None else min(first, channel_first)
+                last = channel_last if last is None else max(last, channel_last)
+        return ReplayStreamSummary(counts, first, last)
+
+    def iter_scope_frames(
+        self,
+        *,
+        channels: Iterable[int] | None = None,
+    ) -> Iterator[ScopeReplayFrame]:
+        """Yield display-ready Scope frames while keeping HDF5 reads bounded."""
+        selected_channels = None if channels is None else {int(item) for item in channels}
+        with h5py.File(self.streams_path, "r") as h5:
+            root = h5.get("scope")
+            if not isinstance(root, h5py.Group):
+                return
+            iterators: list[Iterator[ScopeReplayFrame]] = []
+            for name, channel_group in root.items():
+                if not name.startswith("ch") or not isinstance(channel_group, h5py.Group):
+                    continue
+                try:
+                    channel = int(name[2:])
+                except ValueError:
+                    continue
+                if selected_channels is not None and channel not in selected_channels:
+                    continue
+                selected = self._scope_group_for_channel(channel_group)
+                if selected is None:
+                    continue
+                group, source = selected
+                iterators.append(
+                    self._iter_scope_frames_from_group(
+                        group,
+                        channel=channel,
+                        source=source,
+                    )
+                )
+            yield from heapq.merge(
+                *iterators,
+                key=lambda frame: (
+                    frame.host_monotonic_ns,
+                    frame.channel,
+                    frame.sequence,
+                ),
+            )
 
     def scope_frames(self) -> list[ScopeReplayFrame]:
         """Return display-ready frames ordered on one deterministic timeline.
@@ -438,45 +582,7 @@ class SessionReplay:
         and is therefore preferred. Full DMA waveforms are used only for a
         channel that has no recorded viewer frames.
         """
-        frames: list[ScopeReplayFrame] = []
-        with h5py.File(self.streams_path, "r") as h5:
-            root = h5.get("scope")
-            if not isinstance(root, h5py.Group):
-                return []
-            for name, channel_group in root.items():
-                if not name.startswith("ch") or not isinstance(channel_group, h5py.Group):
-                    continue
-                try:
-                    channel = int(name[2:])
-                except ValueError:
-                    continue
-                viewer = channel_group.get("viewer")
-                channel_frames = (
-                    self._scope_frames_from_group(
-                        viewer,
-                        channel=channel,
-                        source="viewer",
-                    )
-                    if isinstance(viewer, h5py.Group)
-                    else []
-                )
-                if not channel_frames:
-                    dma = channel_group.get("dma")
-                    if isinstance(dma, h5py.Group):
-                        channel_frames = self._scope_frames_from_group(
-                            dma,
-                            channel=channel,
-                            source="dma",
-                        )
-                frames.extend(channel_frames)
-        frames.sort(
-            key=lambda frame: (
-                frame.host_monotonic_ns,
-                frame.channel,
-                frame.sequence,
-            )
-        )
-        return frames
+        return list(self.iter_scope_frames())
 
     def mca_readback_channels(self) -> list[int]:
         with h5py.File(self.streams_path, "r") as h5:
@@ -491,6 +597,104 @@ class SessionReplay:
                 and "readback/checkpoints" in group
             )
 
+    def current_channels(self) -> list[int]:
+        with h5py.File(self.streams_path, "r") as h5:
+            root = h5.get("current")
+            if not isinstance(root, h5py.Group):
+                return []
+            channels: list[int] = []
+            for name, group in root.items():
+                if not name.startswith("ch") or not isinstance(group, h5py.Group):
+                    continue
+                samples = group.get("samples")
+                if isinstance(samples, h5py.Dataset):
+                    channels.append(int(name[2:]))
+            return sorted(channels)
+
+    def current_summary(self) -> ReplayStreamSummary:
+        """Return current sample counts and bounds without loading sample rows."""
+        counts: dict[int, int] = {}
+        first: int | None = None
+        last: int | None = None
+        with h5py.File(self.streams_path, "r") as h5:
+            for channel in self.current_channels():
+                samples = h5[f"current/ch{channel}/samples"]
+                assert isinstance(samples, h5py.Dataset)
+                count = self._committed_count(samples)
+                if not count:
+                    continue
+                counts[channel] = count
+                channel_first = int(samples[0]["timestamp_ns"])
+                channel_last = int(samples[count - 1]["timestamp_ns"])
+                first = channel_first if first is None else min(first, channel_first)
+                last = channel_last if last is None else max(last, channel_last)
+        return ReplayStreamSummary(counts, first, last)
+
+    @staticmethod
+    def _current_sample_from_row(row: np.void) -> CurrentSample:
+        hardware_timestamp = (
+            int(row["hardware_timestamp"])
+            if int(row["hardware_timestamp_valid"])
+            else None
+        )
+        return CurrentSample(
+            sequence=int(row["sequence"]),
+            timestamp_ns=int(row["timestamp_ns"]),
+            raw_code=float(row["raw_code"]),
+            read_latency_ns=int(row["read_latency_ns"]),
+            coverage_ns=int(row["coverage_ns"]),
+            hardware_timestamp=hardware_timestamp,
+            sample_count=int(row["sample_count"]),
+        )
+
+    def _iter_current_for_channel(
+        self,
+        h5: h5py.File,
+        channel: int,
+    ) -> Iterator[CurrentReplaySample]:
+        samples = h5[f"current/ch{channel}/samples"]
+        assert isinstance(samples, h5py.Dataset)
+        for index in range(self._committed_count(samples)):
+            sample = self._current_sample_from_row(samples[index])
+            yield CurrentReplaySample(channel, sample.timestamp_ns, sample)
+
+    def iter_current_samples(
+        self,
+        *,
+        channels: Iterable[int] | None = None,
+    ) -> Iterator[CurrentReplaySample]:
+        """Yield current samples in deterministic cross-channel order."""
+        selected = None if channels is None else {int(item) for item in channels}
+        with h5py.File(self.streams_path, "r") as h5:
+            iterators = [
+                self._iter_current_for_channel(h5, channel)
+                for channel in self.current_channels()
+                if selected is None or channel in selected
+            ]
+            yield from heapq.merge(
+                *iterators,
+                key=lambda item: (
+                    item.host_monotonic_ns,
+                    item.channel,
+                    item.sample.sequence,
+                ),
+            )
+
+    def current_dropped_samples(self, channel: int) -> int:
+        with h5py.File(self.streams_path, "r") as h5:
+            group = h5.get(f"current/ch{int(channel)}")
+            if not isinstance(group, h5py.Group):
+                return 0
+            return max(0, int(group.attrs.get("dropped_samples", 0)))
+
+    def recorded_channels(self) -> list[int]:
+        """Return every channel index represented by a replayable stream."""
+        channels = set(self.scope_summary().counts)
+        channels.update(self.mca_event_channels())
+        channels.update(self.mca_readback_channels())
+        channels.update(self.current_channels())
+        return sorted(channels)
+
     def mca_events(self, channel: int) -> np.ndarray:
         with h5py.File(self.streams_path, "r") as h5:
             path = f"mca/ch{int(channel)}/list_mode/events"
@@ -500,14 +704,70 @@ class SessionReplay:
         events.setflags(write=False)
         return events
 
-    def mca_event_batches(self) -> list[McaReplayBatch]:
-        """Return recorded list-mode batches on their captured host timeline.
+    def _iter_mca_event_batches_for_channel(
+        self,
+        h5: h5py.File,
+        channel: int,
+        *,
+        origin: int,
+    ) -> Iterator[McaReplayBatch]:
+        base = f"mca/ch{channel}/list_mode"
+        event_dataset = h5[f"{base}/events"]
+        assert isinstance(event_dataset, h5py.Dataset)
+        committed_events = self._committed_count(event_dataset)
+        batches = h5.get(f"{base}/batches")
+        if isinstance(batches, h5py.Dataset):
+            for index in range(self._committed_count(batches)):
+                row = batches[index]
+                offset = int(row["event_offset"])
+                count = int(row["event_count"])
+                end = offset + count
+                if offset < 0 or count < 0 or end > committed_events:
+                    raise ValueError(f"MCA ch{channel} batch references invalid events")
+                yield McaReplayBatch(
+                    channel=channel,
+                    sequence=int(row["sequence"]),
+                    host_monotonic_ns=int(row["host_monotonic_ns"]),
+                    events=np.asarray(event_dataset[offset:end]),
+                )
+            return
+
+        first_tick: int | None = None
+        sequence = 0
+        for offset in range(0, committed_events, IIO_LM_FRAME_RECORDS):
+            batch = np.asarray(
+                event_dataset[offset : offset + IIO_LM_FRAME_RECORDS],
+                dtype=IIO_LM_EVENT_DTYPE,
+            )
+            valid_ticks = batch["timestamp"][batch["timestamp"] != 0]
+            tick = int(valid_ticks[0]) if len(valid_ticks) else first_tick
+            if first_tick is None and tick is not None:
+                first_tick = tick
+            elapsed_ns = (
+                0
+                if tick is None or first_tick is None
+                else max(0, tick - first_tick) * COARSE_TICK_NS
+            )
+            yield McaReplayBatch(
+                channel=channel,
+                sequence=sequence,
+                host_monotonic_ns=origin + elapsed_ns,
+                events=batch,
+            )
+            sequence += 1
+
+    def iter_mca_event_batches(
+        self,
+        *,
+        channels: Iterable[int] | None = None,
+    ) -> Iterator[McaReplayBatch]:
+        """Yield recorded list-mode batches with bounded HDF5 payload reads.
 
         New bundles carry an explicit batch index. For older bundles, complete
         1024-record DMA frames are timed from their first hardware timestamp so
         they can still be played progressively rather than collapsed to EOF.
         """
-        result: list[McaReplayBatch] = []
+        selected = None if channels is None else {int(item) for item in channels}
         origin_value = self.manifest.get("started_monotonic_ns")
         origin = (
             int(origin_value)
@@ -517,146 +777,129 @@ class SessionReplay:
             else 0
         )
         with h5py.File(self.streams_path, "r") as h5:
-            for channel in self.mca_event_channels():
-                base = f"mca/ch{channel}/list_mode"
-                event_dataset = h5[f"{base}/events"]
-                assert isinstance(event_dataset, h5py.Dataset)
-                committed_events = int(
-                    event_dataset.attrs.get("committed_records", len(event_dataset))
-                )
-                batches = h5.get(f"{base}/batches")
-                if isinstance(batches, h5py.Dataset):
-                    for row in self._committed_rows(batches):
-                        offset = int(row["event_offset"])
-                        count = int(row["event_count"])
-                        end = offset + count
-                        if offset < 0 or count < 0 or end > committed_events:
-                            raise ValueError(
-                                f"MCA ch{channel} batch references invalid events"
-                            )
-                        result.append(
-                            McaReplayBatch(
-                                channel=channel,
-                                sequence=int(row["sequence"]),
-                                host_monotonic_ns=int(row["host_monotonic_ns"]),
-                                events=np.asarray(event_dataset[offset:end]),
-                            )
-                        )
-                    continue
-
-                events = np.asarray(
-                    event_dataset[:committed_events],
-                    dtype=IIO_LM_EVENT_DTYPE,
-                )
-                first_tick: int | None = None
-                sequence = 0
-                for offset in range(0, len(events), IIO_LM_FRAME_RECORDS):
-                    batch = events[offset : offset + IIO_LM_FRAME_RECORDS]
-                    valid_ticks = batch["timestamp"][batch["timestamp"] != 0]
-                    tick = int(valid_ticks[0]) if len(valid_ticks) else first_tick
-                    if first_tick is None and tick is not None:
-                        first_tick = tick
-                    elapsed_ns = (
-                        0
-                        if tick is None or first_tick is None
-                        else max(0, tick - first_tick) * COARSE_TICK_NS
-                    )
-                    result.append(
-                        McaReplayBatch(
-                            channel=channel,
-                            sequence=sequence,
-                            host_monotonic_ns=origin + elapsed_ns,
-                            events=batch,
-                        )
-                    )
-                    sequence += 1
-        result.sort(
-            key=lambda batch: (
-                batch.host_monotonic_ns,
-                batch.channel,
-                batch.sequence,
+            available = self.mca_event_channels()
+            iterators = [
+                self._iter_mca_event_batches_for_channel(h5, channel, origin=origin)
+                for channel in available
+                if selected is None or channel in selected
+            ]
+            yield from heapq.merge(
+                *iterators,
+                key=lambda batch: (
+                    batch.host_monotonic_ns,
+                    batch.channel,
+                    batch.sequence,
+                ),
             )
-        )
-        return result
+
+    def mca_event_batches(self) -> list[McaReplayBatch]:
+        """Return list-mode batches (compatibility materialization API)."""
+        return list(self.iter_mca_event_batches())
+
+    def _iter_mca_readbacks_for_channel(
+        self,
+        h5: h5py.File,
+        channel: int,
+    ) -> Iterator[McaReplayReadback]:
+        base = f"mca/ch{channel}/readback"
+        checkpoints = h5[f"{base}/checkpoints"]
+        assert isinstance(checkpoints, h5py.Dataset)
+        for index in range(self._committed_count(checkpoints)):
+            row = checkpoints[index]
+            arrays: dict[str, np.ndarray] = {}
+            for name, dtype in (
+                ("histogram", "<u4"),
+                ("debug1", "<i2"),
+                ("debug2", "<i2"),
+            ):
+                offset = int(row[f"{name}_offset"])
+                count = int(row[f"{name}_count"])
+                dataset = h5[f"{base}/{name}_values"]
+                assert isinstance(dataset, h5py.Dataset)
+                end = offset + count
+                if offset < 0 or count < 0 or end > len(dataset):
+                    raise ValueError(
+                        f"MCA ch{channel} readback references invalid {name} values"
+                    )
+                values = np.asarray(dataset[offset:end], dtype=dtype)
+                values.setflags(write=False)
+                arrays[name] = values
+            events_lost = int(row["events_lost"])
+            yield McaReplayReadback(
+                channel=channel,
+                sequence=int(row["sequence"]),
+                host_monotonic_ns=int(row["host_monotonic_ns"]),
+                readback=MCAReadback(
+                    histogram=arrays["histogram"],
+                    debug1=arrays["debug1"],
+                    debug2=arrays["debug2"],
+                    count_rate=int(row["count_rate"]),
+                    pulse_deadtime_ms=float(row["pulse_deadtime_ms"]),
+                    events_lost=None if events_lost < 0 else events_lost,
+                    elapsed_time=int(row["elapsed_time"]),
+                    pulse_overrange=int(row["pulse_overrange"]),
+                    pulse_pileup=int(row["pulse_pileup"]),
+                    energy_overrange=int(row["energy_overrange"]),
+                    energy_estimation_error=int(row["energy_estimation_error"]),
+                    throughput_error=int(row["throughput_error"]),
+                ),
+            )
+
+    def iter_mca_readbacks(
+        self,
+        *,
+        channels: Iterable[int] | None = None,
+    ) -> Iterator[McaReplayReadback]:
+        """Yield MCA polls while retaining only the current readback arrays."""
+        selected = None if channels is None else {int(item) for item in channels}
+        with h5py.File(self.streams_path, "r") as h5:
+            iterators = [
+                self._iter_mca_readbacks_for_channel(h5, channel)
+                for channel in self.mca_readback_channels()
+                if selected is None or channel in selected
+            ]
+            yield from heapq.merge(
+                *iterators,
+                key=lambda readback: (
+                    readback.host_monotonic_ns,
+                    readback.channel,
+                    readback.sequence,
+                ),
+            )
 
     def mca_readbacks(self) -> list[McaReplayReadback]:
-        """Return every captured MCA poll for progressive histogram replay."""
-        result: list[McaReplayReadback] = []
-        with h5py.File(self.streams_path, "r") as h5:
-            for channel in self.mca_readback_channels():
-                base = f"mca/ch{channel}/readback"
-                checkpoints = h5[f"{base}/checkpoints"]
-                assert isinstance(checkpoints, h5py.Dataset)
-                for row in self._committed_rows(checkpoints):
-                    arrays: dict[str, np.ndarray] = {}
-                    for name, dtype in (
-                        ("histogram", "<u4"),
-                        ("debug1", "<i2"),
-                        ("debug2", "<i2"),
-                    ):
-                        offset = int(row[f"{name}_offset"])
-                        count = int(row[f"{name}_count"])
-                        dataset = h5[f"{base}/{name}_values"]
-                        assert isinstance(dataset, h5py.Dataset)
-                        end = offset + count
-                        if offset < 0 or count < 0 or end > len(dataset):
-                            raise ValueError(
-                                f"MCA ch{channel} readback references invalid {name} values"
-                            )
-                        values = np.asarray(dataset[offset:end], dtype=dtype)
-                        values.setflags(write=False)
-                        arrays[name] = values
-                    events_lost = int(row["events_lost"])
-                    result.append(
-                        McaReplayReadback(
-                            channel=channel,
-                            sequence=int(row["sequence"]),
-                            host_monotonic_ns=int(row["host_monotonic_ns"]),
-                            readback=MCAReadback(
-                                histogram=arrays["histogram"],
-                                debug1=arrays["debug1"],
-                                debug2=arrays["debug2"],
-                                count_rate=int(row["count_rate"]),
-                                pulse_deadtime_ms=float(row["pulse_deadtime_ms"]),
-                                events_lost=None if events_lost < 0 else events_lost,
-                                elapsed_time=int(row["elapsed_time"]),
-                                pulse_overrange=int(row["pulse_overrange"]),
-                                pulse_pileup=int(row["pulse_pileup"]),
-                                energy_overrange=int(row["energy_overrange"]),
-                                energy_estimation_error=int(
-                                    row["energy_estimation_error"]
-                                ),
-                                throughput_error=int(row["throughput_error"]),
-                            ),
-                        )
-                    )
-        result.sort(
-            key=lambda readback: (
-                readback.host_monotonic_ns,
-                readback.channel,
-                readback.sequence,
-            )
-        )
-        return result
+        """Return MCA polls (compatibility materialization API)."""
+        return list(self.iter_mca_readbacks())
 
     def mca_event_spectrum(self, channel: int, *, bins: int = 16384) -> np.ndarray:
         """Rebuild a spectrum with the capture-derived list-mode mapping."""
         if bins <= 0:
             raise ValueError("bins must be positive")
-        events = self.mca_events(channel)
-        if len(events) == 0:
-            empty = np.zeros(bins, dtype=np.uint64)
-            empty.setflags(write=False)
-            return empty
-        # DMA frames can contain zero padding.  Preserve a timestamp-zero event
-        # when any other field is populated; discard only records that are zero
-        # in every byte.
-        populated = np.any(events.view(np.uint8).reshape(len(events), -1) != 0, axis=1)
-        channels = np.right_shift(events["trapezoid_energy"][populated], 2)
-        counts = np.bincount(channels, minlength=bins)
-        if len(counts) > bins:
-            raise ValueError("recorded event maps outside the requested spectrum")
-        result = np.asarray(counts[:bins], dtype=np.uint64)
+        result = np.zeros(bins, dtype=np.uint64)
+        with h5py.File(self.streams_path, "r") as h5:
+            path = f"mca/ch{int(channel)}/list_mode/events"
+            if path not in h5:
+                raise KeyError(f"session has no MCA list-mode events for channel {channel}")
+            dataset = h5[path]
+            assert isinstance(dataset, h5py.Dataset)
+            committed = self._committed_count(dataset)
+            chunk_size = max(1, int(dataset.chunks[0]) if dataset.chunks else 65_536)
+            for offset in range(0, committed, chunk_size):
+                events = np.asarray(
+                    dataset[offset : min(committed, offset + chunk_size)],
+                    dtype=IIO_LM_EVENT_DTYPE,
+                )
+                # DMA frames can contain zero padding. Preserve a timestamp-zero
+                # event when any other field is populated.
+                populated = np.any(
+                    events.view(np.uint8).reshape(len(events), -1) != 0,
+                    axis=1,
+                )
+                mapped = np.right_shift(events["trapezoid_energy"][populated], 2)
+                counts = np.bincount(mapped, minlength=bins)
+                if len(counts) > bins:
+                    raise ValueError("recorded event maps outside the requested spectrum")
+                result += np.asarray(counts[:bins], dtype=np.uint64)
         result.setflags(write=False)
         return result
 

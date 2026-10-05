@@ -139,8 +139,8 @@ uv run python examples/measure_current.py
   external Modbus rescans
 - An explicit **Offline / Replay Mode** in the startup dialog that opens the
   analysis workspace without IIO or Modbus hardware, keeps all hardware
-  controls locked, and supports recorded Scope, MCA, PSD, coincidence, PSU,
-  and external-module playback
+  controls locked, and supports recorded Scope, Current, MCA, PSD, coincidence,
+  PSU, global-diagnostics, temperature-correction, and external-module playback
 - Persistent layout, connection, plotting, and developer settings
 - Central **General Settings** controls for Scope display/refresh, MCA refresh,
   PSU monitoring history, acquisition destinations/formats, and histogram views
@@ -198,16 +198,26 @@ store explicit list-mode batch timing; older bundles fall back to complete DMA
 frame boundaries and hardware timestamps. Replay never rearms MCA DMA or the
 shared trigger.
 
-Recorded Scope frames and timestamped PSU/external-module telemetry play once at
-their captured host timing. The exact Scope viewer stream is preferred, with
-complete DMA frames used when no viewer frames exist for a channel. Loading
-replay stops Scope, MCA, and Current acquisition, stops live PSU and external
-polling, and suspends the automatic temperature-correction writer. Late Scope
-updates are coalesced to the newest due frame; every due telemetry update is
-delivered in order. At EOF the last recorded waveform and telemetry values
-remain displayed. Playback never loops or silently falls back to live data, and
-exiting replay leaves acquisition stopped while restarting PSU/external polling
-and temperature correction only when they were active before replay.
+Recorded Scope frames, IIR Current samples, and timestamped PSU/global/external-
+module telemetry play once at their captured host timing from one shared replay
+clock. The exact Scope viewer stream is preferred, with complete DMA frames used
+when no viewer frames exist for a channel. Loading replay stops Scope, MCA, and
+Current acquisition, stops live PSU, global-diagnostic, and external polling,
+and suspends the automatic temperature-correction writer. Late Scope updates
+are coalesced to the newest due frame; every due telemetry update is delivered
+in order. At EOF the last recorded waveform and telemetry values remain
+displayed. Playback never loops or silently falls back to live data, and exiting
+replay leaves acquisition stopped while restarting background monitoring only
+when it was active before replay.
+
+Large numerical streams are consumed lazily from HDF5, so replay retains only
+the current Scope frame, MCA batch/readback, or Current sample window instead of
+materializing the complete capture in memory. External-module register schemas
+(units, scaling, ranges, and register types) are saved with new sessions, and a
+configured module still appears in offline replay even if it produced no
+telemetry. Older bundles remain supported through value-based schema inference.
+If an offline workspace has fewer channels than the bundle, loading stops with
+an explicit channel-count message instead of silently omitting recorded views.
 
 This is deterministic *analysis replay*: recorded commands are not sent back to
 the digitizer, and it cannot reproduce analogue noise, environmental conditions,
@@ -215,9 +225,9 @@ or unobserved device state. A persistent status-bar badge and a `[REPLAY]`
 window-title suffix identify the mode across the application. Every widget and
 menu action capable of changing hardware is disabled while replay is loaded,
 including Scope, MCA, Current, PSU, shared-trigger, coincidence, external-device,
-settings-load, reconnect, and board-power controls. PSU and external views show
-recorded telemetry rather than live polling; unrelated global diagnostics may
-remain live. Use **File -> Exit Replay Mode** to unload all reconstructed
+settings-load, reconnect, and board-power controls. PSU, Global, and External
+views show recorded telemetry rather than live polling. Use **File -> Exit
+Replay Mode** to unload all reconstructed
 analysis and playback. For ML use, fill in `annotations.yaml` and use
 `split_group` to keep measurements from the same physical source/setup together
 during train/validation/test splitting.

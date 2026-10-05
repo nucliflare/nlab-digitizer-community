@@ -83,6 +83,7 @@ class CurrentMonitorController(QWidget):
         self._last_dma_plot_update_ns = 0
         self._calibration_dirty = True
         self._replay_hardware_interlocked = False
+        self._session_replay_active = False
 
         self.ui = Ui_CurrentMonitorView()
         self.ui.setupUi(self)  # type: ignore[no-untyped-call]
@@ -286,6 +287,59 @@ class CurrentMonitorController(QWidget):
         if enabled and self._is_running():
             self.stop_monitor_sync()
         self._set_running_controls(self._is_running())
+
+    def begin_session_replay(
+        self,
+        *,
+        settings: object = None,
+        dropped_samples: int = 0,
+    ) -> None:
+        """Prepare the current view for transport-free recorded IIR samples."""
+        self._display_timer.stop()
+        self._session_replay_active = True
+        self._reset_measurement_state()
+        self._dropped_samples = max(0, int(dropped_samples))
+        self.ui.comboMode.blockSignals(True)
+        self.ui.comboMode.setCurrentIndex(_MODE_IIR)
+        self.ui.comboMode.blockSignals(False)
+        self._on_mode_changed(_MODE_IIR)
+        if isinstance(settings, dict):
+            if "zero_code" in settings:
+                self.ui.spinZero.setValue(float(settings["zero_code"]))
+            if "scale_per_code" in settings:
+                self.ui.spinScale.setValue(float(settings["scale_per_code"]))
+            if "unit" in settings:
+                index = self.ui.comboUnit.findText(str(settings["unit"]))
+                if index >= 0:
+                    self.ui.comboUnit.setCurrentIndex(index)
+        self.ui.lblStatus.setText("Session current replay ready.")
+
+    def display_session_replay_samples(
+        self,
+        samples: tuple[CurrentSample, ...],
+    ) -> None:
+        """Render recorded samples without feeding the live recorder signal."""
+        if not samples:
+            return
+        self._last_batch = samples
+        self._latest = samples[-1]
+        self._history.extend(samples)
+        cutoff = self._latest.timestamp_ns - _HISTORY_NS
+        while self._history and self._history[0].timestamp_ns < cutoff:
+            self._history.popleft()
+        self.ui.btnZero.setEnabled(True)
+        self._render_values(self._latest.timestamp_ns)
+        status = "Recorded FPGA IIR samples; replay does not access hardware."
+        if self._dropped_samples:
+            status += f" Capture dropped {self._dropped_samples:,} sample(s)."
+        self.ui.lblStatus.setText(status)
+
+    def finish_session_replay(self) -> None:
+        if self._session_replay_active:
+            self.ui.lblStatus.setText("Session current replay complete; final view held.")
+
+    def end_session_replay(self) -> None:
+        self._session_replay_active = False
 
     def _reset_measurement_state(self) -> None:
         self._latest = None

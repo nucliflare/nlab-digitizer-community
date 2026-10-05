@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import cast
 
 from PySide6.QtCore import QSettings, Qt, QThread, QTime, QTimer, Signal
@@ -77,6 +77,8 @@ class GlobalController(QWidget):
         self._temperature_worker_stop_requested = False
         self._replay_hardware_interlocked = False
         self._replay_resume_temperature_correction = False
+        self._replay_resume_diagnostics = False
+        self._session_replay_active = False
         self._reset_sync_for_initialization()
         self._sync_available = self._load_sync_state()
         self._load_settings()
@@ -307,6 +309,55 @@ class GlobalController(QWidget):
             f"Correction applied to {len(self._devices)} MCA channel(s).",
         )
 
+    def begin_session_replay(self) -> None:
+        self._session_replay_active = True
+        self.ui.lblLastUpdate.setText("Session diagnostics replay ready.")
+        self._set_temperature_status("Session temperature replay ready.")
+
+    def display_session_replay_temperature(self, value: object) -> None:
+        if not isinstance(value, Mapping):
+            raise ValueError("temperature replay readback must be a mapping")
+        readback = TemperatureCorrectionReadback(
+            temperature=float(value["temperature"]),
+            applied_coefficient=float(value["applied_coefficient"]),
+            applied_offset=int(value["applied_offset"]),
+        )
+        self.ui.lblAdsTemperature.setText(f"{readback.temperature:g} raw")
+        self.ui.lblAppliedTempCoeff.setText(f"{readback.applied_coefficient:.9f}")
+        self.ui.lblAppliedTempOffset.setText(str(readback.applied_offset))
+        self._set_temperature_status("Recorded temperature correction readback.")
+
+    def display_session_replay_diagnostics(self, value: object) -> None:
+        if not isinstance(value, list):
+            raise ValueError("diagnostics replay readback must be a list")
+        readings: list[GlobalDiagnosticReading] = []
+        for item in value:
+            if not isinstance(item, Mapping):
+                raise ValueError("diagnostics replay entry must be a mapping")
+            raw_value = item.get("value")
+            if not isinstance(raw_value, int | float | bool):
+                raise ValueError("diagnostics replay value must be numeric or boolean")
+            healthy = item.get("healthy")
+            readings.append(
+                GlobalDiagnosticReading(
+                    key=str(item.get("key", "")),
+                    label=str(item.get("label", item.get("key", ""))),
+                    value=raw_value,
+                    unit=str(item.get("unit", "")),
+                    precision=int(item.get("precision", 0)),
+                    healthy=healthy if isinstance(healthy, bool) else None,
+                )
+            )
+        self._display_diagnostics_readback(readings)
+        self.ui.lblLastUpdate.setText("Recorded session")
+
+    def finish_session_replay(self) -> None:
+        if self._session_replay_active:
+            self.ui.lblLastUpdate.setText("Session replay complete; final values held.")
+
+    def end_session_replay(self) -> None:
+        self._session_replay_active = False
+
     def _on_temperature_error(self, message: str) -> None:
         self._set_temperature_status(
             f"Temperature-correction cycle failed: {message}",
@@ -502,11 +553,14 @@ class GlobalController(QWidget):
             self._replay_resume_temperature_correction = (
                 self._temperature_worker is not None
             )
+            self._replay_resume_diagnostics = self._worker is not None
             if self._temperature_worker is not None:
                 self._stop_temperature_correction_sync()
                 self._set_temperature_status(
                     "Temperature-correction loop paused during session replay."
                 )
+            if self._worker is not None:
+                self._stop_diagnostics_sync()
         self.ui.groupSoftwareStart.setEnabled(
             not enabled and self._sync_available
         )
@@ -518,6 +572,11 @@ class GlobalController(QWidget):
                 QTimer.singleShot(0, self._resume_temperature_after_replay)
             else:
                 self._replay_resume_temperature_correction = False
+        if not enabled and self._replay_resume_diagnostics:
+            if resume_background:
+                QTimer.singleShot(0, self._resume_diagnostics_after_replay)
+            else:
+                self._replay_resume_diagnostics = False
 
     def _resume_temperature_after_replay(self) -> None:
         resume = self._replay_resume_temperature_correction
@@ -529,6 +588,12 @@ class GlobalController(QWidget):
             and self.ui.cbTemperatureCorrectionEnabled.isChecked()
         ):
             self._start_temperature_correction()
+
+    def _resume_diagnostics_after_replay(self) -> None:
+        resume = self._replay_resume_diagnostics
+        self._replay_resume_diagnostics = False
+        if resume and not self._replay_hardware_interlocked and self._worker is None:
+            self._start_diagnostics()
 
     @property
     def sync_available(self) -> bool:
@@ -622,10 +687,18 @@ class GlobalController(QWidget):
         self,
         readings: list[GlobalDiagnosticReading],
     ) -> None:
+        if self._session_replay_active:
+            return
         try:
             self.session_diagnostics_readback.emit(readings)
         except RuntimeError:
             pass
+        self._display_diagnostics_readback(readings)
+
+    def _display_diagnostics_readback(
+        self,
+        readings: list[GlobalDiagnosticReading],
+    ) -> None:
         table = self.ui.tableDiagnostics
         table.setRowCount(len(readings))
         for row, reading in enumerate(readings):
@@ -665,6 +738,17 @@ class GlobalController(QWidget):
         self.ui.lblLastUpdate.setStyleSheet("color: #b00020;")
 
     def _on_diagnostics_finished(self) -> None:
+        self._worker = None
+        self._worker_thread = None
+        self._worker_stop_requested = False
+
+    def _stop_diagnostics_sync(self) -> None:
+        thread = self._worker_thread
+        self._request_diagnostics_stop()
+        if thread is not None and not thread.wait(5000):
+            log.warning("Waiting for in-flight global diagnostics read")
+            thread.quit()
+            thread.wait()
         self._worker = None
         self._worker_thread = None
         self._worker_stop_requested = False
