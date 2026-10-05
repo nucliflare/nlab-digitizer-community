@@ -5,6 +5,7 @@ import threading
 from typing import cast
 
 from PySide6.QtCore import QSettings, Qt, QTimer, Signal
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QWidget
 
 from nlab.hardware.digitizer.discovery import (
@@ -54,6 +55,7 @@ class ConnectionDialog(QDialog):
         self._ui.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setText("Connect")
         self._ui.buttonBox.accepted.connect(self._on_accept)
         self._ui.buttonBox.rejected.connect(self.reject)
+        self._ui.buttonOffline.clicked.connect(self._on_offline)
         self._ui.comboIp.currentIndexChanged.connect(self._on_address_selected)
         line_edit = self._ui.comboIp.lineEdit()
         if line_edit is not None:
@@ -62,13 +64,24 @@ class ConnectionDialog(QDialog):
         self._discovery_finished.connect(self._on_discovery_finished)
         self._scan_generation = 0
         self._scan_running = False
+        self._startup_scan_started = False
         self._address_edited_since_scan = False
         self._explicit_ip = ip is not None
         self._recent_ips: set[str] = set()
         self._discovered_hosts: set[str] = set()
+        self._offline = False
         apply_taskbar_icon(self)
         self._load_settings()
         self._apply_initial_values(ip=ip, port=port, channels=channels)
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        if self._startup_scan_started:
+            return
+        self._startup_scan_started = True
+        # Queue discovery until Qt has painted the dialog so the initial scan
+        # cannot delay first presentation. Dialogs constructed only for
+        # settings inspection never start a background discovery thread.
         QTimer.singleShot(0, self._start_discovery)
 
     # ------------------------------------------------------------------
@@ -86,6 +99,11 @@ class ConnectionDialog(QDialog):
     @property
     def channels(self) -> int:
         return self._ui.spinChannels.value()
+
+    @property
+    def offline(self) -> bool:
+        """Whether the dialog selected a transport-free analysis workspace."""
+        return self._offline
 
     # ------------------------------------------------------------------
     # Internal
@@ -264,5 +282,10 @@ class ConnectionDialog(QDialog):
         if not self.ip:
             self._ui.comboIp.lineEdit().setFocus()  # type: ignore[union-attr]
             return
+        self._offline = False
         self._save_settings()
+        self.accept()
+
+    def _on_offline(self) -> None:
+        self._offline = True
         self.accept()

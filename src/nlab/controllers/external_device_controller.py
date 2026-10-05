@@ -118,7 +118,13 @@ class ExternalDeviceController(QWidget):
 
     session_readback = Signal(str, float, object)
 
-    def __init__(self, device: BaseModbusDevice, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        device: BaseModbusDevice,
+        parent: QWidget | None = None,
+        *,
+        auto_start: bool = True,
+    ) -> None:
         super().__init__(parent)
         self.device = device
         self.ui = Ui_ExternalDeviceView()
@@ -140,7 +146,8 @@ class ExternalDeviceController(QWidget):
 
         self._build_ui()
         self._load_settings()
-        self._on_start_monitor()
+        if auto_start:
+            self._on_start_monitor()
 
     # ------------------------------------------------------------------
     # UI construction

@@ -59,6 +59,106 @@ def test_startup_reports_connection_and_view_progress(monkeypatch: pytest.Monkey
     ]
 
 
+def test_offline_startup_uses_in_memory_channels_and_interlocks_hardware(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    progress: list[str] = []
+    devices = [object(), object()]
+    factory = Mock(side_effect=devices)
+    live_connect = Mock()
+    interlock = Mock()
+    monkeypatch.setattr(main_window_module, "create_offline_digitizer", factory)
+    monkeypatch.setattr(MainWindowController, "_connect_channel", live_connect)
+    monkeypatch.setattr(MainWindowController, "_make_dock_host", staticmethod(object))
+    monkeypatch.setattr(MainWindowController, "_set_replay_hardware_interlock", interlock)
+    for name in (
+        "_build_global_tab",
+        "_build_channel_docks",
+        "_build_coincidence_tab",
+        "_build_external_docks",
+        "_restore_dock_state",
+        "_connect_signals",
+    ):
+        monkeypatch.setattr(MainWindowController, name, lambda _self: None)
+    monkeypatch.setattr(main_window_module, "ExternalDevices", Mock())
+
+    controller = MainWindowController(
+        SimpleNamespace(),
+        channels=2,
+        on_progress=progress.append,
+        offline=True,
+    )
+
+    assert controller._devices == devices
+    assert factory.call_args_list == [call(0), call(1)]
+    live_connect.assert_not_called()
+    interlock.assert_called_once_with(True, resume_background=False)
+    assert progress[:2] == [
+        "Preparing offline channel 1 of 2...",
+        "Preparing offline channel 2 of 2...",
+    ]
+
+
+def test_offline_external_replay_panels_are_derived_from_recorded_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _bare_controller()
+    controller._offline = True
+    controller._external_controllers = []
+    panel = SimpleNamespace(
+        configuration_id="GEIGER:7",
+        apply_configuration_settings=Mock(),
+    )
+
+    def install(devices: object) -> None:
+        assert list(devices) == ["recorded-device"]  # type: ignore[arg-type]
+        controller._external_controllers = [panel]
+
+    controller._build_external_docks = Mock(side_effect=install)  # type: ignore[method-assign]
+    device_factory = Mock(return_value="recorded-device")
+    monkeypatch.setattr(
+        main_window_module,
+        "create_offline_external_device",
+        device_factory,
+    )
+    replay = SimpleNamespace(
+        configuration_snapshot=Mock(
+            return_value={
+                "hardware": {
+                    "external_devices": {"GEIGER:7": {"pwm_enable": 1}},
+                },
+                "application": {
+                    "external_devices": {
+                        "GEIGER:7": {"plotted_registers": ["pulses_per_sec"]},
+                    },
+                },
+            },
+        ),
+    )
+    events = [
+        TelemetryReplayEvent(
+            sequence=0,
+            host_monotonic_ns=10,
+            source="external.GEIGER:7",
+            payload={
+                "worker_timestamp": 1.0,
+                "values": {"pulses_per_sec": 42},
+            },
+        ),
+    ]
+
+    controller._install_offline_external_replay_controllers(replay, events)
+
+    device_factory.assert_called_once_with(
+        "GEIGER:7",
+        {"pwm_enable": 1},
+        {"pulses_per_sec": 42},
+    )
+    panel.apply_configuration_settings.assert_called_once_with(
+        {"plotted_registers": ["pulses_per_sec"]}
+    )
+
+
 def test_waveform_file_opens_standalone_workbench(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

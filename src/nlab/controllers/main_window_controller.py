@@ -21,6 +21,10 @@ from nlab.controllers.scope_controller import ScopeController
 from nlab.hardware.digitizer.current_monitor import ScopeCurrentAccumulator
 from nlab.hardware.digitizer.digitizer import Digitizer
 from nlab.hardware.digitizer.dma import McaEventBuffer, ScopeFrameBuffer
+from nlab.hardware.digitizer.offline import (
+    create_offline_digitizer,
+    create_offline_external_device,
+)
 from nlab.hardware.modbus_devices import ExternalDevices, ExternalDeviceScan
 from nlab.session.recorder import SessionRecorder
 from nlab.session.replay import (
@@ -58,19 +62,29 @@ class MainWindowController:
         port: int = 30431,
         channels: int = 2,
         on_progress: Callable[[str], None] | None = None,
+        offline: bool = False,
     ) -> None:
         self._window = window
         self._host = host
         self._port = port
         self._channels = channels
+        self._offline = bool(offline)
         self._devices: list[Digitizer] = []
         self._on_progress = on_progress
 
-        log.info("Connecting via IIO to %s:%d, %d channel(s)", host, port, channels)
-        for channel in range(self._channels):
-            self._report_progress(f"Connecting channel {channel + 1} of {self._channels}...")
-            self._devices.append(self._connect_channel(channel))
-        log.info("All %d device(s) connected", len(self._devices))
+        if self._offline:
+            log.info("Preparing offline analysis workspace with %d channel(s)", channels)
+            for channel in range(self._channels):
+                self._report_progress(
+                    f"Preparing offline channel {channel + 1} of {self._channels}..."
+                )
+                self._devices.append(create_offline_digitizer(channel))
+        else:
+            log.info("Connecting via IIO to %s:%d, %d channel(s)", host, port, channels)
+            for channel in range(self._channels):
+                self._report_progress(f"Connecting channel {channel + 1} of {self._channels}...")
+                self._devices.append(self._connect_channel(channel))
+            log.info("All %d device(s) connected", len(self._devices))
 
         self._scope_controllers: list[ScopeController] = []
         self._current_monitor_controllers: list[CurrentMonitorController] = []
@@ -159,6 +173,8 @@ class MainWindowController:
         self._report_progress("Restoring dock layout...")
         self._restore_dock_state()
         self._connect_signals()
+        if self._offline:
+            self._set_replay_hardware_interlock(True, resume_background=False)
         log.info(
             "UI initialized, %d scope / %d current / %d MCA / %d PSD / %d PSU / "
             "%d external controllers",
@@ -468,11 +484,18 @@ class MainWindowController:
         IIO digitizer connection. A device that doesn't respond (not present,
         or bus not bridged) is simply absent from the discovery results.
         """
-        if devices is None:
+        offline = getattr(self, "_offline", False)
+        if devices is None and offline:
+            devices = ()
+        elif devices is None:
             devices = self._external_devices.discover(self._host)
         docks: list[QDockWidget] = []
         for idx, device in enumerate(devices):
-            ctrl = ExternalDeviceController(device)
+            ctrl = (
+                ExternalDeviceController(device, auto_start=False)
+                if offline
+                else ExternalDeviceController(device)
+            )
             self._connect_optional_signal(
                 ctrl,
                 "session_readback",
@@ -492,9 +515,13 @@ class MainWindowController:
 
         tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabExternal)
         self._window.ui.mainTabs.setTabEnabled(tab_index, bool(docks))
-        self._window.ui.tabExternal.setToolTip(
-            "" if docks else "No external Modbus modules were detected on the digitizer host."
-        )
+        if docks:
+            tooltip = ""
+        elif offline:
+            tooltip = "Recorded external modules appear when a replay bundle contains them."
+        else:
+            tooltip = "No external Modbus modules were detected on the digitizer host."
+        self._window.ui.tabExternal.setToolTip(tooltip)
 
     def scan_external_devices(self) -> ExternalDeviceScan:
         """Perform a full Modbus scan using a fresh connection owner.
@@ -503,6 +530,8 @@ class MainWindowController:
         thread. The result must later be adopted with
         :meth:`apply_external_device_scan` or explicitly closed.
         """
+        if getattr(self, "_offline", False):
+            raise RuntimeError("external-device discovery is unavailable in offline mode")
         return ExternalDevices.scan_new(self._host)
 
     def prepare_external_device_refresh(self) -> None:
@@ -758,6 +787,8 @@ class MainWindowController:
 
     def start_session_recording(self, path: Path) -> Path:
         """Passively record all data already observed by this application."""
+        if getattr(self, "_offline", False):
+            raise RuntimeError("session recording requires a live hardware connection")
         if self.session_replay is not None:
             raise RuntimeError("exit session replay before starting a recording")
         if getattr(self, "_session_recorder", None) is not None:
@@ -823,6 +854,8 @@ class MainWindowController:
         telemetry_reader = getattr(replay, "telemetry_events", None)
         telemetry_events = telemetry_reader() if telemetry_reader is not None else []
         self.clear_session_replay()
+        if getattr(self, "_offline", False):
+            self._install_offline_external_replay_controllers(replay, telemetry_events)
         self._session_replay = replay
         self._session_replay_path = path
         try:
@@ -862,7 +895,7 @@ class MainWindowController:
         resume_background: bool = True,
     ) -> None:
         """Apply one app-wide hardware-write boundary for session replay."""
-        enabled = bool(enabled)
+        enabled = bool(enabled) or getattr(self, "_offline", False)
         if enabled == getattr(self, "_replay_hardware_interlocked", False):
             return
         targets: list[object] = []
@@ -908,6 +941,67 @@ class MainWindowController:
                         log.exception("Failed to roll back replay hardware interlock")
             raise
         self._replay_hardware_interlocked = enabled
+
+    def _install_offline_external_replay_controllers(
+        self,
+        replay: SessionReplay,
+        events: list[TelemetryReplayEvent],
+    ) -> None:
+        """Build read-only external-module panels from a replay's recorded schema."""
+        latest_values: dict[str, dict[str, object]] = {}
+        for event in events:
+            if not event.source.startswith("external."):
+                continue
+            configuration_id = event.source.removeprefix("external.")
+            values = event.payload.get("values")
+            if not isinstance(values, dict):
+                continue
+            destination = latest_values.setdefault(configuration_id, {})
+            destination.update(
+                {
+                    str(name): value
+                    for name, value in values.items()
+                    if isinstance(name, str)
+                }
+            )
+        if not latest_values:
+            return
+
+        configuration = replay.configuration_snapshot()
+        hardware = configuration.get("hardware")
+        hardware = hardware if isinstance(hardware, dict) else {}
+        external_hardware = hardware.get("external_devices")
+        external_hardware = external_hardware if isinstance(external_hardware, dict) else {}
+        application = configuration.get("application")
+        application = application if isinstance(application, dict) else {}
+        external_application = application.get("external_devices")
+        external_application = (
+            external_application if isinstance(external_application, dict) else {}
+        )
+
+        devices = []
+        for configuration_id, values in sorted(latest_values.items()):
+            recorded_holding = external_hardware.get(configuration_id)
+            recorded_holding = (
+                recorded_holding if isinstance(recorded_holding, dict) else {}
+            )
+            holding_values: dict[str, int | float] = {}
+            for name, value in recorded_holding.items():
+                if not isinstance(name, str) or not isinstance(value, int | float):
+                    continue
+                holding_values[name] = int(value) if isinstance(value, bool) else value
+            devices.append(
+                create_offline_external_device(
+                    configuration_id,
+                    holding_values,
+                    values,
+                )
+            )
+        self._build_external_docks(devices)
+        for controller in self._external_controllers:
+            controller.apply_configuration_settings(
+                external_application.get(controller.configuration_id)
+            )
 
     def _start_session_analysis_replay(self, replay: SessionReplay) -> None:
         """Replay MCA polls and list-mode batches over their captured timeline."""
@@ -1456,6 +1550,10 @@ class MainWindowController:
         self._session_telemetry_replay_started_ns = 0
         self._session_telemetry_replay_psu_channels = set()
         self._session_telemetry_replay_external_ids = set()
+        if getattr(self, "_offline", False) and getattr(
+            self, "_external_controllers", []
+        ):
+            self._clear_external_docks()
         self._set_replay_hardware_interlock(
             False,
             resume_background=resume_background,
@@ -1683,6 +1781,10 @@ class MainWindowController:
         docks and their controllers since they hold direct references to
         the (now-closed) backend connections.
         """
+        if getattr(self, "_offline", False):
+            raise RuntimeError(
+                "offline mode has no saved hardware endpoint; restart and choose Connect"
+            )
         log.info("Reconnect: stopping workers and closing current devices")
         self.clear_session_replay(resume_background=False)
         if self._energy_calibration_dialog is not None:
@@ -1862,6 +1964,8 @@ class MainWindowController:
 
     def load_all_settings(self, path: Path) -> None:
         """Load settings from YAML and apply to hardware, then refresh UI."""
+        if getattr(self, "_offline", False):
+            raise RuntimeError("hardware settings cannot be loaded in offline mode")
         if self.session_replay is not None:
             raise RuntimeError("exit session replay before loading hardware settings")
         if self._coincidence_controller is not None and self._coincidence_controller.active:

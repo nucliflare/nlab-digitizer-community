@@ -89,21 +89,32 @@ def main() -> None:
     if dialog.exec() != ConnectionDialog.DialogCode.Accepted:
         sys.exit(0)
 
-    log.info(
-        "Application starting — v%s, IIO host=%s, port=%d, channels=%d",
-        __version__,
-        dialog.ip,
-        dialog.port,
-        dialog.channels,
-    )
+    offline = bool(getattr(dialog, "offline", False))
+    if offline:
+        log.info(
+            "Application starting — v%s, offline analysis mode, channels=%d",
+            __version__,
+            dialog.channels,
+        )
+    else:
+        log.info(
+            "Application starting — v%s, IIO host=%s, port=%d, channels=%d",
+            __version__,
+            dialog.ip,
+            dialog.port,
+            dialog.channels,
+        )
     connection_splash = _show_connection_splash()
+    if offline:
+        _update_splash(connection_splash, "Preparing offline analysis workspace...")
     try:
         window = MainAppWindow(
-            host=dialog.ip,
+            host="" if offline else dialog.ip,
             port=dialog.port,
             channels=dialog.channels,
             config_path=args.config,
             on_progress=lambda message: _update_splash(connection_splash, message),
+            offline=offline,
         )
         window.show()
         QApplication.processEvents()

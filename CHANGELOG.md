@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Startup **Offline / Replay Mode** opens the complete analysis workspace
+  without an IIO or Modbus connection. Transport-free channel facades host
+  Scope, MCA, PSD, coincidence, and PSU replay while a permanent hardware
+  interlock disables acquisition and configuration controls. Recorded external
+  modules are reconstructed as read-only panels from the session schema, and a
+  persistent `OFFLINE` badge identifies the mode independently of the replay
+  badge.
 - Versioned `.nlab-session` directory recording from the File menu, with a
   complete configuration snapshot, append-only HDF5 measurement streams,
   JSONL telemetry/command/log chronology, mutable scientific annotations,

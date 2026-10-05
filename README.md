@@ -137,6 +137,10 @@ uv run python examples/measure_current.py
 - Remote board reboot and shutdown controls
 - A dedicated **Connection** menu for full digitizer reconnects and background
   external Modbus rescans
+- An explicit **Offline / Replay Mode** in the startup dialog that opens the
+  analysis workspace without IIO or Modbus hardware, keeps all hardware
+  controls locked, and supports recorded Scope, MCA, PSD, coincidence, PSU,
+  and external-module playback
 - Persistent layout, connection, plotting, and developer settings
 - Central **General Settings** controls for Scope display/refresh, MCA refresh,
   PSU monitoring history, acquisition destinations/formats, and histogram views
@@ -217,6 +221,14 @@ remain live. Use **File -> Exit Replay Mode** to unload all reconstructed
 analysis and playback. For ML use, fill in `annotations.yaml` and use
 `split_group` to keep measurements from the same physical source/setup together
 during train/validation/test splitting.
+
+Replay does not require a connected digitizer. Select **Offline / Replay Mode**
+in the startup connection dialog, then use **File -> Replay Session...**. The
+application opens no IIO or Modbus transport, marks the whole window `OFFLINE`,
+constructs read-only analysis targets for the selected channel count, and builds
+external-module panels from the fields stored in the bundle. File-based waveform,
+PSD, calibration, and peak-analysis tools remain available. To acquire data or
+change hardware, restart the application and choose **Connect**.
 
 ## Hardware and firmware requirements
 
@@ -315,6 +327,12 @@ In the connection dialog:
 1. Select a discovered board or enter its address, for example `192.168.10.128`.
 2. Use port `30431` unless the target's `iiod` configuration differs.
 3. Select the number of channels exposed by the board and connect.
+
+To work without a board, select the desired channel count and click
+**Offline / Replay Mode** instead. The analysis workspace opens no hardware
+endpoint; live acquisition, session recording, hardware settings, reconnect,
+Modbus refresh, and board-power actions remain disabled. Analysis tools and
+**File -> Replay Session...** remain available.
 
 When opened, the dialog scans for network `iiod` services with libiio's
 DNS-SD/mDNS discovery (Avahi on Linux) and also probes `192.168.3.1:30431`, the

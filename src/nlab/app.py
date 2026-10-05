@@ -78,16 +78,22 @@ class MainAppWindow(QMainWindow):
         channels: int = 2,
         config_path: Path | None = None,
         on_progress: Callable[[str], None] | None = None,
+        offline: bool = False,
     ) -> None:
         super().__init__()
         self._host = host
+        self._offline = bool(offline)
         self._closing = False
         self._modbus_refresh_running = False
         self._screen_change_connected = False
         self._board_power_process: QProcess | None = None
         self._board_power_command: BoardPowerCommand | None = None
         self._board_power_phase: str | None = None
-        self._base_window_title = f"Nuclear Lab Digitizer — {host}:{port}"
+        self._base_window_title = (
+            "Nuclear Lab Digitizer — Offline"
+            if self._offline
+            else f"Nuclear Lab Digitizer — {host}:{port}"
+        )
         if on_progress is not None:
             on_progress("Preparing the main window...")
         self._setup_ui()
@@ -103,13 +109,14 @@ class MainAppWindow(QMainWindow):
             port=port,
             channels=channels,
             on_progress=on_progress,
+            offline=self._offline,
         )
         self._apply_stored_general_settings()
-        if config_path is not None:
+        if config_path is not None and not self._offline:
             if on_progress is not None:
                 on_progress("Applying saved settings...")
             self._controller.load_all_settings(config_path)
-        elif auto_configuration_enabled():
+        elif not self._offline and auto_configuration_enabled():
             self._restore_auto_configuration(on_progress)
         self._persist_current_general_settings()
         if on_progress is not None:
@@ -118,7 +125,7 @@ class MainAppWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self._closing = True
-        if auto_configuration_enabled():
+        if not getattr(self, "_offline", False) and auto_configuration_enabled():
             self._save_auto_configuration(show_error=False)
         self._save_developer_settings()
         self._controller.shutdown()
@@ -178,9 +185,40 @@ class MainAppWindow(QMainWindow):
         self._replay_indicator.hide()
         self.statusBar().addPermanentWidget(self._replay_indicator)
 
+        self._offline_indicator = QLabel("OFFLINE", self)
+        self._offline_indicator.setObjectName("offlineModeIndicator")
+        self._offline_indicator.setStyleSheet(
+            "QLabel { background: #455a64; color: white; border-radius: 3px; "
+            "font-weight: 600; padding: 2px 8px; }"
+        )
+        self._offline_indicator.setAccessibleName("Offline analysis mode indicator")
+        self._offline_indicator.setToolTip(
+            "No hardware transport is open. Analysis tools and deterministic session "
+            "replay remain available; all hardware controls are locked."
+        )
+        self._offline_indicator.setVisible(self._offline)
+        self.statusBar().addPermanentWidget(self._offline_indicator)
+
         power_actions_enabled = bool(self._host.strip())
         self.ui.actionRebootBoard.setEnabled(power_actions_enabled)
         self.ui.actionShutdownBoard.setEnabled(power_actions_enabled)
+
+        if self._offline:
+            for action_name in (
+                "actionStartSessionRecording",
+                "actionSaveSettings",
+                "actionLoadSettings",
+                "actionReconnectDevice",
+                "actionRefreshModbus",
+                "actionRebootBoard",
+                "actionShutdownBoard",
+            ):
+                action = getattr(self.ui, action_name, None)
+                if action is not None:
+                    action.setEnabled(False)
+            self.ui.actionReconnectDevice.setToolTip(
+                "Restart the application and choose Connect to open a hardware session."
+            )
 
         self._restore_developer_settings()
 
