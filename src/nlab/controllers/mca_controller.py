@@ -121,6 +121,7 @@ class MCAController(QWidget):
     coincidence_error = Signal(int, str)
     coincidence_stop_requested = Signal()
     energy_calibration_changed = Signal(int, object)
+    session_readback = Signal(int, object)
 
     def __init__(
         self,
@@ -151,6 +152,9 @@ class MCAController(QWidget):
         self._dma_filepath: Path | None = None
         self._dma_counter = 0
         self._event_buffer = event_buffer or McaEventBuffer()
+        self._session_capture_enabled = False
+        self._replay_hardware_interlocked = False
+        self._session_replay_active = False
         self._psd_capture_enabled = False
         self._active_dma_mode = McaDmaOutputMode.BINARY
         self._dma_summary: McaRunSummary | None = None
@@ -185,6 +189,42 @@ class MCAController(QWidget):
     @property
     def channel(self) -> int:
         return self._channel
+
+    def set_replay_hardware_interlock(self, enabled: bool) -> None:
+        """Stop acquisition and block every MCA hardware-setting surface."""
+        enabled = bool(enabled)
+        if enabled == self._replay_hardware_interlocked:
+            return
+        self._replay_hardware_interlocked = enabled
+        if enabled and (
+            self._worker is not None
+            or self._dma_worker is not None
+            or self._coincidence_session
+        ):
+            self._on_stop()
+        for widget in (
+            self.ui.groupMca,
+            self.ui.groupMeasurement,
+            self.ui.groupSignal,
+            self.ui.tabFilters,
+            self.ui.btnClearSpectrum,
+        ):
+            widget.setEnabled(not enabled)
+        self._debug_threshold_line.setMovable(not enabled)
+        self._debug_pretrigger_line.setMovable(not enabled)
+        if not enabled:
+            self._set_controls_enabled(self._dma_worker is None)
+            self.ui.btnStart.setEnabled(
+                self._worker is None
+                and self._dma_worker is None
+                and not self._coincidence_session
+            )
+            self.ui.btnStop.setEnabled(
+                self._worker is not None
+                or self._dma_worker is not None
+                or self._coincidence_session
+            )
+            self.refresh_dma_output_settings()
 
     # ------------------------------------------------------------------
     # Combo population
@@ -455,6 +495,7 @@ class MCAController(QWidget):
     # ------------------------------------------------------------------
 
     def _set_controls_enabled(self, enabled: bool) -> None:
+        enabled = enabled and not getattr(self, "_replay_hardware_interlocked", False)
         if not enabled:
             self._cancel_debug_marker_drags()
         self.ui.groupMca.setEnabled(enabled)
@@ -468,7 +509,11 @@ class MCAController(QWidget):
     def refresh_dma_output_settings(self) -> None:
         """Reflect the application-wide output choice in this channel view."""
         online = MCAController._output_mode() is McaDmaOutputMode.ONLINE
-        self.ui.btnDmaFile.setEnabled(not online and self._dma_worker is None)
+        self.ui.btnDmaFile.setEnabled(
+            not getattr(self, "_replay_hardware_interlocked", False)
+            and not online
+            and self._dma_worker is None
+        )
         if hasattr(self.ui.btnDmaFile, "setToolTip"):
             self.ui.btnDmaFile.setToolTip(
                 "Online-only mode does not create a measurement file."
@@ -797,6 +842,8 @@ class MCAController(QWidget):
         metadata: dict[str, object],
     ) -> None:
         """Start this channel as one half of a coordinated IIO run."""
+        if self._replay_hardware_interlocked:
+            raise RuntimeError("exit session replay before starting coincidence")
         if self.coincidence_busy or self._coincidence_session:
             raise RuntimeError(f"MCA ch{self._channel} is already in use")
         if self._mca_dma is None:
@@ -1102,6 +1149,9 @@ class MCAController(QWidget):
         completion. DMA controls remain disabled because an armed list-mode
         buffer requires its full stop/drain/close lifecycle.
         """
+        if getattr(self, "_replay_hardware_interlocked", False):
+            log.warning("MCA ch%d: ignored configuration write during replay", self._channel)
+            return
         if self._dma_worker is not None:
             log.warning(
                 "MCA ch%d: ignored configuration write while DMA is active",
@@ -1348,6 +1398,8 @@ class MCAController(QWidget):
     # ------------------------------------------------------------------
 
     def _on_start(self) -> None:
+        if getattr(self, "_replay_hardware_interlocked", False):
+            return
         self._cancel_debug_marker_drags()
         self.ui.btnStart.setChecked(True)
         self.ui.btnStart.setEnabled(False)
@@ -1456,6 +1508,8 @@ class MCAController(QWidget):
         MCAController.refresh_dma_output_settings(self)
 
     def _on_clear_spectrum(self) -> None:
+        if getattr(self, "_replay_hardware_interlocked", False):
+            return
         self._mca.clear_spectrum()
         self._hist_curve.setData([], [])
         self._last_histogram = None
@@ -1763,7 +1817,7 @@ class MCAController(QWidget):
         )
 
     def _prepare_psd_capture(self) -> McaEventBuffer | None:
-        """Arm display-only event interception when Charge Comparison is on."""
+        """Select the event publisher needed by PSD, coincidence, or a session."""
         self._psd_capture_enabled = bool(
             self._psd_capture is not None and self.ui.cbCcEnable.isChecked()
         )
@@ -1776,9 +1830,15 @@ class MCAController(QWidget):
                     else "PSD inactive: enable Charge Comparison before starting DMA."
                 ),
             )
-        if self._psd_capture_enabled:
+        if self._psd_capture_enabled or getattr(self, "_session_capture_enabled", False):
             return self._event_buffer
         return getattr(self, "_coincidence_buffer", None)
+
+    def set_session_capture_enabled(self, enabled: bool) -> bool:
+        """Enable publication for future DMA runs; report current-run coverage."""
+        current_run_observed = self._dma_worker is None or self._psd_capture_enabled
+        self._session_capture_enabled = enabled
+        return current_run_observed
 
     def _on_dma_ready(self) -> None:
         # The backend emits ready only after it has armed all eight kernel
@@ -1955,11 +2015,52 @@ class MCAController(QWidget):
         O(1); a single-shot timer renders only the newest snapshot at the
         capped presentation rate, so stale frames never form a queue.
         """
+        # Session consumers receive every hardware poll, independently of the
+        # deliberately throttled plot repaint below.
+        signal = getattr(self, "session_readback", None)
+        if signal is not None:
+            signal.emit(self._channel, rb)
         self._pending_readback = rb
         if not self._render_timer.isActive():
             requested_hz = self.ui.spinRefreshRate.value()
             render_hz = min(requested_hz, _MAX_GUI_RENDER_HZ)
             self._render_timer.start(max(1, 1000 // render_hz))
+
+    def begin_session_replay(self) -> None:
+        """Prepare the normal MCA plots for progressive recorded readbacks."""
+        self._session_replay_active = True
+        self._render_timer.stop()
+        self._pending_readback = None
+        self._last_histogram = np.zeros(16_384, dtype=np.uint64)
+        self._last_elapsed_s = 0.0
+        self._hist_curve.setData(np.arange(16_385), self._last_histogram)
+        for label in (
+            self.ui.lblCountRate,
+            self.ui.lblDeadTime,
+            self.ui.lblElapsedTime,
+            self.ui.lblEventsLost,
+            self.ui.lblPulsePileup,
+            self.ui.lblPulseOverrange,
+            self.ui.lblEnergyOverrange,
+            self.ui.lblEnergyEstErr,
+            self.ui.lblThroughputErr,
+        ):
+            label.setText("0")
+
+    def display_session_replay_readback(self, readback: MCAReadback) -> None:
+        """Render a captured poll without treating it as a new live sample."""
+        if not self._session_replay_active:
+            return
+        self._pending_readback = readback
+        self._render_pending_readback()
+
+    def finish_session_replay(self) -> None:
+        """Hold the final recorded MCA histogram at replay EOF."""
+        self._render_pending_readback()
+
+    def end_session_replay(self) -> None:
+        self._session_replay_active = False
+        self._pending_readback = None
 
     def _render_pending_readback(self) -> None:
         rb = self._pending_readback

@@ -40,6 +40,9 @@ class PSDController(QWidget):
         self._capture_note = "Waiting for DMA with Charge Comparison enabled."
         self._last_dropped_records = 0
         self._energy_log_y = False
+        self._session_replay_batches: list[np.ndarray] | None = None
+        self._session_replay_previous_settings: dict[str, object] | None = None
+        self._session_replay_timer_was_active = False
 
         self.ui = Ui_PSDView()
         self.ui.setupUi(self)  # type: ignore[no-untyped-call]
@@ -202,6 +205,8 @@ class PSDController(QWidget):
         return self._channel
 
     def process_pending_events(self) -> None:
+        if self._session_replay_batches is not None:
+            return
         batches, dropped_records = self._event_buffer.drain()
         self._last_dropped_records = dropped_records
         if not batches:
@@ -227,8 +232,77 @@ class PSDController(QWidget):
         self.ui.spinCut.setValue(float(np.clip(self.ui.spinCut.value(), *ratio_range)))
         self._energy_roi.setBounds(self._accumulator.energy_range)
         self._energy_roi.setRegion((0.0, self._accumulator.energy_range[1] / 4.0))
+        if self._session_replay_batches is not None:
+            try:
+                for events in self._session_replay_batches:
+                    self._accumulator.add_events(events)
+            except (TypeError, ValueError):
+                log.exception("PSD ch%d: session replay analysis failed", self._channel)
+                self._capture_note = "Session replay analysis failed."
         self._reset_display_ranges()
         self._render()
+
+    def begin_session_replay(
+        self,
+        events: np.ndarray | None = None,
+        settings: object = None,
+    ) -> None:
+        """Prepare progressive PSD accumulation from recorded event batches."""
+        self._session_replay_previous_settings = self.configuration_settings()
+        self._session_replay_timer_was_active = self._timer.isActive()
+        self._timer.stop()
+        self._event_buffer.clear()
+        if isinstance(settings, dict):
+            self.apply_configuration_settings(settings)
+        self._session_replay_batches = []
+        self._accumulator = self._make_accumulator()
+        self._last_dropped_records = 0
+        self._capturing = False
+        self._capture_failed = False
+        self._capture_note = "Session replay: waiting for recorded events."
+        if events is not None:
+            self.display_session_replay_events(events)
+        self._reset_display_ranges()
+        self._render()
+
+    def display_session_replay_events(self, events: np.ndarray) -> None:
+        """Add one captured DMA batch to the replay PSD accumulator."""
+        if self._session_replay_batches is None:
+            return
+        copied = np.asarray(events).reshape(-1).copy()
+        self._session_replay_batches.append(copied)
+        try:
+            self._accumulator.add_events(copied)
+        except (TypeError, ValueError):
+            self._capture_note = "Session replay analysis failed."
+            raise
+        self._capture_note = "Session replay in progress."
+        self._render()
+
+    def finish_session_replay(self) -> None:
+        if self._session_replay_batches is None:
+            return
+        self._capture_note = "Session replay complete; final PSD is held."
+        self._update_status()
+
+    def end_session_replay(self) -> None:
+        """Remove replay products and restore the pre-replay analysis controls."""
+        if self._session_replay_batches is None:
+            return
+        previous = self._session_replay_previous_settings
+        restart_timer = self._session_replay_timer_was_active
+        self._session_replay_batches = None
+        self._session_replay_previous_settings = None
+        self._session_replay_timer_was_active = False
+        if previous is not None:
+            self.apply_configuration_settings(previous)
+        else:
+            self._accumulator = self._make_accumulator()
+            self._render()
+        self._capture_note = "Waiting for DMA with Charge Comparison enabled."
+        self._update_status()
+        if restart_timer:
+            self._timer.start()
 
     def _on_cut_spin_changed(self, value: float) -> None:
         self._cut_line.blockSignals(True)

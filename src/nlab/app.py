@@ -3,17 +3,19 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import cast
 
 from PySide6.QtCore import QProcess, QSettings, QStandardPaths, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QIcon, QScreen, QShowEvent
-from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMainWindow, QMessageBox
 
 from nlab import __version__
 from nlab.controllers.main_window_controller import MainWindowController
 from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
 from nlab.hardware.modbus_devices import ExternalDeviceScan
+from nlab.session.replay import SessionReplay
 from nlab.ui.ui_main_window import Ui_MainWindow
 from nlab.utils.remote_board_power import (
     BoardPowerCommand,
@@ -53,6 +55,7 @@ _KEY_MCA_DMA_OUTPUT_MODE = MCA_DMA_OUTPUT_MODE_KEY
 _KEY_SHOW_ROI = "view/show_roi"
 _KEY_LOG_Y = "view/log_y"
 _KEY_TIMING_OFFSET_NS = "timing/channel_b_offset_ns"
+_KEY_SESSION_FOLDER = "session/last_folder"
 _GENERAL_CONTROLLER_KEYS = {
     "scope_display_mode": "general/scope_display_mode",
     "scope_persistence": "general/scope_persistence",
@@ -75,15 +78,22 @@ class MainAppWindow(QMainWindow):
         channels: int = 2,
         config_path: Path | None = None,
         on_progress: Callable[[str], None] | None = None,
+        offline: bool = False,
     ) -> None:
         super().__init__()
         self._host = host
+        self._offline = bool(offline)
         self._closing = False
         self._modbus_refresh_running = False
         self._screen_change_connected = False
         self._board_power_process: QProcess | None = None
         self._board_power_command: BoardPowerCommand | None = None
         self._board_power_phase: str | None = None
+        self._base_window_title = (
+            "Nuclear Lab Digitizer — Offline"
+            if self._offline
+            else f"Nuclear Lab Digitizer — {host}:{port}"
+        )
         if on_progress is not None:
             on_progress("Preparing the main window...")
         self._setup_ui()
@@ -92,20 +102,21 @@ class MainAppWindow(QMainWindow):
         # main.py's post-show callback — calling it before show() targets a
         # provisional HWND that QMainWindow replaces when it first settles its
         # dock layout on the screen, discarding the pre-show WM_SETICON.
-        self.setWindowTitle(f"Nuclear Lab Digitizer — {host}:{port}")
+        self.setWindowTitle(self._base_window_title)
         self._controller = MainWindowController(
             self,
             host=host,
             port=port,
             channels=channels,
             on_progress=on_progress,
+            offline=self._offline,
         )
         self._apply_stored_general_settings()
-        if config_path is not None:
+        if config_path is not None and not self._offline:
             if on_progress is not None:
                 on_progress("Applying saved settings...")
             self._controller.load_all_settings(config_path)
-        elif auto_configuration_enabled():
+        elif not self._offline and auto_configuration_enabled():
             self._restore_auto_configuration(on_progress)
         self._persist_current_general_settings()
         if on_progress is not None:
@@ -114,7 +125,7 @@ class MainAppWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self._closing = True
-        if auto_configuration_enabled():
+        if not getattr(self, "_offline", False) and auto_configuration_enabled():
             self._save_auto_configuration(show_error=False)
         self._save_developer_settings()
         self._controller.shutdown()
@@ -137,6 +148,10 @@ class MainAppWindow(QMainWindow):
         self._resize_for_available_screen()
 
         self.ui.actionExit.triggered.connect(self.close)
+        self.ui.actionStartSessionRecording.triggered.connect(self._on_start_session_recording)
+        self.ui.actionStopSessionRecording.triggered.connect(self._on_stop_session_recording)
+        self.ui.actionReplaySession.triggered.connect(self._on_replay_session)
+        self.ui.actionExitReplay.triggered.connect(self._on_exit_replay)
         self.ui.actionOpenPsdEvents.triggered.connect(self._on_open_psd_events)
         self.ui.actionOpenWaveformFile.triggered.connect(self._on_open_waveform_file)
         self.ui.actionEnergyCalibration.triggered.connect(self._on_energy_calibration)
@@ -160,9 +175,50 @@ class MainAppWindow(QMainWindow):
         self.ui.actionRebootBoard.triggered.connect(self._on_reboot_board)
         self.ui.actionShutdownBoard.triggered.connect(self._on_shutdown_board)
 
+        self._replay_indicator = QLabel(self)
+        self._replay_indicator.setObjectName("replayModeIndicator")
+        self._replay_indicator.setStyleSheet(
+            "QLabel { background: #7353a6; color: white; border-radius: 3px; "
+            "font-weight: 600; padding: 2px 8px; }"
+        )
+        self._replay_indicator.setAccessibleName("Session replay mode indicator")
+        self._replay_indicator.hide()
+        self.statusBar().addPermanentWidget(self._replay_indicator)
+
+        self._offline_indicator = QLabel("OFFLINE", self)
+        self._offline_indicator.setObjectName("offlineModeIndicator")
+        self._offline_indicator.setStyleSheet(
+            "QLabel { background: #455a64; color: white; border-radius: 3px; "
+            "font-weight: 600; padding: 2px 8px; }"
+        )
+        self._offline_indicator.setAccessibleName("Offline analysis mode indicator")
+        self._offline_indicator.setToolTip(
+            "No hardware transport is open. Analysis tools and deterministic session "
+            "replay remain available; all hardware controls are locked."
+        )
+        self._offline_indicator.setVisible(self._offline)
+        self.statusBar().addPermanentWidget(self._offline_indicator)
+
         power_actions_enabled = bool(self._host.strip())
         self.ui.actionRebootBoard.setEnabled(power_actions_enabled)
         self.ui.actionShutdownBoard.setEnabled(power_actions_enabled)
+
+        if self._offline:
+            for action_name in (
+                "actionStartSessionRecording",
+                "actionSaveSettings",
+                "actionLoadSettings",
+                "actionReconnectDevice",
+                "actionRefreshModbus",
+                "actionRebootBoard",
+                "actionShutdownBoard",
+            ):
+                action = getattr(self.ui, action_name, None)
+                if action is not None:
+                    action.setEnabled(False)
+            self.ui.actionReconnectDevice.setToolTip(
+                "Restart the application and choose Connect to open a hardware session."
+            )
 
         self._restore_developer_settings()
 
@@ -396,12 +452,155 @@ class MainAppWindow(QMainWindow):
         idx = self.ui.mainTabs.indexOf(self.ui.tabSystemLog)
         self.ui.mainTabs.setTabVisible(idx, visible)
 
+    def _set_replay_indicator(
+        self,
+        replay: SessionReplay | None,
+        path: Path | None,
+    ) -> None:
+        active = replay is not None and path is not None
+        self.ui.actionExitReplay.setEnabled(active)
+        hardware_action_names = (
+            "actionStartSessionRecording",
+            "actionReconnectDevice",
+            "actionRefreshModbus",
+            "actionLoadSettings",
+            "actionGeneralSettings",
+            "actionRebootBoard",
+            "actionShutdownBoard",
+        )
+        actions = [
+            action
+            for name in hardware_action_names
+            if (action := getattr(self.ui, name, None)) is not None
+        ]
+        saved_states = getattr(self, "_replay_action_enabled_states", None)
+        if active and saved_states is None:
+            self._replay_action_enabled_states = {
+                action.objectName(): action.isEnabled() for action in actions
+            }
+            for action in actions:
+                action.setEnabled(False)
+        elif not active and saved_states is not None:
+            for action in actions:
+                action.setEnabled(bool(saved_states.get(action.objectName(), True)))
+            self._replay_action_enabled_states = None
+        if not active:
+            self._replay_indicator.hide()
+            self._replay_indicator.clear()
+            self._replay_indicator.setToolTip("")
+            self.setWindowTitle(self._base_window_title)
+            return
+
+        assert replay is not None and path is not None
+        name = path.name
+        if len(name) > 32:
+            name = f"{name[:29]}..."
+        warning = not replay.capture_complete or replay.integrity != "verified"
+        self._replay_indicator.setText(f"REPLAY ! {name}" if warning else f"REPLAY | {name}")
+        self._replay_indicator.setToolTip(
+            "Offline session analysis replay is loaded.\n"
+            f"Bundle: {path}\n"
+            f"Session: {replay.manifest.get('session_id', 'unknown')}\n"
+            f"Capture complete: {replay.capture_complete}\n"
+            f"Integrity: {replay.integrity}\n\n"
+            "Recorded Scope, Current, MCA, PSU, global, and external-module updates "
+            "play once and hold their final values. MCA accumulation, PSD, and "
+            "coincidence analysis build progressively from recorded checkpoints and "
+            "event batches. Affected live acquisition and polling are stopped, and all "
+            "hardware-setting controls are locked. Use File > Exit Replay Mode to "
+            "unload replay."
+        )
+        self._replay_indicator.show()
+        self.setWindowTitle(f"{self._base_window_title} [REPLAY]")
+
+    def _sync_replay_indicator(self) -> None:
+        self._set_replay_indicator(
+            self._controller.session_replay,
+            self._controller.session_replay_path,
+        )
+
     # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
 
     def _on_open_psd_events(self) -> None:
         self._controller.show_psd_event_readback()
+
+    def _on_start_session_recording(self) -> None:
+        folder = Path(str(QSettings().value(_KEY_SESSION_FOLDER, "measurements")))
+        suggested = folder / (f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.nlab-session")
+        selected, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Start Session Recording",
+            str(suggested),
+            "NLab session bundle (*.nlab-session)",
+        )
+        if not selected:
+            return
+        path = Path(selected)
+        if not str(path).lower().endswith(".nlab-session"):
+            path = Path(f"{path}.nlab-session")
+        try:
+            self._controller.start_session_recording(path)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Starting session recording failed")
+            QMessageBox.critical(self, "Session Recording", str(exc))
+            return
+        QSettings().setValue(_KEY_SESSION_FOLDER, str(path.parent))
+        self.ui.actionStartSessionRecording.setEnabled(False)
+        self.ui.actionStopSessionRecording.setEnabled(True)
+        self.statusBar().showMessage(f"Recording session to {path}")
+
+    def _on_stop_session_recording(self) -> None:
+        try:
+            path = self._controller.stop_session_recording()
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Finalizing session recording failed")
+            QMessageBox.critical(self, "Session Recording", str(exc))
+        else:
+            if path is not None:
+                self.statusBar().showMessage(f"Session finalized: {path}", 10_000)
+        finally:
+            active = self._controller.session_recording
+            self.ui.actionStartSessionRecording.setEnabled(not active)
+            self.ui.actionStopSessionRecording.setEnabled(active)
+
+    def _on_replay_session(self) -> None:
+        folder = str(QSettings().value(_KEY_SESSION_FOLDER, "measurements"))
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Replay Session Bundle",
+            folder,
+        )
+        if not selected:
+            return
+        path = Path(selected)
+        try:
+            replay = self._controller.replay_session(path)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Loading session replay failed")
+            QMessageBox.critical(self, "Session Replay", str(exc))
+            self._sync_replay_indicator()
+            return
+        QSettings().setValue(_KEY_SESSION_FOLDER, str(path.parent))
+        self._set_replay_indicator(replay, path)
+        if not replay.capture_complete or replay.integrity != "verified":
+            QMessageBox.warning(
+                self,
+                "Session Replay",
+                "The session is incomplete or has recorded data loss. Its data remain "
+                "available for investigation, but should not be treated as a complete "
+                "measurement.",
+            )
+        self.statusBar().showMessage(
+            f"Loaded session replay: {path} (integrity: {replay.integrity})",
+            10_000,
+        )
+
+    def _on_exit_replay(self) -> None:
+        self._controller.clear_session_replay()
+        self._set_replay_indicator(None, None)
+        self.statusBar().showMessage("Session replay unloaded", 5_000)
 
     def _on_open_waveform_file(self) -> None:
         self._controller.show_waveform_analysis()
@@ -771,6 +970,8 @@ class MainAppWindow(QMainWindow):
         except Exception as e:
             logging.getLogger(__name__).exception("Reconnect failed")
             QMessageBox.critical(self, "Reconnect Failed", str(e))
+        finally:
+            self._sync_replay_indicator()
 
     def _on_refresh_modbus_devices(self) -> None:
         """Start a non-blocking scan of both digitizer ser2net bridges."""

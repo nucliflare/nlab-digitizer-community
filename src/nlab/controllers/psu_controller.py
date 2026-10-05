@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from collections.abc import Callable, Mapping
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import QCheckBox, QComboBox, QDoubleSpinBox, QWidget
 
 from nlab.hardware.digitizer.hv import HV_PARAMETER_SPECS, HVParam, HVSupply
@@ -23,6 +24,8 @@ class PSUController(QWidget):
     Loaded from ui_psu_view.ui.  Accepts an HVSupply instance which wraps
     the IDS IIO backend for SiPM/HV bias and temperature monitoring.
     """
+
+    session_readback = Signal(object)
 
     def __init__(self, hv: HVSupply, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -42,6 +45,9 @@ class PSUController(QWidget):
         self._worker: PSUWorker | None = None
         self._worker_thread: QThread | None = None
         self._worker_stop_requested = False
+        self._replay_hardware_interlocked = False
+        self._session_replay_active = False
+        self._replay_resume_monitoring = False
 
         self._setup_plot()
         self._apply_parameter_specs()
@@ -139,50 +145,81 @@ class PSUController(QWidget):
     def _connect_signals(self) -> None:
         if self._sipm_available:
             self.ui.cbSipmEnable.toggled.connect(
-                lambda v: (log.debug("PSU: sipm_enable=%s", v), self.hv.set_sipm_enable(int(v)))
+                lambda v: self._apply_hardware_write(
+                    lambda: (
+                        log.debug("PSU: sipm_enable=%s", v),
+                        self.hv.set_sipm_enable(int(v)),
+                    )
+                )
             )
             self.ui.spinSipmVoltage.editingFinished.connect(self._on_sipm_voltage_changed)
             self.ui.comboSipmCompensMode.currentIndexChanged.connect(
-                lambda i: (
-                    log.debug("PSU: sipm_compens_mode=%d", i),
-                    self.hv.set_sipm_compens_mode(i),
+                lambda i: self._apply_hardware_write(
+                    lambda: (
+                        log.debug("PSU: sipm_compens_mode=%d", i),
+                        self.hv.set_sipm_compens_mode(i),
+                    )
                 )
             )
             self.ui.spinSipmCompensCt.editingFinished.connect(
-                lambda: (
-                    log.debug("PSU: sipm_compens_ct=%.4f", self.ui.spinSipmCompensCt.value()),
-                    self.hv.set_sipm_compens_ct(self.ui.spinSipmCompensCt.value()),
+                lambda: self._apply_hardware_write(
+                    lambda: (
+                        log.debug(
+                            "PSU: sipm_compens_ct=%.4f",
+                            self.ui.spinSipmCompensCt.value(),
+                        ),
+                        self.hv.set_sipm_compens_ct(self.ui.spinSipmCompensCt.value()),
+                    )
                 )
             )
             self.ui.spinSipmCompensTref.editingFinished.connect(
-                lambda: (
-                    log.debug("PSU: sipm_compens_tref=%.2f", self.ui.spinSipmCompensTref.value()),
-                    self.hv.set_sipm_compens_tref(self.ui.spinSipmCompensTref.value()),
+                lambda: self._apply_hardware_write(
+                    lambda: (
+                        log.debug(
+                            "PSU: sipm_compens_tref=%.2f",
+                            self.ui.spinSipmCompensTref.value(),
+                        ),
+                        self.hv.set_sipm_compens_tref(self.ui.spinSipmCompensTref.value()),
+                    )
                 )
             )
 
         self.ui.spinHvVoltage.editingFinished.connect(self._on_hv_voltage_changed)
 
         self.ui.comboHvCompensMode.currentIndexChanged.connect(
-            lambda i: (log.debug("PSU: hv_compens_mode=%d", i), self.hv.set_hv_compens_mode(i))
+            lambda i: self._apply_hardware_write(
+                lambda: (
+                    log.debug("PSU: hv_compens_mode=%d", i),
+                    self.hv.set_hv_compens_mode(i),
+                )
+            )
         )
         self.ui.spinHvCompensCt.editingFinished.connect(
-            lambda: (
-                log.debug("PSU: hv_compens_ct=%.4f", self.ui.spinHvCompensCt.value()),
-                self.hv.set_hv_compens_ct(self.ui.spinHvCompensCt.value()),
+            lambda: self._apply_hardware_write(
+                lambda: (
+                    log.debug("PSU: hv_compens_ct=%.4f", self.ui.spinHvCompensCt.value()),
+                    self.hv.set_hv_compens_ct(self.ui.spinHvCompensCt.value()),
+                )
             )
         )
         self.ui.spinHvCompensTref.editingFinished.connect(
-            lambda: (
-                log.debug("PSU: hv_compens_tref=%.2f", self.ui.spinHvCompensTref.value()),
-                self.hv.set_hv_compens_tref(self.ui.spinHvCompensTref.value()),
+            lambda: self._apply_hardware_write(
+                lambda: (
+                    log.debug(
+                        "PSU: hv_compens_tref=%.2f",
+                        self.ui.spinHvCompensTref.value(),
+                    ),
+                    self.hv.set_hv_compens_tref(self.ui.spinHvCompensTref.value()),
+                )
             )
         )
 
         self.ui.comboTempDigitalEnable.currentIndexChanged.connect(
-            lambda i: (
-                log.debug("PSU: temp_digital_enable=%d", i),
-                self.hv.set_temp_digital_enable(i),
+            lambda i: self._apply_hardware_write(
+                lambda: (
+                    log.debug("PSU: temp_digital_enable=%d", i),
+                    self.hv.set_temp_digital_enable(i),
+                )
             )
         )
 
@@ -190,11 +227,47 @@ class PSUController(QWidget):
         self.ui.btnStopMonitor.clicked.connect(self._on_stop_monitor)
         self.ui.spinRefreshRate.valueChanged.connect(self._on_refresh_rate_changed)
 
+    def _apply_hardware_write(self, write: Callable[[], object]) -> None:
+        if self._replay_hardware_interlocked:
+            return
+        write()
+
+    def set_replay_hardware_interlock(
+        self,
+        enabled: bool,
+        *,
+        resume_background: bool = True,
+    ) -> None:
+        enabled = bool(enabled)
+        if enabled and not self._replay_hardware_interlocked:
+            self._session_replay_active = True
+            self._replay_resume_monitoring = self._worker_thread is not None
+            self.stop_monitor_sync()
+        self._replay_hardware_interlocked = enabled
+        for widget in (
+            self.ui.groupSipm,
+            self.ui.groupSipmCompens,
+            self.ui.groupHv,
+            self.ui.groupHvCompens,
+            self.ui.comboTempDigitalEnable,
+        ):
+            widget.setEnabled(not enabled)
+        self.ui.btnStartMonitor.setEnabled(not enabled and self._worker_thread is None)
+        self.ui.btnStopMonitor.setEnabled(not enabled and self._worker_thread is not None)
+        if not enabled:
+            self._session_replay_active = False
+            resume = self._replay_resume_monitoring and resume_background
+            self._replay_resume_monitoring = False
+            if resume:
+                QTimer.singleShot(0, self._on_start_monitor)
+
     # ------------------------------------------------------------------
     # Monitoring start / stop
     # ------------------------------------------------------------------
 
     def _on_start_monitor(self) -> None:
+        if self._replay_hardware_interlocked:
+            return
         self._ts.clear()
         self._voltages.clear()
 
@@ -271,6 +344,8 @@ class PSUController(QWidget):
             self._worker.change_interval.emit(value)
 
     def _on_hv_voltage_changed(self) -> None:
+        if self._replay_hardware_interlocked:
+            return
         val = self.ui.spinHvVoltage.value()
         log.debug("PSU: hv_voltage=%.2f", val)
         self.hv.set_hv_voltage(val)
@@ -280,6 +355,8 @@ class PSUController(QWidget):
             log.debug("PSU: hv readback=%.1f", readback)
 
     def _on_sipm_voltage_changed(self) -> None:
+        if self._replay_hardware_interlocked:
+            return
         val = self.ui.spinSipmVoltage.value()
         log.debug("PSU: sipm_voltage=%.3f", val)
         self.hv.set_sipm_voltage(val)
@@ -357,6 +434,14 @@ class PSUController(QWidget):
     # ------------------------------------------------------------------
 
     def _on_readback(self, rb: PSUReadback) -> None:
+        if self._session_replay_active:
+            return
+        signal = getattr(self, "session_readback", None)
+        if signal is not None:
+            signal.emit(rb)
+        self._display_readback(rb)
+
+    def _display_readback(self, rb: PSUReadback) -> None:
         time_range = self.ui.spinTimeRange.value()
 
         self._ts.append(rb.timestamp)
@@ -370,6 +455,68 @@ class PSUController(QWidget):
         self._update_plot()
         self._update_readback_labels(rb)
 
+    def begin_session_replay(self) -> None:
+        self._session_replay_active = True
+        self._ts.clear()
+        self._voltages.clear()
+        self._plot_curve.setData([], [])
+
+    def display_session_replay_readback(self, values: Mapping[str, object]) -> None:
+        """Render one recorded PSU sample without emitting it as live telemetry."""
+
+        def required_number(name: str) -> int | float:
+            value = values.get(name)
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise ValueError(f"PSU replay field {name} is not numeric")
+            return value
+
+        def optional_float(name: str) -> float | None:
+            value = values.get(name)
+            if value is None:
+                return None
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise ValueError(f"PSU replay field {name} is not numeric")
+            return float(value)
+
+        def optional_int(name: str) -> int | None:
+            value = values.get(name)
+            if value is None:
+                return None
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise ValueError(f"PSU replay field {name} is not numeric")
+            return int(value)
+
+        readback = PSUReadback(
+            timestamp=float(required_number("timestamp")),
+            hv_voltage=float(required_number("hv_voltage")),
+            hv_compens_output=float(required_number("hv_compens_output")),
+            temp_analog=float(required_number("temp_analog")),
+            temp_digital=float(required_number("temp_digital")),
+            temp_digital_status=int(required_number("temp_digital_status")),
+            ads_temp=float(required_number("ads_temp")),
+            sipm_voltage=optional_float("sipm_voltage"),
+            sipm_current=optional_float("sipm_current"),
+            sipm_overload=optional_int("sipm_overload"),
+            sipm_compens_output=optional_float("sipm_compens_output"),
+        )
+        recorded_sipm = all(
+            value is not None
+            for value in (
+                readback.sipm_voltage,
+                readback.sipm_current,
+                readback.sipm_overload,
+                readback.sipm_compens_output,
+            )
+        )
+        self.ui.groupSipm.setVisible(recorded_sipm)
+        self.ui.groupSipmCompens.setVisible(recorded_sipm)
+        self._display_readback(readback)
+
+    def end_session_replay(self) -> None:
+        self._session_replay_active = False
+        self.ui.groupSipm.setVisible(self._sipm_available)
+        self.ui.groupSipmCompens.setVisible(self._sipm_available)
+
     def _update_plot(self) -> None:
         if not self._ts:
             return
@@ -380,7 +527,15 @@ class PSUController(QWidget):
         vb.setXRange(t[-1] - self.ui.spinTimeRange.value(), t[-1], padding=0.02)
 
     def _update_readback_labels(self, rb: PSUReadback) -> None:
-        if self._sipm_available:
+        if self._sipm_available and all(
+            value is not None
+            for value in (
+                rb.sipm_voltage,
+                rb.sipm_current,
+                rb.sipm_overload,
+                rb.sipm_compens_output,
+            )
+        ):
             self.ui.lblSipmVoltage.setText(f"{rb.sipm_voltage:.2f}")
             self.ui.lblSipmCurrent.setText(f"{rb.sipm_current:.4f}")
             self.ui.lblSipmOverload.setText(str(rb.sipm_overload))

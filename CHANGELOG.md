@@ -11,6 +11,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Startup **Offline / Replay Mode** opens the complete analysis workspace
+  without an IIO or Modbus connection. Transport-free channel facades host
+  Scope, MCA, PSD, coincidence, and PSU replay while a permanent hardware
+  interlock disables acquisition and configuration controls. Recorded external
+  modules are reconstructed as read-only panels from the session schema, and a
+  persistent `OFFLINE` badge identifies the mode independently of the replay
+  badge.
+- Versioned `.nlab-session` directory recording from the File menu, with a
+  complete configuration snapshot, append-only HDF5 measurement streams,
+  JSONL telemetry/command/log chronology, mutable scientific annotations,
+  completion/drop state, and SHA-256 integrity metadata. Offline replay
+  validates the bundle and deterministically reconstructs MCA spectra in the
+  peak-analysis workbench without replaying recorded hardware commands. A
+  persistent status-bar badge and window-title suffix identify replay mode,
+  which can be explicitly exited without affecting unrelated live hardware
+  controls.
+  Timestamped Scope viewer frames now play once at their recorded cadence, with
+  full DMA frames as a fallback; affected live Scope acquisition is stopped and
+  isolated, EOF holds the final frame, and playback never loops or falls back to
+  live data. Replay now provides an application-wide hardware interlock: active
+  Scope, MCA, and Current acquisition is stopped, automatic temperature writes
+  are suspended, and all hardware-setting widgets and menu actions are disabled
+  until replay is exited. Recorded MCA polling checkpoints now animate the
+  normal histogram/debug/statistics views, and timestamped list-mode batches
+  progressively rebuild PSD and two-channel coincidence views using saved
+  analysis settings. Older bundles derive frame timing from hardware event
+  timestamps. PSU and external module polling is suspended during replay and
+  their recorded timestamped telemetry is played once into the normal views,
+  holding the final values at EOF and resuming only previously active pollers
+  on exit. Current-monitor samples, global diagnostics, and temperature-
+  correction readbacks now replay on the same clock as Scope/MCA/telemetry.
+  Numerical streams use bounded lazy HDF5 iterators, HV-only PSU recordings no
+  longer assume SiPM fields, external-module schemas survive offline replay
+  (including configured modules with no samples), and undersized offline
+  workspaces reject a session explicitly instead of omitting channels.
 - A new **Connection → Refresh Modbus Devices** action rescans both ser2net
   bridges without blocking the GUI, safely replaces external-device polling
   workers and docks, and preserves display preferences for rediscovered

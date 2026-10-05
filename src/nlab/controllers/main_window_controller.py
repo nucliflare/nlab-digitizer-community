@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import heapq
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from time import monotonic_ns
+from typing import TYPE_CHECKING, Any, cast
 
-from PySide6.QtCore import QByteArray, QSettings, Qt, QThread, QThreadPool
+from PySide6.QtCore import QByteArray, QSettings, Qt, QThread, QThreadPool, QTimer
 from PySide6.QtWidgets import QDockWidget, QMainWindow, QWidget
 
 from nlab.controllers.coincidence_controller import CoincidenceController
@@ -18,8 +21,21 @@ from nlab.controllers.psu_controller import PSUController
 from nlab.controllers.scope_controller import ScopeController
 from nlab.hardware.digitizer.current_monitor import ScopeCurrentAccumulator
 from nlab.hardware.digitizer.digitizer import Digitizer
-from nlab.hardware.digitizer.dma import McaEventBuffer
+from nlab.hardware.digitizer.dma import McaEventBuffer, ScopeFrameBuffer
+from nlab.hardware.digitizer.offline import (
+    create_offline_digitizer,
+    create_offline_external_device,
+)
 from nlab.hardware.modbus_devices import ExternalDevices, ExternalDeviceScan
+from nlab.session.recorder import SessionRecorder
+from nlab.session.replay import (
+    CurrentReplaySample,
+    McaReplayBatch,
+    McaReplayReadback,
+    ScopeReplayFrame,
+    SessionReplay,
+    TelemetryReplayEvent,
+)
 from nlab.views.energy_calibration_dialog import EnergyCalibrationDialog
 from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
 from nlab.views.psd_readback_dialog import PsdReadbackDialog
@@ -31,6 +47,11 @@ if TYPE_CHECKING:
     from nlab.app import MainAppWindow
 
 log = logging.getLogger(__name__)
+
+_REPLAY_ANALYSIS_EVENTS_PER_TICK = 64
+_REPLAY_SCOPE_FRAMES_PER_TICK = 64
+_REPLAY_CURRENT_SAMPLES_PER_TICK = 4096
+_REPLAY_TELEMETRY_EVENTS_PER_TICK = 1024
 
 
 class MainWindowController:
@@ -48,19 +69,29 @@ class MainWindowController:
         port: int = 30431,
         channels: int = 2,
         on_progress: Callable[[str], None] | None = None,
+        offline: bool = False,
     ) -> None:
         self._window = window
         self._host = host
         self._port = port
         self._channels = channels
+        self._offline = bool(offline)
         self._devices: list[Digitizer] = []
         self._on_progress = on_progress
 
-        log.info("Connecting via IIO to %s:%d, %d channel(s)", host, port, channels)
-        for channel in range(self._channels):
-            self._report_progress(f"Connecting channel {channel + 1} of {self._channels}...")
-            self._devices.append(self._connect_channel(channel))
-        log.info("All %d device(s) connected", len(self._devices))
+        if self._offline:
+            log.info("Preparing offline analysis workspace with %d channel(s)", channels)
+            for channel in range(self._channels):
+                self._report_progress(
+                    f"Preparing offline channel {channel + 1} of {self._channels}..."
+                )
+                self._devices.append(create_offline_digitizer(channel))
+        else:
+            log.info("Connecting via IIO to %s:%d, %d channel(s)", host, port, channels)
+            for channel in range(self._channels):
+                self._report_progress(f"Connecting channel {channel + 1} of {self._channels}...")
+                self._devices.append(self._connect_channel(channel))
+            log.info("All %d device(s) connected", len(self._devices))
 
         self._scope_controllers: list[ScopeController] = []
         self._current_monitor_controllers: list[CurrentMonitorController] = []
@@ -81,6 +112,76 @@ class MainWindowController:
         self._waveform_analysis_dialog: WaveformAnalysisDialog | None = None
         self._external_devices = ExternalDevices()
         self._thread: QThread | None = None
+        self._session_recorder: SessionRecorder | None = None
+        self._session_replay: SessionReplay | None = None
+        self._session_replay_path: Path | None = None
+        self._session_replay_spectrum_ids: set[str] = set()
+        self._session_replay_origin_ns = 0
+        self._session_replay_started_ns = 0
+        self._session_replay_psd_channels: set[int] = set()
+        self._session_replay_coincidence_active = False
+        self._session_analysis_replay_events: list[McaReplayBatch | McaReplayReadback] = []
+        self._session_analysis_replay_iterator: Iterator[
+            McaReplayBatch | McaReplayReadback
+        ] | None = None
+        self._session_analysis_replay_next: McaReplayBatch | McaReplayReadback | None = None
+        self._session_analysis_replay_index = 0
+        self._session_analysis_replay_origin_ns = 0
+        self._session_analysis_replay_started_ns = 0
+        self._session_analysis_replay_mca_channels: set[int] = set()
+        self._session_analysis_replay_coincidence_channels: dict[int, int] = {}
+        self._session_analysis_replay_coincidence_intervals: list[
+            tuple[int, int | None]
+        ] | None = None
+        self._session_analysis_replay_timer = QTimer()
+        self._session_analysis_replay_timer.setSingleShot(True)
+        self._session_analysis_replay_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._session_analysis_replay_timer.timeout.connect(
+            self._advance_session_analysis_replay
+        )
+        self._session_scope_replay_frames: list[ScopeReplayFrame] = []
+        self._session_scope_replay_iterator: Iterator[ScopeReplayFrame] | None = None
+        self._session_scope_replay_next: ScopeReplayFrame | None = None
+        self._session_scope_replay_duration_ns = 0
+        self._session_scope_replay_index = 0
+        self._session_scope_replay_origin_ns = 0
+        self._session_scope_replay_started_ns = 0
+        self._session_scope_replay_channels: set[int] = set()
+        self._session_scope_replay_frame_counts: dict[int, int] = {}
+        self._session_scope_replay_delivered: dict[int, int] = {}
+        self._session_scope_replay_timer = QTimer()
+        self._session_scope_replay_timer.setSingleShot(True)
+        self._session_scope_replay_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._session_scope_replay_timer.timeout.connect(
+            self._advance_session_scope_replay
+        )
+        self._session_telemetry_replay_events: list[TelemetryReplayEvent] = []
+        self._session_telemetry_replay_iterator: Iterator[TelemetryReplayEvent] | None = None
+        self._session_telemetry_replay_next: TelemetryReplayEvent | None = None
+        self._session_telemetry_replay_index = 0
+        self._session_telemetry_replay_origin_ns = 0
+        self._session_telemetry_replay_started_ns = 0
+        self._session_telemetry_replay_psu_channels: set[int] = set()
+        self._session_telemetry_replay_external_ids: set[str] = set()
+        self._session_telemetry_replay_global_active = False
+        self._session_telemetry_replay_timer = QTimer()
+        self._session_telemetry_replay_timer.setSingleShot(True)
+        self._session_telemetry_replay_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._session_telemetry_replay_timer.timeout.connect(
+            self._advance_session_telemetry_replay
+        )
+        self._session_current_replay_iterator: Iterator[CurrentReplaySample] | None = None
+        self._session_current_replay_next: CurrentReplaySample | None = None
+        self._session_current_replay_channels: set[int] = set()
+        self._session_current_replay_timer = QTimer()
+        self._session_current_replay_timer.setSingleShot(True)
+        self._session_current_replay_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._session_current_replay_timer.timeout.connect(
+            self._advance_session_current_replay
+        )
+        self._replay_hardware_interlocked = False
+        self._mca_event_buffers: dict[int, McaEventBuffer] = {}
+        self._scope_frame_buffers: dict[int, ScopeFrameBuffer] = {}
 
         self._scope_dock_host = self._make_dock_host()
         self._current_dock_host = self._make_dock_host()
@@ -100,6 +201,8 @@ class MainWindowController:
         self._report_progress("Restoring dock layout...")
         self._restore_dock_state()
         self._connect_signals()
+        if self._offline:
+            self._set_replay_hardware_interlock(True, resume_background=False)
         log.info(
             "UI initialized, %d scope / %d current / %d MCA / %d PSD / %d PSU / "
             "%d external controllers",
@@ -145,6 +248,17 @@ class MainWindowController:
         return host
 
     @staticmethod
+    def _connect_optional_signal(
+        owner: object,
+        name: str,
+        slot: Callable[..., None],
+    ) -> None:
+        """Connect production Qt signals while keeping isolated factory tests simple."""
+        signal = getattr(owner, name, None)
+        if signal is not None:
+            signal.connect(slot)
+
+    @staticmethod
     def _make_dock(obj_name: str, title: str, widget: QWidget) -> QDockWidget:
         dock = QDockWidget(title)
         dock.setObjectName(obj_name)
@@ -177,6 +291,11 @@ class MainWindowController:
         psd_docks: list[QDockWidget] = []
         psu_docks: list[QDockWidget] = []
 
+        if not hasattr(self, "_mca_event_buffers"):
+            self._mca_event_buffers = {}
+        if not hasattr(self, "_scope_frame_buffers"):
+            self._scope_frame_buffers = {}
+
         self._psu_controller_by_device = {}
         self._psd_controller_by_device = {}
         self._current_monitor_controller_by_device = {}
@@ -201,12 +320,20 @@ class MainWindowController:
             ch_label = f"Ch {ch}"
 
             scope_current_accumulator = ScopeCurrentAccumulator()
+            scope_frame_buffer = ScopeFrameBuffer()
             scope_ctrl = ScopeController(
                 device.scope,
                 scope_dma=device.scope_dma,
                 channel=ch,
+                dma_frame_buffer=scope_frame_buffer,
                 current_accumulator=scope_current_accumulator,
             )
+            self._connect_optional_signal(
+                scope_ctrl,
+                "session_viewer_frame",
+                self._record_scope_viewer_frame,
+            )
+            self._scope_frame_buffers[ch] = scope_frame_buffer
             self._scope_controllers.append(scope_ctrl)
             scope_docks.append(self._make_dock(f"scope_ch{ch}", ch_label, scope_ctrl))
 
@@ -218,6 +345,11 @@ class MainWindowController:
                     scope_controller=scope_ctrl,
                     scope_current_accumulator=scope_current_accumulator,
                 )
+                self._connect_optional_signal(
+                    current_ctrl,
+                    "session_samples",
+                    self._record_current_samples,
+                )
                 self._current_monitor_controllers.append(current_ctrl)
                 self._current_monitor_controller_by_device[idx] = current_ctrl
                 current_docks.append(
@@ -227,6 +359,7 @@ class MainWindowController:
                 psd_ctrl = None
                 if device.mca_dma is not None:
                     event_buffer = McaEventBuffer()
+                    self._mca_event_buffers[ch] = event_buffer
                     psd_ctrl = PSDController(event_buffer=event_buffer, channel=ch)
                     self._psd_controllers.append(psd_ctrl)
                     self._psd_controller_by_device[idx] = psd_ctrl
@@ -240,6 +373,11 @@ class MainWindowController:
                     measurement_configuration=self.configuration_document,
                 )
                 self._mca_controllers.append(mca_ctrl)
+                self._connect_optional_signal(
+                    mca_ctrl,
+                    "session_readback",
+                    self._record_mca_readback,
+                )
                 self._mca_controller_by_device[idx] = mca_ctrl
                 mca_docks.append(self._make_dock(f"mca_ch{ch}", ch_label, mca_ctrl))
             else:
@@ -251,6 +389,11 @@ class MainWindowController:
                 log.warning("PSU controls unavailable for channel %s", ch)
             else:
                 psu_ctrl = PSUController(hv)
+                self._connect_optional_signal(
+                    psu_ctrl,
+                    "session_readback",
+                    partial(self._record_psu_readback, ch),
+                )
                 self._psu_controllers.append(psu_ctrl)
                 self._psu_controller_by_device[idx] = psu_ctrl
                 psu_docks.append(self._make_dock(f"psu_ch{ch}", ch_label, psu_ctrl))
@@ -312,6 +455,16 @@ class MainWindowController:
         """Build the one floatable channel-independent digitizer panel."""
         labels = [self._display_channel(index) for index in range(len(self._devices))]
         self._global_controller = GlobalController(self._devices, labels)
+        self._connect_optional_signal(
+            self._global_controller,
+            "session_temperature_readback",
+            self._record_temperature_readback,
+        )
+        self._connect_optional_signal(
+            self._global_controller,
+            "session_diagnostics_readback",
+            self._record_global_diagnostics,
+        )
         dock = self._make_dock("global_panel", "Global", self._global_controller)
         self._populate_dock_host(self._global_dock_host, [dock])
         layout = self._window.ui.layoutTabGlobal
@@ -341,6 +494,11 @@ class MainWindowController:
             self._coincidence_controller = CoincidenceController(
                 self._devices[:2], [mca_a, mca_b], self._global_controller
             )
+            self._connect_optional_signal(
+                self._coincidence_controller,
+                "session_state",
+                self._record_coincidence_state,
+            )
             self._window.ui.layoutTabCoincidence.addWidget(self._coincidence_controller)
 
     def _build_external_docks(
@@ -354,11 +512,25 @@ class MainWindowController:
         IIO digitizer connection. A device that doesn't respond (not present,
         or bus not bridged) is simply absent from the discovery results.
         """
-        if devices is None:
+        offline = getattr(self, "_offline", False)
+        if devices is None and offline:
+            devices = ()
+        elif devices is None:
             devices = self._external_devices.discover(self._host)
         docks: list[QDockWidget] = []
         for idx, device in enumerate(devices):
-            ctrl = ExternalDeviceController(device)
+            ctrl = (
+                ExternalDeviceController(device, auto_start=False)
+                if offline
+                else ExternalDeviceController(device)
+            )
+            self._connect_optional_signal(
+                ctrl,
+                "session_readback",
+                self._record_external_readback,
+            )
+            if getattr(self, "_replay_hardware_interlocked", False):
+                ctrl.set_replay_hardware_interlock(True)
             self._external_controllers.append(ctrl)
             label = f"{device.device_type.name.title()} #{device.device_id}"
             docks.append(self._make_dock(f"external_{idx}", label, ctrl))
@@ -371,9 +543,13 @@ class MainWindowController:
 
         tab_index = self._window.ui.mainTabs.indexOf(self._window.ui.tabExternal)
         self._window.ui.mainTabs.setTabEnabled(tab_index, bool(docks))
-        self._window.ui.tabExternal.setToolTip(
-            "" if docks else "No external Modbus modules were detected on the digitizer host."
-        )
+        if docks:
+            tooltip = ""
+        elif offline:
+            tooltip = "Recorded external modules appear when a replay bundle contains them."
+        else:
+            tooltip = "No external Modbus modules were detected on the digitizer host."
+        self._window.ui.tabExternal.setToolTip(tooltip)
 
     def scan_external_devices(self) -> ExternalDeviceScan:
         """Perform a full Modbus scan using a fresh connection owner.
@@ -382,6 +558,8 @@ class MainWindowController:
         thread. The result must later be adopted with
         :meth:`apply_external_device_scan` or explicitly closed.
         """
+        if getattr(self, "_offline", False):
+            raise RuntimeError("external-device discovery is unavailable in offline mode")
         return ExternalDevices.scan_new(self._host)
 
     def prepare_external_device_refresh(self) -> None:
@@ -626,6 +804,1164 @@ class MainWindowController:
             )
         self._mca_peak_analysis_dialog.show_workspace()
 
+    # ------------------------------------------------------------------
+    # Versioned session recording and analysis replay
+    # ------------------------------------------------------------------
+
+    @property
+    def session_recording(self) -> bool:
+        recorder = getattr(self, "_session_recorder", None)
+        return recorder is not None and recorder.is_recording
+
+    def start_session_recording(self, path: Path) -> Path:
+        """Passively record all data already observed by this application."""
+        if getattr(self, "_offline", False):
+            raise RuntimeError("session recording requires a live hardware connection")
+        if self.session_replay is not None:
+            raise RuntimeError("exit session replay before starting a recording")
+        if getattr(self, "_session_recorder", None) is not None:
+            raise RuntimeError("a session recording is already active")
+        recorder = SessionRecorder(
+            path,
+            self.configuration_document(),
+            mca_event_buffers=self._mca_event_buffers,
+            scope_frame_buffers=self._scope_frame_buffers,
+        )
+        self._session_recorder = recorder
+        coincidence = getattr(self, "_coincidence_controller", None)
+        if coincidence is not None and coincidence.active:
+            recorder.mark_integrity_issue("session_started_during_active_coincidence")
+            recorder.record_timeline(
+                "coincidence_observation",
+                "coincidence",
+                {"state": "already_active", "coverage": "partial"},
+            )
+        for controller in self._mca_controllers:
+            if not controller.set_session_capture_enabled(True):
+                recorder.mark_integrity_issue(
+                    f"mca_ch{controller.channel}_session_started_during_unobserved_dma"
+                )
+        recorder.record_command(
+            "application",
+            "start_session_recording",
+            {"path": str(path)},
+        )
+        log.info("Session recording started: %s", path)
+        return path
+
+    def stop_session_recording(self) -> Path | None:
+        recorder = self._session_recorder
+        if recorder is None:
+            return None
+        try:
+            try:
+                final_configuration = self.configuration_document()
+            except Exception:
+                log.exception("Capturing the final session configuration failed")
+                recorder.mark_integrity_issue("final_configuration_snapshot_failed")
+                final_configuration = None
+            recorder.record_command("application", "stop_session_recording")
+            path = recorder.stop(final_configuration=final_configuration)
+        finally:
+            for controller in self._mca_controllers:
+                controller.set_session_capture_enabled(False)
+            self._session_recorder = None
+        log.info("Session recording finalized: %s", path)
+        return path
+
+    def replay_session(self, path: Path) -> SessionReplay:
+        """Replay captured analysis inputs and monitored telemetry once."""
+        if self.session_recording:
+            raise RuntimeError("stop the active session recording before replay")
+        coincidence = getattr(self, "_coincidence_controller", None)
+        if coincidence is not None and coincidence.active:
+            raise RuntimeError("stop the coincidence measurement before replay")
+        replay = SessionReplay(path)
+        spectra = replay.replay_mca_spectra()
+        recorded_channels_reader = getattr(replay, "recorded_channels", None)
+        recorded_channels = (
+            recorded_channels_reader() if recorded_channels_reader is not None else []
+        )
+        if getattr(self, "_offline", False) and recorded_channels:
+            unavailable = sorted(
+                channel for channel in recorded_channels if channel >= self._channels
+            )
+            if unavailable:
+                required = max(unavailable) + 1
+                raise RuntimeError(
+                    "this session contains channel(s) unavailable in the offline "
+                    f"workspace ({', '.join(map(str, unavailable))}); restart Offline "
+                    f"Mode with at least {required} channels"
+                )
+        legacy_scope_frames: list[ScopeReplayFrame] | None = None
+        if getattr(replay, "iter_scope_frames", None) is None:
+            legacy_scope_frames = replay.scope_frames()
+        legacy_telemetry_events: list[TelemetryReplayEvent] | None = None
+        if getattr(replay, "iter_telemetry_events", None) is None:
+            telemetry_reader = getattr(replay, "telemetry_events", None)
+            legacy_telemetry_events = (
+                telemetry_reader() if telemetry_reader is not None else []
+            )
+        self.clear_session_replay()
+        self._session_replay = replay
+        self._session_replay_path = path
+        try:
+            origin_reader = getattr(replay, "replay_origin_ns", None)
+            if origin_reader is not None:
+                self._session_replay_origin_ns = origin_reader()
+            else:
+                value = replay.manifest.get("started_monotonic_ns", 0)
+                self._session_replay_origin_ns = (
+                    int(value)
+                    if isinstance(value, int) and not isinstance(value, bool)
+                    else 0
+                )
+            self._session_replay_started_ns = monotonic_ns()
+            self._set_replay_hardware_interlock(True)
+            if getattr(self, "_offline", False):
+                self._install_offline_external_replay_controllers(
+                    replay,
+                    legacy_telemetry_events,
+                )
+            if spectra:
+                if self._mca_peak_analysis_dialog is None:
+                    self._mca_peak_analysis_dialog = McaPeakAnalysisDialog(
+                        self._mca_controllers,
+                        parent=self._window,
+                    )
+                assert self._mca_peak_analysis_dialog is not None
+                self._mca_peak_analysis_dialog.add_spectra(spectra)
+            self._session_replay_spectrum_ids = {
+                spectrum.spectrum_id for spectrum in spectra
+            }
+            self._start_session_analysis_replay(replay)
+            self._start_session_scope_replay(replay, legacy_scope_frames)
+            self._start_session_current_replay(replay)
+            self._start_session_telemetry_replay(replay, legacy_telemetry_events)
+        except Exception:
+            self.clear_session_replay()
+            raise
+        scope_count = sum(self._session_scope_replay_frame_counts.values())
+        telemetry_count = len(self._session_telemetry_replay_events)
+        log.info(
+            "Session replay loaded: %s (%d MCA spectra, %d Scope frames, "
+            "%s telemetry updates, integrity=%s)",
+            path,
+            len(spectra),
+            scope_count,
+            telemetry_count if legacy_telemetry_events is not None else "streamed",
+            replay.integrity,
+        )
+        return replay
+
+    def _set_replay_hardware_interlock(
+        self,
+        enabled: bool,
+        *,
+        resume_background: bool = True,
+    ) -> None:
+        """Apply one app-wide hardware-write boundary for session replay."""
+        enabled = bool(enabled) or getattr(self, "_offline", False)
+        if enabled == getattr(self, "_replay_hardware_interlocked", False):
+            return
+        targets: list[object] = []
+        coincidence = getattr(self, "_coincidence_controller", None)
+        if coincidence is not None:
+            targets.append(coincidence)
+        targets.extend(getattr(self, "_current_monitor_controllers", []))
+        targets.extend(getattr(self, "_scope_controllers", []))
+        targets.extend(getattr(self, "_mca_controllers", []))
+        global_controller = getattr(self, "_global_controller", None)
+        if global_controller is not None:
+            targets.append(global_controller)
+        psu_controllers = getattr(self, "_psu_controllers", [])
+        external_controllers = getattr(self, "_external_controllers", [])
+        targets.extend(psu_controllers)
+        targets.extend(external_controllers)
+        background_targets = {
+            id(target)
+            for target in [global_controller, *psu_controllers, *external_controllers]
+            if target is not None
+        }
+
+        applied: list[object] = []
+        try:
+            for target in targets:
+                setter = getattr(target, "set_replay_hardware_interlock", None)
+                if setter is not None:
+                    if id(target) in background_targets:
+                        setter(enabled, resume_background=resume_background)
+                    else:
+                        setter(enabled)
+                    applied.append(target)
+        except Exception:
+            for target in reversed(applied):
+                setter = getattr(target, "set_replay_hardware_interlock", None)
+                if setter is not None:
+                    try:
+                        if id(target) in background_targets:
+                            setter(not enabled, resume_background=False)
+                        else:
+                            setter(not enabled)
+                    except Exception:
+                        log.exception("Failed to roll back replay hardware interlock")
+            raise
+        self._replay_hardware_interlocked = enabled
+
+    def _install_offline_external_replay_controllers(
+        self,
+        replay: SessionReplay,
+        events: list[TelemetryReplayEvent] | None = None,
+    ) -> None:
+        """Build read-only external-module panels from a replay's recorded schema."""
+        latest_values: dict[str, dict[str, object]] = {}
+        if events is None:
+            latest_reader = getattr(replay, "latest_telemetry_events", None)
+            latest_events = (
+                latest_reader().values() if latest_reader is not None else []
+            )
+        else:
+            latest_events = events
+        for event in latest_events:
+            if not event.source.startswith("external."):
+                continue
+            configuration_id = event.source.removeprefix("external.")
+            values = event.payload.get("values")
+            if not isinstance(values, dict):
+                continue
+            destination = latest_values.setdefault(configuration_id, {})
+            destination.update(
+                {
+                    str(name): value
+                    for name, value in values.items()
+                    if isinstance(name, str)
+                }
+            )
+        configuration = replay.configuration_snapshot()
+        hardware = configuration.get("hardware")
+        hardware = hardware if isinstance(hardware, dict) else {}
+        external_hardware = hardware.get("external_devices")
+        external_hardware = external_hardware if isinstance(external_hardware, dict) else {}
+        application = configuration.get("application")
+        application = application if isinstance(application, dict) else {}
+        external_application = application.get("external_devices")
+        external_application = (
+            external_application if isinstance(external_application, dict) else {}
+        )
+        external_schemas = application.get("external_device_schemas")
+        external_schemas = (
+            external_schemas if isinstance(external_schemas, dict) else {}
+        )
+
+        devices = []
+        configuration_ids = (
+            set(latest_values) | set(external_hardware) | set(external_schemas)
+        )
+        for configuration_id in sorted(configuration_ids):
+            if not isinstance(configuration_id, str):
+                continue
+            values = latest_values.get(configuration_id, {})
+            recorded_holding = external_hardware.get(configuration_id)
+            recorded_holding = (
+                recorded_holding if isinstance(recorded_holding, dict) else {}
+            )
+            holding_values: dict[str, int | float] = {}
+            for name, value in recorded_holding.items():
+                if not isinstance(name, str) or not isinstance(value, int | float):
+                    continue
+                holding_values[name] = int(value) if isinstance(value, bool) else value
+            schema = external_schemas.get(configuration_id)
+            if schema is None:
+                devices.append(
+                    create_offline_external_device(
+                        configuration_id,
+                        holding_values,
+                        values,
+                    )
+                )
+            else:
+                devices.append(
+                    create_offline_external_device(
+                        configuration_id,
+                        holding_values,
+                        values,
+                        schema,
+                    )
+                )
+        self._build_external_docks(devices)
+        for controller in self._external_controllers:
+            controller.apply_configuration_settings(
+                external_application.get(controller.configuration_id)
+            )
+
+    def _ensure_session_replay_clock(
+        self,
+        replay: SessionReplay,
+        first_timestamp_ns: int,
+    ) -> tuple[int, int]:
+        """Create one wall-clock mapping shared by every replay subsystem."""
+        started = getattr(self, "_session_replay_started_ns", 0)
+        origin = getattr(self, "_session_replay_origin_ns", 0)
+        if started:
+            return origin, started
+        manifest_origin = replay.manifest.get("started_monotonic_ns")
+        origin = (
+            int(manifest_origin)
+            if isinstance(manifest_origin, int)
+            and not isinstance(manifest_origin, bool)
+            and 0 <= manifest_origin <= first_timestamp_ns
+            else first_timestamp_ns
+        )
+        started = monotonic_ns()
+        self._session_replay_origin_ns = origin
+        self._session_replay_started_ns = started
+        return origin, started
+
+    @staticmethod
+    def _close_replay_iterator(iterator: object) -> None:
+        close = getattr(iterator, "close", None)
+        if close is not None:
+            close()
+
+    def _start_session_analysis_replay(self, replay: SessionReplay) -> None:
+        """Replay MCA polls and list-mode batches over their captured timeline."""
+        mca_controllers = {
+            controller.channel: controller
+            for controller in getattr(self, "_mca_controllers", [])
+        }
+        psd_controllers = getattr(self, "_psd_controllers", [])
+        coincidence = getattr(self, "_coincidence_controller", None)
+        if not mca_controllers and not psd_controllers and coincidence is None:
+            return
+        readback_channel_reader = getattr(replay, "mca_readback_channels", None)
+        event_channel_reader = getattr(replay, "mca_event_channels", None)
+        legacy_readbacks: list[McaReplayReadback] | None = None
+        legacy_batches: list[McaReplayBatch] | None = None
+        if readback_channel_reader is not None:
+            readback_channels = set(readback_channel_reader())
+        else:
+            legacy_readbacks = replay.mca_readbacks()
+            readback_channels = {item.channel for item in legacy_readbacks}
+        if event_channel_reader is not None:
+            event_channels = set(event_channel_reader())
+        else:
+            legacy_batches = replay.mca_event_batches()
+            event_channels = {item.channel for item in legacy_batches}
+        configuration = replay.configuration_snapshot()
+        application = configuration.get("application")
+        application = application if isinstance(application, dict) else {}
+        channel_settings = application.get("channels")
+        channel_settings = channel_settings if isinstance(channel_settings, dict) else {}
+        hardware = configuration.get("hardware")
+        hardware = hardware if isinstance(hardware, dict) else {}
+        hardware_channels = hardware.get("channels")
+        hardware_channels = hardware_channels if isinstance(hardware_channels, dict) else {}
+
+        replayed_mca_channels = readback_channels & set(mca_controllers)
+        for channel in replayed_mca_channels:
+            mca_controllers[channel].begin_session_replay()
+        self._session_analysis_replay_mca_channels = replayed_mca_channels
+
+        replayed_psd: set[int] = set()
+        for controller in psd_controllers:
+            channel = controller.channel
+            if channel not in event_channels:
+                continue
+            hardware_channel = hardware_channels.get(str(channel), {})
+            hardware_channel = hardware_channel if isinstance(hardware_channel, dict) else {}
+            mca_hardware = hardware_channel.get("mca", {})
+            mca_hardware = mca_hardware if isinstance(mca_hardware, dict) else {}
+            charge_comparison = mca_hardware.get("charge_comparison", {})
+            if (
+                isinstance(charge_comparison, dict)
+                and charge_comparison.get("enable") is False
+            ):
+                continue
+            saved_channel = channel_settings.get(str(channel), {})
+            saved_channel = saved_channel if isinstance(saved_channel, dict) else {}
+            try:
+                controller.begin_session_replay(
+                    settings=saved_channel.get("psd"),
+                )
+            except Exception:
+                log.exception("PSD session replay failed for channel %d", channel)
+            else:
+                replayed_psd.add(channel)
+        self._session_replay_psd_channels = replayed_psd
+
+        ordered_mca = getattr(self, "_mca_controllers", [])
+        coincidence_channels: dict[int, int] = {}
+        interval_reader = getattr(replay, "coincidence_intervals", None)
+        coincidence_intervals = interval_reader() if interval_reader is not None else []
+        explicit_timing_reader = getattr(replay, "has_explicit_mca_batch_timing", None)
+        explicit_timing = (
+            explicit_timing_reader() if explicit_timing_reader is not None else False
+        )
+        allow_coincidence = bool(coincidence_intervals) or not explicit_timing
+        if coincidence is not None and len(ordered_mca) >= 2 and allow_coincidence:
+            channels = (ordered_mca[0].channel, ordered_mca[1].channel)
+            if set(channels).issubset(event_channels):
+                try:
+                    settings, display_settings = replay.coincidence_settings(channels)
+                    coincidence.begin_session_replay(settings, display_settings)
+                except Exception as exc:
+                    log.warning(
+                        "Coincidence session replay is unavailable: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    status = getattr(coincidence, "status", None)
+                    if status is not None:
+                        status.setText(f"Session coincidence replay unavailable: {exc}")
+                else:
+                    self._session_replay_coincidence_active = True
+                    coincidence_channels = {channels[0]: 0, channels[1]: 1}
+        self._session_analysis_replay_coincidence_channels = coincidence_channels
+        self._session_analysis_replay_coincidence_intervals = (
+            coincidence_intervals if explicit_timing else None
+        )
+
+        used_batch_channels = replayed_psd | set(coincidence_channels)
+        readback_iterator_reader = getattr(replay, "iter_mca_readbacks", None)
+        batch_iterator_reader = getattr(replay, "iter_mca_event_batches", None)
+        if readback_iterator_reader is not None:
+            readback_iterator = readback_iterator_reader(
+                channels=replayed_mca_channels,
+            )
+        else:
+            assert legacy_readbacks is not None
+            readback_iterator = iter(
+                item
+                for item in legacy_readbacks
+                if item.channel in replayed_mca_channels
+            )
+        if batch_iterator_reader is not None:
+            batch_iterator = batch_iterator_reader(channels=used_batch_channels)
+        else:
+            assert legacy_batches is not None
+            batch_iterator = iter(
+                item for item in legacy_batches if item.channel in used_batch_channels
+            )
+        def replay_key(
+            item: McaReplayBatch | McaReplayReadback,
+        ) -> tuple[int, int, int, int]:
+            return (
+                item.host_monotonic_ns,
+                0 if isinstance(item, McaReplayBatch) else 1,
+                item.channel,
+                item.sequence,
+            )
+
+        iterator = heapq.merge(readback_iterator, batch_iterator, key=replay_key)
+        first = next(iterator, None)
+        if first is None:
+            return
+        origin, started = self._ensure_session_replay_clock(
+            replay,
+            first.host_monotonic_ns,
+        )
+        self._session_analysis_replay_events = []
+        self._session_analysis_replay_iterator = iterator
+        self._session_analysis_replay_next = first
+        self._session_analysis_replay_index = 0
+        self._session_analysis_replay_origin_ns = origin
+        self._session_analysis_replay_started_ns = started
+        self._advance_session_analysis_replay()
+
+    def _advance_session_analysis_replay(self) -> None:
+        event = getattr(self, "_session_analysis_replay_next", None)
+        iterator = getattr(self, "_session_analysis_replay_iterator", None)
+        if event is None:
+            legacy_events = getattr(self, "_session_analysis_replay_events", [])
+            legacy_index = getattr(self, "_session_analysis_replay_index", 0)
+            if legacy_index < len(legacy_events):
+                event = legacy_events[legacy_index]
+                iterator = iter(legacy_events[legacy_index + 1 :])
+                self._session_analysis_replay_iterator = iterator
+        if getattr(self, "_session_replay", None) is None or event is None:
+            return
+        elapsed_ns = max(0, monotonic_ns() - self._session_analysis_replay_started_ns)
+        mca_controllers = {
+            controller.channel: controller
+            for controller in getattr(self, "_mca_controllers", [])
+        }
+        psd_controllers = {
+            controller.channel: controller
+            for controller in getattr(self, "_psd_controllers", [])
+            if controller.channel in self._session_replay_psd_channels
+        }
+        coincidence = getattr(self, "_coincidence_controller", None)
+        latest_readback: dict[int, McaReplayReadback] = {}
+        processed = 0
+        while event is not None and processed < _REPLAY_ANALYSIS_EVENTS_PER_TICK:
+            recorded_elapsed_ns = max(
+                0,
+                event.host_monotonic_ns - self._session_analysis_replay_origin_ns,
+            )
+            if recorded_elapsed_ns > elapsed_ns:
+                break
+            if isinstance(event, McaReplayReadback):
+                latest_readback[event.channel] = event
+            else:
+                psd = psd_controllers.get(event.channel)
+                if psd is not None:
+                    try:
+                        psd.display_session_replay_events(event.events)
+                    except Exception:
+                        log.exception("PSD replay batch failed for channel %d", event.channel)
+                coincidence_channel = self._session_analysis_replay_coincidence_channels.get(
+                    event.channel
+                )
+                intervals = getattr(
+                    self,
+                    "_session_analysis_replay_coincidence_intervals",
+                    None,
+                )
+                inside_coincidence = intervals is None or any(
+                    start <= event.host_monotonic_ns
+                    and (end is None or event.host_monotonic_ns <= end)
+                    for start, end in intervals
+                )
+                if (
+                    coincidence is not None
+                    and coincidence_channel is not None
+                    and inside_coincidence
+                ):
+                    try:
+                        coincidence.display_session_replay_events(
+                            coincidence_channel,
+                            event.events,
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "Progressive coincidence replay failed: %s",
+                            exc,
+                            exc_info=True,
+                        )
+                        self._session_analysis_replay_coincidence_channels = {}
+                        status = getattr(coincidence, "status", None)
+                        if status is not None:
+                            status.setText(f"Session coincidence replay unavailable: {exc}")
+            self._session_analysis_replay_index += 1
+            processed += 1
+            event = next(iterator, None) if iterator is not None else None
+        self._session_analysis_replay_next = event
+        for channel, readback in latest_readback.items():
+            controller = mca_controllers.get(channel)
+            if controller is not None:
+                controller.display_session_replay_readback(readback.readback)
+
+        if event is None:
+            for channel in self._session_analysis_replay_mca_channels:
+                controller = mca_controllers.get(channel)
+                if controller is not None:
+                    controller.finish_session_replay()
+            for controller in psd_controllers.values():
+                controller.finish_session_replay()
+            if coincidence is not None and self._session_replay_coincidence_active:
+                try:
+                    coincidence.finish_session_replay()
+                except Exception as exc:
+                    log.warning("Finalizing coincidence replay failed: %s", exc, exc_info=True)
+            log.info("MCA/PSD/coincidence session replay reached EOF; final views are held")
+            return
+
+        next_elapsed_ns = max(
+            0,
+            event.host_monotonic_ns - self._session_analysis_replay_origin_ns,
+        )
+        remaining_ns = max(0, next_elapsed_ns - elapsed_ns)
+        delay_ms = max(1, (remaining_ns + 999_999) // 1_000_000)
+        self._session_analysis_replay_timer.start(min(delay_ms, 2_147_000_000))
+
+    def _start_session_scope_replay(
+        self,
+        replay: SessionReplay,
+        frames: list[ScopeReplayFrame] | None = None,
+    ) -> None:
+        controllers = {
+            controller.channel: controller for controller in self._scope_controllers
+        }
+        frame_counts: dict[int, int]
+        if frames is None:
+            summary = replay.scope_summary()
+            frame_counts = {
+                channel: count
+                for channel, count in summary.counts.items()
+                if channel in controllers
+            }
+            missing = sorted(set(summary.counts) - controllers.keys())
+            iterator = replay.iter_scope_frames(channels=frame_counts)
+            last_timestamp = summary.last_timestamp_ns
+        else:
+            playable = [frame for frame in frames if frame.channel in controllers]
+            playable.sort(
+                key=lambda frame: (
+                    frame.host_monotonic_ns,
+                    frame.channel,
+                    frame.sequence,
+                )
+            )
+            frame_counts = {}
+            for frame in playable:
+                frame_counts[frame.channel] = frame_counts.get(frame.channel, 0) + 1
+            missing = sorted({frame.channel for frame in frames} - controllers.keys())
+            iterator = iter(playable)
+            last_timestamp = playable[-1].host_monotonic_ns if playable else None
+        if missing:
+            log.warning(
+                "Session has Scope replay data for unavailable channel(s): %s",
+                ", ".join(str(channel) for channel in missing),
+            )
+        if not frame_counts:
+            return
+        first = next(iterator, None)
+        if first is None:
+            return
+        origin, started = self._ensure_session_replay_clock(
+            replay,
+            first.host_monotonic_ns,
+        )
+        channels = set(frame_counts)
+        duration_ns = max(0, (last_timestamp or first.host_monotonic_ns) - origin)
+
+        self._session_scope_replay_frames = []
+        self._session_scope_replay_iterator = iterator
+        self._session_scope_replay_next = first
+        self._session_scope_replay_index = 0
+        self._session_scope_replay_origin_ns = origin
+        self._session_scope_replay_started_ns = started
+        self._session_scope_replay_duration_ns = duration_ns
+        self._session_scope_replay_channels = channels
+        self._session_scope_replay_frame_counts = frame_counts
+        self._session_scope_replay_delivered = dict.fromkeys(channels, 0)
+        for channel in sorted(channels):
+            controllers[channel].begin_session_replay(
+                frame_count=frame_counts[channel],
+                duration_ns=duration_ns,
+            )
+
+        self._advance_session_scope_replay()
+
+    def _advance_session_scope_replay(self) -> None:
+        frame = getattr(self, "_session_scope_replay_next", None)
+        iterator = getattr(self, "_session_scope_replay_iterator", None)
+        if self._session_replay is None or frame is None:
+            return
+        elapsed_ns = max(0, monotonic_ns() - self._session_scope_replay_started_ns)
+        due_by_channel: dict[int, ScopeReplayFrame] = {}
+        processed = 0
+        while frame is not None and processed < _REPLAY_SCOPE_FRAMES_PER_TICK:
+            recorded_elapsed_ns = max(
+                0,
+                frame.host_monotonic_ns - self._session_scope_replay_origin_ns,
+            )
+            if recorded_elapsed_ns > elapsed_ns:
+                break
+            due_by_channel[frame.channel] = frame
+            self._session_scope_replay_delivered[frame.channel] += 1
+            self._session_scope_replay_index += 1
+            processed += 1
+            frame = next(iterator, None) if iterator is not None else None
+        self._session_scope_replay_next = frame
+
+        controllers = {
+            controller.channel: controller for controller in self._scope_controllers
+        }
+        duration_ns = self._session_scope_replay_duration_ns
+        for channel, displayed_frame in due_by_channel.items():
+            controller = controllers.get(channel)
+            if controller is None:
+                continue
+            controller.display_session_replay_frame(
+                displayed_frame.samples,
+                sample_period_ns=displayed_frame.sample_period_ns,
+                frame_index=self._session_scope_replay_delivered[channel],
+                frame_count=self._session_scope_replay_frame_counts[channel],
+                elapsed_ns=max(
+                    0,
+                    displayed_frame.host_monotonic_ns
+                    - self._session_scope_replay_origin_ns,
+                ),
+                duration_ns=duration_ns,
+                source=displayed_frame.source,
+            )
+
+        if frame is None:
+            for channel in sorted(self._session_scope_replay_channels):
+                controller = controllers.get(channel)
+                if controller is not None:
+                    controller.finish_session_replay(
+                        frame_count=self._session_scope_replay_frame_counts[channel],
+                        duration_ns=duration_ns,
+                    )
+            log.info("Scope session replay reached EOF; final frames are held")
+            return
+
+        next_elapsed_ns = max(
+            0,
+            frame.host_monotonic_ns - self._session_scope_replay_origin_ns,
+        )
+        remaining_ns = max(0, next_elapsed_ns - elapsed_ns)
+        delay_ms = max(1, (remaining_ns + 999_999) // 1_000_000)
+        self._session_scope_replay_timer.start(min(delay_ms, 2_147_000_000))
+
+    def _start_session_current_replay(self, replay: SessionReplay) -> None:
+        summary_reader = getattr(replay, "current_summary", None)
+        iterator_reader = getattr(replay, "iter_current_samples", None)
+        if summary_reader is None or iterator_reader is None:
+            return
+        controllers = {
+            controller.channel: controller
+            for controller in getattr(self, "_current_monitor_controllers", [])
+        }
+        summary = summary_reader()
+        channels = set(summary.counts) & set(controllers)
+        if not channels:
+            return
+        configuration = replay.configuration_snapshot()
+        application = configuration.get("application")
+        application = application if isinstance(application, dict) else {}
+        channel_settings = application.get("channels")
+        channel_settings = channel_settings if isinstance(channel_settings, dict) else {}
+        for channel in sorted(channels):
+            saved_channel = channel_settings.get(str(channel), {})
+            saved_channel = saved_channel if isinstance(saved_channel, dict) else {}
+            controllers[channel].begin_session_replay(
+                settings=saved_channel.get("current_monitor"),
+                dropped_samples=replay.current_dropped_samples(channel),
+            )
+        iterator = iterator_reader(channels=channels)
+        first = next(iterator, None)
+        if first is None:
+            return
+        origin, _started = self._ensure_session_replay_clock(
+            replay,
+            first.host_monotonic_ns,
+        )
+        self._session_current_replay_channels = channels
+        self._session_current_replay_iterator = iterator
+        self._session_current_replay_next = first
+        self._session_replay_origin_ns = origin
+        self._advance_session_current_replay()
+
+    def _advance_session_current_replay(self) -> None:
+        item = getattr(self, "_session_current_replay_next", None)
+        iterator = getattr(self, "_session_current_replay_iterator", None)
+        if self._session_replay is None or item is None:
+            return
+        elapsed_ns = max(0, monotonic_ns() - self._session_replay_started_ns)
+        controllers = {
+            controller.channel: controller
+            for controller in getattr(self, "_current_monitor_controllers", [])
+        }
+        due: dict[int, list[Any]] = {}
+        processed = 0
+        while item is not None and processed < _REPLAY_CURRENT_SAMPLES_PER_TICK:
+            recorded_elapsed_ns = max(
+                0,
+                item.host_monotonic_ns - self._session_replay_origin_ns,
+            )
+            if recorded_elapsed_ns > elapsed_ns:
+                break
+            due.setdefault(item.channel, []).append(item.sample)
+            processed += 1
+            item = next(iterator, None) if iterator is not None else None
+        self._session_current_replay_next = item
+        for channel, samples in due.items():
+            controller = controllers.get(channel)
+            if controller is not None:
+                controller.display_session_replay_samples(tuple(samples))
+        if item is None:
+            for channel in self._session_current_replay_channels:
+                controller = controllers.get(channel)
+                if controller is not None:
+                    controller.finish_session_replay()
+            log.info("Current-monitor session replay reached EOF; final views are held")
+            return
+        next_elapsed_ns = max(
+            0,
+            item.host_monotonic_ns - self._session_replay_origin_ns,
+        )
+        remaining_ns = max(0, next_elapsed_ns - elapsed_ns)
+        delay_ms = max(1, (remaining_ns + 999_999) // 1_000_000)
+        self._session_current_replay_timer.start(min(delay_ms, 2_147_000_000))
+
+    def _psu_replay_controllers(self) -> dict[int, PSUController]:
+        result: dict[int, PSUController] = {}
+        for device_index, controller in getattr(
+            self,
+            "_psu_controller_by_device",
+            {},
+        ).items():
+            result[self._display_channel(device_index)] = controller
+        return result
+
+    def _start_session_telemetry_replay(
+        self,
+        replay: SessionReplay,
+        events: list[TelemetryReplayEvent] | None = None,
+    ) -> None:
+        psu_controllers = self._psu_replay_controllers()
+        external_controllers = {
+            controller.configuration_id: controller
+            for controller in getattr(self, "_external_controllers", [])
+        }
+        psu_channels: set[int] = set()
+        external_ids: set[str] = set()
+        global_controller = getattr(self, "_global_controller", None)
+        global_sources = {
+            "global.temperature_correction",
+            "global.diagnostics",
+        }
+        if events is None:
+            latest_reader = getattr(replay, "latest_telemetry_events", None)
+            latest = latest_reader() if latest_reader is not None else {}
+            available_sources = set(latest)
+        else:
+            available_sources = {event.source for event in events}
+        playable_sources: set[str] = set()
+        for source in available_sources:
+            if source.startswith("psu.ch"):
+                try:
+                    channel = int(source.removeprefix("psu.ch"))
+                except ValueError:
+                    continue
+                if channel in psu_controllers:
+                    playable_sources.add(source)
+                    psu_channels.add(channel)
+            elif source.startswith("external."):
+                configuration_id = source.removeprefix("external.")
+                if configuration_id in external_controllers:
+                    playable_sources.add(source)
+                    external_ids.add(configuration_id)
+            elif source in global_sources and global_controller is not None:
+                playable_sources.add(source)
+        if not playable_sources:
+            return
+        if events is None:
+            iterator = replay.iter_telemetry_events(sources=playable_sources)
+            self._session_telemetry_replay_events = []
+        else:
+            playable = [event for event in events if event.source in playable_sources]
+            playable.sort(key=lambda event: (event.host_monotonic_ns, event.sequence))
+            iterator = iter(playable)
+            self._session_telemetry_replay_events = playable
+        first = next(iterator, None)
+        if first is None:
+            return
+        origin, started = self._ensure_session_replay_clock(
+            replay,
+            first.host_monotonic_ns,
+        )
+        self._session_telemetry_replay_iterator = iterator
+        self._session_telemetry_replay_next = first
+        self._session_telemetry_replay_index = 0
+        self._session_telemetry_replay_origin_ns = origin
+        self._session_telemetry_replay_started_ns = started
+        self._session_telemetry_replay_psu_channels = psu_channels
+        self._session_telemetry_replay_external_ids = external_ids
+        self._session_telemetry_replay_global_active = bool(
+            playable_sources & global_sources
+        )
+        for channel in psu_channels:
+            psu_controllers[channel].begin_session_replay()
+        for configuration_id in external_ids:
+            external_controllers[configuration_id].begin_session_replay()
+        if global_controller is not None and self._session_telemetry_replay_global_active:
+            global_controller.begin_session_replay()
+        self._advance_session_telemetry_replay()
+
+    def _advance_session_telemetry_replay(self) -> None:
+        event = getattr(self, "_session_telemetry_replay_next", None)
+        iterator = getattr(self, "_session_telemetry_replay_iterator", None)
+        if self._session_replay is None or event is None:
+            return
+        elapsed_ns = max(0, monotonic_ns() - self._session_telemetry_replay_started_ns)
+        psu_controllers = self._psu_replay_controllers()
+        external_controllers = {
+            controller.configuration_id: controller
+            for controller in getattr(self, "_external_controllers", [])
+        }
+        global_controller = getattr(self, "_global_controller", None)
+        processed = 0
+        while event is not None and processed < _REPLAY_TELEMETRY_EVENTS_PER_TICK:
+            recorded_elapsed_ns = max(
+                0,
+                event.host_monotonic_ns - self._session_telemetry_replay_origin_ns,
+            )
+            if recorded_elapsed_ns > elapsed_ns:
+                break
+            if event.source.startswith("psu.ch"):
+                channel = int(event.source.removeprefix("psu.ch"))
+                controller = psu_controllers.get(channel)
+                readback = event.payload.get("readback")
+                if controller is not None and isinstance(readback, dict):
+                    controller.display_session_replay_readback(readback)
+            elif event.source.startswith("external."):
+                configuration_id = event.source.removeprefix("external.")
+                controller = external_controllers.get(configuration_id)
+                timestamp = event.payload.get("worker_timestamp")
+                values = event.payload.get("values")
+                if controller is not None and isinstance(timestamp, int | float):
+                    controller.display_session_replay_readback(float(timestamp), values)
+            elif event.source == "global.temperature_correction":
+                readback = event.payload.get("readback")
+                if global_controller is not None:
+                    global_controller.display_session_replay_temperature(readback)
+            elif event.source == "global.diagnostics":
+                readings = event.payload.get("readings")
+                if global_controller is not None:
+                    global_controller.display_session_replay_diagnostics(readings)
+            self._session_telemetry_replay_index += 1
+            processed += 1
+            event = next(iterator, None) if iterator is not None else None
+        self._session_telemetry_replay_next = event
+        if event is None:
+            if (
+                global_controller is not None
+                and self._session_telemetry_replay_global_active
+            ):
+                global_controller.finish_session_replay()
+            log.info("Session telemetry replay reached EOF; final readbacks are held")
+            return
+        next_elapsed_ns = max(
+            0,
+            event.host_monotonic_ns - self._session_telemetry_replay_origin_ns,
+        )
+        remaining_ns = max(0, next_elapsed_ns - elapsed_ns)
+        delay_ms = max(1, (remaining_ns + 999_999) // 1_000_000)
+        self._session_telemetry_replay_timer.start(min(delay_ms, 2_147_000_000))
+
+    @property
+    def session_replay(self) -> SessionReplay | None:
+        return getattr(self, "_session_replay", None)
+
+    @property
+    def session_replay_path(self) -> Path | None:
+        return getattr(self, "_session_replay_path", None)
+
+    def clear_session_replay(self, *, resume_background: bool = True) -> None:
+        """Leave replay mode without resuming any stopped live acquisition."""
+        timer = getattr(self, "_session_scope_replay_timer", None)
+        if timer is not None:
+            timer.stop()
+        analysis_timer = getattr(self, "_session_analysis_replay_timer", None)
+        if analysis_timer is not None:
+            analysis_timer.stop()
+        telemetry_timer = getattr(self, "_session_telemetry_replay_timer", None)
+        if telemetry_timer is not None:
+            telemetry_timer.stop()
+        current_timer = getattr(self, "_session_current_replay_timer", None)
+        if current_timer is not None:
+            current_timer.stop()
+        for iterator_name in (
+            "_session_analysis_replay_iterator",
+            "_session_scope_replay_iterator",
+            "_session_current_replay_iterator",
+            "_session_telemetry_replay_iterator",
+        ):
+            self._close_replay_iterator(getattr(self, iterator_name, None))
+        replay_channels: set[int] = getattr(
+            self,
+            "_session_scope_replay_channels",
+            set(),
+        )
+        for controller in getattr(self, "_scope_controllers", []):
+            if controller.channel in replay_channels:
+                try:
+                    controller.end_session_replay()
+                except Exception:
+                    log.exception(
+                        "Failed to leave Scope replay on channel %d",
+                        controller.channel,
+                    )
+        current_channels: set[int] = getattr(
+            self,
+            "_session_current_replay_channels",
+            set(),
+        )
+        for controller in getattr(self, "_current_monitor_controllers", []):
+            if controller.channel in current_channels:
+                try:
+                    controller.end_session_replay()
+                except Exception:
+                    log.exception(
+                        "Failed to leave Current replay on channel %d",
+                        controller.channel,
+                    )
+        mca_channels: set[int] = getattr(
+            self,
+            "_session_analysis_replay_mca_channels",
+            set(),
+        )
+        for controller in getattr(self, "_mca_controllers", []):
+            if controller.channel in mca_channels:
+                try:
+                    controller.end_session_replay()
+                except Exception:
+                    log.exception("Failed to leave MCA replay on channel %d", controller.channel)
+        psd_channels: set[int] = getattr(self, "_session_replay_psd_channels", set())
+        for controller in getattr(self, "_psd_controllers", []):
+            if controller.channel in psd_channels:
+                try:
+                    controller.end_session_replay()
+                except Exception:
+                    log.exception("Failed to leave PSD replay on channel %d", controller.channel)
+        coincidence = getattr(self, "_coincidence_controller", None)
+        if coincidence is not None and getattr(
+            self,
+            "_session_replay_coincidence_active",
+            False,
+        ):
+            try:
+                coincidence.end_session_replay()
+            except Exception:
+                log.exception("Failed to leave coincidence replay")
+        psu_controllers = self._psu_replay_controllers()
+        for channel in getattr(self, "_session_telemetry_replay_psu_channels", set()):
+            controller = psu_controllers.get(channel)
+            if controller is not None:
+                controller.end_session_replay()
+        external_controllers = {
+            controller.configuration_id: controller
+            for controller in getattr(self, "_external_controllers", [])
+        }
+        for configuration_id in getattr(
+            self,
+            "_session_telemetry_replay_external_ids",
+            set(),
+        ):
+            controller = external_controllers.get(configuration_id)
+            if controller is not None:
+                controller.end_session_replay()
+        global_controller = getattr(self, "_global_controller", None)
+        if global_controller is not None and getattr(
+            self,
+            "_session_telemetry_replay_global_active",
+            False,
+        ):
+            global_controller.end_session_replay()
+        spectrum_ids: set[str] = getattr(
+            self,
+            "_session_replay_spectrum_ids",
+            set(),
+        )
+        dialog = getattr(self, "_mca_peak_analysis_dialog", None)
+        if dialog is not None and spectrum_ids:
+            dialog.remove_spectra(spectrum_ids)
+        self._session_replay = None
+        self._session_replay_path = None
+        self._session_replay_spectrum_ids = set()
+        self._session_replay_origin_ns = 0
+        self._session_replay_started_ns = 0
+        self._session_replay_psd_channels = set()
+        self._session_replay_coincidence_active = False
+        self._session_analysis_replay_events = []
+        self._session_analysis_replay_iterator = None
+        self._session_analysis_replay_next = None
+        self._session_analysis_replay_index = 0
+        self._session_analysis_replay_origin_ns = 0
+        self._session_analysis_replay_started_ns = 0
+        self._session_analysis_replay_mca_channels = set()
+        self._session_analysis_replay_coincidence_channels = {}
+        self._session_analysis_replay_coincidence_intervals = None
+        self._session_scope_replay_frames = []
+        self._session_scope_replay_iterator = None
+        self._session_scope_replay_next = None
+        self._session_scope_replay_duration_ns = 0
+        self._session_scope_replay_index = 0
+        self._session_scope_replay_origin_ns = 0
+        self._session_scope_replay_started_ns = 0
+        self._session_scope_replay_channels = set()
+        self._session_scope_replay_frame_counts = {}
+        self._session_scope_replay_delivered = {}
+        self._session_current_replay_iterator = None
+        self._session_current_replay_next = None
+        self._session_current_replay_channels = set()
+        self._session_telemetry_replay_events = []
+        self._session_telemetry_replay_iterator = None
+        self._session_telemetry_replay_next = None
+        self._session_telemetry_replay_index = 0
+        self._session_telemetry_replay_origin_ns = 0
+        self._session_telemetry_replay_started_ns = 0
+        self._session_telemetry_replay_psu_channels = set()
+        self._session_telemetry_replay_external_ids = set()
+        self._session_telemetry_replay_global_active = False
+        if getattr(self, "_offline", False) and getattr(
+            self, "_external_controllers", []
+        ):
+            self._clear_external_docks()
+        self._set_replay_hardware_interlock(
+            False,
+            resume_background=resume_background,
+        )
+
+    def _record_mca_readback(self, channel: int, readback: object) -> None:
+        recorder = self._session_recorder
+        if recorder is not None:
+            recorder.record_mca_readback(channel, readback)
+
+    def _record_scope_viewer_frame(
+        self,
+        channel: int,
+        samples: object,
+        sample_period_ns: int,
+    ) -> None:
+        recorder = self._session_recorder
+        if recorder is not None:
+            recorder.record_scope_viewer(
+                channel,
+                samples,
+                sample_period_ns=sample_period_ns,
+            )
+
+    def _record_current_samples(self, channel: int, batch: object) -> None:
+        recorder = self._session_recorder
+        if recorder is not None:
+            recorder.record_current_samples(channel, batch)
+
+    def _record_psu_readback(self, channel: int, readback: object) -> None:
+        recorder = self._session_recorder
+        if recorder is not None:
+            recorder.record_telemetry(f"psu.ch{channel}", {"readback": readback})
+
+    def _record_temperature_readback(self, readback: object) -> None:
+        recorder = self._session_recorder
+        if recorder is not None:
+            recorder.record_telemetry(
+                "global.temperature_correction",
+                {"readback": readback},
+            )
+
+    def _record_global_diagnostics(self, readings: object) -> None:
+        recorder = self._session_recorder
+        if recorder is not None:
+            recorder.record_telemetry("global.diagnostics", {"readings": readings})
+
+    def _record_external_readback(
+        self,
+        configuration_id: str,
+        timestamp: float,
+        snapshot: object,
+    ) -> None:
+        recorder = self._session_recorder
+        if recorder is not None:
+            recorder.record_telemetry(
+                f"external.{configuration_id}",
+                {"worker_timestamp": timestamp, "values": snapshot},
+            )
+
+    def _record_coincidence_state(self, state: str, values: object) -> None:
+        recorder = self._session_recorder
+        if recorder is not None:
+            payload = values if isinstance(values, dict) else {"value": values}
+            recorder.record_timeline(
+                f"coincidence_{state}",
+                "coincidence",
+                payload,
+            )
+
     def show_psd_event_readback(self, path: Path | None = None) -> None:
         """Open the hardware-independent saved-event PSD workbench."""
         if self._psd_readback_dialog is None:
@@ -734,6 +2070,14 @@ class MainWindowController:
         for external_controller in self._external_controllers:
             external_controller.stop_polling_sync()
 
+        # Producers are now quiet, so session subscribers can drain their
+        # final complete DMA records before the manifest is finalized.
+        if getattr(self, "_session_recorder", None) is not None:
+            try:
+                self.stop_session_recording()
+            except Exception:
+                log.exception("Finalizing the active session during shutdown failed")
+
         if self._thread is not None:
             self._thread.quit()
             self._thread.wait()
@@ -742,6 +2086,7 @@ class MainWindowController:
     def shutdown(self) -> None:
         """Persist dock layout, stop all workers, close all devices."""
         log.info("Shutdown: persisting state")
+        self.clear_session_replay(resume_background=False)
         if self._energy_calibration_dialog is not None:
             self._energy_calibration_dialog.close_without_prompt()
             self._energy_calibration_dialog = None
@@ -774,7 +2119,12 @@ class MainWindowController:
         docks and their controllers since they hold direct references to
         the (now-closed) backend connections.
         """
+        if getattr(self, "_offline", False):
+            raise RuntimeError(
+                "offline mode has no saved hardware endpoint; restart and choose Connect"
+            )
         log.info("Reconnect: stopping workers and closing current devices")
+        self.clear_session_replay(resume_background=False)
         if self._energy_calibration_dialog is not None:
             self._energy_calibration_dialog.close_without_prompt()
             self._energy_calibration_dialog = None
@@ -820,6 +2170,8 @@ class MainWindowController:
         self._psu_controllers.clear()
         self._psu_controller_by_device.clear()
         self._external_controllers.clear()
+        self._mca_event_buffers.clear()
+        self._scope_frame_buffers.clear()
 
         log.info(
             "Reconnect: connecting via IIO to %s:%d, %d channel(s)",
@@ -903,6 +2255,10 @@ class MainWindowController:
             ctrl.configuration_id: ctrl.configuration_settings()
             for ctrl in self._external_controllers
         }
+        external_schemas = {
+            ctrl.configuration_id: ctrl.replay_schema()
+            for ctrl in self._external_controllers
+        }
         shared_hardware = (
             self._global_controller.hardware_configuration_settings()
             if self._global_controller is not None
@@ -943,6 +2299,7 @@ class MainWindowController:
                 ),
                 "channels": application_channels,
                 "external_devices": external_application,
+                "external_device_schemas": external_schemas,
                 "dock_layout": layout,
             },
         }
@@ -950,6 +2307,10 @@ class MainWindowController:
 
     def load_all_settings(self, path: Path) -> None:
         """Load settings from YAML and apply to hardware, then refresh UI."""
+        if getattr(self, "_offline", False):
+            raise RuntimeError("hardware settings cannot be loaded in offline mode")
+        if self.session_replay is not None:
+            raise RuntimeError("exit session replay before loading hardware settings")
         if self._coincidence_controller is not None and self._coincidence_controller.active:
             raise RuntimeError("Stop the coincidence measurement before loading settings")
         from nlab.utils.settings_io import (

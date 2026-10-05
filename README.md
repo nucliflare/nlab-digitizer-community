@@ -137,6 +137,10 @@ uv run python examples/measure_current.py
 - Remote board reboot and shutdown controls
 - A dedicated **Connection** menu for full digitizer reconnects and background
   external Modbus rescans
+- An explicit **Offline / Replay Mode** in the startup dialog that opens the
+  analysis workspace without IIO or Modbus hardware, keeps all hardware
+  controls locked, and supports recorded Scope, Current, MCA, PSD, coincidence,
+  PSU, global-diagnostics, temperature-correction, and external-module playback
 - Persistent layout, connection, plotting, and developer settings
 - Central **General Settings** controls for Scope display/refresh, MCA refresh,
   PSU monitoring history, acquisition destinations/formats, and histogram views
@@ -146,6 +150,95 @@ uv run python examples/measure_current.py
   an explicit `--config` file takes precedence. See the
   [General Settings ownership review](docs/general-settings-candidates.md) for
   the centralized controls and the hardware operations that remain channel-local.
+
+### Session recording and deterministic analysis replay
+
+Use **File -> Start Session Recording...** to create a versioned
+`.nlab-session` directory. Recording is passive: it does not start or reconfigure
+an acquisition. While active, it saves the measurements the application already
+observes, including MCA list-mode events and histogram/debug/statistic
+checkpoints, Scope viewer and full DMA frames, IIR current samples, PSU/global/
+external telemetry, and application logs. A complete hardware and application
+configuration is saved at the start, with a final configuration snapshot in the
+timeline.
+
+Each bundle contains:
+
+- `manifest.json`: format/application versions, session ID, UTC and monotonic
+  timing, per-stream counts, drop/error reasons, completion state, and SHA-256
+  hashes of immutable capture members;
+- `configuration.yaml`: the initial settings snapshot;
+- `streams.h5`: append-only numerical streams and committed-record counters;
+- `timeline.jsonl`: ordered host timestamps, telemetry, commands, status, and
+  log records;
+- `annotations.yaml`: a deliberately mutable ML-label template for sample ID,
+  isotope truth, background status, detector ID, geometry, shielding,
+  environment, split group, and notes. It is excluded from capture hashes so
+  labels can be curated without invalidating the original measurement.
+
+**File -> Stop Session Recording** drains complete accepted records before
+atomically marking the bundle complete. A crash or storage/consumer overflow is
+therefore visible as an incomplete or invalid session rather than a silently
+truncated valid capture. Existing session directories are never overwritten.
+
+**File -> Replay Session...** verifies finalized content hashes and reconstructs
+one MCA spectrum per channel in the peak-analysis workbench. List-mode replay
+uses the capture-derived `trapezoid_energy >> 2` mapping and discards only
+all-zero DMA padding; when list-mode data are absent it uses the final recorded
+hardware histogram checkpoint.
+
+Recorded MCA polling checkpoints are replayed into the normal MCA histogram,
+debug-waveform, and statistics views at their captured host timing, so
+accumulation is visible rather than appearing only as a final spectrum. Recorded
+list-mode batches progressively feed each channel's PSD matrix and projections.
+If both coincidence channels were captured, those same batches progressively
+rebuild the timing histogram, participant spectra, and prompt/random energy
+matrices using the saved coincidence, ROI, and MCA-binning settings. New bundles
+store explicit list-mode batch timing; older bundles fall back to complete DMA
+frame boundaries and hardware timestamps. Replay never rearms MCA DMA or the
+shared trigger.
+
+Recorded Scope frames, IIR Current samples, and timestamped PSU/global/external-
+module telemetry play once at their captured host timing from one shared replay
+clock. The exact Scope viewer stream is preferred, with complete DMA frames used
+when no viewer frames exist for a channel. Loading replay stops Scope, MCA, and
+Current acquisition, stops live PSU, global-diagnostic, and external polling,
+and suspends the automatic temperature-correction writer. Late Scope updates
+are coalesced to the newest due frame; every due telemetry update is delivered
+in order. At EOF the last recorded waveform and telemetry values remain
+displayed. Playback never loops or silently falls back to live data, and exiting
+replay leaves acquisition stopped while restarting background monitoring only
+when it was active before replay.
+
+Large numerical streams are consumed lazily from HDF5, so replay retains only
+the current Scope frame, MCA batch/readback, or Current sample window instead of
+materializing the complete capture in memory. External-module register schemas
+(units, scaling, ranges, and register types) are saved with new sessions, and a
+configured module still appears in offline replay even if it produced no
+telemetry. Older bundles remain supported through value-based schema inference.
+If an offline workspace has fewer channels than the bundle, loading stops with
+an explicit channel-count message instead of silently omitting recorded views.
+
+This is deterministic *analysis replay*: recorded commands are not sent back to
+the digitizer, and it cannot reproduce analogue noise, environmental conditions,
+or unobserved device state. A persistent status-bar badge and a `[REPLAY]`
+window-title suffix identify the mode across the application. Every widget and
+menu action capable of changing hardware is disabled while replay is loaded,
+including Scope, MCA, Current, PSU, shared-trigger, coincidence, external-device,
+settings-load, reconnect, and board-power controls. PSU, Global, and External
+views show recorded telemetry rather than live polling. Use **File -> Exit
+Replay Mode** to unload all reconstructed
+analysis and playback. For ML use, fill in `annotations.yaml` and use
+`split_group` to keep measurements from the same physical source/setup together
+during train/validation/test splitting.
+
+Replay does not require a connected digitizer. Select **Offline / Replay Mode**
+in the startup connection dialog, then use **File -> Replay Session...**. The
+application opens no IIO or Modbus transport, marks the whole window `OFFLINE`,
+constructs read-only analysis targets for the selected channel count, and builds
+external-module panels from the fields stored in the bundle. File-based waveform,
+PSD, calibration, and peak-analysis tools remain available. To acquire data or
+change hardware, restart the application and choose **Connect**.
 
 ## Hardware and firmware requirements
 
@@ -244,6 +337,12 @@ In the connection dialog:
 1. Select a discovered board or enter its address, for example `192.168.10.128`.
 2. Use port `30431` unless the target's `iiod` configuration differs.
 3. Select the number of channels exposed by the board and connect.
+
+To work without a board, select the desired channel count and click
+**Offline / Replay Mode** instead. The analysis workspace opens no hardware
+endpoint; live acquisition, session recording, hardware settings, reconnect,
+Modbus refresh, and board-power actions remain disabled. Analysis tools and
+**File -> Replay Session...** remain available.
 
 When opened, the dialog scans for network `iiod` services with libiio's
 DNS-SD/mDNS discovery (Avahi on Linux) and also probes `192.168.3.1:30431`, the

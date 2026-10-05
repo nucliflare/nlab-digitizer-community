@@ -57,6 +57,37 @@ def test_main_window_reports_setup_and_saved_settings_stages(
     controller.load_all_settings.assert_called_once_with(Path("settings.yaml"))
 
 
+def test_offline_window_is_identified_and_hardware_actions_are_disabled(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = Mock()
+    factory = Mock(return_value=controller)
+    monkeypatch.setattr(app_module, "MainWindowController", factory)
+    monkeypatch.setattr(MainAppWindow, "_apply_stored_general_settings", lambda _self: None)
+    monkeypatch.setattr(MainAppWindow, "_persist_current_general_settings", lambda _self: None)
+    monkeypatch.setattr(MainAppWindow, "_apply_view_state", lambda _self: None)
+
+    window = MainAppWindow(channels=2, offline=True)
+    qtbot.addWidget(window)
+
+    assert window.windowTitle() == "Nuclear Lab Digitizer — Offline"
+    assert not window._offline_indicator.isHidden()
+    assert window._offline_indicator.text() == "OFFLINE"
+    assert window.ui.actionReplaySession.isEnabled()
+    for action in (
+        window.ui.actionStartSessionRecording,
+        window.ui.actionSaveSettings,
+        window.ui.actionLoadSettings,
+        window.ui.actionReconnectDevice,
+        window.ui.actionRefreshModbus,
+        window.ui.actionRebootBoard,
+        window.ui.actionShutdownBoard,
+    ):
+        assert not action.isEnabled()
+    assert factory.call_args.kwargs["offline"] is True
+
+
 def _prepare_fake_main(monkeypatch: pytest.MonkeyPatch) -> tuple[list[object], Mock, Mock]:
     events: list[object] = []
 

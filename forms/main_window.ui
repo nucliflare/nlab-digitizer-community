@@ -141,6 +141,11 @@
    </property>
    <widget class="QMenu" name="menuFile">
     <property name="title"><string>File</string></property>
+    <addaction name="actionStartSessionRecording"/>
+    <addaction name="actionStopSessionRecording"/>
+    <addaction name="actionReplaySession"/>
+    <addaction name="actionExitReplay"/>
+    <addaction name="separator"/>
     <addaction name="actionConvertToHdf5"/>
     <addaction name="separator"/>
     <addaction name="actionExit"/>
@@ -211,6 +216,23 @@
   </action>
   <action name="actionConvertToHdf5">
    <property name="text"><string>Convert Binary to HDF5...</string></property>
+  </action>
+  <action name="actionStartSessionRecording">
+   <property name="text"><string>Start Session Recording...</string></property>
+   <property name="toolTip"><string>Record observed measurements, telemetry, settings, and logs in a replayable bundle</string></property>
+  </action>
+  <action name="actionStopSessionRecording">
+   <property name="enabled"><bool>false</bool></property>
+   <property name="text"><string>Stop Session Recording</string></property>
+  </action>
+  <action name="actionReplaySession">
+   <property name="text"><string>Replay Session...</string></property>
+   <property name="toolTip"><string>Validate a session bundle and reconstruct its MCA analysis inputs</string></property>
+  </action>
+  <action name="actionExitReplay">
+   <property name="enabled"><bool>false</bool></property>
+   <property name="text"><string>Exit Replay Mode</string></property>
+   <property name="toolTip"><string>Unload the active session replay and remove its reconstructed input spectra</string></property>
   </action>
   <action name="actionReconnectDevice">
    <property name="text"><string>Reconnect Device</string></property>

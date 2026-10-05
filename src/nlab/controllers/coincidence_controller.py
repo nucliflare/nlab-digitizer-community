@@ -13,7 +13,7 @@ from uuid import uuid4
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QRectF, QSettings, Qt, QTimer
+from PySide6.QtCore import QRectF, QSettings, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from nlab.analysis.coincidence import (
     COINCIDENCE_MATRIX_BINS,
     HISTOGRAM_BINS,
+    CoincidenceAnalyzer,
     CoincidencePeakFit,
     CoincidenceSettings,
     CoincidenceSnapshot,
@@ -77,6 +78,8 @@ def _ns_to_q(value: float, rounding: str) -> int:
 class CoincidenceController(QWidget):
     """Own both MCA DMA sessions and the shared start until both are drained."""
 
+    session_state = Signal(str, object)
+
     def __init__(
         self,
         devices: list[Digitizer],
@@ -92,6 +95,7 @@ class CoincidenceController(QWidget):
         self._global_view = global_view
         self._sync = devices[0].mca.sync
         self._state = "idle"
+        self._replay_hardware_interlocked = False
         self._run_error: str | None = None
         self._session_id: str | None = None
         self._session_manifest: Path | None = None
@@ -107,6 +111,9 @@ class CoincidenceController(QWidget):
         self._prior_source: int | None = None
         self._prior_dma_check: tuple[bool, bool] | None = None
         self._current_settings = CoincidenceSettings()
+        self._session_replay_previous_settings: dict[str, object] | None = None
+        self._session_replay_timer_was_active = False
+        self._session_replay_analyzer: CoincidenceAnalyzer | None = None
         self._analysis_epochs: list[dict[str, object]] = []
         self._firmware_identity_snapshot: list[dict[str, object]] = []
         self._matrix_exports: list[str] = []
@@ -887,6 +894,8 @@ class CoincidenceController(QWidget):
         }
 
     def start(self) -> None:
+        if self._replay_hardware_interlocked:
+            return
         if self._state != "idle":
             return
         try:
@@ -930,6 +939,13 @@ class CoincidenceController(QWidget):
             )  # type: ignore[assignment]
             self._prior_source = self._sync.get_trig_src()
             self._state = "arming"
+            self.session_state.emit(
+                "started",
+                {
+                    "session_id": self._session_id,
+                    "settings": self._describe(settings),
+                },
+            )
             self.btnStart.setChecked(True)
             self.btnStart.setEnabled(False)
             self.btnStop.setChecked(False)
@@ -1110,13 +1126,21 @@ class CoincidenceController(QWidget):
         self._state = "idle"
         self._buffers = None
         self.btnStart.setChecked(False)
-        self.btnStart.setEnabled(True)
+        self.btnStart.setEnabled(not self._replay_hardware_interlocked)
         self.btnStop.setChecked(True)
         self.btnStop.setEnabled(False)
         self.status.setText(
             f"Coincidence run failed: {self._run_error}"
             if self._run_error
             else "Coincidence run complete."
+        )
+        self.session_state.emit(
+            "finished",
+            {
+                "session_id": self._session_id,
+                "status": "failed" if self._run_error else "complete",
+                "error": self._run_error,
+            },
         )
 
     def _render(self) -> None:
@@ -1171,6 +1195,92 @@ class CoincidenceController(QWidget):
             f"Energy beyond plot: {snapshot.energy_overflow:,}"
         )
         self._last_rendered_snapshot = snapshot
+
+    def _render_session_snapshot(
+        self,
+        snapshot: CoincidenceSnapshot,
+        settings: CoincidenceSettings,
+    ) -> None:
+        pair_mode = settings.operator == "AND" and not (settings.not_ch0 or settings.not_ch1)
+        if pair_mode:
+            self.delay_curve.setData(
+                settings.low_ns
+                + np.arange(len(snapshot.delay_counts) + 1) * settings.bin_width_ns,
+                snapshot.delay_counts,
+            )
+            self._render_timing_fit(snapshot, settings)
+        else:
+            self.delay_fit_curve.setData([], [])
+            self._timing_fit = None
+            self.timing_fit_label.setText(
+                "Gaussian core fit is available only for ordinary CH0 AND CH1 timing."
+            )
+            if len(snapshot.rate_seconds):
+                edges = np.append(snapshot.rate_seconds, snapshot.rate_seconds[-1] + 1)
+                self.delay_curve.setData(edges, snapshot.rate_counts)
+            else:
+                self.delay_curve.setData([], [])
+        self.energy_curve0.setData(np.arange(16_385), snapshot.energy_ch0)
+        self.energy_curve1.setData(np.arange(16_385), snapshot.energy_ch1)
+        self._last_rendered_snapshot = snapshot
+        self._render_matrix(snapshot)
+        self.counts_label.setText(
+            f"Session replay | pairs: {snapshot.pairs:,} | "
+            f"random pairs: {snapshot.random_pairs:,} | "
+            f"CH0 participants: {snapshot.accepted_ch0:,} | "
+            f"CH1 participants: {snapshot.accepted_ch1:,} | "
+            f"ROI rejects: {snapshot.outside_roi:,}"
+        )
+
+    def begin_session_replay(
+        self,
+        settings: CoincidenceSettings,
+        display_settings: object = None,
+    ) -> None:
+        """Prepare progressive coincidence analysis from recorded batches."""
+        if self.active:
+            raise RuntimeError("stop coincidence acquisition before replay")
+        self._session_replay_previous_settings = self.configuration_settings()
+        self._session_replay_timer_was_active = self._display_timer.isActive()
+        self._display_timer.stop()
+        if isinstance(display_settings, dict):
+            self.apply_configuration_settings(display_settings)
+
+        self._session_replay_analyzer = CoincidenceAnalyzer(settings)
+        self._current_settings = settings
+        self._render_session_snapshot(self._session_replay_analyzer.snapshot(), settings)
+        self.status.setText("Session coincidence replay is waiting for recorded events.")
+
+    def display_session_replay_events(self, channel: int, events: np.ndarray) -> None:
+        """Feed one captured channel batch through the live coincidence analyzer."""
+        analyzer = self._session_replay_analyzer
+        if analyzer is None:
+            return
+        analyzer.add_batch(channel, events)
+        self._render_session_snapshot(analyzer.snapshot(), self._current_settings)
+        self.status.setText("Session coincidence replay in progress.")
+
+    def finish_session_replay(self) -> None:
+        analyzer = self._session_replay_analyzer
+        if analyzer is None:
+            return
+        analyzer.finish()
+        self._render_session_snapshot(analyzer.snapshot(), self._current_settings)
+        self.status.setText("Session coincidence replay complete; recorded result is held.")
+
+    def end_session_replay(self) -> None:
+        """Restore the pre-replay coincidence controls and live renderer."""
+        previous = self._session_replay_previous_settings
+        if previous is None:
+            return
+        restart_timer = self._session_replay_timer_was_active
+        self._session_replay_analyzer = None
+        self._session_replay_previous_settings = None
+        self._session_replay_timer_was_active = False
+        self.apply_configuration_settings(previous)
+        self.status.setText("Coincidence replay unloaded.")
+        if restart_timer:
+            self._display_timer.start()
 
     def _render_timing_fit(
         self,
@@ -1227,6 +1337,11 @@ class CoincidenceController(QWidget):
     @property
     def active(self) -> bool:
         return self._state != "idle"
+
+    def set_replay_hardware_interlock(self, enabled: bool) -> None:
+        self._replay_hardware_interlocked = bool(enabled)
+        self.btnStart.setEnabled(not enabled and not self.active)
+        self.duration.setEnabled(not enabled and not self.active)
 
     def apply_configuration_settings(self, settings: object) -> None:
         if not isinstance(settings, dict):

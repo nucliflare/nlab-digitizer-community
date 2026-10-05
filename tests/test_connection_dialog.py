@@ -165,3 +165,24 @@ def test_port_settings_migrate_only_from_legacy_iio_selection(
     qtbot.addWidget(dialog)
 
     assert dialog.port == expected_port
+
+
+def test_offline_mode_accepts_without_an_address_or_saving_connection(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        connection_dialog_module,
+        "discover_iio_digitizers",
+        lambda: DiscoveryResult(()),
+    )
+    dialog = ConnectionDialog(ip="")
+    qtbot.addWidget(dialog)
+    dialog.show()
+    _wait_for_scan(qtbot, dialog)
+
+    dialog._ui.buttonOffline.click()
+
+    assert dialog.result() == ConnectionDialog.DialogCode.Accepted
+    assert dialog.offline
+    assert "connection/recent_ips" not in _Settings.values

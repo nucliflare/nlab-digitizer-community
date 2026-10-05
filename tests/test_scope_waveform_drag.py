@@ -387,3 +387,41 @@ def test_disabling_controls_cancels_an_active_mouse_drag(qtbot: QtBot) -> None:
     assert controller.ui.spinPretrigger.value() == 64
     scope.set_dac_value.assert_not_called()
     scope.set_pretrigger_samples.assert_not_called()
+
+
+def test_scope_session_replay_blocks_live_acquisition_and_holds_final_frame(
+    qtbot: QtBot,
+) -> None:
+    controller, scope = _raw_controller(qtbot)
+
+    controller.begin_session_replay(frame_count=2, duration_ns=1_000_000_000)
+
+    assert controller.session_replay_active
+    assert not controller.ui.btnStart.isEnabled()
+    assert not controller.ui.btnAcquireFrame.isEnabled()
+    controller.display_session_replay_frame(
+        np.array([10, -20, 30], dtype=np.int16),
+        sample_period_ns=8,
+        frame_index=1,
+        frame_count=2,
+        elapsed_ns=500_000_000,
+        duration_ns=1_000_000_000,
+        source="viewer",
+    )
+    _x, y = controller._raw_curve.getData()
+    np.testing.assert_array_equal(y, [10, -20, 30])
+
+    controller._on_start()
+    scope.start.assert_not_called()
+
+    controller.finish_session_replay(
+        frame_count=2,
+        duration_ns=1_000_000_000,
+    )
+    assert "final recorded frame held" in controller.ui.lblRecordingStatus.text()
+
+    controller.end_session_replay()
+
+    assert not controller.session_replay_active
+    assert controller.ui.btnStart.isEnabled()
+    assert "remains stopped" in controller.ui.lblRecordingStatus.text()

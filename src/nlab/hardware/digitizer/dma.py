@@ -255,17 +255,18 @@ class McaEventBuffer:
         if max_batches <= 0:
             raise ValueError("max_batches must be positive")
         self._max_batches = max_batches
-        self._batches: deque[np.ndarray] = deque()
+        self._batches: deque[tuple[int, np.ndarray]] = deque()
         self._lock = threading.Lock()
         self._dropped_records = 0
         self._subscribers: list[McaEventBuffer] = []
 
     def append(self, events: np.ndarray) -> None:
         copied = events.copy()
+        received_ns = time.monotonic_ns()
         with self._lock:
             if len(self._batches) >= self._max_batches:
-                self._dropped_records += len(self._batches.popleft())
-            self._batches.append(copied)
+                self._dropped_records += len(self._batches.popleft()[1])
+            self._batches.append((received_ns, copied))
             subscribers = tuple(self._subscribers)
         # The producer never waits for a display consumer. Each subscriber
         # owns its own bounded queue; PSD and coincidence cannot steal batches
@@ -292,6 +293,13 @@ class McaEventBuffer:
 
     def drain(self) -> tuple[list[np.ndarray], int]:
         """Atomically remove pending batches and report cumulative drops."""
+        with self._lock:
+            batches = [events for _received_ns, events in self._batches]
+            self._batches.clear()
+            return batches, self._dropped_records
+
+    def drain_timed(self) -> tuple[list[tuple[int, np.ndarray]], int]:
+        """Drain batches with their local monotonic publisher timestamps."""
         with self._lock:
             batches = list(self._batches)
             self._batches.clear()
