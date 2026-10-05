@@ -16,7 +16,11 @@ from nlab.controllers import coincidence_controller as coincidence_module
 from nlab.controllers.coincidence_controller import CoincidenceController
 from nlab.controllers.mca_controller import MCAController
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer
-from nlab.hardware.digitizer.iio_listmode import TIME_Q_PER_NS, VDPP_ZC_CALC_SCHEMA
+from nlab.hardware.digitizer.iio_listmode import (
+    IIO_LM_EVENT_DTYPE,
+    TIME_Q_PER_NS,
+    VDPP_ZC_CALC_SCHEMA,
+)
 from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
 from nlab.views.plot_viewbox import ModifierZoomViewBox
 
@@ -283,6 +287,32 @@ def test_matrix_tab_renders_log_corrected_counts_and_interactive_projections(
     assert controller.matrix_projection0_curve.xData[[0, -1]].tolist() == [0, 16_384]
     assert controller.btnExportMatrix.isEnabled()
     assert "random scale 0.5" in controller.matrix_status.text()
+
+
+def test_session_replay_rebuilds_coincidence_products(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _make_controller(monkeypatch)
+    ch0 = np.zeros(1, dtype=IIO_LM_EVENT_DTYPE)
+    ch1 = np.zeros(1, dtype=IIO_LM_EVENT_DTYPE)
+    ch0["timestamp"] = 10
+    ch1["timestamp"] = 11
+    ch0["trapezoid_energy"] = 400
+    ch1["trapezoid_energy"] = 800
+
+    controller.begin_session_replay(CoincidenceSettings())
+    controller.display_session_replay_events(0, ch0)
+    controller.display_session_replay_events(1, ch1)
+    controller.finish_session_replay()
+
+    assert not controller._display_timer.isActive()
+    assert controller._last_rendered_snapshot is not None
+    assert controller._last_rendered_snapshot.pairs == 1
+    assert "Session replay" in controller.counts_label.text()
+
+    controller.end_session_replay()
+
+    assert controller._display_timer.isActive()
 
 
 def test_all_coincidence_plots_use_independent_axis_modifier_zoom(

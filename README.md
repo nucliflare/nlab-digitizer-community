@@ -147,6 +147,77 @@ uv run python examples/measure_current.py
   [General Settings ownership review](docs/general-settings-candidates.md) for
   the centralized controls and the hardware operations that remain channel-local.
 
+### Session recording and deterministic analysis replay
+
+Use **File -> Start Session Recording...** to create a versioned
+`.nlab-session` directory. Recording is passive: it does not start or reconfigure
+an acquisition. While active, it saves the measurements the application already
+observes, including MCA list-mode events and histogram/debug/statistic
+checkpoints, Scope viewer and full DMA frames, IIR current samples, PSU/global/
+external telemetry, and application logs. A complete hardware and application
+configuration is saved at the start, with a final configuration snapshot in the
+timeline.
+
+Each bundle contains:
+
+- `manifest.json`: format/application versions, session ID, UTC and monotonic
+  timing, per-stream counts, drop/error reasons, completion state, and SHA-256
+  hashes of immutable capture members;
+- `configuration.yaml`: the initial settings snapshot;
+- `streams.h5`: append-only numerical streams and committed-record counters;
+- `timeline.jsonl`: ordered host timestamps, telemetry, commands, status, and
+  log records;
+- `annotations.yaml`: a deliberately mutable ML-label template for sample ID,
+  isotope truth, background status, detector ID, geometry, shielding,
+  environment, split group, and notes. It is excluded from capture hashes so
+  labels can be curated without invalidating the original measurement.
+
+**File -> Stop Session Recording** drains complete accepted records before
+atomically marking the bundle complete. A crash or storage/consumer overflow is
+therefore visible as an incomplete or invalid session rather than a silently
+truncated valid capture. Existing session directories are never overwritten.
+
+**File -> Replay Session...** verifies finalized content hashes and reconstructs
+one MCA spectrum per channel in the peak-analysis workbench. List-mode replay
+uses the capture-derived `trapezoid_energy >> 2` mapping and discards only
+all-zero DMA padding; when list-mode data are absent it uses the final recorded
+hardware histogram checkpoint.
+
+Recorded MCA polling checkpoints are replayed into the normal MCA histogram,
+debug-waveform, and statistics views at their captured host timing, so
+accumulation is visible rather than appearing only as a final spectrum. Recorded
+list-mode batches progressively feed each channel's PSD matrix and projections.
+If both coincidence channels were captured, those same batches progressively
+rebuild the timing histogram, participant spectra, and prompt/random energy
+matrices using the saved coincidence, ROI, and MCA-binning settings. New bundles
+store explicit list-mode batch timing; older bundles fall back to complete DMA
+frame boundaries and hardware timestamps. Replay never rearms MCA DMA or the
+shared trigger.
+
+Recorded Scope frames and timestamped PSU/external-module telemetry play once at
+their captured host timing. The exact Scope viewer stream is preferred, with
+complete DMA frames used when no viewer frames exist for a channel. Loading
+replay stops Scope, MCA, and Current acquisition, stops live PSU and external
+polling, and suspends the automatic temperature-correction writer. Late Scope
+updates are coalesced to the newest due frame; every due telemetry update is
+delivered in order. At EOF the last recorded waveform and telemetry values
+remain displayed. Playback never loops or silently falls back to live data, and
+exiting replay leaves acquisition stopped while restarting PSU/external polling
+and temperature correction only when they were active before replay.
+
+This is deterministic *analysis replay*: recorded commands are not sent back to
+the digitizer, and it cannot reproduce analogue noise, environmental conditions,
+or unobserved device state. A persistent status-bar badge and a `[REPLAY]`
+window-title suffix identify the mode across the application. Every widget and
+menu action capable of changing hardware is disabled while replay is loaded,
+including Scope, MCA, Current, PSU, shared-trigger, coincidence, external-device,
+settings-load, reconnect, and board-power controls. PSU and external views show
+recorded telemetry rather than live polling; unrelated global diagnostics may
+remain live. Use **File -> Exit Replay Mode** to unload all reconstructed
+analysis and playback. For ML use, fill in `annotations.yaml` and use
+`split_group` to keep measurements from the same physical source/setup together
+during train/validation/test splitting.
+
 ## Hardware and firmware requirements
 
 For the recommended IIO path, the board must run a firmware and Linux image

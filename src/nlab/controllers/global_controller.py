@@ -4,7 +4,7 @@ import logging
 from collections.abc import Sequence
 from typing import cast
 
-from PySide6.QtCore import QSettings, Qt, QThread, QTime
+from PySide6.QtCore import QSettings, Qt, QThread, QTime, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QHeaderView, QTableWidgetItem, QWidget
 
@@ -31,6 +31,8 @@ class GlobalController(QWidget):
     _TEMPERATURE_COEFFICIENT_SETTINGS_KEY = "global/temperature_coefficient"
     _TEMPERATURE_OFFSET_SETTINGS_KEY = "global/temperature_offset"
     _TEMPERATURE_ENABLED_SETTINGS_KEY = "global/temperature_enabled"
+    session_temperature_readback = Signal(object)
+    session_diagnostics_readback = Signal(object)
 
     def __init__(
         self,
@@ -73,6 +75,8 @@ class GlobalController(QWidget):
         self._temperature_worker: TemperatureCorrectionWorker | None = None
         self._temperature_worker_thread: QThread | None = None
         self._temperature_worker_stop_requested = False
+        self._replay_hardware_interlocked = False
+        self._replay_resume_temperature_correction = False
         self._reset_sync_for_initialization()
         self._sync_available = self._load_sync_state()
         self._load_settings()
@@ -199,6 +203,8 @@ class GlobalController(QWidget):
         self.ui.lblTemperatureStatus.setStyleSheet(f"color: {color};")
 
     def _on_temperature_coefficient_changed(self) -> None:
+        if getattr(self, "_replay_hardware_interlocked", False):
+            return
         QSettings().setValue(
             self._TEMPERATURE_COEFFICIENT_SETTINGS_KEY,
             self.ui.spinTempCoeff.value(),
@@ -206,6 +212,8 @@ class GlobalController(QWidget):
         self._send_temperature_parameters()
 
     def _on_temperature_offset_changed(self) -> None:
+        if getattr(self, "_replay_hardware_interlocked", False):
+            return
         QSettings().setValue(
             self._TEMPERATURE_OFFSET_SETTINGS_KEY,
             self.ui.spinTempOffset.value(),
@@ -221,6 +229,8 @@ class GlobalController(QWidget):
             )
 
     def _on_temperature_interval_changed(self, interval_ms: int) -> None:
+        if getattr(self, "_replay_hardware_interlocked", False):
+            return
         QSettings().setValue(
             self._TEMPERATURE_INTERVAL_SETTINGS_KEY,
             interval_ms,
@@ -229,6 +239,8 @@ class GlobalController(QWidget):
             self._temperature_worker.change_interval.emit(interval_ms)
 
     def _on_temperature_correction_toggled(self, enabled: bool) -> None:
+        if getattr(self, "_replay_hardware_interlocked", False):
+            return
         QSettings().setValue(self._TEMPERATURE_ENABLED_SETTINGS_KEY, enabled)
         if enabled:
             self._start_temperature_correction()
@@ -281,6 +293,11 @@ class GlobalController(QWidget):
         self,
         readback: TemperatureCorrectionReadback,
     ) -> None:
+        try:
+            self.session_temperature_readback.emit(readback)
+        except RuntimeError:
+            # Some unit-level callers construct an uninitialized Qt wrapper.
+            pass
         self.ui.lblAdsTemperature.setText(f"{readback.temperature:g} raw")
         self.ui.lblAppliedTempCoeff.setText(
             f"{readback.applied_coefficient:.9f}",
@@ -361,6 +378,8 @@ class GlobalController(QWidget):
         }
 
     def apply_hardware_configuration_settings(self, settings: object) -> None:
+        if getattr(self, "_replay_hardware_interlocked", False):
+            raise RuntimeError("exit session replay before applying shared hardware settings")
         if not self._sync_available or not isinstance(settings, dict):
             return
         # Gate first, configure the source, and only then restore the requested
@@ -407,6 +426,8 @@ class GlobalController(QWidget):
         self.ui.lblSyncStatus.setStyleSheet(f"color: {color};")
 
     def _on_sync_source_changed(self, source: int) -> None:
+        if getattr(self, "_replay_hardware_interlocked", False):
+            return
         try:
             self._sync.set_trig_src(source)
         except Exception as exc:
@@ -420,6 +441,8 @@ class GlobalController(QWidget):
         )
 
     def _on_sync_enable_changed(self, enabled: bool) -> None:
+        if getattr(self, "_replay_hardware_interlocked", False):
+            return
         try:
             self._sync.set_enable(enabled)
         except Exception as exc:
@@ -433,6 +456,8 @@ class GlobalController(QWidget):
 
     def _prepare_software_sync(self) -> None:
         """Establish disabled/source-software/LOW/enabled in the safe order."""
+        if getattr(self, "_replay_hardware_interlocked", False):
+            return
         try:
             self._sync.set_enable(False)
             self._sync.set_sw_trig(0)
@@ -456,9 +481,54 @@ class GlobalController(QWidget):
             self.ui.btnSoftwareStart,
             self.ui.btnSoftwareReset,
         ):
-            control.setEnabled(not locked)
-        if not locked:
+            control.setEnabled(
+                not locked and not getattr(self, "_replay_hardware_interlocked", False)
+            )
+        if not locked and not getattr(self, "_replay_hardware_interlocked", False):
             self._load_sync_state()
+
+    def set_replay_hardware_interlock(
+        self,
+        enabled: bool,
+        *,
+        resume_background: bool = True,
+    ) -> None:
+        """Pause background writes and disable shared hardware controls."""
+        enabled = bool(enabled)
+        if enabled == self._replay_hardware_interlocked:
+            return
+        self._replay_hardware_interlocked = enabled
+        if enabled:
+            self._replay_resume_temperature_correction = (
+                self._temperature_worker is not None
+            )
+            if self._temperature_worker is not None:
+                self._stop_temperature_correction_sync()
+                self._set_temperature_status(
+                    "Temperature-correction loop paused during session replay."
+                )
+        self.ui.groupSoftwareStart.setEnabled(
+            not enabled and self._sync_available
+        )
+        self.ui.groupTemperatureCorrection.setEnabled(
+            not enabled and self._temperature_available
+        )
+        if not enabled and self._replay_resume_temperature_correction:
+            if resume_background:
+                QTimer.singleShot(0, self._resume_temperature_after_replay)
+            else:
+                self._replay_resume_temperature_correction = False
+
+    def _resume_temperature_after_replay(self) -> None:
+        resume = self._replay_resume_temperature_correction
+        self._replay_resume_temperature_correction = False
+        if (
+            resume
+            and not self._replay_hardware_interlocked
+            and self._temperature_available
+            and self.ui.cbTemperatureCorrectionEnabled.isChecked()
+        ):
+            self._start_temperature_correction()
 
     @property
     def sync_available(self) -> bool:
@@ -474,6 +544,8 @@ class GlobalController(QWidget):
         return errors
 
     def _start_armed_channels(self) -> None:
+        if getattr(self, "_replay_hardware_interlocked", False):
+            return
         try:
             if self._sync.get_trig_src() != 0:
                 raise RuntimeError("shared start source is not Software")
@@ -494,6 +566,8 @@ class GlobalController(QWidget):
         log.info("Global software start asserted for %d MCA channel(s)", len(self._devices))
 
     def _reset_software_level(self) -> None:
+        if getattr(self, "_replay_hardware_interlocked", False):
+            return
         try:
             self._sync.set_sw_trig(0)
         except Exception as exc:
@@ -548,6 +622,10 @@ class GlobalController(QWidget):
         self,
         readings: list[GlobalDiagnosticReading],
     ) -> None:
+        try:
+            self.session_diagnostics_readback.emit(readings)
+        except RuntimeError:
+            pass
         table = self.ui.tableDiagnostics
         table.setRowCount(len(readings))
         for row, reading in enumerate(readings):

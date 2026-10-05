@@ -124,6 +124,7 @@ class ScopeController(QWidget):
     _THRESHOLD_MARKER_COLOR = "#a66f6f"
     _PRETRIGGER_MARKER_COLOR = "#648b71"
     current_dma_state_changed = Signal(bool, str)
+    session_viewer_frame = Signal(int, object, int)
 
     def __init__(
         self,
@@ -173,6 +174,9 @@ class ScopeController(QWidget):
         self._measurement_timer = QTimer(self)
         self._measurement_timer.setSingleShot(True)
         self._measurement_timer.timeout.connect(self._on_measurement_timeout)
+        self._session_replay_active = False
+        self._session_replay_display_mode: int | None = None
+        self._replay_hardware_interlocked = False
 
         self._apply_parameter_specs()
         self._send_defaults()
@@ -345,6 +349,182 @@ class ScopeController(QWidget):
         """Reset the waveform plot to its default fixed range."""
         self._update_axis_ranges()
 
+    @property
+    def session_replay_active(self) -> bool:
+        return self._session_replay_active
+
+    def begin_session_replay(self, *, frame_count: int, duration_ns: int) -> None:
+        """Stop live acquisition and isolate this view for recorded playback."""
+        if getattr(self, "_session_replay_active", False):
+            self.end_session_replay()
+        self._session_replay_active = True
+        self._stop_live_for_replay()
+        self._session_replay_display_mode = self.ui.comboDisplayMode.currentIndex()
+        blocked = self.ui.comboDisplayMode.blockSignals(True)
+        try:
+            self.ui.comboDisplayMode.setCurrentIndex(int(DisplayMode.RAW))
+        finally:
+            self.ui.comboDisplayMode.blockSignals(blocked)
+        self._set_display_mode(DisplayMode.RAW)
+        self._raw_curve.setData([], [])
+        self._threshold_line.setVisible(False)
+        self._pretrigger_line.setVisible(False)
+        self._apply_session_replay_controls()
+        duration_s = duration_ns / 1_000_000_000
+        self.ui.lblRecordingStatus.setText(
+            f"Scope replay ready: {frame_count} recorded frame(s), {duration_s:.3f} s"
+        )
+
+    def _stop_live_for_replay(self) -> None:
+        self._refresh_timer.stop()
+        self._measurement_timer.stop()
+        self._discard_inflight_frame = True
+        self._acquiring = False
+        online_current = self._dma_online_current
+        try:
+            self.stop_dma_sync()
+            dma_running = self._dma_thread is not None and self._dma_thread.isRunning()
+            auto_running = (
+                self._auto_setup_thread is not None
+                and self._auto_setup_thread.isRunning()
+            )
+            if dma_running or auto_running:
+                raise RuntimeError(
+                    "Scope background activity did not stop; replay was not started"
+                )
+        except Exception:
+            self._session_replay_active = False
+            self._restore_controls_after_session_replay()
+            raise
+
+        if online_current:
+            self._dma_online_current = False
+            self._set_dma_checkbox_without_write(False)
+            self.current_dma_state_changed.emit(
+                False,
+                "Live Scope DMA stopped for session replay.",
+            )
+        self._dma_stopping = False
+
+    def set_replay_hardware_interlock(self, enabled: bool) -> None:
+        """Prevent every Scope hardware action while replay data are loaded."""
+        enabled = bool(enabled)
+        if enabled == self._replay_hardware_interlocked:
+            return
+        self._replay_hardware_interlocked = enabled
+        if enabled:
+            self._stop_live_for_replay()
+            self._apply_hardware_interlock_controls()
+            return
+        if not self._session_replay_active:
+            self._restore_controls_after_session_replay()
+
+    def _apply_hardware_interlock_controls(self) -> None:
+        self._set_controls_enabled(False)
+        self.ui.btnStart.setChecked(False)
+        self.ui.btnStart.setEnabled(False)
+        self.ui.btnStop.setChecked(False)
+        self.ui.btnStop.setEnabled(False)
+        self.ui.btnAcquireFrame.setEnabled(False)
+        self.ui.btnDmaFile.setEnabled(False)
+        self.ui.btnAutoSetup.setEnabled(False)
+
+    def _apply_session_replay_controls(self) -> None:
+        self._apply_hardware_interlock_controls()
+        self.ui.comboDisplayMode.setEnabled(False)
+        self.ui.dialPersistence.setEnabled(False)
+        self.ui.labelPersistenceValue.setEnabled(False)
+
+    def display_session_replay_frame(
+        self,
+        samples: np.ndarray,
+        *,
+        sample_period_ns: int,
+        frame_index: int,
+        frame_count: int,
+        elapsed_ns: int,
+        duration_ns: int,
+        source: str,
+    ) -> None:
+        """Render one recorded frame without publishing or touching hardware."""
+        if not self._session_replay_active:
+            return
+        waveform = np.asarray(samples, dtype="<i2").reshape(-1)
+        if len(waveform) == 0 or sample_period_ns <= 0:
+            return
+        frame_duration_ns = max(sample_period_ns, len(waveform) * sample_period_ns)
+        self._time_scale = time_axis_scale(frame_duration_ns)
+        x_time = (
+            np.arange(len(waveform), dtype=np.float64)
+            * sample_period_ns
+            / self._time_scale.ns_per_unit
+        )
+        self._raw_curve.setData(x_time, waveform)
+        self._time_axis_label.setText(
+            f"Recorded time [{self._time_scale.unit}]  "
+            f"({sample_period_ns} ns/sample; {source} stream)"
+        )
+        view = self._plot_item.getViewBox()
+        view.setXRange(
+            0,
+            frame_duration_ns / self._time_scale.ns_per_unit,
+            padding=0,
+        )
+        view.setYRange(self._Y_MIN, self._Y_MAX, padding=0)
+        self.ui.lblRecordingStatus.setText(
+            "Replaying recorded Scope: "
+            f"{elapsed_ns / 1_000_000_000:.3f} / "
+            f"{duration_ns / 1_000_000_000:.3f} s "
+            f"(frame {frame_index}/{frame_count})"
+        )
+
+    def finish_session_replay(self, *, frame_count: int, duration_ns: int) -> None:
+        """Hold the last replay frame and keep live acquisition isolated at EOF."""
+        if not self._session_replay_active:
+            return
+        self.ui.lblRecordingStatus.setText(
+            "Scope replay complete: "
+            f"{frame_count} frame(s), {duration_ns / 1_000_000_000:.3f} s; "
+            "final recorded frame held"
+        )
+
+    def end_session_replay(self) -> None:
+        """Leave replay isolation without automatically restarting acquisition."""
+        if not self._session_replay_active:
+            return
+        self._session_replay_active = False
+        self._restore_controls_after_session_replay()
+        self.ui.lblRecordingStatus.setText(
+            "Session replay unloaded; Scope acquisition remains stopped"
+        )
+
+    def _restore_controls_after_session_replay(self) -> None:
+        display_index = self._session_replay_display_mode
+        self._session_replay_display_mode = None
+        if display_index is not None:
+            blocked = self.ui.comboDisplayMode.blockSignals(True)
+            try:
+                self.ui.comboDisplayMode.setCurrentIndex(display_index)
+            finally:
+                self.ui.comboDisplayMode.blockSignals(blocked)
+        self.ui.comboDisplayMode.setEnabled(True)
+        self._set_display_mode(DisplayMode(self.ui.comboDisplayMode.currentIndex()))
+        self._threshold_line.setVisible(True)
+        self._pretrigger_line.setVisible(True)
+        if self._replay_hardware_interlocked:
+            self._apply_hardware_interlock_controls()
+            self._update_axis_ranges()
+            return
+        self._set_controls_enabled(True)
+        self.ui.btnStart.setChecked(False)
+        self.ui.btnStart.setEnabled(True)
+        self.ui.btnStop.setChecked(False)
+        self.ui.btnStop.setEnabled(False)
+        self.ui.btnAcquireFrame.setEnabled(True)
+        self.ui.btnDmaFile.setEnabled(True)
+        self.ui.btnAutoSetup.setEnabled(True)
+        self._update_axis_ranges()
+
     # ------------------------------------------------------------------
     # Enable/disable parameter controls during DMA
     # ------------------------------------------------------------------
@@ -369,6 +549,8 @@ class ScopeController(QWidget):
 
     def reset_defaults(self) -> None:
         """Restore Scope hardware/UI defaults while the channel is idle."""
+        if self._replay_hardware_interlocked:
+            raise RuntimeError("exit session replay before resetting Scope defaults")
         if (
             self._auto_setup_thread is not None
             or self._dma_worker is not None
@@ -469,9 +651,7 @@ class ScopeController(QWidget):
         self._raw_curve.drag_finished.connect(self._on_waveform_drag_finished)
 
         self.ui.spinPretrigger.editingFinished.connect(
-            lambda: self._scope.set_pretrigger_samples(
-                self.ui.spinPretrigger.value() // self._SAMPLE_PERIOD_NS
-            )
+            self._on_pretrigger_committed
         )
         self.ui.spinPretrigger.valueChanged.connect(
             self._sync_pretrigger_line_from_widget
@@ -484,9 +664,7 @@ class ScopeController(QWidget):
         )
         self.ui.spinFrameSamples.editingFinished.connect(self._on_frame_samples_changed)
         self.ui.spinFrameGap.editingFinished.connect(
-            lambda: self._scope.set_frame_period_cycles(
-                self.ui.spinFrameGap.value() // self._VIEWER_POINT_PERIOD_NS
-            )
+            self._on_frame_gap_committed
         )
         self.ui.comboTriggerMode.currentIndexChanged.connect(
             self._on_trigger_mode_changed
@@ -515,6 +693,8 @@ class ScopeController(QWidget):
         self.ui.spinTriggerLevel.setValue(value)
 
     def _on_threshold_line_drag_finished(self) -> None:
+        if self._replay_hardware_interlocked:
+            return
         if self._threshold_line.movable:
             self._scope.set_trigger_level(self.ui.spinTriggerLevel.value())
 
@@ -568,6 +748,8 @@ class ScopeController(QWidget):
         self._restore_pretrigger_line_drag(state)
 
     def _on_pretrigger_line_drag_finished(self) -> None:
+        if self._replay_hardware_interlocked:
+            return
         state = self._pretrigger_line_drag
         if state is None:
             return
@@ -695,6 +877,9 @@ class ScopeController(QWidget):
         )
 
     def _on_waveform_drag_finished(self, cancelled: bool) -> None:
+        if self._replay_hardware_interlocked:
+            self._raw_curve.cancelDrag()
+            return
         state = self._waveform_drag
         if state is None:
             return
@@ -751,8 +936,24 @@ class ScopeController(QWidget):
             )
 
     def _on_trigger_mode_changed(self, index: int) -> None:
+        if self._replay_hardware_interlocked:
+            return
         self._scope.set_trigger_mode(TriggerMode(index))
         self._update_frame_gap_enabled()
+
+    def _on_pretrigger_committed(self) -> None:
+        if self._replay_hardware_interlocked:
+            return
+        self._scope.set_pretrigger_samples(
+            self.ui.spinPretrigger.value() // self._SAMPLE_PERIOD_NS
+        )
+
+    def _on_frame_gap_committed(self) -> None:
+        if self._replay_hardware_interlocked:
+            return
+        self._scope.set_frame_period_cycles(
+            self.ui.spinFrameGap.value() // self._VIEWER_POINT_PERIOD_NS
+        )
 
     def _update_frame_gap_enabled(self) -> None:
         periodic = self.ui.comboTriggerMode.currentIndex() == TriggerMode.TIMED
@@ -774,10 +975,12 @@ class ScopeController(QWidget):
             slider.blockSignals(False)
 
         def on_spin_committed() -> None:
-            set_fn(spinbox.value())  # type: ignore[operator]
+            if not self._replay_hardware_interlocked:
+                set_fn(spinbox.value())  # type: ignore[operator]
 
         def on_slider_released() -> None:
-            set_fn(spinbox.value())  # type: ignore[operator]
+            if not self._replay_hardware_interlocked:
+                set_fn(spinbox.value())  # type: ignore[operator]
 
         spinbox.valueChanged.connect(on_spin_changed)
         spinbox.editingFinished.connect(on_spin_committed)
@@ -807,6 +1010,8 @@ class ScopeController(QWidget):
         point as Scope. Other firmware retains the operator-selected Scope
         geometry because that preset has not been qualified there.
         """
+        if self._replay_hardware_interlocked:
+            raise RuntimeError("exit session replay before starting Scope DMA")
         if not self.current_dma_supported():
             raise RuntimeError(
                 "Scope DMA current monitoring requires the direct IIO backend "
@@ -943,6 +1148,15 @@ class ScopeController(QWidget):
         self._update_viewer_transport_hint()
 
     def _on_start(self) -> None:
+        if getattr(self, "_replay_hardware_interlocked", False) or getattr(
+            self,
+            "_session_replay_active",
+            False,
+        ):
+            self.ui.lblRecordingStatus.setText(
+                "Exit session replay before starting live Scope acquisition"
+            )
+            return
         self._raw_curve.cancelDrag()
         self._cancel_pretrigger_line_drag()
         if self._waveform_pending_status is not None:
@@ -1000,7 +1214,9 @@ class ScopeController(QWidget):
         self._dma_worker = IIOScopeDmaWorker(
             streamer=self._scope_dma,
             filepath=filepath,
-            frame_buffer=(None if self._dma_online_current else self._dma_frame_buffer),
+            # The publisher and current accumulator are independent consumers.
+            # Keep both attached so passive recording also sees Current-only DMA.
+            frame_buffer=self._dma_frame_buffer,
             current_accumulator=(
                 self._current_accumulator if self._dma_online_current else None
             ),
@@ -1109,6 +1325,11 @@ class ScopeController(QWidget):
     # ------------------------------------------------------------------
 
     def _on_auto_setup(self) -> None:
+        if getattr(self, "_replay_hardware_interlocked", False):
+            self.ui.lblRecordingStatus.setText(
+                "Exit session replay before running Scope Auto Setup"
+            )
+            return
         if self._auto_setup_worker is not None:
             self._auto_setup_worker.stop()
             self.ui.btnAutoSetup.setEnabled(False)
@@ -1187,6 +1408,9 @@ class ScopeController(QWidget):
         self._auto_setup_worker = None
         self._auto_setup_thread = None
         try:
+            if getattr(self, "_session_replay_active", False):
+                self._apply_session_replay_controls()
+                return
             self._set_auto_setup_busy(False)
             self._load_hardware_state()
             self._update_frame_gap_enabled()
@@ -1242,6 +1466,8 @@ class ScopeController(QWidget):
             self._refresh_timer.setInterval(1000 // value)
 
     def _request_frame(self) -> None:
+        if getattr(self, "_session_replay_active", False):
+            return
         if self._dma_online_current and self._current_accumulator is not None:
             # Hidden Current-only operation performs no viewer transaction or
             # waveform conversion. A visible Scope consumes only the latest
@@ -1260,6 +1486,8 @@ class ScopeController(QWidget):
         QThreadPool.globalInstance().start(worker)
 
     def _on_dma_preview_received(self, preview: ScopeCurrentPreview) -> None:
+        if getattr(self, "_session_replay_active", False):
+            return
         if self._waveform_drag is not None or self._pretrigger_line_drag is not None:
             return
         geometry = preview.geometry
@@ -1296,12 +1524,26 @@ class ScopeController(QWidget):
     @Slot(object)
     def _on_viewer_frame_received(self, data: list[np.ndarray] | None) -> None:
         self._acquiring = False
-        if data is None or self._discard_inflight_frame:
+        if (
+            data is None
+            or self._discard_inflight_frame
+            or getattr(self, "_session_replay_active", False)
+        ):
             return
         self._on_frame_received(data)
 
     def _on_frame_received(self, data: list[np.ndarray]) -> None:
         self._acquiring = False
+        if getattr(self, "_session_replay_active", False):
+            return
+        _x_time, captured_samples = data
+        signal = getattr(self, "session_viewer_frame", None)
+        if signal is not None:
+            signal.emit(
+                self._channel,
+                captured_samples,
+                self._VIEWER_POINT_PERIOD_NS,
+            )
         if self._waveform_drag is not None or self._pretrigger_line_drag is not None:
             return
         pending_status = self._waveform_pending_status
@@ -1325,6 +1567,8 @@ class ScopeController(QWidget):
             self._update_waveform_drag_enabled()
 
     def _on_frame_samples_changed(self) -> None:
+        if self._replay_hardware_interlocked:
+            return
         self._raw_curve.cancelDrag()
         self._cancel_pretrigger_line_drag()
         if self._waveform_pending_status is not None:
@@ -1341,6 +1585,11 @@ class ScopeController(QWidget):
             self.ui.lblRecordingStatus.setText(self._viewer_limit_message())
 
     def _on_acquire_frame(self) -> None:
+        if getattr(self, "_replay_hardware_interlocked", False):
+            self.ui.lblRecordingStatus.setText(
+                "Exit session replay before acquiring a live Scope frame"
+            )
+            return
         self._raw_curve.cancelDrag()
         self._cancel_pretrigger_line_drag()
         try:
@@ -1357,6 +1606,13 @@ class ScopeController(QWidget):
                 log.exception("Scope ch%d: failed to disarm after viewer read", self._channel)
         frame_samples = self._frame_samples_from_ui()
         frame = raw_frame[: frame_samples // 4]
+        signal = getattr(self, "session_viewer_frame", None)
+        if signal is not None:
+            signal.emit(
+                self._channel,
+                frame,
+                self._VIEWER_POINT_PERIOD_NS,
+            )
         expected = frame_samples // 4
         if len(frame) < expected:
             self.ui.lblRecordingStatus.setText(
@@ -1641,6 +1897,9 @@ class ScopeController(QWidget):
             )
         log.info("Scope DMA: worker finished; restoring controls")
         try:
+            if getattr(self, "_session_replay_active", False):
+                self._apply_session_replay_controls()
+                return
             self._set_controls_enabled(True)
             self.ui.btnStart.setChecked(False)
             self.ui.btnStart.setEnabled(True)
@@ -1698,7 +1957,7 @@ class ScopeController(QWidget):
                 )
 
     def stop_dma_sync(self) -> None:
-        """Blocking stop for use during application shutdown/reconnect only.
+        """Blocking stop for shutdown, reconnect, or isolated session replay.
 
         Handles both halves of what the UI's own Stop button does: an
         in-progress DMA worker (if any), and -- regardless of whether DMA

@@ -295,6 +295,23 @@ def test_coincidence_can_receive_online_events_without_feeding_disabled_psd() ->
     assert result is not psd_buffer
 
 
+def test_session_capture_publishes_events_without_enabling_psd() -> None:
+    event_buffer = McaEventBuffer()
+    controller = SimpleNamespace(
+        _psd_capture=Mock(),
+        _psd_capture_enabled=False,
+        _session_capture_enabled=True,
+        _event_buffer=event_buffer,
+        _coincidence_buffer=None,
+        ui=SimpleNamespace(cbCcEnable=SimpleNamespace(isChecked=lambda: False)),
+    )
+
+    result = MCAController._prepare_psd_capture(controller)
+
+    assert result is event_buffer
+    assert controller._psd_capture_enabled is False
+
+
 @pytest.mark.parametrize("mode", list(McaDmaOutputMode))
 @pytest.mark.parametrize("charge_comparison_enabled", [False, True])
 def test_dma_output_and_psd_interception_are_independent(

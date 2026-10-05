@@ -428,6 +428,31 @@ class McaPeakAnalysisDialog(QDialog):
         self._visible.setdefault(spectrum.spectrum_id, True)
         self._rebuild_source_list(select_id=spectrum.spectrum_id if select else self._current_id())
 
+    def add_spectra(self, spectra: list[Spectrum]) -> None:
+        """Add externally reconstructed spectra without coupling them to file loaders."""
+        for index, spectrum in enumerate(spectra):
+            self._add_spectrum(spectrum, select=index == len(spectra) - 1)
+
+    def remove_spectra(self, spectrum_ids: set[str]) -> None:
+        """Remove a related set of externally managed spectra in one UI rebuild."""
+        if not spectrum_ids:
+            return
+        for spectrum_id in spectrum_ids:
+            self._spectra.pop(spectrum_id, None)
+            self._visible.pop(spectrum_id, None)
+        self._order = [
+            spectrum_id for spectrum_id in self._order if spectrum_id not in spectrum_ids
+        ]
+        for channel, live_id in tuple(self._live_ids.items()):
+            if live_id in spectrum_ids:
+                del self._live_ids[channel]
+        if self._fit_spectrum_id in spectrum_ids:
+            self._fit_result = None
+            self._fit_spectrum_id = None
+            self.export_fit_button.setEnabled(False)
+        self._rebuild_source_list()
+        self._render()
+
     def _rebuild_source_list(self, *, select_id: str | None = None) -> None:
         current = select_id or self._current_id()
         self._rebuilding_sources = True

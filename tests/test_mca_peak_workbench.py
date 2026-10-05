@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QMainWindow, QMessageBox
 from pytestqt.qtbot import QtBot
 
 from nlab.analysis.energy_calibration import EnergyCalibration, SpectrumSnapshot
+from nlab.analysis.spectrum import Spectrum
 from nlab.ui.ui_main_window import Ui_MainWindow
 from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
 from nlab.views.plot_viewbox import ModifierZoomViewBox
@@ -90,6 +91,29 @@ def test_workbench_operation_creates_immutable_derived_spectrum(qtbot: QtBot) ->
     np.testing.assert_allclose(derived.counts, source.counts * 0.5)
     np.testing.assert_allclose(dialog._spectra[source_id].counts, source.counts)
     assert not derived.poisson_counts
+    dialog.close_without_prompt()
+
+
+def test_workbench_removes_only_managed_replay_spectra(qtbot: QtBot) -> None:
+    dialog = McaPeakAnalysisDialog(  # type: ignore[list-item]
+        [_FakeMcaController(0, _photopeak())]
+    )
+    qtbot.addWidget(dialog)
+    live_id = dialog._current_id()
+    assert live_id is not None
+    replay = Spectrum.create(
+        label="Recorded MCA Ch 0",
+        counts=np.arange(16, dtype=np.uint32),
+        source="mca",
+        spectrum_id="session-replay-ch0",
+    )
+
+    dialog.add_spectra([replay])
+    dialog.remove_spectra({replay.spectrum_id})
+
+    assert replay.spectrum_id not in dialog._spectra
+    assert live_id in dialog._spectra
+    assert dialog.source_list.count() == 1
     dialog.close_without_prompt()
 
 

@@ -56,3 +56,29 @@ def test_bottom_histogram_hover_l_toggles_log_and_all_plots_use_modifier_zoom(
     assert controller.eventFilter(controller.ui.plotEnergy, key)
     assert not controller._energy_log_y
     controller.stop_processing()
+
+
+def test_session_replay_rebuilds_psd_and_restores_live_processing(qtbot: QtBot) -> None:
+    controller = PSDController(McaEventBuffer(), channel=0)
+    qtbot.addWidget(controller)
+    original_bins = controller.ui.spinEnergyBins.value()
+    events = np.zeros(2, dtype=_LM_EVENT_DTYPE)
+    events["trapezoid_energy"] = [1000, 2000]
+    events["charge_energy"] = [500, 1000]
+
+    controller.begin_session_replay(events, {"energy_bins": 64, "ratio_bins": 32})
+
+    assert not controller._timer.isActive()
+    assert controller._accumulator.statistics.received == 2
+    assert controller._accumulator.statistics.accepted == 2
+    assert "Session replay in progress" in controller.ui.lblStatus.text()
+
+    controller.finish_session_replay()
+
+    assert "Session replay complete" in controller.ui.lblStatus.text()
+
+    controller.end_session_replay()
+
+    assert controller._timer.isActive()
+    assert controller.ui.spinEnergyBins.value() == original_bins
+    controller.stop_processing()

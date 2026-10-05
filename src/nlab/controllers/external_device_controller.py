@@ -6,7 +6,7 @@ from collections import deque
 import pyqtgraph as pg
 from nlab_modbus.core.base_modbus_device import BaseModbusDevice
 from nlab_modbus.core.register_specs import RegisterSpec, RegisterType
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
@@ -116,6 +116,8 @@ class ExternalDeviceController(QWidget):
     that set varies per device type and can't be known at design time.
     """
 
+    session_readback = Signal(str, float, object)
+
     def __init__(self, device: BaseModbusDevice, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.device = device
@@ -126,6 +128,9 @@ class ExternalDeviceController(QWidget):
         self._worker: ExternalDeviceWorker | None = None
         self._worker_thread: QThread | None = None
         self._worker_stop_requested = False
+        self._replay_hardware_interlocked = False
+        self._session_replay_active = False
+        self._replay_resume_polling = False
         self._row_by_name: dict[str, int] = {}
 
         self._plot_colors: dict[str, object] = {}
@@ -356,6 +361,8 @@ class ExternalDeviceController(QWidget):
     # ------------------------------------------------------------------
 
     def _on_setting_changed(self, name: str, value: int | float) -> None:
+        if self._replay_hardware_interlocked:
+            return
         log.debug("%s: %s=%s", self.device.connection_info(), name, value)
         try:
             self.device.write(name, value)
@@ -379,6 +386,8 @@ class ExternalDeviceController(QWidget):
         return values
 
     def apply_hardware_configuration_settings(self, settings: object) -> None:
+        if self._replay_hardware_interlocked:
+            raise RuntimeError("exit session replay before applying external settings")
         if not isinstance(settings, dict):
             return
         specs = dict(self._holding_specs())
@@ -399,6 +408,28 @@ class ExternalDeviceController(QWidget):
                 finally:
                     widget.blockSignals(False)
             self.device.write(name, value)
+
+    def set_replay_hardware_interlock(
+        self,
+        enabled: bool,
+        *,
+        resume_background: bool = True,
+    ) -> None:
+        enabled = bool(enabled)
+        if enabled and not self._replay_hardware_interlocked:
+            self._session_replay_active = True
+            self._replay_resume_polling = self._worker_thread is not None
+            self.stop_polling_sync()
+        self._replay_hardware_interlocked = enabled
+        self.ui.groupSettings.setEnabled(not enabled)
+        self.ui.btnStartMonitor.setEnabled(not enabled and self._worker_thread is None)
+        self.ui.btnStopMonitor.setEnabled(not enabled and self._worker_thread is not None)
+        if not enabled:
+            self._session_replay_active = False
+            resume = self._replay_resume_polling and resume_background
+            self._replay_resume_polling = False
+            if resume:
+                QTimer.singleShot(0, self._on_start_monitor)
 
     def configuration_settings(self) -> dict[str, object]:
         plotted: list[str] = []
@@ -434,6 +465,8 @@ class ExternalDeviceController(QWidget):
     # ------------------------------------------------------------------
 
     def start_polling(self, interval_ms: int = 1000) -> None:
+        if self._replay_hardware_interlocked:
+            return
         self._worker = ExternalDeviceWorker(self.device, interval_ms=interval_ms)
         self._worker_thread = QThread(self)
         self._worker_stop_requested = False
@@ -501,6 +534,18 @@ class ExternalDeviceController(QWidget):
         self._worker_stop_requested = False
 
     def _on_readback(self, timestamp: float, snapshot: dict[str, int | float]) -> None:
+        if self._session_replay_active:
+            return
+        signal = getattr(self, "session_readback", None)
+        if signal is not None:
+            signal.emit(self.configuration_id, timestamp, snapshot)
+        self._display_readback(timestamp, snapshot)
+
+    def _display_readback(
+        self,
+        timestamp: float,
+        snapshot: dict[str, int | float],
+    ) -> None:
         for name, value in snapshot.items():
             row = self._row_by_name.get(f"telemetry:{name}")
             if row is None:
@@ -523,3 +568,28 @@ class ExternalDeviceController(QWidget):
                 ts.popleft()
                 values.popleft()
             curve.setData(list(ts), list(values))
+
+    def begin_session_replay(self) -> None:
+        self._session_replay_active = True
+        for name in tuple(self._plot_ts):
+            self._plot_ts[name].clear()
+            self._plot_values[name].clear()
+            self._plot_curves[name].setData([], [])
+
+    def display_session_replay_readback(
+        self,
+        timestamp: float,
+        snapshot: object,
+    ) -> None:
+        if not isinstance(snapshot, dict):
+            raise ValueError("external replay telemetry must be a mapping")
+        values: dict[str, int | float] = {}
+        for name, value in snapshot.items():
+            if isinstance(name, str) and isinstance(value, int | float) and not isinstance(
+                value, bool
+            ):
+                values[name] = value
+        self._display_readback(float(timestamp), values)
+
+    def end_session_replay(self) -> None:
+        self._session_replay_active = False
