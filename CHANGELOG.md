@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The MCA peak-analysis workbench can overlay a pinned offline NNDC ENSDF
+  catalogue containing 2,065 decaying parent nuclides/states and 87,481
+  default-quality photon lines. The generated SQLite artifact applies ENSDF
+  photon and branch normalization, excludes limit-only/uncertain records from
+  the default overlay, retains source-dataset provenance, and adds the DDEP/
+  IRDFF-II Na-22 annihilation reference. Multiple nuclides, an emission-
+  probability cutoff, source tooltips, calibrated channel mapping, and
+  reproducible JSON fit-export metadata are supported. An indexed fit-ROI
+  candidate filter composes with text and probability filtering, ranks parents
+  by matching-line count and strongest emission, and remains explicitly a
+  candidate aid rather than an identification. Persistent, user-editable
+  favourites pin common laboratory sources above the full list and matching
+  ROI candidates. Candidate searches clip calibrated ROIs to the non-negative
+  photon-energy domain. Missing or stale calibrations suppress both calibrated
+  features explicitly.
+
 ## [0.6.3] — 2026-10-05
 
 ### Added

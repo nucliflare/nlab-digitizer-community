@@ -96,7 +96,8 @@ uv run python examples/measure_current.py
   snapshots of current MCA spectra, CSV/ASCII SPE/Tukan WDM/CAEN TXT3/ROOT
   loading, one-to-three Gaussian fits, selectable count-aware backgrounds,
   residuals, parameter uncertainties, and variance-preserving spectrum
-  arithmetic
+  arithmetic, plus evaluated radionuclide photon-line overlays for calibrated
+  spectra
 - Debug waveform-bank readout
 - Synchronized stop/write/restart when changing MCA settings during acquisition
 - List-mode IIO DMA using fixed 1,024-record frames
@@ -563,6 +564,44 @@ variable Tukan calibration/ROI tail and opaque CAEN ROOT calibration objects
 are not guessed or applied. Visible spectra can be overlaid when they share
 channel or energy coordinates; spectra using another axis are not silently
 resampled.
+
+The **Reference lines** tab overlays evaluated photon energies from a pinned,
+offline NNDC ENSDF snapshot. The bundled 12.97 MiB SQLite catalogue contains
+2,065 decaying parent nuclides/states and 87,481 default-quality lines from the
+ENSDF data generated on 2026-08-10. It is generated at release time rather than
+queried over the network, so the same application version produces the same
+overlay offline. Na-22's evaluated 511 keV positron-annihilation feature is an
+explicit DDEP/IRDFF-II supplement because annihilation radiation is not an
+ENSDF nuclear gamma-transition record.
+
+Select one or more parent nuclides and a minimum absolute emission probability.
+The overlay works with a native keV axis or the selected spectrum's retained
+channel-to-energy calibration; it is hidden when the calibration is absent or
+stale. ENSDF relative intensities are converted to photons per 100 parent decays
+using the dataset's photon normalization and branching ratio. Limit-only and
+uncertain records remain in the database for provenance but are excluded from
+the default overlay. Common laboratory sources are starred and pinned to the
+top on first use; highlight any catalogue entry to add or remove it from the
+persistent favourites, or restore the common defaults. **Only nuclides with
+lines in fit ROI** converts the explicit fit region to keV and shows candidate
+parents ranked by matching-line count and strongest emission probability, with
+matching favourites pinned first; favourites without an ROI match remain
+excluded. Text search and the probability threshold continue to apply. The plot
+viewport is deliberately not used, so zooming and panning do not silently
+change the candidate list. A line match is not presented as an isotope
+identification.
+
+Detector efficiency, geometry, attenuation, coincidence summing, and dead time
+still determine the measured peak height. The catalogue does not currently
+synthesize characteristic X-ray lines or annihilation lines for positron
+emitters other than Na-22. JSON fit exports snapshot the selected nuclides,
+catalogue version and source-release timestamp, probability threshold, ROI
+candidate-filter state, and exact displayed reference records for
+reproducibility.
+
+Maintainers can reproduce the committed database with
+`python scripts/build_radionuclide_catalog.py`. The builder refuses an
+unexpected ENSDF release timestamp until it is reviewed and explicitly pinned.
 
 Select one, two, or three Gaussian components and a background of none,
 constant, linear, centred exponential, an error-function Compton step, or a

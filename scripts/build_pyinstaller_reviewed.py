@@ -36,6 +36,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ENTRY = ROOT / "src" / "nlab" / "main.py"
 ICON = ROOT / "resources" / "icons" / "ewt.ico"
+RADIONUCLIDE_CATALOG = ROOT / "src" / "nlab" / "data" / "radionuclide_lines.sqlite3"
 VERSION_SOURCE = ROOT / "src" / "nlab" / "_version.py"
 DIST = ROOT / "dist"
 WORK = ROOT / "build" / "pyinstaller-reviewed"
@@ -160,6 +161,7 @@ def _preflight() -> None:
     required_paths = [
         ENTRY,
         ICON,
+        RADIONUCLIDE_CATALOG,
         VERSION_SOURCE,
     ]
     missing = [path for path in required_paths if not path.is_file()]
@@ -188,6 +190,7 @@ def _build_arguments(*, clean: bool, version: str) -> list[str]:
         f"--workpath={WORK}",
         f"--specpath={SPEC}",
         f"--add-data={ICON}{os.pathsep}resources/icons",
+        f"--add-data={RADIONUCLIDE_CATALOG}{os.pathsep}nlab/data",
     ]
     if clean:
         arguments.append("--clean")
