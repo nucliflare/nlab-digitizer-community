@@ -1816,7 +1816,7 @@ requires-dist = [
     { name = "ordered-set", marker = "extra == 'dev'" },
     { name = "pip-licenses", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "pyinstaller", marker = "extra == 'dev'", specifier = ">=6.8" },
-    { name = "pylibiio", specifier = ">=0.25" },
+    { name = "pylibiio", specifier = ">=0.25,<1" },
     { name = "pyqtgraph", specifier = ">=0.13" },
     { name = "pyside6", specifier = ">=6.7,<6.10" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },

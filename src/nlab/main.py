@@ -1,21 +1,22 @@
+from __future__ import annotations
+
 import argparse
+import importlib
 import logging
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QEventLoop, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QEventLoop, Qt, QTimer, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMessageBox, QSplashScreen
 
 from nlab import __version__
-from nlab.app import MainAppWindow
-from nlab.utils.settings_io import (
-    connection_settings,
-    read_configuration,
-    validate_connection_transport,
-)
 from nlab.utils.windows_icon import apply_taskbar_icon
-from nlab.views.connection_dialog import ConnectionDialog
+
+if TYPE_CHECKING:
+    from nlab.app import MainAppWindow as _MainAppWindow
+    from nlab.views.connection_dialog import ConnectionDialog as _ConnectionDialog
 
 # Registers compiled Qt resources (icons, images) with the Qt resource system.
 # Must happen before any QPixmap(":/...") call.
@@ -30,6 +31,83 @@ except ImportError:
 
 
 log = logging.getLogger(__name__)
+LIBIIO_V026_RELEASE_URL = "https://github.com/analogdevicesinc/libiio/releases/tag/v0.26"
+LIBIIO_V026_WINDOWS_INSTALLER = "libiio-0.26.ga0eca0d2-setup.exe"
+
+# Loaded only after QApplication exists and the native libiio runtime has been
+# checked. Keeping these imports out of module scope lets frozen builds replace
+# PyInstaller's raw missing-DLL traceback with an actionable Qt dialog.
+MainAppWindow: type[_MainAppWindow] | None = None
+ConnectionDialog: type[_ConnectionDialog] | None = None
+
+
+class LibiioRuntimeError(RuntimeError):
+    """The pylibiio wrapper could not load a usable native runtime."""
+
+
+def _verify_libiio_runtime() -> None:
+    try:
+        module = importlib.import_module("iio")
+    except Exception as exc:
+        raise LibiioRuntimeError(str(exc) or type(exc).__name__) from exc
+    version = getattr(module, "version", None)
+    if (
+        isinstance(version, tuple)
+        and version
+        and isinstance(version[0], int)
+        and version[0] >= 1
+    ):
+        display_version = ".".join(str(component) for component in version[:2])
+        raise LibiioRuntimeError(
+            f"libiio {display_version} uses the incompatible 1.x API; libiio v0.26 is required"
+        )
+    log.info("Loaded native libiio runtime: %s", version if version is not None else "unknown")
+
+
+def _load_runtime_ui() -> None:
+    global ConnectionDialog, MainAppWindow
+    if MainAppWindow is None:
+        from nlab.app import MainAppWindow as RuntimeMainAppWindow
+
+        MainAppWindow = RuntimeMainAppWindow
+    if ConnectionDialog is None:
+        from nlab.views.connection_dialog import ConnectionDialog as RuntimeConnectionDialog
+
+        ConnectionDialog = RuntimeConnectionDialog
+
+
+def _show_libiio_runtime_error(error: LibiioRuntimeError) -> None:
+    box = QMessageBox()
+    box.setIcon(QMessageBox.Icon.Critical)
+    box.setWindowTitle("libiio Runtime Required")
+    box.setText("A supported Analog Devices libiio runtime is not available.")
+    if sys.platform == "win32":
+        instructions = (
+            f"Install the supported libiio v0.26 Windows package "
+            f"({LIBIIO_V026_WINDOWS_INSTALLER}), then restart Nuclear Lab Digitizer."
+        )
+    else:
+        instructions = (
+            "Install the libiio v0.26 native runtime using your system package manager or "
+            "the official release assets, then restart Nuclear Lab Digitizer."
+        )
+    box.setInformativeText(
+        f"{instructions}\n\nlibiio 1.x uses a different API and is not yet a validated native "
+        "runtime for this application."
+    )
+    box.setDetailedText(
+        f"Official release: {LIBIIO_V026_RELEASE_URL}\n\nStartup error:\n{error}"
+    )
+    box.setStandardButtons(QMessageBox.StandardButton.Close)
+    box.setDefaultButton(QMessageBox.StandardButton.Close)
+    open_button = box.addButton(
+        "Open libiio v0.26 download page",
+        QMessageBox.ButtonRole.ActionRole,
+    )
+    box.exec()
+    if box.clickedButton() is open_button:
+        if not QDesktopServices.openUrl(QUrl(LIBIIO_V026_RELEASE_URL)):
+            log.warning("Could not open the libiio release page in the default browser")
 
 
 def _parse_arguments(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
@@ -67,6 +145,22 @@ def main() -> None:
     app.setApplicationVersion(__version__)
     app.setOrganizationName("EWT")
     app.setOrganizationDomain("ewt.local")  # scopes QSettings on all platforms
+
+    try:
+        _verify_libiio_runtime()
+    except LibiioRuntimeError as exc:
+        log.error("Native libiio runtime is unavailable: %s", exc)
+        _show_libiio_runtime_error(exc)
+        sys.exit(1)
+
+    _load_runtime_ui()
+    assert MainAppWindow is not None
+    assert ConnectionDialog is not None
+    from nlab.utils.settings_io import (
+        connection_settings,
+        read_configuration,
+        validate_connection_transport,
+    )
 
     config: dict[str, object] = {}
     if args.config is not None:

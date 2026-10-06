@@ -197,3 +197,112 @@ def test_connection_failure_closes_second_splash_and_reports_error(
     connection_splash.close.assert_called_once_with()
     connection_splash.finish.assert_not_called()
     error_box.assert_called_once_with(None, "Connection Failed", "device unavailable")
+
+
+def test_libiio_import_failure_is_reported_before_runtime_ui_loads(
+    monkeypatch: pytest.MonkeyPatch,
+    qapp: QApplication,
+) -> None:
+    _events, first_splash, _connection_splash = _prepare_fake_main(monkeypatch)
+    runtime_loader = Mock()
+    error_dialog = Mock()
+    monkeypatch.setattr(main_module, "_load_runtime_ui", runtime_loader)
+    monkeypatch.setattr(main_module, "_show_libiio_runtime_error", error_dialog)
+    monkeypatch.setattr(
+        main_module,
+        "_verify_libiio_runtime",
+        Mock(side_effect=main_module.LibiioRuntimeError("missing libiio.dll")),
+    )
+
+    with pytest.raises(SystemExit) as exited:
+        main_module.main()
+
+    assert exited.value.code == 1
+    runtime_loader.assert_not_called()
+    first_splash.finish.assert_not_called()
+    error_dialog.assert_called_once()
+    assert str(error_dialog.call_args.args[0]) == "missing libiio.dll"
+
+
+def test_libiio_runtime_check_wraps_native_load_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_import(_name: str) -> None:
+        raise OSError("missing libiio.dll")
+
+    monkeypatch.setattr(main_module.importlib, "import_module", fail_import)
+
+    with pytest.raises(main_module.LibiioRuntimeError, match="missing libiio.dll"):
+        main_module._verify_libiio_runtime()
+
+
+def test_libiio_runtime_check_rejects_v1_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        main_module.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(version=(1, 0, "test")),
+    )
+
+    with pytest.raises(main_module.LibiioRuntimeError, match="incompatible 1.x API"):
+        main_module._verify_libiio_runtime()
+
+
+def test_libiio_error_dialog_opens_pinned_release_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened_urls: list[str] = []
+    captured: dict[str, object] = {}
+    open_button = object()
+
+    class FakeMessageBox:
+        Icon = SimpleNamespace(Critical=1)
+        ButtonRole = SimpleNamespace(ActionRole=2)
+        StandardButton = SimpleNamespace(Close=3)
+
+        def setIcon(self, value: object) -> None:  # noqa: N802 - Qt API
+            captured["icon"] = value
+
+        def setWindowTitle(self, value: str) -> None:  # noqa: N802 - Qt API
+            captured["title"] = value
+
+        def setText(self, value: str) -> None:  # noqa: N802 - Qt API
+            captured["text"] = value
+
+        def setInformativeText(self, value: str) -> None:  # noqa: N802 - Qt API
+            captured["informative"] = value
+
+        def setDetailedText(self, value: str) -> None:  # noqa: N802 - Qt API
+            captured["details"] = value
+
+        def addButton(self, text: str, _role: object) -> object:  # noqa: N802 - Qt API
+            captured["button_text"] = text
+            return open_button
+
+        def setStandardButtons(self, value: object) -> None:  # noqa: N802 - Qt API
+            captured["standard_buttons"] = value
+
+        def setDefaultButton(self, value: object) -> None:  # noqa: N802 - Qt API
+            captured["default_button"] = value
+
+        def exec(self) -> None:
+            pass
+
+        def clickedButton(self) -> object:  # noqa: N802 - Qt API
+            return open_button
+
+    monkeypatch.setattr(main_module, "QMessageBox", FakeMessageBox)
+    monkeypatch.setattr(
+        main_module.QDesktopServices,
+        "openUrl",
+        lambda url: opened_urls.append(url.toString()) or True,
+    )
+
+    main_module._show_libiio_runtime_error(
+        main_module.LibiioRuntimeError("missing libiio.dll")
+    )
+
+    assert captured["title"] == "libiio Runtime Required"
+    assert "v0.26" in str(captured["informative"])
+    assert "not yet a validated" in str(captured["informative"])
+    assert "missing libiio.dll" in str(captured["details"])
+    assert opened_urls == [main_module.LIBIIO_V026_RELEASE_URL]
