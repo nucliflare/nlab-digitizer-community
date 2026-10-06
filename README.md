@@ -312,6 +312,22 @@ or request a partial scan mask as a workaround.
 On Linux, the system may also need the OpenGL, EGL, XKB, and XCB libraries used
 by Qt.
 
+On Windows, a packaged application detects a missing or unloadable native
+libiio runtime before importing the hardware UI. It shows an actionable dialog
+with a button to the pinned v0.26 release instead of exposing a frozen-
+application traceback. Install `libiio-0.26.ga0eca0d2-setup.exe` from that
+release and restart the application.
+
+The host application currently uses the libiio 0.x Python and streaming APIs.
+Libiio 1.0 deliberately breaks that API and ABI, including context discovery,
+attribute access, channel masks, and buffer streaming. The 1.0 distribution can
+build a v0.x compatibility library and a v0.26 client remains wire-compatible
+with a 1.0 IIOD server. The application nevertheless rejects a host runtime
+reporting major version 1 and remains pinned to v0.26 until the compatibility
+layer and DMA lifecycle are validated on the supported Windows and target
+configurations. This does not prevent connecting the v0.26 host client to a
+target running a backward-compatible 1.0 IIOD server.
+
 ### Set up the project
 
 ```bash

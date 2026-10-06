@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Frozen builds now detect a missing or unloadable native libiio runtime after
+  Qt starts but before importing hardware modules. A recovery dialog directs
+  users to the pinned v0.26 Windows installer instead of exposing a
+  PyInstaller missing-DLL traceback. The Python binding is constrained to the
+  0.x API, and host runtimes reporting the breaking libiio 1.x API are rejected
+  while its compatibility layer and DMA model remain unvalidated.
+
 ## [0.6.3] — 2026-10-05
 
 ### Added

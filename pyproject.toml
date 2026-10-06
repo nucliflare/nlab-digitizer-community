@@ -24,7 +24,7 @@ dependencies = [
     "uproot>=5.7",
     "pyyaml>=6.0",
     "nlab-modbus",
-    "pylibiio>=0.25",
+    "pylibiio>=0.25,<1",
 ]
 
 [project.optional-dependencies]
