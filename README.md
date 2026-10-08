@@ -758,6 +758,10 @@ hiding a completed fit. Sparse data, unresolved populations, parameters at
 fit bounds, missing covariance, or poor reduced chi-square produce a visible
 convergence warning; the result should not then be treated as a qualified PSD
 separation measurement.
+The ratio and energy projections share the map's aligned data boundaries. Hover
+over the bottom energy projection and press **L** to switch its count axis
+between linear and logarithmic scale; this shortcut is available in both live
+PSD and offline/readback views.
 The import runs in a background worker: binary files are memory-mapped, HDF5
 is read in dataset slices, and ROOT uses chunked tree iteration, so event
 memory does not grow with file size. CAEN PSD import requires raw Energy and

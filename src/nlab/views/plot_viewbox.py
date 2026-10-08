@@ -4,10 +4,20 @@ from typing import Any
 
 from pyqtgraph import PlotCurveItem, PlotWidget, ViewBox
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QWidget
 
+_PLOT_AREA_BACKGROUND = "#f8f9fa"
 
-class ModifierZoomViewBox(ViewBox):
+
+def style_plot_widget(widget: PlotWidget) -> None:
+    """Match the plot surround to Qt while retaining a light data canvas."""
+    interface_background = widget.palette().color(QPalette.ColorRole.Window)
+    widget.setBackground(interface_background)
+    widget.getViewBox().setBackgroundColor(_PLOT_AREA_BACKGROUND)
+
+
+class ModifierZoomViewBox(ViewBox):  # type: ignore[misc]
     """ViewBox with modifier-key axis-locked scrolling.
 
     * Shift + wheel  → horizontal zoom only
@@ -15,7 +25,7 @@ class ModifierZoomViewBox(ViewBox):
     * Plain wheel    → default pyqtgraph behaviour (zoom both)
     """
 
-    def wheelEvent(self, ev, axis=None):  # noqa: N802
+    def wheelEvent(self, ev: Any, axis: int | None = None) -> None:  # noqa: N802
         mods = ev.modifiers()
         if mods & Qt.KeyboardModifier.ShiftModifier:
             axis = 0
@@ -24,7 +34,7 @@ class ModifierZoomViewBox(ViewBox):
         super().wheelEvent(ev, axis=axis)
 
 
-class NLabPlotWidget(PlotWidget):
+class NLabPlotWidget(PlotWidget):  # type: ignore[misc]
     """PlotWidget that uses ModifierZoomViewBox by default.
 
     Promote QWidget to this class in Qt Designer with header

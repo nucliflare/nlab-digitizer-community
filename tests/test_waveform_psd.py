@@ -9,7 +9,8 @@ from typing import Literal
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QEvent, Qt, QThread, Signal
+from PySide6.QtGui import QKeyEvent, QPalette
 from pytestqt.qtbot import QtBot
 
 import nlab.views.waveform_analysis_dialog as waveform_dialog_module
@@ -151,6 +152,45 @@ def test_offline_psd_plots_use_modifier_zoom(qtbot: QtBot) -> None:
 
     for plot_item in (plot.matrix_plot, plot.ratio_plot, plot.energy_plot):
         assert isinstance(plot_item.getViewBox(), ModifierZoomViewBox)
+
+
+def test_offline_psd_projection_axes_align_and_energy_l_toggles_log(qtbot: QtBot) -> None:
+    plot = OfflinePsdPlot()
+    qtbot.addWidget(plot)
+    plot.resize(1000, 600)
+    plot.show()
+    plot.set_data(
+        np.ones((512, 256), dtype=np.uint64),
+        energy_range=(0.0, 1_000_000.0),
+        ratio_range=(-1.0, 1.0),
+    )
+    qtbot.wait(10)
+
+    matrix_rect = plot.matrix_plot.getViewBox().sceneBoundingRect()
+    ratio_rect = plot.ratio_plot.getViewBox().sceneBoundingRect()
+    energy_rect = plot.energy_plot.getViewBox().sceneBoundingRect()
+    assert ratio_rect.top() == pytest.approx(matrix_rect.top())
+    assert ratio_rect.bottom() == pytest.approx(matrix_rect.bottom())
+    assert energy_rect.left() == pytest.approx(matrix_rect.left())
+    assert energy_rect.right() == pytest.approx(matrix_rect.right())
+    assert plot.ratio_plot.viewRange()[1] == pytest.approx([-1.0, 1.0])
+    assert plot.energy_plot.viewRange()[0] == pytest.approx([0.0, 1_000_000.0])
+
+    interface_background = plot.palette().color(QPalette.ColorRole.Window)
+    for widget in (plot._matrix_widget, plot._ratio_widget, plot._energy_widget):
+        assert widget.backgroundBrush().color() == interface_background
+        assert widget.getViewBox().background.brush().color().name() == "#f8f9fa"
+
+    plot._energy_widget.underMouse = lambda: True
+    key = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_L,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    assert plot.eventFilter(plot._energy_widget, key)
+    assert plot._energy_log_y
+    assert plot.eventFilter(plot._energy_widget, key)
+    assert not plot._energy_log_y
 
 
 def test_worker_reconstructs_indexed_ndma_without_retaining_frames(tmp_path: Path) -> None:

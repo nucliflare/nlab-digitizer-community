@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QRectF
+from PySide6.QtCore import QEvent, QObject, QRectF, Qt
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDoubleSpinBox,
     QGridLayout,
@@ -15,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from nlab.views.plot_viewbox import NLabPlotWidget
+from nlab.views.plot_viewbox import NLabPlotWidget, style_plot_widget
 from nlab.views.psd_fom_widget import PsdFomWidget
 
 
@@ -27,6 +29,7 @@ class OfflinePsdPlot(QWidget):
         self._matrix = np.zeros((1, 1), dtype=np.uint64)
         self._energy_range = (0.0, 1.0)
         self._ratio_range = (0.0, 1.0)
+        self._energy_log_y = False
 
         root = QVBoxLayout(self)
         controls = QHBoxLayout()
@@ -49,7 +52,7 @@ class OfflinePsdPlot(QWidget):
         plots.setSpacing(4)
 
         self._matrix_widget = NLabPlotWidget(plots_widget)
-        self._matrix_widget.setBackground("#f8f9fa")
+        style_plot_widget(self._matrix_widget)
         self.matrix_plot = self._matrix_widget.getPlotItem()
         self.matrix_plot.showAxis("top")
         self.matrix_plot.showAxis("right")
@@ -77,23 +80,31 @@ class OfflinePsdPlot(QWidget):
         self.matrix_plot.addItem(self.cut_line)
 
         self._ratio_widget = NLabPlotWidget(plots_widget)
-        self._ratio_widget.setBackground("#f8f9fa")
+        style_plot_widget(self._ratio_widget)
         self._ratio_widget.setMaximumWidth(300)
         self.ratio_plot = self._ratio_widget.getPlotItem()
         self.ratio_plot.setYLink(self.matrix_plot)
+        self.ratio_plot.showAxis("top")
+        self.ratio_plot.showAxis("right")
         self.ratio_plot.showGrid(x=True, y=True, alpha=0.2)
         self.ratio_plot.setLabel("bottom", "Counts")
         self.ratio_plot.setLabel("left", "PSD ratio")
         self.ratio_curve = self.ratio_plot.plot(pen=pg.mkPen("#6a4c93", width=1.5))
 
         self._energy_widget = NLabPlotWidget(plots_widget)
-        self._energy_widget.setBackground("#f8f9fa")
+        style_plot_widget(self._energy_widget)
         self._energy_widget.setMaximumHeight(240)
         self.energy_plot = self._energy_widget.getPlotItem()
         self.energy_plot.setXLink(self.matrix_plot)
+        self.energy_plot.showAxis("top")
+        self.energy_plot.showAxis("right")
         self.energy_plot.showGrid(x=True, y=True, alpha=0.2)
         self.energy_plot.setLabel("left", "Counts")
         self.energy_plot.setLabel("bottom", "Long-gate charge", units="raw")
+        self._energy_widget.setToolTip(
+            "Hover here and press L to toggle logarithmic Y scale. "
+            "Shift+wheel zooms X; Ctrl+wheel zooms Y."
+        )
         self.energy_plot.addLegend(offset=(10, 10))
         self.below_curve = self.energy_plot.plot(
             pen=pg.mkPen("#277da1", width=1.5), name="Below cut"
@@ -118,6 +129,30 @@ class OfflinePsdPlot(QWidget):
         self.cut_spin.valueChanged.connect(self._cut_spin_changed)
         self.cut_line.sigPositionChanged.connect(self._cut_line_changed)
         self.energy_region.sigRegionChangeFinished.connect(self._render_projections)
+        self._application = QApplication.instance()
+        if self._application is not None:
+            self._application.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        """Toggle energy-projection log scale only while that plot is hovered."""
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and self.isVisible()
+            and self._energy_widget.underMouse()
+            and isinstance(event, QKeyEvent)
+            and event.key() == Qt.Key.Key_L
+            and event.modifiers()
+            in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.ShiftModifier)
+            and not event.isAutoRepeat()
+        ):
+            self.set_energy_log_y(not self._energy_log_y)
+            return True
+        return super().eventFilter(watched, event)
+
+    def set_energy_log_y(self, enabled: bool) -> None:
+        """Set logarithmic Y display on the bottom energy projection."""
+        self._energy_log_y = bool(enabled)
+        self.energy_plot.setLogMode(y=self._energy_log_y)
 
     def set_data(
         self,

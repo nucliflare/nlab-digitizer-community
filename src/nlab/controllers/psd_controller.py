@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from nlab.analysis.psd import PsdAccumulator
 from nlab.hardware.digitizer.dma import McaEventBuffer
 from nlab.ui.ui_psd_view import Ui_PSDView
+from nlab.views.plot_viewbox import style_plot_widget
 from nlab.views.psd_fom_widget import PsdFomWidget
 from nlab.views.responsive_layout import configure_psd_layout
 
@@ -72,7 +73,7 @@ class PSDController(QWidget):
 
     def _setup_plots(self) -> None:
         for widget in (self.ui.plotPsd, self.ui.plotRatio, self.ui.plotEnergy):
-            widget.setBackground("#f8f9fa")
+            style_plot_widget(widget)
 
         self._psd_plot = self.ui.plotPsd.getPlotItem()
         self._psd_plot.showAxis("right")

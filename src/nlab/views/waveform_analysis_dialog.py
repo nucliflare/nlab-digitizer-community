@@ -39,7 +39,7 @@ from nlab.analysis.waveform_psd import (
     integrate_waveform,
 )
 from nlab.views.offline_psd_plot import OfflinePsdPlot
-from nlab.views.plot_viewbox import ModifierZoomViewBox
+from nlab.views.plot_viewbox import ModifierZoomViewBox, style_plot_widget
 from nlab.workers.waveform_file_worker import WaveformFileIndexWorker
 from nlab.workers.waveform_psd_worker import WaveformPsdWorker
 
@@ -139,7 +139,7 @@ class WaveformAnalysisDialog(QDialog):
         self.plot_splitter = QSplitter(Qt.Orientation.Vertical, self)
         self.waveform_widget = pg.PlotWidget(self, viewBox=ModifierZoomViewBox())
         self.waveform_widget.setMinimumHeight(200)
-        self.waveform_widget.setBackground("#f8f9fa")
+        style_plot_widget(self.waveform_widget)
         self.waveform_plot = self.waveform_widget.getPlotItem()
         self.waveform_plot.showAxis("top")
         self.waveform_plot.showAxis("right")

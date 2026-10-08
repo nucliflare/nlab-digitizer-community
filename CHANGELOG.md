@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Pyqtgraph plot surrounds now follow the active Qt interface palette while
+  retaining a distinct light data canvas. Offline PSD projection axes align
+  exactly with the PSD map, and hovering the bottom energy projection while
+  pressing `L` toggles its count axis between linear and logarithmic scale.
 - MCA Stop now keeps Start and configuration controls interlocked until the
   list-mode DMA worker has drained, destroyed its native buffer, and released
   the hardware ownership gate, preventing an immediate restart from failing
