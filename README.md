@@ -891,6 +891,14 @@ Tests that require a real digitizer are kept separate from ordinary unit
 tests. When running hardware checks, always stop an armed MCA/Scope in a
 `finally` block so a failed script does not leave the target enabled.
 
+After stopping MCA list-mode DMA, the GUI keeps Start and MCA configuration
+disabled until the native IIO buffer has finished draining and released its
+hardware gate, then restores the DMA file selector for file-backed output even
+when PSD interception was active. A definitive IIO connection reset stops periodic MCA,
+diagnostics, and temperature-correction polling after the first failure; use
+**Connection -> Reconnect Device** after the board or `iiod` service is
+available again.
+
 ## Standalone builds
 
 Install the development dependencies and generate the Qt UI modules before

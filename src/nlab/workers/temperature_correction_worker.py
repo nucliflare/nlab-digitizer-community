@@ -9,7 +9,7 @@ from PySide6.QtCore import QTimer, Signal, Slot
 
 from nlab.hardware.digitizer.hv import HVSupply
 from nlab.hardware.digitizer.mca import MultiChannelAnalyzer
-from nlab.workers.base_worker import BaseWorker
+from nlab.workers.base_worker import BaseWorker, is_fatal_transport_error
 
 log = logging.getLogger(__name__)
 
@@ -93,7 +93,7 @@ class TemperatureCorrectionWorker(BaseWorker):
 
     @Slot()
     def _tick(self) -> None:
-        if self._stop_requested.is_set():
+        if self._finished or self._stop_requested.is_set():
             self._stop()
             return
         try:
@@ -110,8 +110,14 @@ class TemperatureCorrectionWorker(BaseWorker):
             if self._stop_requested.is_set():
                 self._stop()
                 return
-            log.exception("MCA temperature-correction cycle failed")
+            connection_lost = is_fatal_transport_error(exc)
+            if connection_lost:
+                log.exception("MCA temperature-correction connection lost; stopping worker")
+            else:
+                log.exception("MCA temperature-correction cycle failed")
             self.error.emit(str(exc))
+            if connection_lost:
+                self._stop()
             return
 
         if self._stop_requested.is_set():

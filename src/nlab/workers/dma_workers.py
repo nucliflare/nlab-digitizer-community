@@ -25,7 +25,7 @@ from nlab.hardware.digitizer.dma import (
     ScopeFrameBuffer,
 )
 from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode, McaRunSummary
-from nlab.workers.base_worker import BaseWorker
+from nlab.workers.base_worker import BaseWorker, is_fatal_transport_error
 
 if TYPE_CHECKING:
     from nlab.hardware.digitizer.current_monitor import ScopeCurrentAccumulator
@@ -152,6 +152,7 @@ class IIOMcaDmaWorker(BaseWorker):
     ready = Signal()
     progress = Signal(object)
     summary = Signal(object)
+    connection_lost = Signal(str)
 
     def __init__(
         self,
@@ -201,6 +202,8 @@ class IIOMcaDmaWorker(BaseWorker):
         except Exception as exc:
             error = str(exc)
             log.exception("IIOMcaDmaWorker: streaming failed")
+            if is_fatal_transport_error(exc):
+                self.connection_lost.emit(error)
             self.error.emit(f"IIO MCA DMA streaming failed: {error}")
         finally:
             self.summary.emit(

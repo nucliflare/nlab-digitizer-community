@@ -6,7 +6,7 @@ import threading
 from PySide6.QtCore import QTimer, Signal, Slot
 
 from nlab.hardware.digitizer.digitizer import Digitizer
-from nlab.workers.base_worker import BaseWorker
+from nlab.workers.base_worker import BaseWorker, is_fatal_transport_error
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ class GlobalDiagnosticsWorker(BaseWorker):
 
     @Slot()
     def _tick(self) -> None:
-        if self._stop_requested.is_set():
+        if self._finished or self._stop_requested.is_set():
             self._stop()
             return
         try:
@@ -69,8 +69,14 @@ class GlobalDiagnosticsWorker(BaseWorker):
             if self._stop_requested.is_set():
                 self._stop()
                 return
-            log.exception("Global diagnostics readback failed")
+            connection_lost = is_fatal_transport_error(exc)
+            if connection_lost:
+                log.exception("Global diagnostics connection lost; stopping worker")
+            else:
+                log.exception("Global diagnostics readback failed")
             self.error.emit(str(exc))
+            if connection_lost:
+                self._stop()
             return
         # A queued request_stop signal cannot run while the synchronous IIO
         # read above occupies this thread.  Observe the thread-safe flag here

@@ -71,7 +71,16 @@ def test_dma_final_status_keeps_run_health_instead_of_stopped() -> None:
         _dma_worker=object(),
         _dma_thread=thread,
         _channel=0,
-        ui=SimpleNamespace(lblDmaStatus=label),
+        _connection_lost=False,
+        _replay_hardware_interlocked=False,
+        _set_controls_enabled=Mock(),
+        ui=SimpleNamespace(
+            lblDmaStatus=label,
+            btnStart=Mock(),
+            btnStop=Mock(),
+            cbDmaEnable=Mock(),
+            btnDmaFile=Mock(),
+        ),
         _finish_psd_capture=Mock(),
     )
     summary = McaRunSummary(
@@ -94,6 +103,8 @@ def test_dma_final_status_keeps_run_health_instead_of_stopped() -> None:
     assert events == ["wait:2000", "delete"]
     assert controller._dma_thread is None
     assert controller._dma_worker is None
+    controller._set_controls_enabled.assert_called_once_with(True)
+    controller.ui.btnStart.setEnabled.assert_called_once_with(True)
 
 
 def test_dma_finish_retries_without_releasing_live_thread(
@@ -140,6 +151,117 @@ def test_polling_finish_waits_before_releasing_thread_wrappers() -> None:
     assert events == ["wait:2000", "delete"]
     assert controller._worker_thread is None
     assert controller._worker is None
+
+
+def test_dma_stop_keeps_start_interlocked_until_worker_finishes() -> None:
+    worker = Mock()
+    controller = SimpleNamespace(
+        _channel=0,
+        _coincidence_session=False,
+        _dma_worker=worker,
+        _cancel_debug_marker_drags=Mock(),
+        _stop_worker=Mock(),
+        _mca=Mock(),
+        _set_controls_enabled=Mock(),
+        ui=SimpleNamespace(
+            btnStart=Mock(),
+            btnStop=Mock(),
+            cbDmaEnable=Mock(),
+            btnDmaFile=Mock(),
+        ),
+    )
+
+    MCAController._on_stop(controller)  # type: ignore[arg-type]
+
+    worker.stop.assert_called_once_with()
+    controller._mca.stop.assert_called_once_with()
+    controller._set_controls_enabled.assert_called_once_with(False)
+    controller.ui.btnStart.setEnabled.assert_called_once_with(False)
+    controller.ui.cbDmaEnable.setEnabled.assert_called_once_with(False)
+
+
+def test_start_is_ignored_while_dma_thread_is_closing() -> None:
+    controller = SimpleNamespace(
+        _replay_hardware_interlocked=False,
+        _dma_worker=object(),
+        _dma_thread=object(),
+        _channel=0,
+        _cancel_debug_marker_drags=Mock(),
+    )
+
+    MCAController._on_start(controller)  # type: ignore[arg-type]
+
+    controller._cancel_debug_marker_drags.assert_not_called()
+
+
+def test_connection_loss_keeps_controls_interlocked_after_dma_cleanup() -> None:
+    label = Mock()
+    controller = SimpleNamespace(
+        _dma_summary=None,
+        _dma_error="connection reset",
+        _dma_worker=object(),
+        _dma_thread=_ThreadProbe([]),
+        _channel=0,
+        _connection_lost=True,
+        _replay_hardware_interlocked=False,
+        _set_controls_enabled=Mock(),
+        _finish_psd_capture=Mock(),
+        ui=SimpleNamespace(
+            lblDmaStatus=label,
+            btnStart=Mock(),
+            btnStop=Mock(),
+            cbDmaEnable=Mock(),
+            btnDmaFile=Mock(),
+        ),
+    )
+
+    MCAController._on_dma_finished(controller)  # type: ignore[arg-type]
+
+    controller._set_controls_enabled.assert_called_once_with(False)
+    controller.ui.btnStart.setEnabled.assert_called_once_with(False)
+    controller.ui.cbDmaEnable.setEnabled.assert_called_once_with(False)
+    label.setText.assert_called_once_with(
+        "Connection lost; use Connection -> Reconnect Device."
+    )
+
+
+def test_dma_finish_unlocks_file_button_after_psd_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        MCAController,
+        "_output_mode",
+        staticmethod(lambda: McaDmaOutputMode.BINARY),
+    )
+    capture = Mock()
+    controller = SimpleNamespace(
+        _dma_summary=None,
+        _dma_error=None,
+        _dma_worker=object(),
+        _dma_thread=_ThreadProbe([]),
+        _channel=0,
+        _connection_lost=False,
+        _replay_hardware_interlocked=False,
+        _set_controls_enabled=Mock(),
+        _psd_capture=capture,
+        _psd_capture_enabled=True,
+        ui=SimpleNamespace(
+            lblDmaStatus=Mock(),
+            btnStart=Mock(),
+            btnStop=Mock(),
+            cbDmaEnable=Mock(),
+            btnDmaFile=Mock(),
+        ),
+    )
+    controller._finish_psd_capture = lambda: MCAController._finish_psd_capture(
+        controller  # type: ignore[arg-type]
+    )
+
+    MCAController._on_dma_finished(controller)  # type: ignore[arg-type]
+
+    capture.finish_capture.assert_called_once_with()
+    assert controller._psd_capture_enabled is False
+    controller.ui.btnDmaFile.setEnabled.assert_called_once_with(True)
 
 
 def test_live_reconfiguration_restarts_after_failed_write() -> None:
@@ -348,6 +470,7 @@ def test_dma_output_and_psd_interception_are_independent(
         _set_controls_enabled=Mock(),
         _on_dma_ready=Mock(),
         _on_dma_progress=Mock(),
+        _on_connection_lost=Mock(),
         _on_dma_error=Mock(),
         _on_dma_summary=Mock(),
         _on_dma_finished=Mock(),

@@ -27,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   photon-energy domain. Missing or stale calibrations suppress both calibrated
   features explicitly.
 
+### Fixed
+
+- MCA Stop now keeps Start and configuration controls interlocked until the
+  list-mode DMA worker has drained, destroyed its native buffer, and released
+  the hardware ownership gate, preventing an immediate restart from failing
+  with `EBUSY`. File-backed output also restores the DMA file selector after
+  a PSD session finishes.
+- Definitive IIO connection-loss errors stop MCA, diagnostics, and temperature-
+  correction polling after one report instead of generating a traceback on
+  every timer tick. Online list-mode continuity errors no longer claim that a
+  nonexistent capture file was retained.
+
 ## [0.6.3] — 2026-10-05
 
 ### Added
