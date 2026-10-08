@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Live and offline/readback PSD ratio projections now provide a toggleable
+  draggable fit ROI, two draggable centroid seeds, and button-triggered bounded
+  Levenberg-Marquardt double-Gaussian fitting. The lower-right results panel
+  reports both centroids and FWHMs, reduced chi-square, and the conventional
+  PSD figure of merit, with explicit warnings for weak or poor convergence.
 - The MCA peak-analysis workbench can overlay a pinned offline NNDC ENSDF
   catalogue containing 2,065 decaying parent nuclides/states and 87,481
   default-quality photon lines. The generated SQLite artifact applies ENSDF

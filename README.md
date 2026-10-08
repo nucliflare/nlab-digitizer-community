@@ -101,7 +101,9 @@ uv run python examples/measure_current.py
 - Debug waveform-bank readout
 - Synchronized stop/write/restart when changing MCA settings during acquisition
 - List-mode IIO DMA using fixed 1,024-record frames
-- Live PSD classification from charge-comparison and energy measurements
+- Live PSD classification from charge-comparison and energy measurements,
+  including interactive double-Gaussian projection fitting and conventional
+  centroid/FWHM figure-of-merit reporting
 - Per-measurement MCA output as NDMA, ROOT TTree, HDF5, or online-only DMA
 - Incremental bounded-memory file writing with embedded/same-stem YAML settings
 - Per-channel live record rate and end-of-run integrity summary; IIO driver
@@ -747,6 +749,15 @@ Use **Tools → PSD Event Readback...** to reconstruct the PSD matrix and both
 projections from NDMA, CAEN CoMPASS, legacy `caen.py`, HDF5, or ROOT events in
 a standalone workbench. Saved-event analysis no longer replaces or pauses a
 live PSD measurement.
+The live and readback ratio projections include a shaded draggable fit ROI and
+two draggable centroid estimates. **Fit double Gaussian** runs a bounded
+Levenberg-Marquardt fit with a constant background on the current projection
+snapshot and reports both centroids, both FWHMs, reduced chi-square, and
+`FOM = |μ2 - μ1| / (FWHM1 + FWHM2)`. The guide overlay can be hidden without
+hiding a completed fit. Sparse data, unresolved populations, parameters at
+fit bounds, missing covariance, or poor reduced chi-square produce a visible
+convergence warning; the result should not then be treated as a qualified PSD
+separation measurement.
 The import runs in a background worker: binary files are memory-mapped, HDF5
 is read in dataset slices, and ROOT uses chunked tree iteration, so event
 memory does not grow with file size. CAEN PSD import requires raw Energy and

@@ -5,9 +5,18 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QRectF
-from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QComboBox,
+    QDoubleSpinBox,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QVBoxLayout,
+    QWidget,
+)
 
-from nlab.views.plot_viewbox import ModifierZoomViewBox
+from nlab.views.plot_viewbox import NLabPlotWidget
+from nlab.views.psd_fom_widget import PsdFomWidget
 
 
 class OfflinePsdPlot(QWidget):
@@ -34,13 +43,14 @@ class OfflinePsdPlot(QWidget):
         controls.addStretch(1)
         root.addLayout(controls)
 
-        graphics = pg.GraphicsLayoutWidget(self)
-        graphics.setBackground("#f8f9fa")
-        self.matrix_plot = graphics.addPlot(
-            row=0,
-            col=0,
-            viewBox=ModifierZoomViewBox(),
-        )
+        plots_widget = QWidget(self)
+        plots = QGridLayout(plots_widget)
+        plots.setContentsMargins(0, 0, 0, 0)
+        plots.setSpacing(4)
+
+        self._matrix_widget = NLabPlotWidget(plots_widget)
+        self._matrix_widget.setBackground("#f8f9fa")
+        self.matrix_plot = self._matrix_widget.getPlotItem()
         self.matrix_plot.showAxis("top")
         self.matrix_plot.showAxis("right")
         self.matrix_plot.getViewBox().setDefaultPadding(0.0)
@@ -66,24 +76,20 @@ class OfflinePsdPlot(QWidget):
         self.cut_line.setZValue(20.0)
         self.matrix_plot.addItem(self.cut_line)
 
-        self.ratio_plot = graphics.addPlot(
-            row=0,
-            col=1,
-            viewBox=ModifierZoomViewBox(),
-        )
-        self.ratio_plot.setMaximumWidth(300)
+        self._ratio_widget = NLabPlotWidget(plots_widget)
+        self._ratio_widget.setBackground("#f8f9fa")
+        self._ratio_widget.setMaximumWidth(300)
+        self.ratio_plot = self._ratio_widget.getPlotItem()
         self.ratio_plot.setYLink(self.matrix_plot)
         self.ratio_plot.showGrid(x=True, y=True, alpha=0.2)
         self.ratio_plot.setLabel("bottom", "Counts")
         self.ratio_plot.setLabel("left", "PSD ratio")
         self.ratio_curve = self.ratio_plot.plot(pen=pg.mkPen("#6a4c93", width=1.5))
 
-        self.energy_plot = graphics.addPlot(
-            row=1,
-            col=0,
-            viewBox=ModifierZoomViewBox(),
-        )
-        self.energy_plot.setMaximumHeight(240)
+        self._energy_widget = NLabPlotWidget(plots_widget)
+        self._energy_widget.setBackground("#f8f9fa")
+        self._energy_widget.setMaximumHeight(240)
+        self.energy_plot = self._energy_widget.getPlotItem()
         self.energy_plot.setXLink(self.matrix_plot)
         self.energy_plot.showGrid(x=True, y=True, alpha=0.2)
         self.energy_plot.setLabel("left", "Counts")
@@ -95,7 +101,18 @@ class OfflinePsdPlot(QWidget):
         self.above_curve = self.energy_plot.plot(
             pen=pg.mkPen("#f8961e", width=1.5), name="Above cut"
         )
-        root.addWidget(graphics, 1)
+        self.fom_widget = PsdFomWidget(self.ratio_plot, plots_widget)
+        self.fom_widget.setMaximumWidth(300)
+
+        plots.addWidget(self._matrix_widget, 0, 0)
+        plots.addWidget(self._ratio_widget, 0, 1)
+        plots.addWidget(self._energy_widget, 1, 0)
+        plots.addWidget(self.fom_widget, 1, 1)
+        plots.setRowStretch(0, 3)
+        plots.setRowStretch(1, 2)
+        plots.setColumnStretch(0, 3)
+        plots.setColumnStretch(1, 2)
+        root.addWidget(plots_widget, 1)
 
         self.scale_combo.currentIndexChanged.connect(self._render_image)
         self.cut_spin.valueChanged.connect(self._cut_spin_changed)
@@ -116,6 +133,8 @@ class OfflinePsdPlot(QWidget):
         self._matrix = values
         self._energy_range = energy_range
         self._ratio_range = ratio_range
+        self.fom_widget.set_ratio_range(ratio_range)
+        self.fom_widget.clear_fit()
         self.matrix_plot.setLabel("bottom", energy_label, units="raw")
         self.energy_plot.setLabel("bottom", energy_label, units="raw")
 
@@ -195,3 +214,4 @@ class OfflinePsdPlot(QWidget):
         )
         ratio_counts = self._matrix[first:last].sum(axis=0, dtype=np.uint64)
         self.ratio_curve.setData(ratio_counts, ratio_centers)
+        self.fom_widget.set_projection(ratio_centers, ratio_counts)

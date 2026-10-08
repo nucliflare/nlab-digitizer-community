@@ -58,6 +58,30 @@ def test_bottom_histogram_hover_l_toggles_log_and_all_plots_use_modifier_zoom(
     controller.stop_processing()
 
 
+def test_fom_panel_occupies_bottom_right_and_tracks_live_projection(qtbot: QtBot) -> None:
+    controller = PSDController(McaEventBuffer(), channel=0)
+    qtbot.addWidget(controller)
+
+    energy_position = controller.ui.plotsLayout.getItemPosition(
+        controller.ui.plotsLayout.indexOf(controller.ui.plotEnergy)
+    )
+    fom_position = controller.ui.plotsLayout.getItemPosition(
+        controller.ui.plotsLayout.indexOf(controller._fom_widget)
+    )
+
+    assert energy_position == (1, 0, 1, 1)
+    assert fom_position == (1, 1, 1, 1)
+    np.testing.assert_array_equal(
+        controller._fom_widget._ratio,
+        controller._accumulator.ratio_centers,
+    )
+    np.testing.assert_array_equal(
+        controller._fom_widget._counts,
+        np.zeros(controller._accumulator.ratio_bins),
+    )
+    controller.stop_processing()
+
+
 def test_session_replay_rebuilds_psd_and_restores_live_processing(qtbot: QtBot) -> None:
     controller = PSDController(McaEventBuffer(), channel=0)
     qtbot.addWidget(controller)

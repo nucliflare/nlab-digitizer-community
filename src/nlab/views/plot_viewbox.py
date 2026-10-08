@@ -4,6 +4,7 @@ from typing import Any
 
 from pyqtgraph import PlotCurveItem, PlotWidget, ViewBox
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QWidget
 
 
 class ModifierZoomViewBox(ViewBox):
@@ -30,7 +31,7 @@ class NLabPlotWidget(PlotWidget):
     ``nlab.views.plot_viewbox``.
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent=parent, viewBox=ModifierZoomViewBox())
 
 
