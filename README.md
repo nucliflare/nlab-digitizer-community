@@ -751,13 +751,16 @@ a standalone workbench. Saved-event analysis no longer replaces or pauses a
 live PSD measurement.
 The live and readback ratio projections include a shaded draggable fit ROI and
 two draggable centroid estimates. **Fit double Gaussian** runs a bounded
-Levenberg-Marquardt fit with a constant background on the current projection
-snapshot and reports both centroids, both FWHMs, reduced chi-square, and
+Levenberg-Marquardt fit with a constant background and Poisson-deviance
+residuals on the current projection snapshot. It reports both centroids, both
+FWHMs, reduced Poisson deviance, and
 `FOM = |μ2 - μ1| / (FWHM1 + FWHM2)`. The guide overlay can be hidden without
 hiding a completed fit. Sparse data, unresolved populations, parameters at
-fit bounds, missing covariance, or poor reduced chi-square produce a visible
+fit bounds, missing covariance, or poor reduced deviance produce a visible
 convergence warning; the result should not then be treated as a qualified PSD
-separation measurement.
+separation measurement. Each peak width is initialized independently from its
+local half-height, and ordered centroids can move across the initial seed
+midpoint without swapping population identity.
 The ratio and energy projections share the map's aligned data boundaries. Hover
 over the bottom energy projection and press **L** to switch its count axis
 between linear and logarithmic scale; this shortcut is available in both live

@@ -91,13 +91,14 @@ class PsdFomWidget(QGroupBox):
         self.first_label = QLabel("—", self)
         self.second_label = QLabel("—", self)
         self.fom_label = QLabel("—", self)
-        self.chi_square_label = QLabel("—", self)
+        self.deviance_label = QLabel("—", self)
+        self.chi_square_label = self.deviance_label
         results = QFormLayout()
         results.setContentsMargins(0, 0, 0, 0)
         results.addRow("Population 1 μ / FWHM:", self.first_label)
         results.addRow("Population 2 μ / FWHM:", self.second_label)
         results.addRow("FOM:", self.fom_label)
-        results.addRow("Reduced χ²:", self.chi_square_label)
+        results.addRow("Reduced deviance:", self.deviance_label)
 
         self.status_label = QLabel(
             "Drag the ROI and μ markers, then press Fit double Gaussian.", self
@@ -154,7 +155,7 @@ class PsdFomWidget(QGroupBox):
         self.first_label.setText("—")
         self.second_label.setText("—")
         self.fom_label.setText("—")
-        self.chi_square_label.setText("—")
+        self.deviance_label.setText("—")
         self.status_label.setStyleSheet("")
         self.status_label.setText("Drag the ROI and μ markers, then press Fit double Gaussian.")
 
@@ -187,7 +188,7 @@ class PsdFomWidget(QGroupBox):
         self.first_label.setText(_peak_text(fit.centroids[0], fit.fwhms[0]))
         self.second_label.setText(_peak_text(fit.centroids[1], fit.fwhms[1]))
         self.fom_label.setText(f"{fit.fom:.4g}")
-        self.chi_square_label.setText(f"{fit.reduced_chi_square:.3g}")
+        self.deviance_label.setText(f"{fit.reduced_deviance:.3g}")
         if fit.poor_convergence:
             details = "; ".join(fit.warnings) or fit.message
             self.status_label.setStyleSheet("color: #b54708; font-weight: bold;")

@@ -38,8 +38,30 @@ def test_lm_double_gaussian_recovers_conventional_fom() -> None:
     assert fit.centroids == pytest.approx((0.12, 0.48), abs=0.005)
     assert fit.fwhms == pytest.approx((0.035 * 2.35482, 0.055 * 2.35482), rel=0.08)
     assert fit.fom == pytest.approx(expected_fom, rel=0.08)
-    assert fit.reduced_chi_square == pytest.approx(1.0, abs=0.35)
+    assert fit.reduced_deviance == pytest.approx(1.0, abs=0.35)
     assert not fit.best_fit.flags.writeable
+
+
+def test_zero_background_well_separated_peaks_converge_to_independent_widths() -> None:
+    ratio = np.linspace(-1.0, 1.0, 256)
+    expectation = 210.0 * np.exp(-0.5 * np.square((ratio - 0.225) / 0.025)) + 375.0 * np.exp(
+        -0.5 * np.square((ratio - 0.808) / 0.019)
+    )
+    counts = np.random.default_rng(108).poisson(expectation)
+
+    fit = fit_psd_fom_lm(
+        ratio,
+        counts,
+        roi=(-0.1, 0.98),
+        centroid_seeds=(0.22, 0.81),
+    )
+
+    assert fit.success
+    assert fit.centroids == pytest.approx((0.225, 0.808), abs=0.004)
+    assert fit.fwhms == pytest.approx((0.05887, 0.04474), rel=0.12)
+    assert fit.fwhms[0] != pytest.approx(fit.fwhms[1])
+    assert fit.fom > 5.0
+    assert fit.reduced_deviance < 2.0
 
 
 def test_lm_fit_rejects_centroid_estimates_outside_roi() -> None:
