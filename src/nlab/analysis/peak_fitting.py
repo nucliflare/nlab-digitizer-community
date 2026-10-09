@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
@@ -198,6 +198,7 @@ def export_peak_fit_result(
     spectrum: Spectrum,
     spec: PeakFitSpec,
     result: PeakFitResult,
+    reference_overlay: Mapping[str, object] | None = None,
 ) -> None:
     """Export a compact fit report as JSON or CSV without overwriting."""
     path = Path(path)
@@ -212,6 +213,7 @@ def export_peak_fit_result(
                 "history": spectrum.history,
             },
             "model": asdict(spec),
+            "reference_overlay": dict(reference_overlay) if reference_overlay else None,
             "statistics": {
                 "success": result.success,
                 "message": result.message,

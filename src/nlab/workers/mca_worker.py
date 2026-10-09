@@ -8,7 +8,7 @@ import numpy as np
 from PySide6.QtCore import QTimer, Signal, Slot
 
 from nlab.hardware.digitizer.mca import MultiChannelAnalyzer
-from nlab.workers.base_worker import BaseWorker
+from nlab.workers.base_worker import BaseWorker, is_fatal_transport_error
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +56,7 @@ class MCAWorker(BaseWorker):
         self._last_debug2: np.ndarray = np.empty(0, dtype=np.int16)
         self._histogram_read_failing = False
         self._waveform_read_failing = False
+        self._finished = False
 
     def run(self) -> None:
         self._timer = QTimer()
@@ -71,6 +72,9 @@ class MCAWorker(BaseWorker):
 
     @Slot()
     def _stop(self) -> None:
+        if self._finished:
+            return
+        self._finished = True
         if self._timer is not None:
             self._timer.stop()
             self._timer = None
@@ -157,6 +161,8 @@ class MCAWorker(BaseWorker):
         return self._last_debug1, self._last_debug2
 
     def _tick(self) -> None:
+        if self._finished:
+            return
         try:
             histogram = self._acquire_histogram()
             debug1, debug2 = self._acquire_waveforms()
@@ -176,11 +182,17 @@ class MCAWorker(BaseWorker):
                 energy_estimation_error=self._stat(stats.get_energy_estimation_error),
                 throughput_error=self._stat(stats.get_throughput_error),
             )
-        except Exception:
-            log.exception("MCA readback failed")
+            measurement_in_progress = self._mca.get_measurement_in_progress()
+        except Exception as exc:
+            if is_fatal_transport_error(exc):
+                log.exception("MCA connection lost; stopping readback worker")
+                self.error.emit(str(exc))
+                self._stop()
+            else:
+                log.exception("MCA readback failed")
             return
         self.readback.emit(rb)
-        if self._mca.get_measurement_in_progress():
+        if measurement_in_progress:
             self._seen_running = True
         elif self._seen_running:
             log.info("MCA: hardware measurement completed (time limit reached)")

@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Live and offline/readback PSD ratio projections now provide a toggleable
+  draggable fit ROI, two draggable centroid seeds, and button-triggered bounded
+  Levenberg-Marquardt double-Gaussian fitting with Poisson-deviance residuals,
+  strictly interior bound initialization, independently estimated starting
+  widths, and ordered but non-midpoint-constrained centroids. The lower-right
+  results panel reports both centroids and FWHMs, reduced deviance, and the
+  conventional PSD figure of merit, with explicit warnings for weak or poor
+  convergence.
+- The MCA peak-analysis workbench can overlay a pinned offline NNDC ENSDF
+  catalogue containing 2,065 decaying parent nuclides/states and 87,481
+  default-quality photon lines. The generated SQLite artifact applies ENSDF
+  photon and branch normalization, excludes limit-only/uncertain records from
+  the default overlay, retains source-dataset provenance, and adds the DDEP/
+  IRDFF-II Na-22 annihilation reference. Multiple nuclides, an emission-
+  probability cutoff, source tooltips, calibrated channel mapping, and
+  reproducible JSON fit-export metadata are supported. An indexed fit-ROI
+  candidate filter composes with text and probability filtering, ranks parents
+  by matching-line count and strongest emission, and remains explicitly a
+  candidate aid rather than an identification. Persistent, user-editable
+  favourites pin common laboratory sources above the full list and matching
+  ROI candidates. Candidate searches clip calibrated ROIs to the non-negative
+  photon-energy domain. Missing or stale calibrations suppress both calibrated
+  features explicitly.
+
 ### Fixed
 
 - Frozen builds now detect a missing or unloadable native libiio runtime after
@@ -17,6 +43,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PyInstaller missing-DLL traceback. The Python binding is constrained to the
   0.x API, and host runtimes reporting the breaking libiio 1.x API are rejected
   while its compatibility layer and DMA model remain unvalidated.
+- Pyqtgraph plot surrounds now follow the active Qt interface palette while
+  retaining a distinct light data canvas. Offline PSD projection axes align
+  exactly with the PSD map, and hovering the bottom energy projection while
+  pressing `L` toggles its count axis between linear and logarithmic scale.
+- MCA Stop now keeps Start and configuration controls interlocked until the
+  list-mode DMA worker has drained, destroyed its native buffer, and released
+  the hardware ownership gate, preventing an immediate restart from failing
+  with `EBUSY`. File-backed output also restores the DMA file selector after
+  a PSD session finishes.
+- Definitive IIO connection-loss errors stop MCA, diagnostics, and temperature-
+  correction polling after one report instead of generating a traceback on
+  every timer tick. Online list-mode continuity errors no longer claim that a
+  nonexistent capture file was retained.
 
 ## [0.6.3] — 2026-10-05
 

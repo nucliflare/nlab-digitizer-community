@@ -151,6 +151,7 @@ class MCAController(QWidget):
         self._dma_thread: QThread | None = None
         self._dma_filepath: Path | None = None
         self._dma_counter = 0
+        self._connection_lost = False
         self._event_buffer = event_buffer or McaEventBuffer()
         self._session_capture_enabled = False
         self._replay_hardware_interlocked = False
@@ -900,9 +901,13 @@ class MCAController(QWidget):
         self._coincidence_metadata = None
         self._coincidence_session = False
         self._coincidence_stopping = False
-        self._set_controls_enabled(True)
-        self.ui.btnStart.setEnabled(True)
-        self.ui.cbDmaEnable.setEnabled(True)
+        enabled = not (
+            getattr(self, "_replay_hardware_interlocked", False)
+            or getattr(self, "_connection_lost", False)
+        )
+        self._set_controls_enabled(enabled)
+        self.ui.btnStart.setEnabled(enabled)
+        self.ui.cbDmaEnable.setEnabled(enabled)
         self.refresh_dma_output_settings()
         self.coincidence_finished.emit(self._channel)
 
@@ -1400,6 +1405,18 @@ class MCAController(QWidget):
     def _on_start(self) -> None:
         if getattr(self, "_replay_hardware_interlocked", False):
             return
+        if getattr(self, "_connection_lost", False):
+            log.warning(
+                "MCA ch%d: ignored Start after connection loss; reconnect required",
+                self._channel,
+            )
+            return
+        if self._dma_worker is not None or self._dma_thread is not None:
+            log.warning(
+                "MCA ch%d: ignored Start while the previous DMA worker is still closing",
+                self._channel,
+            )
+            return
         self._cancel_debug_marker_drags()
         self.ui.btnStart.setChecked(True)
         self.ui.btnStart.setEnabled(False)
@@ -1468,15 +1485,15 @@ class MCAController(QWidget):
             # and one-second inactivity drain.
             self._dma_worker.stop()
             self._mca.stop()
-            self._set_controls_enabled(True)
+            self._set_controls_enabled(False)
         else:
             self._stop_worker()
             self._mca.stop()
 
         self.ui.btnStart.setChecked(False)
-        self.ui.btnStart.setEnabled(True)
+        self.ui.btnStart.setEnabled(self._dma_worker is None)
         self.ui.btnStop.setEnabled(False)
-        self.ui.cbDmaEnable.setEnabled(True)
+        self.ui.cbDmaEnable.setEnabled(self._dma_worker is None)
         MCAController.refresh_dma_output_settings(self)
         log.info("MCA ch%d: measurement stopped", self._channel)
 
@@ -1497,14 +1514,14 @@ class MCAController(QWidget):
             # release enable so the close path can drain the tail.
             self._dma_worker.stop()
             self._mca.stop()
-            self._set_controls_enabled(True)
+            self._set_controls_enabled(False)
         else:
             self._mca.stop()
         self.ui.btnStart.setChecked(False)
-        self.ui.btnStart.setEnabled(True)
+        self.ui.btnStart.setEnabled(self._dma_worker is None)
         self.ui.btnStop.setChecked(True)
         self.ui.btnStop.setEnabled(False)
-        self.ui.cbDmaEnable.setEnabled(True)
+        self.ui.cbDmaEnable.setEnabled(self._dma_worker is None)
         MCAController.refresh_dma_output_settings(self)
 
     def _on_clear_spectrum(self) -> None:
@@ -1569,6 +1586,7 @@ class MCAController(QWidget):
 
         self._worker_thread.started.connect(self._worker.run)
         self._worker.readback.connect(self._on_readback)
+        self._worker.error.connect(self._on_connection_lost)
         self._worker.measurement_done.connect(self._on_measurement_done)
         self._worker.finished.connect(
             self._worker_thread.quit,
@@ -1581,6 +1599,12 @@ class MCAController(QWidget):
         )
 
         self._worker_thread.start()
+
+    def _on_connection_lost(self, message: str) -> None:
+        self._connection_lost = True
+        self.ui.lblDmaStatus.setText(
+            f"Connection lost: {message}; use Connection -> Reconnect Device."
+        )
 
     def _stop_worker(self) -> None:
         if self._worker is not None:
@@ -1780,6 +1804,7 @@ class MCAController(QWidget):
         self._dma_thread.started.connect(self._dma_worker.run)
         self._dma_worker.ready.connect(self._on_dma_ready)
         self._dma_worker.progress.connect(self._on_dma_progress)
+        self._dma_worker.connection_lost.connect(self._on_connection_lost)
         self._dma_worker.error.connect(self._on_dma_error)
         self._dma_worker.summary.connect(self._on_dma_summary)
         self._dma_worker.finished.connect(
@@ -1942,6 +1967,26 @@ class MCAController(QWidget):
                     self.coincidence_stop_requested.emit()
                 if self._coincidence_stopping:
                     self._end_coincidence_capture()
+            else:
+                enabled = not (
+                    getattr(self, "_replay_hardware_interlocked", False)
+                    or getattr(self, "_connection_lost", False)
+                )
+                self._set_controls_enabled(enabled)
+                self.ui.btnStart.setChecked(False)
+                self.ui.btnStart.setEnabled(enabled)
+                self.ui.btnStop.setChecked(False)
+                self.ui.btnStop.setEnabled(False)
+                self.ui.cbDmaEnable.setEnabled(enabled)
+                # Stop-time refresh runs while _dma_worker still owns the
+                # buffer and therefore deliberately keeps the file selector
+                # locked. Re-evaluate it only after worker release and PSD
+                # capture cleanup so file-backed output becomes selectable.
+                MCAController.refresh_dma_output_settings(self)
+                if getattr(self, "_connection_lost", False):
+                    self.ui.lblDmaStatus.setText(
+                        "Connection lost; use Connection -> Reconnect Device."
+                    )
             log.info("MCA ch%d: DMA worker cleanup complete", self._channel)
         finally:
             thread.deleteLater()

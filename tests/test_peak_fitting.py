@@ -143,12 +143,19 @@ def test_peak_fit_reports_export_to_json_and_csv_without_overwrite(tmp_path: Pat
     json_path = tmp_path / "fit.json"
     csv_path = tmp_path / "fit.csv"
 
-    export_peak_fit_result(json_path, spectrum=spectrum, spec=spec, result=result)
+    export_peak_fit_result(
+        json_path,
+        spectrum=spectrum,
+        spec=spec,
+        result=result,
+        reference_overlay={"catalog_id": "test", "nuclides": ["Na-22"]},
+    )
     export_peak_fit_result(csv_path, spectrum=spectrum, spec=spec, result=result)
 
     document = json.loads(json_path.read_text(encoding="utf-8"))
     assert document["kind"] == "nlab_mca_peak_fit"
     assert document["model"]["background"] == "linear"
+    assert document["reference_overlay"]["nuclides"] == ["Na-22"]
     assert document["peaks"][0]["center"] == pytest.approx(180, abs=0.2)
     assert csv_path.read_text(encoding="utf-8").splitlines()[0].startswith("peak,center")
     with pytest.raises(FileExistsError):

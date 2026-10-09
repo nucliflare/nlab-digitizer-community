@@ -11,6 +11,8 @@ from PySide6.QtWidgets import QApplication, QWidget
 from nlab.analysis.psd import PsdAccumulator
 from nlab.hardware.digitizer.dma import McaEventBuffer
 from nlab.ui.ui_psd_view import Ui_PSDView
+from nlab.views.plot_viewbox import style_plot_widget
+from nlab.views.psd_fom_widget import PsdFomWidget
 from nlab.views.responsive_layout import configure_psd_layout
 
 log = logging.getLogger(__name__)
@@ -71,7 +73,7 @@ class PSDController(QWidget):
 
     def _setup_plots(self) -> None:
         for widget in (self.ui.plotPsd, self.ui.plotRatio, self.ui.plotEnergy):
-            widget.setBackground("#f8f9fa")
+            style_plot_widget(widget)
 
         self._psd_plot = self.ui.plotPsd.getPlotItem()
         self._psd_plot.showAxis("right")
@@ -131,6 +133,16 @@ class PSDController(QWidget):
             pen=pg.mkPen("#f8961e", width=1.5), name="Above cut"
         )
 
+        # The Designer form keeps the generated UI simple. Re-place the energy
+        # spectrum here so the shared fit panel occupies the requested lower-right
+        # cell beside it.
+        self.ui.plotsLayout.removeWidget(self.ui.plotEnergy)
+        self.ui.plotsLayout.addWidget(self.ui.plotEnergy, 1, 0, 1, 1)
+        self._fom_widget = PsdFomWidget(self._ratio_plot, self)
+        self._fom_widget.setObjectName("psdFomWidget")
+        self._fom_widget.set_ratio_range(self._accumulator.ratio_range)
+        self.ui.plotsLayout.addWidget(self._fom_widget, 1, 1, 1, 1)
+
     def _connect_signals(self) -> None:
         for spinbox in (
             self.ui.spinEnergyBins,
@@ -173,6 +185,7 @@ class PSDController(QWidget):
         self._last_dropped_records = 0
         self._capturing = enabled
         self._capture_failed = False
+        self._fom_widget.clear_fit()
         self._capture_note = note or (
             "Recording live PSD."
             if enabled
@@ -198,6 +211,7 @@ class PSDController(QWidget):
         self._event_buffer.clear()
         self._accumulator.reset()
         self._last_dropped_records = 0
+        self._fom_widget.clear_fit()
         self._render()
 
     @property
@@ -232,6 +246,7 @@ class PSDController(QWidget):
         self.ui.spinCut.setValue(float(np.clip(self.ui.spinCut.value(), *ratio_range)))
         self._energy_roi.setBounds(self._accumulator.energy_range)
         self._energy_roi.setRegion((0.0, self._accumulator.energy_range[1] / 4.0))
+        self._fom_widget.set_ratio_range(self._accumulator.ratio_range)
         if self._session_replay_batches is not None:
             try:
                 for events in self._session_replay_batches:
@@ -337,6 +352,7 @@ class PSDController(QWidget):
 
         ratio_counts = self._accumulator.ratio_projection(self._energy_roi.getRegion())
         self._ratio_curve.setData(ratio_counts, self._accumulator.ratio_centers)
+        self._fom_widget.set_projection(self._accumulator.ratio_centers, ratio_counts)
         self._ratio_cut_line.setPos(cut)
 
     def _update_status(self) -> None:
@@ -378,6 +394,9 @@ class PSDController(QWidget):
             "ratio_cut": self.ui.spinCut.value(),
             "energy_roi": [float(value) for value in self._energy_roi.getRegion()],
             "energy_log_y": self._energy_log_y,
+            "fom_fit_roi": [float(value) for value in self._fom_widget.fit_region.getRegion()],
+            "fom_centroid_seeds": [float(line.value()) for line in self._fom_widget.centroid_lines],
+            "fom_guides_visible": self._fom_widget.guides_checkbox.isChecked(),
         }
 
     def apply_configuration_settings(self, settings: object) -> None:
@@ -409,6 +428,18 @@ class PSDController(QWidget):
         energy_roi = settings.get("energy_roi")
         if isinstance(energy_roi, list) and len(energy_roi) == 2:
             self._energy_roi.setRegion((float(energy_roi[0]), float(energy_roi[1])))
+        fom_fit_roi = settings.get("fom_fit_roi")
+        if isinstance(fom_fit_roi, list) and len(fom_fit_roi) == 2:
+            self._fom_widget.fit_region.setRegion((float(fom_fit_roi[0]), float(fom_fit_roi[1])))
+        fom_centroid_seeds = settings.get("fom_centroid_seeds")
+        if isinstance(fom_centroid_seeds, list) and len(fom_centroid_seeds) == 2:
+            for line, value in zip(
+                self._fom_widget.centroid_lines,
+                fom_centroid_seeds,
+                strict=True,
+            ):
+                line.setPos(float(value))
+        self._fom_widget.guides_checkbox.setChecked(bool(settings.get("fom_guides_visible", True)))
         self.set_energy_log_y(bool(settings.get("energy_log_y", False)))
         self._render_projections()
 

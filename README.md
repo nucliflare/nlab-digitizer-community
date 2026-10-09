@@ -96,11 +96,14 @@ uv run python examples/measure_current.py
   snapshots of current MCA spectra, CSV/ASCII SPE/Tukan WDM/CAEN TXT3/ROOT
   loading, one-to-three Gaussian fits, selectable count-aware backgrounds,
   residuals, parameter uncertainties, and variance-preserving spectrum
-  arithmetic
+  arithmetic, plus evaluated radionuclide photon-line overlays for calibrated
+  spectra
 - Debug waveform-bank readout
 - Synchronized stop/write/restart when changing MCA settings during acquisition
 - List-mode IIO DMA using fixed 1,024-record frames
-- Live PSD classification from charge-comparison and energy measurements
+- Live PSD classification from charge-comparison and energy measurements,
+  including interactive double-Gaussian projection fitting and conventional
+  centroid/FWHM figure-of-merit reporting
 - Per-measurement MCA output as NDMA, ROOT TTree, HDF5, or online-only DMA
 - Incremental bounded-memory file writing with embedded/same-stem YAML settings
 - Per-channel live record rate and end-of-run integrity summary; IIO driver
@@ -580,6 +583,44 @@ are not guessed or applied. Visible spectra can be overlaid when they share
 channel or energy coordinates; spectra using another axis are not silently
 resampled.
 
+The **Reference lines** tab overlays evaluated photon energies from a pinned,
+offline NNDC ENSDF snapshot. The bundled 12.97 MiB SQLite catalogue contains
+2,065 decaying parent nuclides/states and 87,481 default-quality lines from the
+ENSDF data generated on 2026-08-10. It is generated at release time rather than
+queried over the network, so the same application version produces the same
+overlay offline. Na-22's evaluated 511 keV positron-annihilation feature is an
+explicit DDEP/IRDFF-II supplement because annihilation radiation is not an
+ENSDF nuclear gamma-transition record.
+
+Select one or more parent nuclides and a minimum absolute emission probability.
+The overlay works with a native keV axis or the selected spectrum's retained
+channel-to-energy calibration; it is hidden when the calibration is absent or
+stale. ENSDF relative intensities are converted to photons per 100 parent decays
+using the dataset's photon normalization and branching ratio. Limit-only and
+uncertain records remain in the database for provenance but are excluded from
+the default overlay. Common laboratory sources are starred and pinned to the
+top on first use; highlight any catalogue entry to add or remove it from the
+persistent favourites, or restore the common defaults. **Only nuclides with
+lines in fit ROI** converts the explicit fit region to keV and shows candidate
+parents ranked by matching-line count and strongest emission probability, with
+matching favourites pinned first; favourites without an ROI match remain
+excluded. Text search and the probability threshold continue to apply. The plot
+viewport is deliberately not used, so zooming and panning do not silently
+change the candidate list. A line match is not presented as an isotope
+identification.
+
+Detector efficiency, geometry, attenuation, coincidence summing, and dead time
+still determine the measured peak height. The catalogue does not currently
+synthesize characteristic X-ray lines or annihilation lines for positron
+emitters other than Na-22. JSON fit exports snapshot the selected nuclides,
+catalogue version and source-release timestamp, probability threshold, ROI
+candidate-filter state, and exact displayed reference records for
+reproducibility.
+
+Maintainers can reproduce the committed database with
+`python scripts/build_radionuclide_catalog.py`. The builder refuses an
+unexpected ENSDF release timestamp until it is reviewed and explicitly pinned.
+
 Select one, two, or three Gaussian components and a background of none,
 constant, linear, centred exponential, an error-function Compton step, or a
 logistic Fermi step. Draggable markers seed and bound the peak centres. Raw
@@ -724,6 +765,22 @@ Use **Tools → PSD Event Readback...** to reconstruct the PSD matrix and both
 projections from NDMA, CAEN CoMPASS, legacy `caen.py`, HDF5, or ROOT events in
 a standalone workbench. Saved-event analysis no longer replaces or pauses a
 live PSD measurement.
+The live and readback ratio projections include a shaded draggable fit ROI and
+two draggable centroid estimates. **Fit double Gaussian** runs a bounded
+Levenberg-Marquardt fit with a constant background and Poisson-deviance
+residuals on the current projection snapshot. It reports both centroids, both
+FWHMs, reduced Poisson deviance, and
+`FOM = |μ2 - μ1| / (FWHM1 + FWHM2)`. The guide overlay can be hidden without
+hiding a completed fit. Sparse data, unresolved populations, parameters at
+fit bounds, missing covariance, or poor reduced deviance produce a visible
+convergence warning; the result should not then be treated as a qualified PSD
+separation measurement. Each peak width is initialized independently from its
+local half-height, and ordered centroids can move across the initial seed
+midpoint without swapping population identity.
+The ratio and energy projections share the map's aligned data boundaries. Hover
+over the bottom energy projection and press **L** to switch its count axis
+between linear and logarithmic scale; this shortcut is available in both live
+PSD and offline/readback views.
 The import runs in a background worker: binary files are memory-mapped, HDF5
 is read in dataset slices, and ROOT uses chunked tree iteration, so event
 memory does not grow with file size. CAEN PSD import requires raw Energy and
@@ -867,6 +924,14 @@ uv run mypy src/nlab
 Tests that require a real digitizer are kept separate from ordinary unit
 tests. When running hardware checks, always stop an armed MCA/Scope in a
 `finally` block so a failed script does not leave the target enabled.
+
+After stopping MCA list-mode DMA, the GUI keeps Start and MCA configuration
+disabled until the native IIO buffer has finished draining and released its
+hardware gate, then restores the DMA file selector for file-backed output even
+when PSD interception was active. A definitive IIO connection reset stops periodic MCA,
+diagnostics, and temperature-correction polling after the first failure; use
+**Connection -> Reconnect Device** after the board or `iiod` service is
+available again.
 
 ## Standalone builds
 

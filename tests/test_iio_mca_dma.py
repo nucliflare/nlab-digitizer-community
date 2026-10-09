@@ -586,6 +586,17 @@ def test_streamer_rejects_invalid_post_capture_diagnostics(
         IIOMcaDmaStreamer(backend, channel=0).stream_events(stop_event)
 
 
+def test_online_drop_error_does_not_claim_that_a_file_was_retained() -> None:
+    stop_event = threading.Event()
+    backend = _FakeBackend(stop_event)
+    backend.diagnostics = (0, 0, 2, 7)
+
+    with pytest.raises(RuntimeError, match="online capture continuity is invalid") as exc:
+        IIOMcaDmaStreamer(backend, channel=0).stream_events(stop_event)
+
+    assert "file" not in str(exc.value)
+
+
 def test_streamer_retains_invalid_continuity_metadata(tmp_path: Path) -> None:
     stop_event = threading.Event()
     backend = _FakeBackend(stop_event)

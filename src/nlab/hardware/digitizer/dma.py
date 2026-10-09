@@ -901,20 +901,32 @@ class IIOMcaDmaStreamer:
             )
             log.info("IIO MCA DMA: capture metadata written to %s", metadata_path)
         if dma_fault:
-            raise RuntimeError(
-                f"MCA list-mode driver latched DMA fault reason {dma_fault}; "
+            detail = (
                 "the capture file was retained for diagnostics"
+                if writer is not None
+                else "online capture continuity is invalid"
+            )
+            raise RuntimeError(
+                f"MCA list-mode driver latched DMA fault reason {dma_fault}; {detail}"
             )
         if completed_frames != frame_count:
+            detail = (
+                "the retained capture is incomplete"
+                if writer is not None
+                else "online capture continuity is invalid"
+            )
             raise RuntimeError(
                 f"MCA list-mode capture contains {frame_count} complete frames, "
-                f"but the driver completed {completed_frames}; the retained "
-                "capture is incomplete"
+                f"but the driver completed {completed_frames}; {detail}"
             )
         if deadtime_records:
-            raise RuntimeError(
-                f"MCA list-mode IP reports {deadtime_records} dropped records; "
+            detail = (
                 "the capture file was retained, but continuity is invalid"
+                if writer is not None
+                else "online capture continuity is invalid"
+            )
+            raise RuntimeError(
+                f"MCA list-mode IP reports {deadtime_records} dropped records; {detail}"
             )
         log.info(
             "IIO MCA DMA: continuity verified -- %d driver frames, "

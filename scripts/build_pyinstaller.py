@@ -30,6 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ENTRY = ROOT / "src" / "nlab" / "main.py"
 ICON = ROOT / "resources" / "icons" / "ewt.ico"
+RADIONUCLIDE_CATALOG = ROOT / "src" / "nlab" / "data" / "radionuclide_lines.sqlite3"
 DIST = ROOT / "dist"
 WORK = ROOT / "build" / "pyinstaller"
 
@@ -46,6 +47,7 @@ args = [
     # on-disk .ico at runtime (relative to the onefile extraction dir) — see
     # the matching note in scripts/build_nuitka.py.
     f"--add-data={ICON}{os.pathsep}resources/icons",
+    f"--add-data={RADIONUCLIDE_CATALOG}{os.pathsep}nlab/data",
     str(ENTRY),
 ]
 

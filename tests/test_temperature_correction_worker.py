@@ -54,3 +54,20 @@ def test_cycle_error_is_reported_without_readback() -> None:
 
     assert errors == ["sensor unavailable"]
     assert readbacks == []
+
+
+def test_connection_reset_reports_once_and_stops_correction() -> None:
+    hv = Mock()
+    hv.get_ads_temp_for_correction.side_effect = OSError(10054, "connection reset")
+    worker = TemperatureCorrectionWorker(hv, [Mock()], coefficient=1.0, offset=1)
+    errors: list[str] = []
+    finished = Mock()
+    worker.error.connect(errors.append)
+    worker.finished.connect(finished)
+
+    worker._tick()
+    worker._tick()
+
+    assert errors == ["[Errno 10054] connection reset"]
+    finished.assert_called_once_with()
+    hv.get_ads_temp_for_correction.assert_called_once_with()

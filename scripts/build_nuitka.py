@@ -38,6 +38,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ENTRY = ROOT / "src" / "nlab" / "main.py"
 ICON = ROOT / "resources" / "icons" / "ewt.ico"
+RADIONUCLIDE_CATALOG = ROOT / "src" / "nlab" / "data" / "radionuclide_lines.sqlite3"
 DIST = ROOT / "dist"
 
 # On Linux, the executable has no .exe extension so it would be named "nlab"
@@ -56,6 +57,7 @@ args = [
     "--include-module=PySide6.QtOpenGL",
     "--include-module=PySide6.QtOpenGLWidgets",
     f"--include-data-files={ICON}=resources/icons/ewt.ico",
+    f"--include-data-files={RADIONUCLIDE_CATALOG}=nlab/data/radionuclide_lines.sqlite3",
 ]
 
 if sys.platform == "win32":

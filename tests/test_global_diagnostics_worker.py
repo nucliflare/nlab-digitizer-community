@@ -35,3 +35,23 @@ def test_shutdown_requested_during_read_finishes_without_emitting_readback() -> 
 
     finished.assert_called_once_with()
     readback.assert_not_called()
+
+
+def test_connection_reset_reports_once_and_stops_polling() -> None:
+    device = SimpleNamespace(
+        get_global_diagnostics=Mock(
+            side_effect=ConnectionResetError(10054, "connection reset")
+        )
+    )
+    worker = GlobalDiagnosticsWorker(device)  # type: ignore[arg-type]
+    errors: list[str] = []
+    finished = Mock()
+    worker.error.connect(errors.append)
+    worker.finished.connect(finished)
+
+    worker._tick()
+    worker._tick()
+
+    assert errors == ["[Errno 10054] connection reset"]
+    finished.assert_called_once_with()
+    device.get_global_diagnostics.assert_called_once_with()

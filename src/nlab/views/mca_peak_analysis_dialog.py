@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -43,6 +44,15 @@ from nlab.analysis.peak_fitting import (
     export_peak_fit_result,
     suggest_peak_centers,
 )
+from nlab.analysis.radionuclide_lines import (
+    BUILTIN_RADIONUCLIDE_CATALOG,
+    RadionuclideCandidate,
+    RadionuclideLine,
+    canonical_nuclide,
+    coordinate_for_energy,
+    energy_range_for_coordinates,
+    has_usable_energy_axis,
+)
 from nlab.analysis.spectrum import (
     NormalizationMode,
     Spectrum,
@@ -63,7 +73,23 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 _COLORS = ("#1f77b4", "#d28b38", "#648b71", "#7353a6", "#a66f6f", "#2a9d8f")
 _FIT_REGION_Z = 20.0
+_REFERENCE_LINE_Z = 25.0
 _PEAK_MARKER_Z = 30.0
+_REFERENCE_COLORS = ("#c23b22", "#0072b2", "#009e73", "#cc79a7", "#e69f00", "#6f4e7c")
+_REFERENCE_FAVOURITES_KEY = "analysis/radionuclide_reference_favourites"
+_DEFAULT_REFERENCE_FAVOURITES = (
+    "Cs-137",
+    "Na-22",
+    "Bi-207",
+    "Mn-54",
+    "Cr-51",
+    "Co-57",
+    "Cd-109",
+    "Am-241",
+    "Pm-145",
+    "Mo-93",
+    "Ba-133",
+)
 
 
 class _SpectrumEnergyAxis(pg.AxisItem):  # type: ignore[misc]
@@ -139,6 +165,11 @@ class McaPeakAnalysisDialog(QDialog):
         self._fit_thread: QThread | None = None
         self._fit_worker: PeakFitWorker | None = None
         self._peak_lines: list[pg.InfiniteLine] = []
+        self._reference_lines: list[pg.InfiniteLine] = []
+        self._reference_candidates: dict[str, RadionuclideCandidate] = {}
+        self._reference_roi_energy_range: tuple[float, float] | None = None
+        self._reference_favourites: list[str] = []
+        self._updating_reference_items = False
         self._rebuilding_sources = False
         self._allow_close = False
         self._build_ui()
@@ -226,6 +257,7 @@ class McaPeakAnalysisDialog(QDialog):
         self.side_tabs.setMinimumWidth(390)
         self.side_tabs.setMaximumWidth(520)
         self.side_tabs.addTab(self._build_fit_tab(), "Peak fit")
+        self.side_tabs.addTab(self._build_reference_tab(), "Reference lines")
         self.side_tabs.addTab(self._build_operations_tab(), "Operations")
         self.side_tabs.addTab(self._build_results_tab(), "Results")
         splitter.addWidget(self.side_tabs)
@@ -289,6 +321,106 @@ class McaPeakAnalysisDialog(QDialog):
         self.fit_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.fit_status)
         layout.addStretch(1)
+        return tab
+
+    def _build_reference_tab(self) -> QWidget:
+        tab = QWidget(self)
+        layout = QVBoxLayout(tab)
+        explanation = QLabel(
+            "Overlay evaluated decay-photon energies on the selected calibrated spectrum. "
+            "Emission probability controls marker visibility; it does not predict measured "
+            "peak height.",
+            self,
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+
+        self.reference_search = QLineEdit(self)
+        self.reference_search.setPlaceholderText("Filter nuclides, for example Na-22")
+        layout.addWidget(self.reference_search)
+
+        self.reference_roi_filter = QCheckBox("Only nuclides with lines in fit ROI", self)
+        self.reference_roi_filter.setEnabled(False)
+        self.reference_nuclide_list = QListWidget(self)
+        self.reference_nuclide_list.setMaximumHeight(150)
+        self._reference_summaries = {
+            summary.nuclide: summary for summary in BUILTIN_RADIONUCLIDE_CATALOG.summaries()
+        }
+        self._reference_favourites = self._load_reference_favourites()
+        self.reference_favourite_button = QPushButton("Add to favourites", self)
+        self.reference_favourite_button.setEnabled(False)
+        self.reference_favourite_button.setToolTip(
+            "Pin the highlighted nuclide above the rest of the current list."
+        )
+        self.restore_reference_favourites_button = QPushButton("Restore common defaults", self)
+        self.restore_reference_favourites_button.setToolTip(
+            "Restore the built-in common laboratory source favourites."
+        )
+        self._populate_reference_nuclides(
+            self._ordered_reference_nuclides(tuple(self._reference_summaries))
+        )
+        layout.addWidget(self.reference_nuclide_list)
+        favourite_row = QHBoxLayout()
+        favourite_row.addWidget(self.reference_favourite_button)
+        favourite_row.addWidget(self.restore_reference_favourites_button)
+        favourite_row.addStretch(1)
+        layout.addLayout(favourite_row)
+
+        controls = QFormLayout()
+        self.reference_probability = QDoubleSpinBox(self)
+        self.reference_probability.setRange(0.0, 200.0)
+        self.reference_probability.setDecimals(3)
+        self.reference_probability.setSingleStep(0.5)
+        self.reference_probability.setValue(1.0)
+        self.reference_probability.setSuffix(" %")
+        controls.addRow("Minimum emission probability:", self.reference_probability)
+        controls.addRow("", self.reference_roi_filter)
+        layout.addLayout(controls)
+
+        self.reference_filter_status = QLabel(
+            "ROI candidate filtering requires a current energy calibration.",
+            self,
+        )
+        self.reference_filter_status.setWordWrap(True)
+        layout.addWidget(self.reference_filter_status)
+
+        clear_row = QHBoxLayout()
+        self.clear_reference_button = QPushButton("Clear selection", self)
+        clear_row.addWidget(self.clear_reference_button)
+        clear_row.addStretch(1)
+        layout.addLayout(clear_row)
+
+        self.reference_table = QTableWidget(0, 4, self)
+        self.reference_table.setHorizontalHeaderLabels(
+            ["Nuclide", "Energy (keV)", "Emission (%)", "Radiation"]
+        )
+        self.reference_table.verticalHeader().setVisible(False)
+        self.reference_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.reference_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        layout.addWidget(self.reference_table, 1)
+
+        self.reference_status = QLabel("Select a radionuclide to display its photon lines.", self)
+        self.reference_status.setWordWrap(True)
+        self.reference_status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(self.reference_status)
+        metadata = BUILTIN_RADIONUCLIDE_CATALOG.metadata
+        source = QLabel(
+            f'Offline catalogue v{BUILTIN_RADIONUCLIDE_CATALOG.version}: '
+            f'{len(BUILTIN_RADIONUCLIDE_CATALOG.nuclides()):,} parent nuclides and '
+            f'{int(metadata["recommended_line_count"]):,} evaluated photon lines from the '
+            '<a href="https://www.nndc.bnl.gov/ensdf/">NNDC ENSDF</a> snapshot dated '
+            f'{metadata["source_data_generated_at"]}; Na-22 annihilation from '
+            '<a href="https://www-nds.iaea.org/IRDFF/Recomm-DecayData-IRDFF-II.pdf">'
+            "DDEP/IRDFF-II</a>.",
+            self,
+        )
+        source.setOpenExternalLinks(True)
+        source.setWordWrap(True)
+        layout.addWidget(source)
         return tab
 
     def _build_operations_tab(self) -> QWidget:
@@ -407,10 +539,283 @@ class McaPeakAnalysisDialog(QDialog):
         self.suggest_button.clicked.connect(self._suggest_peaks)
         self.fit_button.clicked.connect(self._start_fit)
         self.cancel_fit_button.clicked.connect(self._cancel_fit)
+        self.reference_search.textChanged.connect(self._filter_reference_nuclides)
+        self.reference_nuclide_list.itemChanged.connect(self._reference_selection_changed)
+        self.reference_nuclide_list.currentItemChanged.connect(
+            self._reference_current_item_changed
+        )
+        self.reference_favourite_button.clicked.connect(self._toggle_reference_favourite)
+        self.restore_reference_favourites_button.clicked.connect(
+            self._restore_reference_favourites
+        )
+        self.reference_probability.valueChanged.connect(self._reference_probability_changed)
+        self.reference_roi_filter.toggled.connect(self._reference_roi_filter_changed)
+        self.fit_region.sigRegionChangeFinished.connect(self._reference_roi_changed)
+        self.clear_reference_button.clicked.connect(self._clear_reference_selection)
         self.operation_combo.currentIndexChanged.connect(self._update_operation_controls)
         self.apply_operation_button.clicked.connect(self._apply_operation)
         self.export_fit_button.clicked.connect(self._export_fit_result)
         self.close_button.clicked.connect(self.reject)
+
+    def _load_reference_favourites(self) -> list[str]:
+        settings = QSettings()
+        configured = settings.contains(_REFERENCE_FAVOURITES_KEY)
+        if configured:
+            stored = settings.value(_REFERENCE_FAVOURITES_KEY, [])
+            if isinstance(stored, str):
+                raw_values = [stored]
+            elif isinstance(stored, (list, tuple)):
+                raw_values = list(stored)
+            else:
+                raw_values = []
+        else:
+            raw_values = list(_DEFAULT_REFERENCE_FAVOURITES)
+        favourites: list[str] = []
+        for raw_value in raw_values:
+            try:
+                nuclide = canonical_nuclide(str(raw_value))
+            except ValueError:
+                continue
+            if nuclide in self._reference_summaries and nuclide not in favourites:
+                favourites.append(nuclide)
+        return favourites
+
+    def _save_reference_favourites(self) -> None:
+        QSettings().setValue(_REFERENCE_FAVOURITES_KEY, self._reference_favourites)
+
+    def _ordered_reference_nuclides(self, nuclides: tuple[str, ...]) -> tuple[str, ...]:
+        available = set(nuclides)
+        favourites = [
+            nuclide for nuclide in self._reference_favourites if nuclide in available
+        ]
+        favourite_set = set(favourites)
+        return tuple(favourites + [nuclide for nuclide in nuclides if nuclide not in favourite_set])
+
+    def _populate_reference_nuclides(self, nuclides: tuple[str, ...]) -> None:
+        checked = set(self._selected_reference_nuclides())
+        current = self.reference_nuclide_list.currentItem()
+        current_nuclide = (
+            str(current.data(Qt.ItemDataRole.UserRole)) if current is not None else None
+        )
+        restored_current: QListWidgetItem | None = None
+        favourites = set(self._reference_favourites)
+        self._updating_reference_items = True
+        try:
+            self.reference_nuclide_list.clear()
+            for nuclide in nuclides:
+                summary = self._reference_summaries[nuclide]
+                candidate = self._reference_candidates.get(nuclide)
+                if candidate is not None:
+                    count = candidate.matching_line_count
+                    label = (
+                        f"{nuclide}  ({count} ROI line{'s' if count != 1 else ''}; "
+                        f"strongest {candidate.strongest_probability_percent:g}%)"
+                    )
+                elif self.reference_roi_filter.isChecked() and nuclide in checked:
+                    label = f"{nuclide}  (selected; no ROI match)"
+                else:
+                    label = f"{nuclide}  ({summary.line_count} line(s))"
+                if nuclide in favourites:
+                    label = f"★ {label}"
+                item = QListWidgetItem(label)
+                item.setData(Qt.ItemDataRole.UserRole, nuclide)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(
+                    Qt.CheckState.Checked if nuclide in checked else Qt.CheckState.Unchecked
+                )
+                state = (
+                    f"\nParent-state energy: {summary.state_energy_kev:g} keV"
+                    if summary.state_energy_kev > 0
+                    else ""
+                )
+                favourite = "Favourite reference\n" if nuclide in favourites else ""
+                item.setToolTip(
+                    f"{favourite}{BUILTIN_RADIONUCLIDE_CATALOG.reference}{state}"
+                )
+                self.reference_nuclide_list.addItem(item)
+                if nuclide == current_nuclide:
+                    restored_current = item
+            if restored_current is not None:
+                self.reference_nuclide_list.setCurrentItem(restored_current)
+        finally:
+            self._updating_reference_items = False
+        self._update_reference_favourite_button()
+
+    def _reference_current_item_changed(self, *_args: object) -> None:
+        self._update_reference_favourite_button()
+
+    def _update_reference_favourite_button(self) -> None:
+        item = self.reference_nuclide_list.currentItem()
+        if item is None:
+            self.reference_favourite_button.setText("Add to favourites")
+            self.reference_favourite_button.setEnabled(False)
+            return
+        nuclide = str(item.data(Qt.ItemDataRole.UserRole))
+        is_favourite = nuclide in self._reference_favourites
+        self.reference_favourite_button.setText(
+            "Remove from favourites" if is_favourite else "Add to favourites"
+        )
+        self.reference_favourite_button.setEnabled(True)
+
+    def _toggle_reference_favourite(self) -> None:
+        item = self.reference_nuclide_list.currentItem()
+        if item is None:
+            return
+        nuclide = str(item.data(Qt.ItemDataRole.UserRole))
+        if nuclide in self._reference_favourites:
+            self._reference_favourites.remove(nuclide)
+        else:
+            self._reference_favourites.append(nuclide)
+        self._save_reference_favourites()
+        self._update_reference_candidate_filter(force_rebuild=True)
+
+    def _restore_reference_favourites(self) -> None:
+        self._reference_favourites = [
+            nuclide
+            for nuclide in _DEFAULT_REFERENCE_FAVOURITES
+            if nuclide in self._reference_summaries
+        ]
+        self._save_reference_favourites()
+        self._update_reference_candidate_filter(force_rebuild=True)
+
+    def _filter_reference_nuclides(self, _text: str = "") -> None:
+        self._apply_reference_nuclide_visibility()
+
+    def _apply_reference_nuclide_visibility(self) -> None:
+        normalized = self.reference_search.text().strip().lower().replace("-", "")
+        roi_filter = self.reference_roi_filter.isChecked()
+        for row in range(self.reference_nuclide_list.count()):
+            item = self.reference_nuclide_list.item(row)
+            nuclide = str(item.data(Qt.ItemDataRole.UserRole))
+            text_matches = normalized in nuclide.lower().replace("-", "")
+            roi_matches = (
+                not roi_filter
+                or nuclide in self._reference_candidates
+                or item.checkState() == Qt.CheckState.Checked
+            )
+            item.setHidden(not text_matches or not roi_matches)
+
+    def _update_reference_candidate_filter(self, *, force_rebuild: bool = False) -> None:
+        spectrum = self._current_spectrum()
+        low, high = sorted(map(float, self.fit_region.getRegion()))
+        energy_range = (
+            energy_range_for_coordinates(spectrum, low, high) if spectrum is not None else None
+        )
+        self.reference_roi_filter.setEnabled(energy_range is not None)
+        unavailable_tooltip = (
+            "The fit ROI must overlap the selected spectrum at a non-negative energy."
+            if spectrum is not None and has_usable_energy_axis(spectrum)
+            else "A selected spectrum with a current energy calibration is required."
+        )
+        self.reference_roi_filter.setToolTip(
+            "Filter and rank parent nuclides by evaluated lines inside the fit ROI."
+            if energy_range is not None
+            else unavailable_tooltip
+        )
+        if energy_range is None:
+            if self.reference_roi_filter.isChecked():
+                self.reference_roi_filter.blockSignals(True)
+                self.reference_roi_filter.setChecked(False)
+                self.reference_roi_filter.blockSignals(False)
+            rebuild = force_rebuild or bool(self._reference_candidates) or (
+                self.reference_nuclide_list.count() != len(self._reference_summaries)
+            )
+            self._reference_candidates = {}
+            self._reference_roi_energy_range = None
+            if rebuild:
+                self._populate_reference_nuclides(
+                    self._ordered_reference_nuclides(tuple(self._reference_summaries))
+                )
+            self._apply_reference_nuclide_visibility()
+            if spectrum is not None and bool(spectrum.metadata.get("calibration_stale", False)):
+                reason = "The selected spectrum's calibration is stale."
+            elif spectrum is not None and has_usable_energy_axis(spectrum):
+                reason = (
+                    "The fit ROI does not overlap the selected spectrum at a non-negative "
+                    "energy."
+                )
+            else:
+                reason = "A current energy calibration is required."
+            self.reference_filter_status.setText(f"ROI candidate filter unavailable: {reason}")
+            return
+
+        self._reference_roi_energy_range = energy_range
+        if not self.reference_roi_filter.isChecked():
+            rebuild = force_rebuild or bool(self._reference_candidates) or (
+                self.reference_nuclide_list.count() != len(self._reference_summaries)
+            )
+            self._reference_candidates = {}
+            if rebuild:
+                self._populate_reference_nuclides(
+                    self._ordered_reference_nuclides(tuple(self._reference_summaries))
+                )
+            self._apply_reference_nuclide_visibility()
+            self.reference_filter_status.setText(
+                f"Fit ROI spans {energy_range[0]:g}–{energy_range[1]:g} keV; enable the "
+                "candidate filter to search it."
+            )
+            return
+
+        candidates = BUILTIN_RADIONUCLIDE_CATALOG.candidates(
+            energy_range[0],
+            energy_range[1],
+            minimum_probability_percent=self.reference_probability.value(),
+        )
+        self._reference_candidates = {candidate.nuclide: candidate for candidate in candidates}
+        selected = set(self._selected_reference_nuclides())
+        matching = self._ordered_reference_nuclides(
+            tuple(candidate.nuclide for candidate in candidates)
+        )
+        selected_nonmatches = self._ordered_reference_nuclides(
+            tuple(
+                nuclide
+                for nuclide in self._reference_summaries
+                if nuclide in selected and nuclide not in self._reference_candidates
+            )
+        )
+        self._populate_reference_nuclides(matching + selected_nonmatches)
+        self._apply_reference_nuclide_visibility()
+        self.reference_filter_status.setText(
+            f"Found {len(candidates):,} candidate parent nuclide(s) with evaluated lines at or "
+            f"above {self.reference_probability.value():g}% in "
+            f"{energy_range[0]:g}–{energy_range[1]:g} keV. A match is not an identification."
+        )
+
+    def _reference_probability_changed(self, *_args: object) -> None:
+        self._update_reference_candidate_filter()
+        self._render()
+
+    def _reference_roi_filter_changed(self, _checked: bool) -> None:
+        self._update_reference_candidate_filter()
+
+    def _reference_roi_changed(self, *_args: object) -> None:
+        self._update_reference_candidate_filter()
+
+    def _reference_selection_changed(self, item: QListWidgetItem) -> None:
+        if not self._updating_reference_items:
+            if (
+                self.reference_roi_filter.isChecked()
+                and item.checkState() != Qt.CheckState.Checked
+            ):
+                self._apply_reference_nuclide_visibility()
+            self._render()
+
+    def _clear_reference_selection(self) -> None:
+        self._updating_reference_items = True
+        try:
+            for row in range(self.reference_nuclide_list.count()):
+                self.reference_nuclide_list.item(row).setCheckState(Qt.CheckState.Unchecked)
+        finally:
+            self._updating_reference_items = False
+        self._render()
+
+    def _selected_reference_nuclides(self) -> tuple[str, ...]:
+        return tuple(
+            str(item.data(Qt.ItemDataRole.UserRole))
+            for row in range(self.reference_nuclide_list.count())
+            if (item := self.reference_nuclide_list.item(row)).checkState()
+            == Qt.CheckState.Checked
+        )
 
     def _current_id(self) -> str | None:
         item = self.source_list.currentItem()
@@ -485,6 +890,7 @@ class McaPeakAnalysisDialog(QDialog):
         if spectrum is None:
             self.fit_button.setEnabled(False)
             self.export_spectrum_button.setEnabled(False)
+            self._update_reference_candidate_filter()
             self._render()
             return
         self.fit_button.setEnabled(self._fit_thread is None)
@@ -496,6 +902,7 @@ class McaPeakAnalysisDialog(QDialog):
         self._suggest_peaks()
         self._update_other_spectra()
         self._update_source_status()
+        self._update_reference_candidate_filter()
         self._render()
 
     def _visibility_changed(self, item: QListWidgetItem) -> None:
@@ -509,6 +916,7 @@ class McaPeakAnalysisDialog(QDialog):
         selected = self._current_spectrum()
         self.spectrum_plot.clear()
         self.legend.clear()
+        self._reference_lines = []
         self.spectrum_plot.addItem(self.fit_region)
         selected_unit = selected.axis_unit if selected is not None else "channel"
         plotted = 0
@@ -531,6 +939,7 @@ class McaPeakAnalysisDialog(QDialog):
             plotted += 1
         for line in self._peak_lines:
             self.spectrum_plot.addItem(line)
+        self._render_reference_lines(selected)
         logarithmic = self.scale_combo.currentData() == "log"
         self.spectrum_plot.setLogMode(y=logarithmic)
         self.spectrum_plot.setLabel(
@@ -563,6 +972,141 @@ class McaPeakAnalysisDialog(QDialog):
         )
         if selected is not None:
             self.workbench_status.setText(f"Displayed {plotted} spectrum/spectra{suffix}.")
+
+    def _render_reference_lines(self, spectrum: Spectrum | None) -> None:
+        nuclides = self._selected_reference_nuclides()
+        minimum = self.reference_probability.value()
+        selected_lines: list[tuple[str, RadionuclideLine, str]] = []
+        for nuclide_index, nuclide in enumerate(nuclides):
+            color = _REFERENCE_COLORS[nuclide_index % len(_REFERENCE_COLORS)]
+            selected_lines.extend(
+                (nuclide, line, color)
+                for line in BUILTIN_RADIONUCLIDE_CATALOG.lines(
+                    nuclide,
+                    minimum_probability_percent=minimum,
+                )
+            )
+
+        self.reference_table.setRowCount(0)
+        if not nuclides:
+            self.reference_status.setText(
+                "Select a radionuclide to display its evaluated photon lines."
+            )
+            return
+        if spectrum is None:
+            self.reference_status.setText("Select a spectrum before displaying reference lines.")
+            return
+        if bool(spectrum.metadata.get("calibration_stale", False)):
+            self.reference_status.setText(
+                "The selected spectrum's energy calibration is stale; reference lines are hidden."
+            )
+            return
+        if not has_usable_energy_axis(spectrum):
+            self.reference_status.setText(
+                "Apply an energy calibration, or load a spectrum with a keV axis, to display "
+                "reference lines."
+            )
+            return
+
+        plotted: list[tuple[str, RadionuclideLine, str, float]] = []
+        for nuclide, reference, color in selected_lines:
+            coordinate = coordinate_for_energy(spectrum, reference.energy_kev)
+            if coordinate is None:
+                continue
+            marker = pg.InfiniteLine(
+                pos=coordinate,
+                angle=90,
+                movable=False,
+                pen=pg.mkPen(color, width=1.25, style=Qt.PenStyle.DashLine),
+                hoverPen=pg.mkPen(color, width=2.25),
+                label=f"{nuclide}  {reference.energy_kev:g} keV",
+                labelOpts={
+                    "position": 0.96 - 0.08 * (len(plotted) % 4),
+                    "color": color,
+                    "fill": (255, 255, 255, 190),
+                    "movable": False,
+                },
+            )
+            marker.setZValue(_REFERENCE_LINE_Z)
+            kind = "annihilation" if reference.kind == "annihilation" else "gamma"
+            note = f"\n{reference.note}" if reference.note else ""
+            marker.setToolTip(
+                f"{nuclide}: {reference.energy_kev:g} keV\n"
+                f"Emission probability: {reference.emission_probability_percent:g}%\n"
+                f"Radiation: {kind}\n"
+                f"Decay: {reference.decay_mode or 'not specified'}\n"
+                f"Source dataset: {reference.source_dataset or 'catalogue supplement'}{note}"
+            )
+            self.spectrum_plot.addItem(marker)
+            self._reference_lines.append(marker)
+            plotted.append((nuclide, reference, color, coordinate))
+
+        self.reference_table.setRowCount(len(plotted))
+        for row, (nuclide, reference, color, _coordinate) in enumerate(plotted):
+            radiation = "Annihilation" if reference.kind == "annihilation" else "Gamma"
+            values = (
+                nuclide,
+                f"{reference.energy_kev:.8g}",
+                f"{reference.emission_probability_percent:.8g}",
+                radiation,
+            )
+            source_document = BUILTIN_RADIONUCLIDE_CATALOG.line_document(reference)
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setForeground(pg.mkBrush(color))
+                item.setToolTip(
+                    f"{source_document['reference']}\n"
+                    f"{reference.source_dataset or 'catalogue supplement'}\n"
+                    f"{source_document['reference_url']}"
+                )
+                self.reference_table.setItem(row, column, item)
+
+        outside = len(selected_lines) - len(plotted)
+        if plotted:
+            suffix = f"; {outside} outside this spectrum's energy range" if outside else ""
+            self.reference_status.setText(
+                f"Displayed {len(plotted)} evaluated line(s) for {len(nuclides)} "
+                f"nuclide(s){suffix}. Marker height is not a predicted peak height."
+            )
+        else:
+            self.reference_status.setText(
+                f"No selected lines at or above {minimum:g}% fall inside this spectrum's "
+                "calibrated energy range."
+            )
+
+    def _reference_selection_document(self) -> dict[str, object] | None:
+        nuclides = self._selected_reference_nuclides()
+        if not nuclides:
+            return None
+        minimum = self.reference_probability.value()
+        document = BUILTIN_RADIONUCLIDE_CATALOG.selection_document(
+            nuclides,
+            minimum_probability_percent=minimum,
+        )
+        spectrum = self._current_spectrum()
+        displayed = []
+        if spectrum is not None:
+            displayed = [
+                BUILTIN_RADIONUCLIDE_CATALOG.line_document(line)
+                for nuclide in nuclides
+                for line in BUILTIN_RADIONUCLIDE_CATALOG.lines(
+                    nuclide,
+                    minimum_probability_percent=minimum,
+                )
+                if coordinate_for_energy(spectrum, line.energy_kev) is not None
+            ]
+        document["lines"] = displayed
+        document["spectrum_id"] = spectrum.spectrum_id if spectrum is not None else None
+        document["candidate_filter"] = {
+            "enabled": self.reference_roi_filter.isChecked(),
+            "fit_roi_energy_kev": (
+                list(self._reference_roi_energy_range)
+                if self.reference_roi_filter.isChecked()
+                and self._reference_roi_energy_range is not None
+                else None
+            ),
+        }
+        return document
 
     def _refresh_energy_axis(self, spectrum: Spectrum | None) -> None:
         self.energy_axis.set_spectrum(spectrum)
@@ -967,6 +1511,7 @@ class McaPeakAnalysisDialog(QDialog):
                 spectrum=spectrum,
                 spec=self._last_fit_spec,
                 result=result,
+                reference_overlay=self._reference_selection_document(),
             )
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "Fit Export Failed", str(exc))

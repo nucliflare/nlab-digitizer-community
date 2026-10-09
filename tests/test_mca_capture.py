@@ -233,3 +233,23 @@ def test_iio_worker_emits_verified_summary_for_online_run() -> None:
     assert summaries[0].continuity == "verified"
     assert summaries[0].sidecar_path is None
     assert received["client_record_schema"] == VDPP_ZC_CALC_SCHEMA
+
+
+def test_iio_worker_marks_connection_reset_as_connection_loss() -> None:
+    class FakeStreamer:
+        last_capture_diagnostics = None
+
+        def stream_events(self, **_kwargs: object) -> int:
+            raise ConnectionResetError(10054, "connection reset")
+
+    worker = IIOMcaDmaWorker(streamer=FakeStreamer())  # type: ignore[arg-type]
+    connection_losses: list[str] = []
+    errors: list[str] = []
+    worker.connection_lost.connect(connection_losses.append)
+    worker.error.connect(errors.append)
+
+    worker.run()
+
+    assert len(connection_losses) == 1
+    assert "connection reset" in connection_losses[0]
+    assert len(errors) == 1

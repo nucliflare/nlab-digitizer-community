@@ -6,10 +6,17 @@ from dataclasses import dataclass
 
 import numpy as np
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMainWindow, QMessageBox
 from pytestqt.qtbot import QtBot
 
-from nlab.analysis.energy_calibration import EnergyCalibration, SpectrumSnapshot
+import nlab.views.mca_peak_analysis_dialog as peak_analysis_dialog_module
+from nlab.analysis.energy_calibration import (
+    CalibrationPoint,
+    EnergyCalibration,
+    SpectrumSnapshot,
+    fit_energy_calibration,
+)
 from nlab.analysis.spectrum import Spectrum
 from nlab.ui.ui_main_window import Ui_MainWindow
 from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
@@ -23,6 +30,7 @@ class _FakeMcaController:
     elapsed_s: float = 10.0
     energy_calibration: EnergyCalibration | None = None
     coincidence_energy_bin: int = 0
+    calibration_stale: bool = False
     snapshots: int = 0
 
     def spectrum_snapshot(self) -> SpectrumSnapshot:
@@ -37,7 +45,7 @@ class _FakeMcaController:
         )
 
     def energy_calibration_is_stale(self) -> bool:
-        return False
+        return self.calibration_stale
 
 
 def _photopeak(center: float = 180.0) -> np.ndarray:
@@ -194,6 +202,213 @@ def test_peak_spectrum_and_residual_use_modifier_zoom(qtbot: QtBot) -> None:
 
     assert isinstance(dialog.spectrum_plot.getViewBox(), ModifierZoomViewBox)
     assert isinstance(dialog.residual_plot.getViewBox(), ModifierZoomViewBox)
+    dialog.close_without_prompt()
+
+
+def test_reference_lines_overlay_na22_on_calibrated_channel_axis(qtbot: QtBot) -> None:
+    calibration = fit_energy_calibration(
+        (CalibrationPoint(0.0, 0.0), CalibrationPoint(399.0, 2000.0))
+    )
+    controller = _FakeMcaController(0, _photopeak(), energy_calibration=calibration)
+    dialog = McaPeakAnalysisDialog([controller])  # type: ignore[list-item]
+    qtbot.addWidget(dialog)
+
+    na22 = next(
+        dialog.reference_nuclide_list.item(row)
+        for row in range(dialog.reference_nuclide_list.count())
+        if dialog.reference_nuclide_list.item(row).data(Qt.ItemDataRole.UserRole) == "Na-22"
+    )
+    na22.setCheckState(Qt.CheckState.Checked)
+
+    assert len(dialog._reference_lines) == 2
+    assert [line.value() for line in dialog._reference_lines] == pytest.approx(
+        [511.0 * 399.0 / 2000.0, 1274.537 * 399.0 / 2000.0]
+    )
+    assert dialog.reference_table.rowCount() == 2
+    assert dialog.reference_table.item(0, 3).text() == "Annihilation"
+    assert "Marker height is not a predicted peak height" in dialog.reference_status.text()
+    dialog.close_without_prompt()
+
+
+def test_reference_lines_require_current_energy_calibration(qtbot: QtBot) -> None:
+    dialog = McaPeakAnalysisDialog(  # type: ignore[list-item]
+        [_FakeMcaController(0, _photopeak())]
+    )
+    qtbot.addWidget(dialog)
+    first = dialog.reference_nuclide_list.item(0)
+
+    first.setCheckState(Qt.CheckState.Checked)
+
+    assert dialog._reference_lines == []
+    assert "Apply an energy calibration" in dialog.reference_status.text()
+    assert not dialog.reference_roi_filter.isEnabled()
+    assert "unavailable" in dialog.reference_filter_status.text()
+    dialog.close_without_prompt()
+
+
+def test_reference_favourites_are_pinned_editable_and_persistent(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored_settings: dict[str, object] = {}
+
+    class MemorySettings:
+        def contains(self, key: str) -> bool:
+            return key in stored_settings
+
+        def value(self, key: str, default: object = None) -> object:
+            return stored_settings.get(key, default)
+
+        def setValue(self, key: str, value: object) -> None:  # noqa: N802 - Qt API
+            stored_settings[key] = value
+
+    monkeypatch.setattr(peak_analysis_dialog_module, "QSettings", MemorySettings)
+    dialog = McaPeakAnalysisDialog(  # type: ignore[list-item]
+        [_FakeMcaController(0, _photopeak())]
+    )
+    qtbot.addWidget(dialog)
+
+    expected_defaults = [
+        "Cs-137",
+        "Na-22",
+        "Bi-207",
+        "Mn-54",
+        "Cr-51",
+        "Co-57",
+        "Cd-109",
+        "Am-241",
+        "Pm-145",
+        "Ba-133",
+    ]
+    listed = [
+        str(dialog.reference_nuclide_list.item(row).data(Qt.ItemDataRole.UserRole))
+        for row in range(len(expected_defaults))
+    ]
+    assert listed == expected_defaults
+    assert all(
+        dialog.reference_nuclide_list.item(row).text().startswith("★ ")
+        for row in range(len(expected_defaults))
+    )
+
+    co60 = next(
+        dialog.reference_nuclide_list.item(row)
+        for row in range(dialog.reference_nuclide_list.count())
+        if dialog.reference_nuclide_list.item(row).data(Qt.ItemDataRole.UserRole) == "Co-60"
+    )
+    dialog.reference_nuclide_list.setCurrentItem(co60)
+    assert dialog.reference_favourite_button.text() == "Add to favourites"
+    dialog.reference_favourite_button.click()
+
+    assert dialog._reference_favourites == expected_defaults + ["Co-60"]
+    assert stored_settings["analysis/radionuclide_reference_favourites"] == (
+        expected_defaults + ["Co-60"]
+    )
+    assert dialog.reference_nuclide_list.item(len(expected_defaults)).data(
+        Qt.ItemDataRole.UserRole
+    ) == "Co-60"
+    dialog.close_without_prompt()
+
+    reopened = McaPeakAnalysisDialog(  # type: ignore[list-item]
+        [_FakeMcaController(0, _photopeak())]
+    )
+    qtbot.addWidget(reopened)
+    cs137 = next(
+        reopened.reference_nuclide_list.item(row)
+        for row in range(reopened.reference_nuclide_list.count())
+        if reopened.reference_nuclide_list.item(row).data(Qt.ItemDataRole.UserRole) == "Cs-137"
+    )
+    reopened.reference_nuclide_list.setCurrentItem(cs137)
+    assert reopened.reference_favourite_button.text() == "Remove from favourites"
+    reopened.reference_favourite_button.click()
+
+    assert "Cs-137" not in reopened._reference_favourites
+    assert reopened.reference_nuclide_list.item(0).data(Qt.ItemDataRole.UserRole) == "Na-22"
+    unpinned_cs137 = next(
+        reopened.reference_nuclide_list.item(row)
+        for row in range(reopened.reference_nuclide_list.count())
+        if reopened.reference_nuclide_list.item(row).data(Qt.ItemDataRole.UserRole) == "Cs-137"
+    )
+    assert not unpinned_cs137.text().startswith("★ ")
+    reopened.close_without_prompt()
+
+
+def test_reference_candidate_filter_uses_calibrated_fit_roi(qtbot: QtBot) -> None:
+    calibration = fit_energy_calibration(
+        (CalibrationPoint(0.0, 0.0), CalibrationPoint(399.0, 2000.0))
+    )
+    controller = _FakeMcaController(0, _photopeak(), energy_calibration=calibration)
+    dialog = McaPeakAnalysisDialog([controller])  # type: ignore[list-item]
+    qtbot.addWidget(dialog)
+    dialog.fit_region.setRegion((650.0 * 399.0 / 2000.0, 670.0 * 399.0 / 2000.0))
+
+    assert dialog.reference_roi_filter.isEnabled()
+    dialog.reference_roi_filter.setChecked(True)
+
+    items = {
+        str(dialog.reference_nuclide_list.item(row).data(Qt.ItemDataRole.UserRole)):
+        dialog.reference_nuclide_list.item(row)
+        for row in range(dialog.reference_nuclide_list.count())
+    }
+    assert "Cs-137" in items
+    assert "1 ROI line" in items["Cs-137"].text()
+    assert "strongest 85.1%" in items["Cs-137"].text()
+    assert "Na-22" not in items
+    assert "A match is not an identification" in dialog.reference_filter_status.text()
+
+    dialog.reference_probability.setValue(90.0)
+    remaining = {
+        str(dialog.reference_nuclide_list.item(row).data(Qt.ItemDataRole.UserRole))
+        for row in range(dialog.reference_nuclide_list.count())
+    }
+    assert "Cs-137" not in remaining
+    dialog.close_without_prompt()
+
+
+def test_reference_candidate_filter_clips_negative_calibrated_roi(qtbot: QtBot) -> None:
+    calibration = fit_energy_calibration(
+        (CalibrationPoint(100.0, 10.0), CalibrationPoint(200.0, 30.0))
+    )
+    dialog = McaPeakAnalysisDialog(  # type: ignore[list-item]
+        [_FakeMcaController(0, _photopeak(), energy_calibration=calibration)]
+    )
+    qtbot.addWidget(dialog)
+    dialog.fit_region.setRegion((0.0, 100.0))
+
+    dialog.reference_roi_filter.setChecked(True)
+
+    assert dialog.reference_roi_filter.isChecked()
+    assert dialog._reference_roi_energy_range == pytest.approx((0.0, 10.0))
+    assert "0–10 keV" in dialog.reference_filter_status.text()
+    dialog.close_without_prompt()
+
+
+def test_reference_candidate_filter_keeps_selected_nonmatch_manageable(qtbot: QtBot) -> None:
+    calibration = fit_energy_calibration(
+        (CalibrationPoint(0.0, 0.0), CalibrationPoint(399.0, 2000.0))
+    )
+    dialog = McaPeakAnalysisDialog(  # type: ignore[list-item]
+        [_FakeMcaController(0, _photopeak(), energy_calibration=calibration)]
+    )
+    qtbot.addWidget(dialog)
+    na22 = next(
+        dialog.reference_nuclide_list.item(row)
+        for row in range(dialog.reference_nuclide_list.count())
+        if dialog.reference_nuclide_list.item(row).data(Qt.ItemDataRole.UserRole) == "Na-22"
+    )
+    na22.setCheckState(Qt.CheckState.Checked)
+    dialog.fit_region.setRegion((650.0 * 399.0 / 2000.0, 670.0 * 399.0 / 2000.0))
+    dialog.reference_roi_filter.setChecked(True)
+
+    retained = next(
+        dialog.reference_nuclide_list.item(row)
+        for row in range(dialog.reference_nuclide_list.count())
+        if dialog.reference_nuclide_list.item(row).data(Qt.ItemDataRole.UserRole) == "Na-22"
+    )
+    assert retained.checkState() == Qt.CheckState.Checked
+    assert "selected; no ROI match" in retained.text()
+
+    retained.setCheckState(Qt.CheckState.Unchecked)
+    assert retained.isHidden()
     dialog.close_without_prompt()
 
 
