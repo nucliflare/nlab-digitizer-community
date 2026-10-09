@@ -189,19 +189,6 @@ class GeneralSettingsDialog(QDialog):
         files_form.addRow("Destination:", folder_row)
         files_form.addRow("MCA output:", self.mca_output)
 
-        histogram_group = QGroupBox("Histograms")
-        histogram_layout = QVBoxLayout(histogram_group)
-        self.show_roi = QCheckBox("Show ROI")
-        self.show_roi.setChecked(bool(values.get("show_roi", False)))
-        self.show_roi.setToolTip(
-            "Shows the ROI selector and statistics on every MCA histogram."
-        )
-        self.log_y = QCheckBox("Logarithmic Y axis")
-        self.log_y.setChecked(bool(values.get("log_y", False)))
-        self.log_y.setToolTip("Uses a logarithmic Y axis on every MCA histogram.")
-        histogram_layout.addWidget(self.show_roi)
-        histogram_layout.addWidget(self.log_y)
-
         configuration_group = QGroupBox("Configuration persistence")
         configuration_form = QFormLayout(configuration_group)
 
@@ -233,7 +220,6 @@ class GeneralSettingsDialog(QDialog):
         layout.addWidget(scope_group)
         layout.addWidget(acquisition_group)
         layout.addWidget(files_group)
-        layout.addWidget(histogram_group)
         layout.addWidget(configuration_group)
         layout.addWidget(buttons)
 
@@ -252,8 +238,6 @@ class GeneralSettingsDialog(QDialog):
             "psu_plot_time_range_s": self.psu_history.value(),
             "dma_save_folder": self.dma_folder.text().strip() or "measurements",
             "mca_dma_output_mode": str(self.mca_output.currentData()),
-            "show_roi": self.show_roi.isChecked(),
-            "log_y": self.log_y.isChecked(),
         }
 
     def _browse_dma_folder(self) -> None:

@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt, QThread
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
@@ -23,12 +24,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from nlab.analysis.capture_metadata import capture_digitizer_info
 from nlab.analysis.psd import PsdAccumulator
-from nlab.analysis.psd_file import inspect_psd_event_file
+from nlab.analysis.psd_file import PsdEventFileInfo, inspect_psd_event_file
+from nlab.analysis.psd_report import PsdReportRequest, export_psd_report
 from nlab.views.offline_psd_plot import OfflinePsdPlot
 from nlab.workers.psd_file_worker import PsdFileWorker
 
 log = logging.getLogger(__name__)
+_WINDOW_TITLE = "PSD Event Readback"
 
 
 class PsdReadbackDialog(QDialog):
@@ -36,11 +40,15 @@ class PsdReadbackDialog(QDialog):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("PSD Event Readback")
+        self.setWindowTitle(_WINDOW_TITLE)
         self.setModal(False)
         self.resize(1180, 760)
         self._thread: QThread | None = None
         self._worker: PsdFileWorker | None = None
+        self._pending_info: PsdEventFileInfo | None = None
+        self._source_info: PsdEventFileInfo | None = None
+        self._last_accumulator: PsdAccumulator | None = None
+        self._processed_events = 0
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -92,6 +100,13 @@ class PsdReadbackDialog(QDialog):
         grid.addWidget(self.ratio_min, 1, 3)
         grid.addWidget(QLabel("Ratio maximum:", self), 1, 4)
         grid.addWidget(self.ratio_max, 1, 5)
+        self.current_file_label = QLabel("Current file: No file loaded", self)
+        self.current_file_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.current_file_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.current_file_label.setWordWrap(True)
+        grid.addWidget(self.current_file_label, 2, 0, 1, 9)
         grid.setColumnStretch(8, 1)
         root.addWidget(settings)
 
@@ -102,12 +117,20 @@ class PsdReadbackDialog(QDialog):
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.status.setWordWrap(True)
         bottom.addWidget(self.status, 1)
+        self.report_button = QPushButton("Download report...", self)
+        self.report_button.setEnabled(False)
+        self.report_button.setToolTip(
+            "Save a PDF report and the plotted PSD/FOM data as CSV files."
+        )
+        bottom.addWidget(self.report_button)
         self.close_button = QPushButton("Close", self)
         bottom.addWidget(self.close_button)
         root.addLayout(bottom)
 
         self.load_button.clicked.connect(self._choose_file)
         self.cancel_button.clicked.connect(self._cancel)
+        self.report_button.clicked.connect(self._download_report)
+        self.plot.fom_widget.fit_changed.connect(self._fit_changed)
         self.close_button.clicked.connect(self.reject)
 
     def _choose_file(self) -> None:
@@ -161,6 +184,7 @@ class PsdReadbackDialog(QDialog):
         )
         self._worker = worker
         self._thread = thread
+        self._pending_info = info
         self._set_busy(True)
         self.status.setText(f"Loading {path.name} ({info.total_events:,} events)...")
         thread.start()
@@ -178,6 +202,12 @@ class PsdReadbackDialog(QDialog):
             ratio_range=accumulator.ratio_range,
             energy_label="Long-gate energy",
         )
+        self._source_info = self._pending_info
+        self._pending_info = None
+        if self._source_info is not None:
+            self._set_current_file(self._source_info.path)
+        self._last_accumulator = accumulator
+        self._processed_events = processed
         stats = accumulator.statistics
         self.status.setText(
             f"Loaded {processed:,} events from {source}. Accepted {stats.accepted:,}; "
@@ -185,10 +215,12 @@ class PsdReadbackDialog(QDialog):
         )
 
     def _failed(self, message: str) -> None:
+        self._pending_info = None
         self.status.setText(f"File load failed: {message}")
         QMessageBox.critical(self, "PSD File Load Failed", message)
 
     def _cancelled(self) -> None:
+        self._pending_info = None
         self.status.setText("File load cancelled.")
 
     def _cancel(self) -> None:
@@ -215,6 +247,100 @@ class PsdReadbackDialog(QDialog):
             self.ratio_max,
         ):
             control.setEnabled(not busy)
+        self._update_report_button()
+
+    def _set_current_file(self, path: Path | None) -> None:
+        if path is None:
+            self.current_file_label.setText("Current file: No file loaded")
+            self.current_file_label.setToolTip("")
+            self.setWindowTitle(_WINDOW_TITLE)
+            return
+        path_text = str(path)
+        self.current_file_label.setText(f"Current file: {path_text}")
+        self.current_file_label.setToolTip(path_text)
+        self.setWindowTitle(f"{_WINDOW_TITLE} — {path.name}")
+
+    def _fit_changed(self, _fit: object) -> None:
+        self._update_report_button()
+
+    def _update_report_button(self) -> None:
+        self.report_button.setEnabled(
+            self._thread is None
+            and self._source_info is not None
+            and self._last_accumulator is not None
+            and self.plot.fom_widget.last_fit is not None
+        )
+
+    def _download_report(self) -> None:
+        info = self._source_info
+        accumulator = self._last_accumulator
+        fit = self.plot.fom_widget.last_fit
+        if info is None or accumulator is None or fit is None:
+            QMessageBox.warning(
+                self,
+                "PSD Report",
+                "Load a PSD file and complete the FOM fit before creating a report.",
+            )
+            return
+        default_folder = str(QSettings().value("analysis/psd_report_folder", str(info.path.parent)))
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select PSD Report Destination",
+            default_folder,
+        )
+        if not selected:
+            return
+        state = self.plot.report_state()
+        request = PsdReportRequest(
+            source_path=info.path,
+            title="PSD Event Readback Report",
+            matrix=state.matrix,
+            energy_range=state.energy_range,
+            ratio_range=state.ratio_range,
+            energy_label=state.energy_label,
+            cut=state.cut,
+            energy_roi=state.energy_roi,
+            matrix_scale=state.matrix_scale,
+            energy_log_y=state.energy_log_y,
+            fit=fit,
+            settings={
+                "energy right shift": accumulator.energy_right_shift,
+                "PSD ratio definition": "(Qlong - Qshort) / Qlong",
+            },
+            digitizer_info={
+                **capture_digitizer_info(info.path),
+                "source format": info.format_name,
+                "source board": (
+                    info.board if info.board is not None else "Not embedded in source file"
+                ),
+                "source channel": (
+                    info.channel if info.channel is not None else "Not embedded in source file"
+                ),
+                "declared source events": info.total_events,
+            },
+            statistics={
+                "processed events": self._processed_events,
+                "accepted events": accumulator.statistics.accepted,
+                "zero-energy events": accumulator.statistics.zero_total,
+                "outside-view events": accumulator.statistics.outside_range,
+            },
+        )
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            bundle = export_psd_report(request, Path(selected))
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            log.exception("Could not create PSD readback report")
+            QMessageBox.critical(self, "PSD Report Failed", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        QSettings().setValue("analysis/psd_report_folder", selected)
+        self.status.setText(f"PSD report saved to {bundle.directory}.")
+        QMessageBox.information(
+            self,
+            "PSD Report Saved",
+            f"Report and data files were saved to:\n{bundle.directory}",
+        )
 
     def show_workspace(self) -> None:
         self.show()

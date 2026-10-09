@@ -31,6 +31,23 @@ def test_controller_drains_dma_batches_into_live_matrix(qtbot: QtBot) -> None:
     controller.stop_processing()
 
 
+def test_live_psd_matrix_makes_zero_and_one_count_bins_transparent(
+    qtbot: QtBot,
+) -> None:
+    controller = PSDController(McaEventBuffer(), channel=0)
+    qtbot.addWidget(controller)
+    controller._accumulator.matrix[1, 2] = 1
+    controller._accumulator.matrix[3, 4] = 2
+
+    controller._render()
+
+    image = np.asarray(controller._psd_image.image)
+    assert np.isnan(image[0, 0])
+    assert np.isnan(image[2, 1])
+    assert image[4, 3] == np.log1p(2)
+    controller.stop_processing()
+
+
 def test_bottom_histogram_hover_l_toggles_log_and_all_plots_use_modifier_zoom(
     qtbot: QtBot,
 ) -> None:

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from nlab.analysis.psd import PsdAccumulator
 from nlab.hardware.digitizer.dma import McaEventBuffer
 from nlab.ui.ui_psd_view import Ui_PSDView
+from nlab.views.image_display import transparent_sparse_bins
 from nlab.views.plot_viewbox import style_plot_widget
 from nlab.views.psd_fom_widget import PsdFomWidget
 from nlab.views.responsive_layout import configure_psd_layout
@@ -18,6 +19,8 @@ from nlab.views.responsive_layout import configure_psd_layout
 log = logging.getLogger(__name__)
 
 _DISPLAY_INTERVAL_MS = 100
+_MATRIX_COLUMN_LEFT_AXIS_WIDTH = 84
+_MATRIX_COLUMN_RIGHT_AXIS_WIDTH = 66
 
 
 class PSDController(QWidget):
@@ -122,6 +125,9 @@ class PSDController(QWidget):
         self._energy_plot.setLabel("bottom", "Trapezoid energy", units="raw")
         self._energy_plot.setLabel("left", "Counts")
         self._energy_plot.addLegend(offset=(10, 10))
+        for plot in (self._psd_plot, self._energy_plot):
+            plot.getAxis("left").setWidth(_MATRIX_COLUMN_LEFT_AXIS_WIDTH)
+            plot.getAxis("right").setWidth(_MATRIX_COLUMN_RIGHT_AXIS_WIDTH)
         self.ui.plotEnergy.setToolTip(
             "Hover here and press L to toggle logarithmic Y scale. "
             "Shift+wheel zooms X; Ctrl+wheel zooms Y."
@@ -334,7 +340,8 @@ class PSDController(QWidget):
         matrix = self._accumulator.matrix.T
         image = np.log1p(matrix.astype(np.float64))
         high = max(1.0, float(image.max(initial=0.0)))
-        self._psd_image.setImage(image, autoLevels=False, levels=(0.0, high))
+        displayed = transparent_sparse_bins(image, matrix)
+        self._psd_image.setImage(displayed, autoLevels=False, levels=(0.0, high))
         energy_low, energy_high = self._accumulator.energy_range
         ratio_low, ratio_high = self._accumulator.ratio_range
         self._psd_image.setRect(

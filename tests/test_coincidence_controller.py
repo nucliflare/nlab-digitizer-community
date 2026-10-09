@@ -270,6 +270,7 @@ def test_matrix_tab_renders_log_corrected_counts_and_interactive_projections(
     snapshot.random_matrix[20, 10] = 2
     snapshot.prompt_matrix[30, 10] = 3
     snapshot.prompt_matrix[20, 40] = 2
+    snapshot.prompt_matrix[5, 5] = 1
     controller._current_settings = CoincidenceSettings()
     controller.matrix_mode.setCurrentIndex(controller.matrix_mode.findData("corrected"))
     controller.matrix_scale.setCurrentIndex(controller.matrix_scale.findData("log"))
@@ -279,6 +280,8 @@ def test_matrix_tab_renders_log_corrected_counts_and_interactive_projections(
     controller._render_matrix(snapshot)
 
     assert np.asarray(controller.matrix_image.image)[20, 10] == pytest.approx(np.log10(7))
+    assert np.isnan(np.asarray(controller.matrix_image.image)[0, 0])
+    assert np.isnan(np.asarray(controller.matrix_image.image)[5, 5])
     assert controller.matrix_projection0_curve.yData[10] == 6
     assert controller.matrix_projection0_curve.yData[40] == 2
     assert controller.matrix_projection1_curve.yData[20] == 6

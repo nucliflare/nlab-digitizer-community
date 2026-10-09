@@ -752,6 +752,30 @@ def test_general_settings_read_first_channel_and_apply_to_every_channel() -> Non
         )
 
 
+def test_differential_histogram_view_mode_applies_to_every_mca_channel() -> None:
+    controller = _bare_controller()
+    channels = [
+        SimpleNamespace(set_differential_histogram=Mock()),
+        SimpleNamespace(set_differential_histogram=Mock()),
+    ]
+    controller._mca_controllers = channels
+
+    controller.set_differential_histogram(True)
+
+    for channel in channels:
+        channel.set_differential_histogram.assert_called_once_with(True)
+
+
+def test_mca_histogram_hover_is_reported_across_channels() -> None:
+    controller = object.__new__(MainWindowController)
+    controller._mca_controllers = [
+        SimpleNamespace(histogram_under_mouse=Mock(return_value=False)),
+        SimpleNamespace(histogram_under_mouse=Mock(return_value=True)),
+    ]
+
+    assert controller.mca_histogram_under_mouse()
+
+
 def test_iio_startup_explicitly_requests_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     controller = _bare_controller()
     expected = object()

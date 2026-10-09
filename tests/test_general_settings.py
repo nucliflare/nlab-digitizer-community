@@ -5,12 +5,14 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtGui import QAction, QCloseEvent, QKeyEvent
 from PySide6.QtWidgets import QMainWindow, QWidget
 from pytestqt.qtbot import QtBot
 
 from nlab import app as app_module
 from nlab.app import MainAppWindow
+from nlab.ui.ui_main_window import Ui_MainWindow
 from nlab.ui.ui_mca_view import Ui_MCAView
 from nlab.ui.ui_psu_view import Ui_PSUView
 from nlab.ui.ui_scope_view import Ui_ScopeView
@@ -72,8 +74,6 @@ def test_general_settings_describes_complete_configuration_snapshot(
             "psu_plot_time_range_s": 120,
             "dma_save_folder": "captures",
             "mca_dma_output_mode": "hdf5",
-            "show_roi": True,
-            "log_y": True,
         },
     )
     qtbot.addWidget(dialog)
@@ -90,9 +90,22 @@ def test_general_settings_describes_complete_configuration_snapshot(
         "psu_plot_time_range_s": 120,
         "dma_save_folder": "captures",
         "mca_dma_output_mode": "hdf5",
-        "show_roi": True,
-        "log_y": True,
     }
+
+
+def test_mca_histogram_controls_are_in_view_menu(qtbot: QtBot) -> None:
+    window = QMainWindow()
+    qtbot.addWidget(window)
+    ui = Ui_MainWindow()
+    ui.setupUi(window)
+
+    view_actions = ui.menuView.actions()
+    assert ui.actionShowRoi in view_actions
+    assert ui.actionDifferentialHistogram in view_actions
+    assert ui.actionLogY in view_actions
+    assert ui.actionShowRoi.isCheckable()
+    assert ui.actionDifferentialHistogram.isCheckable()
+    assert ui.actionLogY.isCheckable()
 
 
 def test_channel_panels_hide_controls_moved_to_general_settings(qtbot: QtBot) -> None:
@@ -119,7 +132,6 @@ def test_channel_panels_hide_controls_moved_to_general_settings(qtbot: QtBot) ->
 
 
 def test_app_applies_general_settings_to_controllers_and_global_options(
-    qtbot: QtBot,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stored: dict[str, object] = {}
@@ -128,8 +140,6 @@ def test_app_applies_general_settings_to_controllers_and_global_options(
         def setValue(self, key: str, value: object) -> None:  # noqa: N802
             stored[key] = value
 
-    owner = QWidget()
-    qtbot.addWidget(owner)
     controller = SimpleNamespace(
         apply_general_configuration_settings=Mock(),
         refresh_dma_output_settings=Mock(),
@@ -138,13 +148,7 @@ def test_app_applies_general_settings_to_controllers_and_global_options(
     window = SimpleNamespace(
         _controller=controller,
         _save_developer_settings=save_preferences,
-        ui=SimpleNamespace(
-            actionShowRoi=QAction(owner),
-            actionLogY=QAction(owner),
-        ),
     )
-    window.ui.actionShowRoi.setCheckable(True)
-    window.ui.actionLogY.setCheckable(True)
     monkeypatch.setattr(app_module, "QSettings", FakeSettings)
     values = {
         "scope_display_mode": 1,
@@ -155,8 +159,6 @@ def test_app_applies_general_settings_to_controllers_and_global_options(
         "psu_plot_time_range_s": 180,
         "dma_save_folder": "captures",
         "mca_dma_output_mode": "root",
-        "show_roi": True,
-        "log_y": True,
     }
 
     MainAppWindow._apply_general_settings(window, values)
@@ -165,9 +167,34 @@ def test_app_applies_general_settings_to_controllers_and_global_options(
     controller.refresh_dma_output_settings.assert_called_once_with()
     assert stored["dma/save_folder"] == "captures"
     assert stored["dma/mca_output_mode"] == "root"
-    assert window.ui.actionShowRoi.isChecked()
-    assert window.ui.actionLogY.isChecked()
     save_preferences.assert_called_once_with()
+
+
+def test_l_toggles_mca_log_action_only_while_histogram_is_hovered(
+    qtbot: QtBot,
+) -> None:
+    owner = QWidget()
+    qtbot.addWidget(owner)
+    action = QAction(owner)
+    action.setCheckable(True)
+    controller = SimpleNamespace(mca_histogram_under_mouse=Mock(return_value=True))
+    window = SimpleNamespace(
+        isVisible=lambda: True,
+        _controller=controller,
+        ui=SimpleNamespace(actionLogY=action),
+    )
+    event = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_L,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+    assert MainAppWindow._try_mca_log_shortcut(window, event)
+    assert action.isChecked()
+
+    controller.mca_histogram_under_mouse.return_value = False
+    assert not MainAppWindow._try_mca_log_shortcut(window, event)
+    assert action.isChecked()
 
 
 def test_enabling_auto_configuration_saves_immediately(

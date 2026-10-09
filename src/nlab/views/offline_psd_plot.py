@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Literal, cast
+
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QEvent, QObject, QRectF, Qt
@@ -17,8 +20,26 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from nlab.views.image_display import transparent_sparse_bins
 from nlab.views.plot_viewbox import NLabPlotWidget, style_plot_widget
 from nlab.views.psd_fom_widget import PsdFomWidget
+
+_MATRIX_COLUMN_LEFT_AXIS_WIDTH = 84
+_MATRIX_COLUMN_RIGHT_AXIS_WIDTH = 66
+
+
+@dataclass(frozen=True)
+class OfflinePsdReportState:
+    """Current matrix, selections, and display state for report generation."""
+
+    matrix: np.ndarray
+    energy_range: tuple[float, float]
+    ratio_range: tuple[float, float]
+    energy_label: str
+    cut: float
+    energy_roi: tuple[float, float]
+    matrix_scale: Literal["linear", "log"]
+    energy_log_y: bool
 
 
 class OfflinePsdPlot(QWidget):
@@ -29,6 +50,8 @@ class OfflinePsdPlot(QWidget):
         self._matrix = np.zeros((1, 1), dtype=np.uint64)
         self._energy_range = (0.0, 1.0)
         self._ratio_range = (0.0, 1.0)
+        self._energy_label = "Long-gate charge"
+        self._has_data = False
         self._energy_log_y = False
 
         root = QVBoxLayout(self)
@@ -101,6 +124,9 @@ class OfflinePsdPlot(QWidget):
         self.energy_plot.showGrid(x=True, y=True, alpha=0.2)
         self.energy_plot.setLabel("left", "Counts")
         self.energy_plot.setLabel("bottom", "Long-gate charge", units="raw")
+        for plot in (self.matrix_plot, self.energy_plot):
+            plot.getAxis("left").setWidth(_MATRIX_COLUMN_LEFT_AXIS_WIDTH)
+            plot.getAxis("right").setWidth(_MATRIX_COLUMN_RIGHT_AXIS_WIDTH)
         self._energy_widget.setToolTip(
             "Hover here and press L to toggle logarithmic Y scale. "
             "Shift+wheel zooms X; Ctrl+wheel zooms Y."
@@ -165,9 +191,11 @@ class OfflinePsdPlot(QWidget):
         values = np.asarray(matrix, dtype=np.uint64)
         if values.ndim != 2 or 0 in values.shape:
             raise ValueError("PSD matrix must be a non-empty two-dimensional array")
+        previous_energy_region = self.energy_region.getRegion()
         self._matrix = values
         self._energy_range = energy_range
         self._ratio_range = ratio_range
+        self._energy_label = energy_label
         self.fom_widget.set_ratio_range(ratio_range)
         self.fom_widget.clear_fit()
         self.matrix_plot.setLabel("bottom", energy_label, units="raw")
@@ -180,9 +208,19 @@ class OfflinePsdPlot(QWidget):
         self.cut_line.setBounds(ratio_range)
         self.cut_line.setPos(self.cut_spin.value())
         self.energy_region.setBounds(energy_range)
-        self.energy_region.setRegion(
-            (energy_range[0], energy_range[0] + (energy_range[1] - energy_range[0]) / 4.0)
-        )
+        if self._has_data:
+            low, high = sorted(map(float, previous_energy_region))
+            low = float(np.clip(low, *energy_range))
+            high = float(np.clip(high, *energy_range))
+            if high <= low:
+                low = energy_range[0]
+                high = energy_range[0] + (energy_range[1] - energy_range[0]) / 4.0
+            self.energy_region.setRegion((low, high))
+        else:
+            self.energy_region.setRegion(
+                (energy_range[0], energy_range[0] + (energy_range[1] - energy_range[0]) / 4.0)
+            )
+        self._has_data = True
         # Prime the linked projections before applying the authoritative matrix
         # range.  Setting a linked projection last makes pyqtgraph compensate for
         # the plots' unequal axis geometry and can crop the matrix (for example,
@@ -194,11 +232,13 @@ class OfflinePsdPlot(QWidget):
         self.matrix_plot.setRange(xRange=energy_range, yRange=ratio_range, padding=0.0)
 
     def _render_image(self) -> None:
-        image = self._matrix.T.astype(np.float64)
+        matrix = self._matrix.T
+        image = matrix.astype(np.float64)
         if self.scale_combo.currentData() == "log":
             image = np.log1p(image)
         high = max(1.0, float(image.max(initial=0.0)))
-        self.image.setImage(image, autoLevels=False, levels=(0.0, high))
+        displayed = transparent_sparse_bins(image, matrix)
+        self.image.setImage(displayed, autoLevels=False, levels=(0.0, high))
         energy_low, energy_high = self._energy_range
         ratio_low, ratio_high = self._ratio_range
         self.image.setRect(
@@ -250,3 +290,21 @@ class OfflinePsdPlot(QWidget):
         ratio_counts = self._matrix[first:last].sum(axis=0, dtype=np.uint64)
         self.ratio_curve.setData(ratio_counts, ratio_centers)
         self.fom_widget.set_projection(ratio_centers, ratio_counts)
+
+    def report_state(self) -> OfflinePsdReportState:
+        """Return an immutable snapshot of the currently displayed report inputs."""
+        if not self._has_data:
+            raise ValueError("No PSD data are available for a report")
+        matrix = self._matrix.copy()
+        matrix.flags.writeable = False
+        energy_roi = tuple(sorted(map(float, self.energy_region.getRegion())))
+        return OfflinePsdReportState(
+            matrix=matrix,
+            energy_range=self._energy_range,
+            ratio_range=self._ratio_range,
+            energy_label=self._energy_label,
+            cut=float(self.cut_spin.value()),
+            energy_roi=(energy_roi[0], energy_roi[1]),
+            matrix_scale=cast(Literal["linear", "log"], str(self.scale_combo.currentData())),
+            energy_log_y=self._energy_log_y,
+        )

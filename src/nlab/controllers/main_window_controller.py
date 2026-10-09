@@ -714,11 +714,24 @@ class MainWindowController:
             ctrl.set_roi_visible(visible)
         log.info("ROI %s on all MCA histograms", "shown" if visible else "hidden")
 
+    def set_differential_histogram(self, enabled: bool) -> None:
+        """Toggle per-refresh differences on every MCA histogram."""
+        for ctrl in self._mca_controllers:
+            ctrl.set_differential_histogram(enabled)
+        log.info(
+            "MCA histograms set to %s display",
+            "differential" if enabled else "accumulated",
+        )
+
     def set_log_y(self, enabled: bool) -> None:
         """Toggle logarithmic Y-axis on every MCA histogram."""
         for ctrl in self._mca_controllers:
             ctrl.set_log_y(enabled)
         log.info("Histogram Y-axis set to %s", "log" if enabled else "linear")
+
+    def mca_histogram_under_mouse(self) -> bool:
+        """Return whether the pointer is over any live MCA histogram."""
+        return any(ctrl.histogram_under_mouse() for ctrl in self._mca_controllers)
 
     def reset_all_zoom(self) -> None:
         """Auto-range/reset zoom on every live plot."""

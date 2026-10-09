@@ -171,6 +171,10 @@
    </widget>
    <widget class="QMenu" name="menuView">
     <property name="title"><string>View</string></property>
+     <addaction name="actionShowRoi"/>
+     <addaction name="actionDifferentialHistogram"/>
+     <addaction name="actionLogY"/>
+     <addaction name="separator"/>
     <addaction name="actionResetZoom"/>
     <addaction name="actionResetDocks"/>
    </widget>
@@ -206,7 +210,13 @@
   </action>
   <action name="actionLogY">
    <property name="checkable"><bool>true</bool></property>
-   <property name="text"><string>Log Y-Axis (Histograms)</string></property>
+   <property name="text"><string>Logarithmic MCA Y Axis</string></property>
+   <property name="toolTip"><string>Use a logarithmic Y axis on MCA histograms; hover over a histogram and press L to toggle</string></property>
+  </action>
+  <action name="actionDifferentialHistogram">
+   <property name="checkable"><bool>true</bool></property>
+   <property name="text"><string>Differential MCA Histogram</string></property>
+   <property name="toolTip"><string>Display only counts added since the previous rendered MCA histogram</string></property>
   </action>
   <action name="actionResetZoom">
    <property name="text"><string>Reset Zoom (All Plots)</string></property>

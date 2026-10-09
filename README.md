@@ -88,7 +88,13 @@ uv run python examples/measure_current.py
   the offset marker previews a horizontal shift of both debug traces, and
   hardware settings are applied on release.
 - Pulse-processor, input-filter, CFD, charge-comparison, and trapezoid controls
-- Live 16,384-bin spectra with logarithmic display and ROI statistics
+- Live 16,384-bin spectra with logarithmic display, ROI statistics, and a
+  **View** menu switch for monitoring only the counts added since the previous
+  refresh; the same menu controls MCA ROI visibility and logarithmic Y scale.
+  Hover over an MCA histogram and press `L` to toggle its scale. Exports and
+  analysis snapshots retain accumulated counts. Double-click the MCA ROI to open a
+  modeless count history against acquisition elapsed time; its values follow the
+  accumulated or per-refresh differential histogram display mode
 - Modeless multi-spectrum energy calibration under **Tools**, with draggable
   reference lines, linear or quadratic fits, residuals, per-channel calibrated
   top axes, and raw-channel-preserving CSV/YAML metadata
@@ -103,7 +109,9 @@ uv run python examples/measure_current.py
 - List-mode IIO DMA using fixed 1,024-record frames
 - Live PSD classification from charge-comparison and energy measurements,
   including interactive double-Gaussian projection fitting and conventional
-  centroid/FWHM figure-of-merit reporting
+  centroid/FWHM figure-of-merit reporting. Live and Tools/readback PSD maps,
+  along with coincidence matrices, render bins containing zero or one count as
+  transparent against the light plot background
 - Per-measurement MCA output as NDMA, ROOT TTree, HDF5, or online-only DMA
 - Incremental bounded-memory file writing with embedded/same-stem YAML settings
 - Per-channel live record rate and end-of-run integrity summary; IIO driver
@@ -382,6 +390,38 @@ You can also run the module directly:
 ```bash
 python -m nlab.main
 ```
+
+### MCA startup gain-drift diagnostic
+
+`examples/mca_gain_drift_diagnostic.py` records a repeatable dual-channel
+startup trace for a known photopeak. It applies the host's latest auto-saved
+MCA configuration by default, starts fresh histogram acquisitions, and tracks
+both the literal and smoothed differential-spectrum maximum in an inclusive
+ROI. The command also records a local centroid, MCA statistics, available HV
+feedback, detector/HAT/FPGA/ADC temperatures, input-filter temperature
+correction, clock/rail diagnostics, and standard board-input hwmon telemetry.
+
+```bash
+uv run python examples/mca_gain_drift_diagnostic.py \
+  --host 192.168.10.135 --duration 180 --interval 2 \
+  --channel-roi 0 3500 4250 --channel-roi 1 1000 1700 \
+  --apply-saved-psu
+```
+
+Both MCA channels must be idle before the command starts. Scope settings are
+never written. PSU settings are monitor-only by default; the explicit
+`--apply-saved-psu` option applies each channel's saved bias and requests a safe
+HV shutdown after the capture, including on errors. The original MCA state is
+restored after the capture. Use repeated `--channel-roi CHANNEL MIN MAX`
+arguments when the two calibrated peaks occupy different raw-channel ranges.
+The timestamped output directory contains sample telemetry as CSV, every
+differential ROI spectrum as compressed NPZ, early/late and time-series PNG
+plots, the exact saved YAML configuration, and JSON metadata/summary. An
+internal HV readback is informative only when that supply actually biases the
+detector; retain the external supply's own log when PMT bias is external.
+For an A/B check between acquisition startup and detector/base settling, add
+`--bias-settle SECONDS` with `--apply-saved-psu`; the saved bias is then held
+for that interval before either MCA starts.
 
 ### First live measurement: Cs-137
 
@@ -776,7 +816,21 @@ fit bounds, missing covariance, or poor reduced deviance produce a visible
 convergence warning; the result should not then be treated as a qualified PSD
 separation measurement. Each peak width is initialized independently from its
 local half-height, and ordered centroids can move across the initial seed
-midpoint without swapping population identity.
+midpoint without swapping population identity. **Copy table** places both
+populations, parameter uncertainties, the FOM, reduced Poisson deviance, fit
+status, evaluation count, and warnings on the clipboard as tab-separated data;
+the control is available in both PSD Event Readback and Waveform Analysis.
+After a fit, **Download report...** saves a uniquely named folder based on the
+investigated file. The bundle contains a three-page PDF with the EWT identity,
+software version, source/digitizer metadata, PSD matrix, fitted FOM projection,
+cut-separated energy spectra, fit diagnostics, and the exact cut, binning, and
+projection-ROI settings. CSV files preserve the complete matrix, both separated
+spectra, the full FOM projection and every fitted component; settings are also
+written as CSV and machine-readable JSON. Source formats that do not embed a
+device identity are marked explicitly instead of being inferred.
+Both analysis workbenches keep the full current source path visible and show
+the source filename in the window title, so subsequent status and report
+messages do not obscure which file is being analyzed.
 The ratio and energy projections share the map's aligned data boundaries. Hover
 over the bottom energy projection and press **L** to switch its count axis
 between linear and logarithmic scale; this shortcut is available in both live
@@ -825,8 +879,12 @@ With **Auto-recalculate while dragging** enabled, moving any baseline or gate
 marker produces a debounced preview from every twentieth selected event. Releasing
 the marker cancels any stale preview and queues a full calculation using the
 configured event stride and maximum-event limit. The initial PSD ratio view spans
--1 to 1, and the workbench sizes its waveform and full PSD panes to the available
-desktop.
+-1 to 1. Gate-driven PSD recalculations preserve the selected energy-projection
+ROI, and the workbench sizes its waveform and full PSD panes to the available desktop.
+Its report bundle additionally records the exact baseline method, polarity,
+sample-domain gates and their time equivalents, sample period, source channel,
+event stride/limit, reconstruction statistics, and analysis mode that produced
+the fitted matrix.
 
 For Scope NDMA timing checks, edit `FILENAME` in
 [`notebooks/check_dma.py`](notebooks/check_dma.py) and run it from the repository

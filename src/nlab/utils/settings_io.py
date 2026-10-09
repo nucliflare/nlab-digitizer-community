@@ -381,6 +381,66 @@ def _apply_mca(mca: MultiChannelAnalyzer, settings: Mapping[str, Any]) -> None:
         mca.set_temp_offset(int(temperature["offset"]))
 
 
+def apply_mca_hardware(
+    mca: MultiChannelAnalyzer,
+    settings: Mapping[str, Any],
+) -> None:
+    """Apply only one channel's saved MCA settings.
+
+    This is useful for focused command-line diagnostics which must reproduce
+    an MCA configuration without writing unrelated Scope or PSU registers.
+    ``settings`` is the complete per-channel hardware mapping returned by
+    :func:`channel_entry`; missing MCA data is ignored.
+    """
+
+    if not isinstance(settings.get("mca"), Mapping):
+        return
+    mca_settings = _mapping(settings, "mca")
+    mca.reconfigure_while_running(lambda: _apply_mca(mca, mca_settings))
+
+
+def apply_psu_hardware(
+    hv: HVSupply,
+    settings: Mapping[str, Any],
+) -> None:
+    """Apply only one channel's saved PSU settings; ignore missing PSU data."""
+
+    if not isinstance(settings.get("psu"), Mapping):
+        return
+    psu = _mapping(settings, "psu")
+    _apply_floats(
+        psu,
+        (
+            ("hv_voltage", hv.set_hv_voltage),
+            ("hv_compens_ct", hv.set_hv_compens_ct),
+            ("hv_compens_tref", hv.set_hv_compens_tref),
+        ),
+    )
+    _apply_ints(
+        psu,
+        (
+            ("hv_compens_mode", hv.set_hv_compens_mode),
+            ("temp_digital_enable", hv.set_temp_digital_enable),
+        ),
+    )
+    if hv.sipm_available():
+        _apply_ints(
+            psu,
+            (
+                ("sipm_enable", hv.set_sipm_enable),
+                ("sipm_compens_mode", hv.set_sipm_compens_mode),
+            ),
+        )
+        _apply_floats(
+            psu,
+            (
+                ("sipm_voltage", hv.set_sipm_voltage),
+                ("sipm_compens_ct", hv.set_sipm_compens_ct),
+                ("sipm_compens_tref", hv.set_sipm_compens_tref),
+            ),
+        )
+
+
 def apply_channel_hardware(
     scope: Scope,
     mca: MultiChannelAnalyzer | None,
@@ -417,45 +477,13 @@ def apply_channel_hardware(
     if "edge_mode" in scope_settings:
         scope.set_trigger_mode(TriggerMode(int(scope_settings["edge_mode"])))
 
-    if mca is not None and isinstance(settings.get("mca"), Mapping):
-        mca_settings = _mapping(settings, "mca")
+    if mca is not None:
         # The pulse-processor rejects configuration writes while enabled.
         # One locked stop/write/restart covers the whole transaction.
-        mca.reconfigure_while_running(lambda: _apply_mca(mca, mca_settings))
+        apply_mca_hardware(mca, settings)
 
-    if hv is not None and isinstance(settings.get("psu"), Mapping):
-        psu = _mapping(settings, "psu")
-        _apply_floats(
-            psu,
-            (
-                ("hv_voltage", hv.set_hv_voltage),
-                ("hv_compens_ct", hv.set_hv_compens_ct),
-                ("hv_compens_tref", hv.set_hv_compens_tref),
-            ),
-        )
-        _apply_ints(
-            psu,
-            (
-                ("hv_compens_mode", hv.set_hv_compens_mode),
-                ("temp_digital_enable", hv.set_temp_digital_enable),
-            ),
-        )
-        if hv.sipm_available():
-            _apply_ints(
-                psu,
-                (
-                    ("sipm_enable", hv.set_sipm_enable),
-                    ("sipm_compens_mode", hv.set_sipm_compens_mode),
-                ),
-            )
-            _apply_floats(
-                psu,
-                (
-                    ("sipm_voltage", hv.set_sipm_voltage),
-                    ("sipm_compens_ct", hv.set_sipm_compens_ct),
-                    ("sipm_compens_tref", hv.set_sipm_compens_tref),
-                ),
-            )
+    if hv is not None:
+        apply_psu_hardware(hv, settings)
 
 
 # Compatibility helpers for code that still uses one old-style channel file.

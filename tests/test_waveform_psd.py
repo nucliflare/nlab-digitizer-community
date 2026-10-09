@@ -146,6 +146,39 @@ def test_offline_psd_plot_keeps_requested_matrix_range(qtbot: QtBot) -> None:
     assert y_range == pytest.approx([-1.0, 1.0])
 
 
+def test_offline_psd_matrix_makes_zero_and_one_count_bins_transparent(
+    qtbot: QtBot,
+) -> None:
+    plot = OfflinePsdPlot()
+    qtbot.addWidget(plot)
+    matrix = np.zeros((3, 2), dtype=np.uint64)
+    matrix[1, 0] = 1
+    matrix[2, 0] = 2
+
+    plot.set_data(
+        matrix,
+        energy_range=(0.0, 3.0),
+        ratio_range=(0.0, 2.0),
+    )
+
+    image = np.asarray(plot.image.image)
+    assert np.isnan(image[0, 0])
+    assert np.isnan(image[0, 1])
+    assert image[0, 2] == np.log1p(2)
+
+
+def test_offline_psd_data_refresh_preserves_energy_region(qtbot: QtBot) -> None:
+    plot = OfflinePsdPlot()
+    qtbot.addWidget(plot)
+    matrix = np.full((8, 4), 2, dtype=np.uint64)
+    plot.set_data(matrix, energy_range=(0.0, 80.0), ratio_range=(-1.0, 1.0))
+    plot.energy_region.setRegion((24.0, 56.0))
+
+    plot.set_data(matrix + 1, energy_range=(0.0, 80.0), ratio_range=(-1.0, 1.0))
+
+    assert plot.energy_region.getRegion() == pytest.approx((24.0, 56.0))
+
+
 def test_offline_psd_plots_use_modifier_zoom(qtbot: QtBot) -> None:
     plot = OfflinePsdPlot()
     qtbot.addWidget(plot)
@@ -160,7 +193,7 @@ def test_offline_psd_projection_axes_align_and_energy_l_toggles_log(qtbot: QtBot
     plot.resize(1000, 600)
     plot.show()
     plot.set_data(
-        np.ones((512, 256), dtype=np.uint64),
+        np.full((512, 256), 2, dtype=np.uint64),
         energy_range=(0.0, 1_000_000.0),
         ratio_range=(-1.0, 1.0),
     )
@@ -262,9 +295,15 @@ def test_waveform_workbench_indexes_and_reconstructs_ndma(
 
     assert dialog._reader is not None
     assert dialog.frame_spin.maximum() == 0
+    assert dialog.current_file_label.text() == f"Current file: {path}"
+    assert dialog.current_file_label.toolTip() == str(path)
+    assert dialog.windowTitle().endswith(f"— {path.name}")
     assert "Qlong" in dialog.preview_status.text()
     assert dialog.waveform_widget.minimumHeight() >= 200
     assert dialog.psd_plot.minimumHeight() >= 360
+    assert dialog.psd_plot.fom_widget.copy_button.text() == "Copy table"
+    assert dialog.report_button.text() == "Download report..."
+    assert not dialog.report_button.isEnabled()
     assert dialog.ratio_min.value() == -1.0
     assert "20th" in dialog.auto_recalculate.text()
     assert isinstance(dialog.waveform_widget.getViewBox(), ModifierZoomViewBox)
@@ -279,12 +318,45 @@ def test_waveform_workbench_indexes_and_reconstructs_ndma(
     qtbot.waitUntil(lambda: dialog._analysis_thread is None, timeout=5000)
     assert "Sparse PSD preview complete" in dialog.status.text()
 
+    energy_low, energy_high = dialog.psd_plot._energy_range
+    selected_energy_region = (
+        energy_low + 0.3 * (energy_high - energy_low),
+        energy_low + 0.6 * (energy_high - energy_low),
+    )
+    dialog.psd_plot.energy_region.setRegion(selected_energy_region)
     dialog._on_gate_moved()
     assert dialog._auto_preview_timer.isActive()
     dialog._on_gate_change_finished()
     assert not dialog._auto_preview_timer.isActive()
     qtbot.waitUntil(lambda: dialog._analysis_thread is None, timeout=5000)
     assert "PSD complete" in dialog.status.text()
+    assert dialog.psd_plot.energy_region.getRegion() == pytest.approx(selected_energy_region)
+
+    ratio_edges = np.linspace(-0.2, 0.8, 257)
+    ratio = (ratio_edges[:-1] + ratio_edges[1:]) * 0.5
+    expectation = (
+        8.0
+        + 260.0 * np.exp(-0.5 * np.square((ratio - 0.12) / 0.035))
+        + 180.0 * np.exp(-0.5 * np.square((ratio - 0.48) / 0.055))
+    )
+    matrix = np.random.default_rng(15).poisson(expectation, size=(32, 256))
+    dialog.psd_plot.set_data(
+        matrix,
+        energy_range=(0.0, 32.0),
+        ratio_range=(-0.2, 0.8),
+    )
+    dialog.psd_plot.energy_region.setRegion((0.0, 32.0))
+    dialog.psd_plot._render_projections()
+    dialog.psd_plot.fom_widget.fit_region.setRegion((-0.05, 0.65))
+    dialog.psd_plot.fom_widget.centroid_lines[0].setPos(0.1)
+    dialog.psd_plot.fom_widget.centroid_lines[1].setPos(0.5)
+    assert dialog.psd_plot.fom_widget.fit_current_projection() is not None
+    assert dialog.report_button.isEnabled()
+
+    dialog.close_file()
+    assert dialog.current_file_label.text() == "Current file: No file loaded"
+    assert dialog.current_file_label.toolTip() == ""
+    assert dialog.windowTitle() == "Waveform Analysis Workbench"
 
 
 def test_waveform_worker_is_deleted_by_its_finished_thread(

@@ -45,6 +45,17 @@ class LibiioRuntimeError(RuntimeError):
     """The pylibiio wrapper could not load a usable native runtime."""
 
 
+def _configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    # Debug mode is intended for NLab diagnostics. Matplotlib emits hundreds
+    # of font-scoring records while the PSD report figures are rendered.
+    logging.getLogger("matplotlib.font_manager").setLevel(logging.WARNING)
+
+
 def _verify_libiio_runtime() -> None:
     try:
         module = importlib.import_module("iio")
@@ -128,11 +139,7 @@ def _int_value(value: object) -> int | None:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    _configure_logging()
     args, qt_args = _parse_arguments(sys.argv[1:])
     _set_windows_app_user_model_id()
     app = QApplication([sys.argv[0], *qt_args])

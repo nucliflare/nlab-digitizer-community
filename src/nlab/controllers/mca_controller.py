@@ -24,6 +24,10 @@ from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode, McaRunSummary
 from nlab.hardware.digitizer.scope import RangeSpec
 from nlab.ui.ui_mca_view import Ui_MCAView
 from nlab.views.energy_axis import CalibratedEnergyAxis
+from nlab.views.mca_roi_history_dialog import (
+    DoubleClickableLinearRegionItem,
+    McaRoiHistoryDialog,
+)
 from nlab.views.plot_viewbox import ModifierZoomViewBox
 from nlab.views.responsive_layout import configure_mca_layout
 from nlab.views.time_axis import format_duration_ns, time_axis_scale
@@ -167,6 +171,12 @@ class MCAController(QWidget):
         self._coincidence_stopping = False
 
         self._last_histogram: np.ndarray | None = None
+        self._display_histogram: np.ndarray | None = None
+        self._differential_histogram_enabled = False
+        self._differential_reference_histogram: np.ndarray | None = None
+        self._differential_reference_elapsed_s = 0.0
+        self._display_interval_s = 0.0
+        self._roi_history_dialog: McaRoiHistoryDialog | None = None
         self._last_elapsed_s: float = 0.0
         self._energy_calibration: EnergyCalibration | None = None
         self._pending_readback: MCAReadback | None = None
@@ -758,8 +768,12 @@ class MCAController(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         self.ui.plotHistogram.setCentralItem(layout)
         self.ui.plotHistogram.setBackground("#f8f9fa")
+        self.ui.plotHistogram.setToolTip(
+            "Hover here and press L to toggle logarithmic Y scale. "
+            "Shift+wheel zooms X; Ctrl+wheel zooms Y."
+        )
 
-        layout.addLabel("Counts", angle=-90)
+        self._histogram_y_label = layout.addLabel("Counts", angle=-90)
         self._energy_axis = CalibratedEnergyAxis("top")
         self._hist_plot = layout.addPlot(
             viewBox=ModifierZoomViewBox(),
@@ -776,9 +790,12 @@ class MCAController(QWidget):
             stepMode="center",
         )
 
-        self._roi = pg.LinearRegionItem(values=[100, 200], movable=True)
+        self._roi = DoubleClickableLinearRegionItem(values=[100, 200], movable=True)
         self._roi_dragging = False
         self._roi.setZValue(10)
+        self._roi.setToolTip(
+            "Drag to select MCA bins. Double-click to plot integrated counts over time."
+        )
         self._hist_plot.addItem(self._roi)
         self._roi.setVisible(False)
         # This pyqtgraph version exposes no sigRegionChangeStarted. The first
@@ -787,6 +804,7 @@ class MCAController(QWidget):
         # calculations. sigRegionChangeFinished performs the one update.
         self._roi.sigRegionChanged.connect(self._on_roi_region_changed)
         self._roi.sigRegionChangeFinished.connect(self._on_roi_change_finished)
+        self._roi.double_clicked.connect(self._open_roi_history)
 
     def _on_roi_region_changed(self) -> None:
         # Histogram readbacks can continue at up to 60 Hz while the mouse is
@@ -799,6 +817,7 @@ class MCAController(QWidget):
     def _on_roi_change_finished(self) -> None:
         self._roi_dragging = False
         self._update_roi_stats()
+        MCAController._restart_roi_history_trace(self)
         if signal := getattr(self, "roi_changed", None):
             signal.emit()
 
@@ -812,13 +831,68 @@ class MCAController(QWidget):
             self._update_roi_stats()
         self.roi_changed.emit()
 
+    def _roi_bounds(self, n_bins: int) -> tuple[int, int]:
+        left, right = self._roi.getRegion()
+        low_bin, high_bin = sorted(
+            (
+                int(np.clip(round(left), 0, n_bins - 1)),
+                int(np.clip(round(right), 0, n_bins - 1)),
+            )
+        )
+        return low_bin, high_bin
+
+    def _open_roi_history(self) -> None:
+        dialog = self._roi_history_dialog
+        if dialog is None:
+            dialog = McaRoiHistoryDialog(self._channel, self)
+            dialog.destroyed.connect(self._on_roi_history_destroyed)
+            self._roi_history_dialog = dialog
+        self._restart_roi_history_trace(reset=False)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_roi_history_destroyed(self, _object: object | None = None) -> None:
+        self._roi_history_dialog = None
+
+    def _append_roi_history_sample(self, histogram: np.ndarray) -> None:
+        dialog = getattr(self, "_roi_history_dialog", None)
+        if dialog is None or self._roi_dragging or len(histogram) == 0:
+            return
+        dialog.set_differential(self._differential_histogram_enabled)
+        low_bin, high_bin = self._roi_bounds(len(histogram))
+        dialog.set_region(low_bin, high_bin)
+        integrated = int(
+            np.sum(histogram[low_bin : high_bin + 1], dtype=np.uint64)
+        )
+        dialog.append_sample(self._last_elapsed_s, integrated)
+
+    def _restart_roi_history_trace(self, *, reset: bool = True) -> None:
+        dialog = getattr(self, "_roi_history_dialog", None)
+        if dialog is None:
+            return
+        dialog.set_differential(self._differential_histogram_enabled)
+        histogram = self._display_histogram
+        if histogram is None and not self._differential_histogram_enabled:
+            histogram = self._last_histogram
+        n_bins = len(histogram) if histogram is not None and len(histogram) > 0 else 16_384
+        low_bin, high_bin = self._roi_bounds(n_bins)
+        dialog.set_region(low_bin, high_bin)
+        if reset:
+            dialog.clear_history()
+        if histogram is not None and len(histogram) > 0:
+            self._append_roi_history_sample(histogram)
+
+    def _clear_roi_history(self) -> None:
+        dialog = getattr(self, "_roi_history_dialog", None)
+        if dialog is not None:
+            dialog.clear_history()
+
     def coincidence_roi(self) -> tuple[int, int] | None:
         """Return MCA histogram bins selected by the visible ROI, inclusive."""
         if not self._roi.isVisible():
             return None
-        low, high = self._roi.getRegion()
-        values = sorted((int(np.clip(round(low), 0, 16_383)), int(np.clip(round(high), 0, 16_383))))
-        return values[0], values[1]
+        return self._roi_bounds(16_384)
 
     @property
     def coincidence_energy_bin(self) -> int:
@@ -915,6 +989,10 @@ class MCAController(QWidget):
         """Toggle logarithmic Y-axis on the histogram plot."""
         self._hist_plot.setLogMode(y=enabled)
 
+    def histogram_under_mouse(self) -> bool:
+        """Return whether this visible histogram currently contains the pointer."""
+        return self.isVisible() and self.ui.plotHistogram.underMouse()
+
     def reset_zoom(self) -> None:
         """Auto-range the debug and histogram plots."""
         self._debug_plot.autoRange()
@@ -986,7 +1064,7 @@ class MCAController(QWidget):
         }
 
     def spectrum_snapshot(self) -> SpectrumSnapshot:
-        """Return an immutable copy of the latest presented MCA histogram."""
+        """Return an immutable copy of the latest accumulated MCA histogram."""
         if self._last_histogram is None or len(self._last_histogram) == 0:
             raise RuntimeError(f"MCA channel {self._channel} has no spectrum to copy")
         created = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -1051,11 +1129,11 @@ class MCAController(QWidget):
     def _update_roi_stats(self) -> None:
         if not self._roi.isVisible():
             return
-        if self._last_histogram is None or len(self._last_histogram) == 0:
+        if self._display_histogram is None or len(self._display_histogram) == 0:
             self.ui.lblRoiStats.setText("No histogram data yet.")
             return
 
-        histogram = self._last_histogram
+        histogram = self._display_histogram
         n_bins = len(histogram)
 
         left, right = self._roi.getRegion()
@@ -1072,8 +1150,10 @@ class MCAController(QWidget):
         gross_unc = np.sqrt(gross_counts) if gross_counts > 0 else 0.0
         rel_unc_pct = (gross_unc / gross_counts * 100.0) if gross_counts > 0 else float("nan")
 
-        if self._last_elapsed_s > 0:
-            cps_line = f"  CPS:                {gross_counts / self._last_elapsed_s:.2f}"
+        differential = self._differential_histogram_enabled
+        elapsed_s = self._display_interval_s if differential else self._last_elapsed_s
+        if elapsed_s > 0:
+            cps_line = f"  CPS:                {gross_counts / elapsed_s:.2f}"
         else:
             cps_line = "  CPS:                N/A (no live time)"
 
@@ -1174,6 +1254,9 @@ class MCAController(QWidget):
             # previous run's spectrum/elapsed time as belonging to it while
             # the polling worker waits for its next readback.
             self._last_histogram = None
+            self._display_histogram = None
+            MCAController._reset_histogram_difference_reference(self)
+            MCAController._clear_roi_history(self)
             self._last_elapsed_s = 0.0
             self._hist_curve.setData([], [])
 
@@ -1418,6 +1501,8 @@ class MCAController(QWidget):
             )
             return
         self._cancel_debug_marker_drags()
+        MCAController._reset_histogram_difference_reference(self)
+        MCAController._clear_roi_history(self)
         self.ui.btnStart.setChecked(True)
         self.ui.btnStart.setEnabled(False)
         self.ui.btnStop.setChecked(False)
@@ -1530,6 +1615,9 @@ class MCAController(QWidget):
         self._mca.clear_spectrum()
         self._hist_curve.setData([], [])
         self._last_histogram = None
+        self._display_histogram = None
+        MCAController._reset_histogram_difference_reference(self)
+        MCAController._clear_roi_history(self)
         if self._roi.isVisible() and not self._roi_dragging:
             self._update_roi_stats()
 
@@ -2077,8 +2165,13 @@ class MCAController(QWidget):
         self._render_timer.stop()
         self._pending_readback = None
         self._last_histogram = np.zeros(16_384, dtype=np.uint64)
+        self._display_histogram = self._last_histogram.copy()
+        self._differential_reference_histogram = self._last_histogram.copy()
+        self._differential_reference_elapsed_s = 0.0
+        self._display_interval_s = 0.0
+        self._clear_roi_history()
         self._last_elapsed_s = 0.0
-        self._hist_curve.setData(np.arange(16_385), self._last_histogram)
+        self._hist_curve.setData(np.arange(16_385), self._display_histogram)
         for label in (
             self.ui.lblCountRate,
             self.ui.lblDeadTime,
@@ -2145,11 +2238,69 @@ class MCAController(QWidget):
     def _update_histogram(self, histogram: np.ndarray) -> None:
         if histogram is None or len(histogram) == 0:
             return
-        self._last_histogram = histogram
-        channels = np.arange(len(histogram) + 1)
-        self._hist_curve.setData(channels, histogram)
+        accumulated = np.asarray(histogram)
+        reference = self._differential_reference_histogram
+        reference_elapsed_s = self._differential_reference_elapsed_s
+        self._last_histogram = accumulated
+
+        if self._differential_histogram_enabled:
+            current = np.asarray(accumulated, dtype=np.uint64)
+            if reference is None or reference.shape != current.shape:
+                displayed = current.copy()
+                self._display_interval_s = max(self._last_elapsed_s, 0.0)
+            else:
+                previous = np.asarray(reference, dtype=np.uint64)
+                displayed = np.zeros(current.shape, dtype=np.uint64)
+                increasing = current >= previous
+                np.subtract(current, previous, out=displayed, where=increasing)
+                self._display_interval_s = max(
+                    self._last_elapsed_s - reference_elapsed_s,
+                    0.0,
+                )
+        else:
+            displayed = accumulated
+            self._display_interval_s = self._last_elapsed_s
+
+        self._display_histogram = displayed
+        self._differential_reference_histogram = accumulated.copy()
+        self._differential_reference_elapsed_s = self._last_elapsed_s
+        MCAController._append_roi_history_sample(self, displayed)
+        channels = np.arange(len(displayed) + 1)
+        self._hist_curve.setData(channels, displayed)
         if self._roi.isVisible() and not self._roi_dragging:
             self._update_roi_stats()
+
+    def _reset_histogram_difference_reference(self) -> None:
+        self._differential_reference_histogram = None
+        self._differential_reference_elapsed_s = 0.0
+        self._display_interval_s = 0.0
+
+    def set_differential_histogram(self, differential: bool) -> None:
+        """Select accumulated or per-refresh histogram presentation."""
+        differential = bool(differential)
+        mode_changed = differential != self._differential_histogram_enabled
+        self._differential_histogram_enabled = differential
+        self._histogram_y_label.setText("Counts / refresh" if differential else "Counts")
+        accumulated = self._last_histogram
+        if accumulated is None or len(accumulated) == 0:
+            self._display_histogram = None
+            MCAController._reset_histogram_difference_reference(self)
+            self._hist_curve.setData([], [])
+        else:
+            self._differential_reference_histogram = accumulated.copy()
+            self._differential_reference_elapsed_s = self._last_elapsed_s
+            self._display_interval_s = 0.0 if differential else self._last_elapsed_s
+            self._display_histogram = (
+                np.zeros(accumulated.shape, dtype=np.uint64) if differential else accumulated
+            )
+            self._hist_curve.setData(
+                np.arange(len(self._display_histogram) + 1),
+                self._display_histogram,
+            )
+        if self._roi.isVisible() and not self._roi_dragging:
+            self._update_roi_stats()
+        if mode_changed:
+            MCAController._restart_roi_history_trace(self)
 
     def _update_statistics(self, rb: MCAReadback) -> None:
         self._last_elapsed_s = rb.elapsed_time / 10.0

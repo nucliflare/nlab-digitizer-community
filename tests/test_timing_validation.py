@@ -250,6 +250,7 @@ def test_timing_offset_survives_application_settings_round_trip(
             actionShowSystemLog=QAction(window),
             actionDebugMode=QAction(window),
             actionShowRoi=QAction(window),
+            actionDifferentialHistogram=QAction(window),
             actionLogY=QAction(window),
             mainTabs=SimpleNamespace(
                 currentIndex=lambda: 0, count=lambda: 1, setCurrentIndex=Mock()

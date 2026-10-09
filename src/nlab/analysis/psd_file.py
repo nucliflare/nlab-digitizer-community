@@ -40,6 +40,7 @@ class PsdEventFileInfo:
     format_name: str
     channel: int | None
     total_events: int
+    board: int | None = None
 
 
 def _channel_from_configuration(text: str) -> int | None:
@@ -86,6 +87,7 @@ def inspect_psd_event_file(path: Path) -> PsdEventFileInfo:
                 info.format_name,
                 info.channel,
                 info.total_events,
+                info.board,
             )
         with path.open("rb") as stream:
             header = read_file_header(stream)

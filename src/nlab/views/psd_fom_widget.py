@@ -8,6 +8,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QFormLayout,
     QGroupBox,
@@ -25,6 +26,7 @@ class PsdFomWidget(QGroupBox):
     """Fit panel plus draggable guides attached to a ratio-projection plot."""
 
     fit_completed = Signal(object)
+    fit_changed = Signal(object)
 
     def __init__(self, ratio_plot: pg.PlotItem, parent: QWidget | None = None) -> None:
         super().__init__("PSD figure of merit", parent)
@@ -82,6 +84,11 @@ class PsdFomWidget(QGroupBox):
         self.fit_button.setToolTip(
             "Run a bounded Levenberg-Marquardt fit on the current projected PSD counts."
         )
+        self.copy_button = QPushButton("Copy table", self)
+        self.copy_button.setEnabled(False)
+        self.copy_button.setToolTip(
+            "Copy the fitted populations and overall FOM diagnostics as a tab-separated table."
+        )
 
         button_row = QHBoxLayout()
         button_row.addWidget(self.guides_checkbox)
@@ -100,6 +107,10 @@ class PsdFomWidget(QGroupBox):
         results.addRow("FOM:", self.fom_label)
         results.addRow("Reduced deviance:", self.deviance_label)
 
+        copy_row = QHBoxLayout()
+        copy_row.addStretch(1)
+        copy_row.addWidget(self.copy_button)
+
         self.status_label = QLabel(
             "Drag the ROI and μ markers, then press Fit double Gaussian.", self
         )
@@ -108,11 +119,13 @@ class PsdFomWidget(QGroupBox):
         layout = QVBoxLayout(self)
         layout.addLayout(button_row)
         layout.addLayout(results)
+        layout.addLayout(copy_row)
         layout.addWidget(self.status_label)
         layout.addStretch(1)
 
         self.guides_checkbox.toggled.connect(self.set_guides_visible)
         self.fit_button.clicked.connect(self.fit_current_projection)
+        self.copy_button.clicked.connect(self.copy_results_table)
 
     def set_projection(self, ratio: np.ndarray, counts: np.ndarray) -> None:
         """Store the currently displayed ratio projection for the next button press."""
@@ -120,8 +133,13 @@ class PsdFomWidget(QGroupBox):
         count_values = np.asarray(counts, dtype=np.float64)
         if ratio_values.ndim != 1 or ratio_values.shape != count_values.shape:
             raise ValueError("PSD ratio projection coordinates and counts must match")
+        changed = not (
+            np.array_equal(self._ratio, ratio_values) and np.array_equal(self._counts, count_values)
+        )
         self._ratio = ratio_values.copy()
         self._counts = count_values.copy()
+        if changed and self.last_fit is not None:
+            self.clear_fit()
 
     def set_ratio_range(self, ratio_range: tuple[float, float]) -> None:
         """Bound and, when the display range changes, reset the fit guides."""
@@ -156,8 +174,10 @@ class PsdFomWidget(QGroupBox):
         self.second_label.setText("—")
         self.fom_label.setText("—")
         self.deviance_label.setText("—")
+        self.copy_button.setEnabled(False)
         self.status_label.setStyleSheet("")
         self.status_label.setText("Drag the ROI and μ markers, then press Fit double Gaussian.")
+        self.fit_changed.emit(None)
 
     def fit_current_projection(self) -> PsdFomFit | None:
         """Fit the current projection snapshot and update the result panel."""
@@ -189,6 +209,7 @@ class PsdFomWidget(QGroupBox):
         self.second_label.setText(_peak_text(fit.centroids[1], fit.fwhms[1]))
         self.fom_label.setText(f"{fit.fom:.4g}")
         self.deviance_label.setText(f"{fit.reduced_deviance:.3g}")
+        self.copy_button.setEnabled(True)
         if fit.poor_convergence:
             details = "; ".join(fit.warnings) or fit.message
             self.status_label.setStyleSheet("color: #b54708; font-weight: bold;")
@@ -199,8 +220,61 @@ class PsdFomWidget(QGroupBox):
                 f"LM fit converged in {fit.evaluations} evaluations; result is a snapshot."
             )
         self.fit_completed.emit(fit)
+        self.fit_changed.emit(fit)
         return fit
+
+    def copy_results_table(self) -> str | None:
+        """Copy the latest fit as a spreadsheet-friendly TSV table."""
+        fit = self.last_fit
+        if fit is None:
+            return None
+        table = format_psd_fom_table(fit)
+        QApplication.clipboard().setText(table)
+        return table
 
 
 def _peak_text(centroid: float, fwhm: float) -> str:
     return f"{centroid:.5g} / {fwhm:.5g}"
+
+
+def format_psd_fom_table(fit: PsdFomFit) -> str:
+    """Format both fitted populations and shared diagnostics as TSV."""
+    headers = (
+        "Population",
+        "Centroid",
+        "Centroid uncertainty",
+        "FWHM",
+        "FWHM uncertainty",
+        "FOM",
+        "Reduced Poisson deviance",
+        "Fit status",
+        "Evaluations",
+        "Warnings",
+    )
+    status = "Poor convergence" if fit.poor_convergence else "Converged"
+    warnings = "; ".join(fit.warnings)
+    rows = [headers]
+    for index in range(2):
+        rows.append(
+            (
+                str(index + 1),
+                _table_number(fit.centroids[index]),
+                _table_optional_number(fit.centroid_uncertainties[index]),
+                _table_number(fit.fwhms[index]),
+                _table_optional_number(fit.fwhm_uncertainties[index]),
+                _table_number(fit.fom),
+                _table_number(fit.reduced_deviance),
+                status,
+                str(fit.evaluations),
+                warnings,
+            )
+        )
+    return "\n".join("\t".join(row) for row in rows)
+
+
+def _table_number(value: float) -> str:
+    return f"{value:.12g}"
+
+
+def _table_optional_number(value: float | None) -> str:
+    return "" if value is None else _table_number(value)

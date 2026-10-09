@@ -140,6 +140,38 @@ def test_standalone_psd_readback_loads_hdf5(
 
     assert int(dialog.plot._matrix.sum()) == 10
     assert "Loaded 10 events" in dialog.status.text()
+    assert dialog.current_file_label.text() == f"Current file: {path}"
+    assert dialog.current_file_label.toolTip() == str(path)
+    assert dialog.windowTitle().endswith(f"— {path.name}")
+    assert dialog.plot.fom_widget.copy_button.text() == "Copy table"
+    assert dialog.report_button.text() == "Download report..."
+    assert not dialog.report_button.isEnabled()
+
+    ratio_edges = np.linspace(-0.2, 0.8, 257)
+    ratio = (ratio_edges[:-1] + ratio_edges[1:]) * 0.5
+    expectation = (
+        8.0
+        + 260.0 * np.exp(-0.5 * np.square((ratio - 0.12) / 0.035))
+        + 180.0 * np.exp(-0.5 * np.square((ratio - 0.48) / 0.055))
+    )
+    matrix = np.random.default_rng(14).poisson(expectation, size=(32, 256))
+    dialog.plot.set_data(
+        matrix,
+        energy_range=(0.0, 32.0),
+        ratio_range=(-0.2, 0.8),
+    )
+    dialog.plot.energy_region.setRegion((0.0, 32.0))
+    dialog.plot._render_projections()
+    dialog.plot.fom_widget.fit_region.setRegion((-0.05, 0.65))
+    dialog.plot.fom_widget.centroid_lines[0].setPos(0.1)
+    dialog.plot.fom_widget.centroid_lines[1].setPos(0.5)
+    assert dialog.plot.fom_widget.fit_current_projection() is not None
+    assert dialog.report_button.isEnabled()
+
+    dialog.plot.energy_region.setRegion((0.0, 16.0))
+    dialog.plot._render_projections()
+    assert dialog.plot.fom_widget.last_fit is None
+    assert not dialog.report_button.isEnabled()
 
 
 def test_psd_readback_worker_is_deleted_by_its_finished_thread(

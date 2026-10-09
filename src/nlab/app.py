@@ -7,8 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
-from PySide6.QtCore import QProcess, QSettings, QStandardPaths, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QIcon, QScreen, QShowEvent
+from PySide6.QtCore import QEvent, QObject, QProcess, QSettings, QStandardPaths, Qt, QTimer, Signal
+from PySide6.QtGui import QCloseEvent, QIcon, QKeyEvent, QScreen, QShowEvent
 from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMainWindow, QMessageBox
 
 from nlab import __version__
@@ -53,6 +53,7 @@ _KEY_DEBUG_MODE = "developer/debug_mode"
 _KEY_DMA_FOLDER = DMA_FOLDER_KEY
 _KEY_MCA_DMA_OUTPUT_MODE = MCA_DMA_OUTPUT_MODE_KEY
 _KEY_SHOW_ROI = "view/show_roi"
+_KEY_DIFFERENTIAL_HISTOGRAM = "view/differential_histogram"
 _KEY_LOG_Y = "view/log_y"
 _KEY_TIMING_OFFSET_NS = "timing/channel_b_offset_ns"
 _KEY_SESSION_FOLDER = "session/last_folder"
@@ -111,6 +112,9 @@ class MainAppWindow(QMainWindow):
             on_progress=on_progress,
             offline=self._offline,
         )
+        self._application = QApplication.instance()
+        if self._application is not None:
+            self._application.installEventFilter(self)
         self._apply_stored_general_settings()
         if config_path is not None and not self._offline:
             if on_progress is not None:
@@ -125,11 +129,36 @@ class MainAppWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self._closing = True
+        application = getattr(self, "_application", None)
+        if application is not None:
+            application.removeEventFilter(self)
+            self._application = None
         if not getattr(self, "_offline", False) and auto_configuration_enabled():
             self._save_auto_configuration(show_error=False)
         self._save_developer_settings()
         self._controller.shutdown()
         super().closeEvent(event)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        """Handle the MCA log shortcut only while an MCA histogram is hovered."""
+        if self._try_mca_log_shortcut(event):
+            return True
+        return super().eventFilter(watched, event)
+
+    def _try_mca_log_shortcut(self, event: QEvent) -> bool:
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and self.isVisible()
+            and isinstance(event, QKeyEvent)
+            and event.key() == Qt.Key.Key_L
+            and event.modifiers()
+            in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.ShiftModifier)
+            and not event.isAutoRepeat()
+            and self._controller.mca_histogram_under_mouse()
+        ):
+            self.ui.actionLogY.setChecked(not self.ui.actionLogY.isChecked())
+            return True
+        return False
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
         super().showEvent(event)
@@ -164,6 +193,9 @@ class MainAppWindow(QMainWindow):
         self.ui.actionResetDocks.triggered.connect(self._on_reset_docks)
         self.ui.actionResetZoom.triggered.connect(self._on_reset_zoom)
         self.ui.actionShowRoi.toggled.connect(self._on_show_roi_toggled)
+        self.ui.actionDifferentialHistogram.toggled.connect(
+            self._on_differential_histogram_toggled
+        )
         self.ui.actionLogY.toggled.connect(self._on_log_y_toggled)
         self.ui.actionSaveSettings.triggered.connect(self._on_save_settings)
         self.ui.actionLoadSettings.triggered.connect(self._on_load_settings)
@@ -263,17 +295,27 @@ class MainAppWindow(QMainWindow):
         show_log = settings.value(_KEY_SHOW_LOG, False, type=bool)
         debug_mode = settings.value(_KEY_DEBUG_MODE, False, type=bool)
         show_roi = settings.value(_KEY_SHOW_ROI, False, type=bool)
+        differential_histogram = cast(
+            bool,
+            settings.value(
+                _KEY_DIFFERENTIAL_HISTOGRAM,
+                False,
+                type=bool,
+            ),
+        )
         log_y = settings.value(_KEY_LOG_Y, False, type=bool)
 
         # Suppress intermediate toggled signals while restoring state.
         self.ui.actionShowSystemLog.blockSignals(True)
         self.ui.actionDebugMode.blockSignals(True)
         self.ui.actionShowRoi.blockSignals(True)
+        self.ui.actionDifferentialHistogram.blockSignals(True)
         self.ui.actionLogY.blockSignals(True)
 
         self.ui.actionShowSystemLog.setChecked(show_log)
         self.ui.actionDebugMode.setChecked(debug_mode)
         self.ui.actionShowRoi.setChecked(show_roi)
+        self.ui.actionDifferentialHistogram.setChecked(differential_histogram)
         self.ui.actionLogY.setChecked(log_y)
         self._set_log_tab_visible(show_log)
         if debug_mode:
@@ -282,6 +324,7 @@ class MainAppWindow(QMainWindow):
         self.ui.actionShowSystemLog.blockSignals(False)
         self.ui.actionDebugMode.blockSignals(False)
         self.ui.actionShowRoi.blockSignals(False)
+        self.ui.actionDifferentialHistogram.blockSignals(False)
         self.ui.actionLogY.blockSignals(False)
 
     def _save_developer_settings(self) -> None:
@@ -289,6 +332,10 @@ class MainAppWindow(QMainWindow):
         settings.setValue(_KEY_SHOW_LOG, self.ui.actionShowSystemLog.isChecked())
         settings.setValue(_KEY_DEBUG_MODE, self.ui.actionDebugMode.isChecked())
         settings.setValue(_KEY_SHOW_ROI, self.ui.actionShowRoi.isChecked())
+        settings.setValue(
+            _KEY_DIFFERENTIAL_HISTOGRAM,
+            self.ui.actionDifferentialHistogram.isChecked(),
+        )
         settings.setValue(_KEY_LOG_Y, self.ui.actionLogY.isChecked())
 
     def configuration_settings(self) -> dict[str, object]:
@@ -297,6 +344,7 @@ class MainAppWindow(QMainWindow):
             "show_system_log": self.ui.actionShowSystemLog.isChecked(),
             "debug_mode": self.ui.actionDebugMode.isChecked(),
             "show_roi": self.ui.actionShowRoi.isChecked(),
+            "differential_histogram": self.ui.actionDifferentialHistogram.isChecked(),
             "log_y": self.ui.actionLogY.isChecked(),
             "dma_save_folder": str(QSettings().value(_KEY_DMA_FOLDER, "measurements")),
             "mca_dma_output_mode": str(
@@ -319,6 +367,7 @@ class MainAppWindow(QMainWindow):
             "show_system_log": self.ui.actionShowSystemLog,
             "debug_mode": self.ui.actionDebugMode,
             "show_roi": self.ui.actionShowRoi,
+            "differential_histogram": self.ui.actionDifferentialHistogram,
             "log_y": self.ui.actionLogY,
         }
         for name, action in actions.items():
@@ -363,6 +412,9 @@ class MainAppWindow(QMainWindow):
     def _apply_view_state(self) -> None:
         """Re-apply persisted view toggles to the (re)built MCA controllers."""
         self._controller.set_roi_visible(self.ui.actionShowRoi.isChecked())
+        self._controller.set_differential_histogram(
+            self.ui.actionDifferentialHistogram.isChecked()
+        )
         self._controller.set_log_y(self.ui.actionLogY.isChecked())
 
     def _general_settings_values(self) -> dict[str, object]:
@@ -378,8 +430,6 @@ class MainAppWindow(QMainWindow):
                         McaDmaOutputMode.BINARY.value,
                     )
                 ),
-                "show_roi": self.ui.actionShowRoi.isChecked(),
-                "log_y": self.ui.actionLogY.isChecked(),
             }
         )
         return values
@@ -405,8 +455,6 @@ class MainAppWindow(QMainWindow):
             _KEY_MCA_DMA_OUTPUT_MODE,
             str(values.get("mca_dma_output_mode", McaDmaOutputMode.BINARY.value)),
         )
-        self.ui.actionShowRoi.setChecked(bool(values.get("show_roi", False)))
-        self.ui.actionLogY.setChecked(bool(values.get("log_y", False)))
         self._save_developer_settings()
         self._controller.refresh_dma_output_settings()
 
@@ -944,6 +992,9 @@ class MainAppWindow(QMainWindow):
 
     def _on_show_roi_toggled(self, checked: bool) -> None:
         self._controller.set_roi_visible(checked)
+
+    def _on_differential_histogram_toggled(self, checked: bool) -> None:
+        self._controller.set_differential_histogram(checked)
 
     def _on_log_y_toggled(self, checked: bool) -> None:
         self._controller.set_log_y(checked)

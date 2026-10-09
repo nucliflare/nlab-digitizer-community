@@ -11,6 +11,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A dual-channel MCA gain-drift CLI diagnostic tracks the Na-22 511-keV peak
+  maximum and local centroid from saved differential ROI spectra while logging
+  MCA statistics, temperature correction, detector/board temperatures, power
+  telemetry, rails, clocks, and available HV feedback. It reproduces the
+  auto-saved MCA and ADC-temperature-correction settings without writing Scope
+  registers, can explicitly apply saved per-channel PSU bias with guaranteed
+  safe-shutdown cleanup, restores the original MCA state, supports distinct
+  channel ROIs, and emits CSV, NPZ, JSON, and PNG investigation artifacts.
+- The live MCA histogram can switch between the accumulated spectrum and the
+  non-negative per-refresh count difference. The differential reference resets
+  on mode, run, clear, and configuration changes, while CSV exports and analysis
+  snapshots continue to use the accumulated hardware spectrum. Differential
+  display and MCA ROI visibility are controlled from the View menu. Double-
+  clicking an MCA ROI opens a modeless pyqtgraph history of its integrated
+  counts versus acquisition elapsed time. The history follows the selected
+  accumulated or per-refresh differential display mode, and moving the ROI or
+  changing modes starts a new trace.
+- MCA logarithmic Y-scale control is again in the View menu. Hovering over an
+  MCA histogram and pressing `L` toggles the shared linear/logarithmic state.
+- Live and Tools/readback PSD maps and coincidence matrices render zero- and
+  one-count bins transparently, reducing low-occupancy background clutter
+  without changing projections, fits, or exported matrix values.
+- Waveform gate-driven PSD recalculation preserves the user's energy-projection
+  ROI instead of restoring the default first-quarter region after every update.
+- PSD Event Readback and Waveform Analysis now keep the current source file's
+  full path visible and include its filename in the workbench window title.
+- PSD Event Readback and Waveform Analysis can export a file-named report folder
+  after an FOM fit. It contains a branded three-page PDF of the PSD matrix,
+  fitted FOM projection, cut-separated spectra, convergence results, source and
+  digitizer metadata, software version, cut/binning/ROI settings, plus complete
+  matrix, spectrum, projection, fit-component, settings, and JSON metadata files.
+  Waveform reports also preserve the exact integration gates and processing
+  context used to produce the fit.
 - Live and offline/readback PSD ratio projections now provide a toggleable
   draggable fit ROI, two draggable centroid seeds, and button-triggered bounded
   Levenberg-Marquardt double-Gaussian fitting with Poisson-deviance residuals,
@@ -18,7 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   widths, and ordered but non-midpoint-constrained centroids. The lower-right
   results panel reports both centroids and FWHMs, reduced deviance, and the
   conventional PSD figure of merit, with explicit warnings for weak or poor
-  convergence.
+  convergence. Waveform Analysis and PSD Event Readback can copy the fitted
+  populations and shared FOM diagnostics as a tab-separated table.
 - The MCA peak-analysis workbench can overlay a pinned offline NNDC ENSDF
   catalogue containing 2,065 decaying parent nuclides/states and 87,481
   default-quality photon lines. The generated SQLite artifact applies ENSDF
@@ -37,6 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- PSD report rendering no longer floods the system log with Matplotlib font-
+  matching diagnostics when developer debug mode is enabled.
 - Frozen builds now detect a missing or unloadable native libiio runtime after
   Qt starts but before importing hardware modules. A recovery dialog directs
   users to the pinned v0.26 Windows installer instead of exposing a

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
@@ -30,6 +31,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from nlab.analysis.capture_metadata import capture_digitizer_info
+from nlab.analysis.psd_report import PsdReportRequest, export_psd_report
 from nlab.analysis.waveform_file import MappedWaveformFile, WaveformFileIndex, WaveformFrame
 from nlab.analysis.waveform_psd import (
     BaselineMethod,
@@ -47,7 +50,18 @@ log = logging.getLogger(__name__)
 _MAX_QT_INDEX = 2_147_483_647
 _AUTO_PREVIEW_STRIDE_MULTIPLIER = 20
 _AUTO_PREVIEW_DEBOUNCE_MS = 120
+_WINDOW_TITLE = "Waveform Analysis Workbench"
 AnalysisKind = Literal["manual", "sparse", "full"]
+
+
+@dataclass(frozen=True)
+class _WaveformAnalysisContext:
+    settings: WaveformPsdSettings
+    source_index: int
+    stride: int
+    maximum_events: int
+    analysis_kind: AnalysisKind
+    sample_period_ns: float
 
 
 class WaveformAnalysisDialog(QDialog):
@@ -55,7 +69,7 @@ class WaveformAnalysisDialog(QDialog):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Waveform Analysis Workbench")
+        self.setWindowTitle(_WINDOW_TITLE)
         self.setModal(False)
         self.resize(1420, 900)
         self._index: WaveformFileIndex | None = None
@@ -67,6 +81,9 @@ class WaveformAnalysisDialog(QDialog):
         self._analysis_worker: WaveformPsdWorker | None = None
         self._active_analysis_kind: AnalysisKind | None = None
         self._pending_analysis_kind: AnalysisKind | None = None
+        self._active_report_context: _WaveformAnalysisContext | None = None
+        self._last_report_context: _WaveformAnalysisContext | None = None
+        self._last_psd_result: WaveformPsdResult | None = None
         self._last_sample_period = 1.0
         self._updating_gates = False
         self._auto_preview_timer = QTimer(self)
@@ -125,6 +142,13 @@ class WaveformAnalysisDialog(QDialog):
         toolbar.addWidget(self.sample_period)
         toolbar.addStretch(1)
         root.addLayout(toolbar)
+        self.current_file_label = QLabel("Current file: No file loaded", self)
+        self.current_file_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.current_file_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.current_file_label.setWordWrap(True)
+        root.addWidget(self.current_file_label)
 
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         controls = QWidget(self)
@@ -186,6 +210,12 @@ class WaveformAnalysisDialog(QDialog):
         self.status.setWordWrap(True)
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         status_row.addWidget(self.status, 1)
+        self.report_button = QPushButton("Download report...", self)
+        self.report_button.setEnabled(False)
+        self.report_button.setToolTip(
+            "Save a PDF report and all plotted PSD/FOM data and fit inputs as CSV files."
+        )
+        status_row.addWidget(self.report_button)
         self.close_button = QPushButton("Close", self)
         status_row.addWidget(self.close_button)
         root.addLayout(status_row)
@@ -207,6 +237,8 @@ class WaveformAnalysisDialog(QDialog):
         self._auto_preview_timer.timeout.connect(self._request_sparse_analysis)
         self.analyze_button.clicked.connect(self._start_analysis)
         self.cancel_button.clicked.connect(self._cancel_analysis)
+        self.report_button.clicked.connect(self._download_report)
+        self.psd_plot.fom_widget.fit_changed.connect(self._fit_changed)
         self.close_button.clicked.connect(self.reject)
 
     def _build_preprocessing_group(self) -> QGroupBox:
@@ -359,6 +391,7 @@ class WaveformAnalysisDialog(QDialog):
         except OSError as exc:
             self._index_failed(str(exc))
             return
+        self._set_current_file(value.path)
         self.source_combo.blockSignals(True)
         self.source_combo.clear()
         for source in value.channels:
@@ -608,12 +641,15 @@ class WaveformAnalysisDialog(QDialog):
             stride_multiplier = (
                 _AUTO_PREVIEW_STRIDE_MULTIPLIER if kind == "sparse" else 1
             )
+            stride = self.event_stride.value() * stride_multiplier
+            maximum_events = self.maximum_events.value()
+            source_index = self.source_combo.currentIndex()
             worker = WaveformPsdWorker(
                 self._index,
-                source_index=self.source_combo.currentIndex(),
+                source_index=source_index,
                 settings=settings,
-                stride=self.event_stride.value() * stride_multiplier,
-                maximum_events=self.maximum_events.value(),
+                stride=stride,
+                maximum_events=maximum_events,
             )
         except ValueError as exc:
             self.status.setText(f"Invalid PSD settings: {exc}")
@@ -636,6 +672,14 @@ class WaveformAnalysisDialog(QDialog):
         self._analysis_worker = worker
         self._analysis_thread = thread
         self._active_analysis_kind = kind
+        self._active_report_context = _WaveformAnalysisContext(
+            settings=settings,
+            source_index=source_index,
+            stride=stride,
+            maximum_events=maximum_events,
+            analysis_kind=kind,
+            sample_period_ns=self.sample_period.value(),
+        )
         self._set_analysis_busy(True)
         self.progress.setValue(0)
         if kind == "sparse":
@@ -660,6 +704,8 @@ class WaveformAnalysisDialog(QDialog):
             energy_range=value.energy_range,
             ratio_range=value.ratio_range,
         )
+        self._last_psd_result = value
+        self._last_report_context = self._active_report_context
         stats = value.statistics
         comparison = ""
         if len(value.stored_long):
@@ -704,6 +750,7 @@ class WaveformAnalysisDialog(QDialog):
         self._analysis_worker = None
         self._analysis_thread = None
         self._active_analysis_kind = None
+        self._active_report_context = None
         self._set_analysis_busy(False)
         if thread is not None:
             thread.deleteLater()
@@ -718,6 +765,117 @@ class WaveformAnalysisDialog(QDialog):
         self.source_combo.setEnabled(
             not busy and self._index is not None and len(self._index.channels) > 1
         )
+        self._update_report_button()
+
+    def _fit_changed(self, _fit: object) -> None:
+        self._update_report_button()
+
+    def _update_report_button(self) -> None:
+        self.report_button.setEnabled(
+            self._analysis_thread is None
+            and self._index_thread is None
+            and self._index is not None
+            and self._last_psd_result is not None
+            and self._last_report_context is not None
+            and self.psd_plot.fom_widget.last_fit is not None
+        )
+
+    def _download_report(self) -> None:
+        index = self._index
+        result = self._last_psd_result
+        context = self._last_report_context
+        fit = self.psd_plot.fom_widget.last_fit
+        if index is None or result is None or context is None or fit is None:
+            QMessageBox.warning(
+                self,
+                "Waveform PSD Report",
+                "Reconstruct the PSD and complete the FOM fit before creating a report.",
+            )
+            return
+        if not 0 <= context.source_index < len(index.channels):
+            QMessageBox.critical(
+                self,
+                "Waveform PSD Report Failed",
+                "The analyzed waveform source is no longer available.",
+            )
+            return
+        default_folder = str(
+            QSettings().value("analysis/waveform_report_folder", str(index.path.parent))
+        )
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select Waveform PSD Report Destination",
+            default_folder,
+        )
+        if not selected:
+            return
+        source = index.channels[context.source_index]
+        settings = context.settings
+        state = self.psd_plot.report_state()
+        request = PsdReportRequest(
+            source_path=index.path,
+            title="Waveform PSD/FOM Analysis Report",
+            matrix=state.matrix,
+            energy_range=state.energy_range,
+            ratio_range=state.ratio_range,
+            energy_label=state.energy_label,
+            cut=state.cut,
+            energy_roi=state.energy_roi,
+            matrix_scale=state.matrix_scale,
+            energy_log_y=state.energy_log_y,
+            fit=fit,
+            settings={
+                "baseline estimator": settings.baseline_method,
+                "baseline samples": (settings.baseline_start, settings.baseline_end),
+                "integration start sample": settings.gate_start,
+                "short-gate end sample": settings.short_end,
+                "long-gate end sample": settings.long_end,
+                "pulse polarity": settings.polarity,
+                "sample period ns": context.sample_period_ns,
+                "baseline time ns": (
+                    settings.baseline_start * context.sample_period_ns,
+                    settings.baseline_end * context.sample_period_ns,
+                ),
+                "integration start time ns": settings.gate_start * context.sample_period_ns,
+                "short-gate end time ns": settings.short_end * context.sample_period_ns,
+                "long-gate end time ns": settings.long_end * context.sample_period_ns,
+                "event stride used": context.stride,
+                "maximum events": (context.maximum_events if context.maximum_events else "All"),
+                "analysis mode": context.analysis_kind,
+                "PSD ratio definition": "(Qlong - Qshort) / Qlong",
+            },
+            digitizer_info={
+                **capture_digitizer_info(index.path),
+                "source format": index.format_name,
+                "board": source.board if source.board is not None else "Not embedded",
+                "channel": source.channel,
+                "source frames": source.frame_count,
+                "sample period ns": context.sample_period_ns,
+            },
+            statistics={
+                "received waveforms": result.statistics.received,
+                "accepted waveforms": result.statistics.accepted,
+                "too-short waveforms": result.statistics.too_short,
+                "nonpositive Qlong": result.statistics.nonpositive_long,
+                "outside-view waveforms": result.statistics.outside_range,
+            },
+        )
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            bundle = export_psd_report(request, Path(selected))
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            log.exception("Could not create waveform PSD report")
+            QMessageBox.critical(self, "Waveform PSD Report Failed", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        QSettings().setValue("analysis/waveform_report_folder", selected)
+        self.status.setText(f"Waveform PSD report saved to {bundle.directory}.")
+        QMessageBox.information(
+            self,
+            "Waveform PSD Report Saved",
+            f"Report and data files were saved to:\n{bundle.directory}",
+        )
 
     def close_file(self) -> None:
         self._auto_preview_timer.stop()
@@ -729,6 +887,10 @@ class WaveformAnalysisDialog(QDialog):
         self._reader = None
         self._index = None
         self._frame = None
+        self._active_report_context = None
+        self._last_report_context = None
+        self._last_psd_result = None
+        self._set_current_file(None)
         self.source_combo.clear()
         self.source_combo.setEnabled(False)
         self.frame_spin.setRange(0, 0)
@@ -739,6 +901,19 @@ class WaveformAnalysisDialog(QDialog):
         self.raw_curve.clear()
         self.oriented_curve.clear()
         self.preview_status.setText("No frame loaded.")
+        self.psd_plot.fom_widget.clear_fit()
+        self._update_report_button()
+
+    def _set_current_file(self, path: Path | None) -> None:
+        if path is None:
+            self.current_file_label.setText("Current file: No file loaded")
+            self.current_file_label.setToolTip("")
+            self.setWindowTitle(_WINDOW_TITLE)
+            return
+        path_text = str(path)
+        self.current_file_label.setText(f"Current file: {path_text}")
+        self.current_file_label.setToolTip(path_text)
+        self.setWindowTitle(f"{_WINDOW_TITLE} — {path.name}")
 
     def _stop_index_sync(self) -> None:
         if self._index_worker is not None:

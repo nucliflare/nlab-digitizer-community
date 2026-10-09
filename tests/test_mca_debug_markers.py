@@ -263,3 +263,77 @@ def test_energy_calibration_snapshot_axis_and_settings_persistence(
     controller.ui.comboPulsePolarity.setCurrentIndex(1)
     assert controller.energy_calibration_is_stale()
     assert controller._energy_axis._stale
+
+
+def test_double_clicking_mca_roi_opens_integrated_count_history(
+    qtbot: QtBot, monkeypatch: MonkeyPatch
+) -> None:
+    controller, _mca = _controller(qtbot, monkeypatch)
+    controller._roi.setRegion((2, 4))
+    controller._last_elapsed_s = 1.0
+    controller._update_histogram(np.arange(8, dtype=np.uint32))
+
+    controller._roi.double_clicked.emit()
+
+    dialog = controller._roi_history_dialog
+    assert dialog is not None
+    assert dialog.isVisible()
+    assert dialog.region == (2, 4)
+    x_data, y_data = dialog.curve.getData()
+    np.testing.assert_array_equal(x_data, [1.0])
+    np.testing.assert_array_equal(y_data, [9.0])
+
+    controller._last_elapsed_s = 2.0
+    controller._update_histogram(np.arange(8, dtype=np.uint32) + 2)
+    x_data, y_data = dialog.curve.getData()
+    np.testing.assert_array_equal(x_data, [1.0, 2.0])
+    np.testing.assert_array_equal(y_data, [9.0, 15.0])
+
+    controller._roi.setRegion((4, 5))
+    controller._on_roi_change_finished()
+    x_data, y_data = dialog.curve.getData()
+    np.testing.assert_array_equal(x_data, [2.0])
+    np.testing.assert_array_equal(y_data, [13.0])
+
+    dialog.close()
+    qtbot.waitUntil(lambda: controller._roi_history_dialog is None)
+
+
+def test_mca_roi_history_tracks_differential_display_mode(
+    qtbot: QtBot, monkeypatch: MonkeyPatch
+) -> None:
+    controller, _mca = _controller(qtbot, monkeypatch)
+    controller._roi.setRegion((2, 4))
+    controller._last_elapsed_s = 1.0
+    first = np.arange(8, dtype=np.uint32)
+    controller._update_histogram(first)
+    controller._roi.double_clicked.emit()
+
+    dialog = controller._roi_history_dialog
+    assert dialog is not None
+    controller.set_differential_histogram(True)
+
+    x_data, y_data = dialog.curve.getData()
+    np.testing.assert_array_equal(x_data, [1.0])
+    np.testing.assert_array_equal(y_data, [0.0])
+    assert dialog.plot_widget.getAxis("left").labelText == "Counts / refresh"
+
+    controller._last_elapsed_s = 2.0
+    second = np.array([0, 2, 5, 3, 8, 6, 7, 8], dtype=np.uint32)
+    controller._update_histogram(second)
+
+    x_data, y_data = dialog.curve.getData()
+    np.testing.assert_array_equal(x_data, [1.0, 2.0])
+    np.testing.assert_array_equal(y_data, [0.0, 7.0])
+    assert dialog.status_label.text().endswith("7 counts in latest refresh")
+
+    controller.set_differential_histogram(False)
+
+    x_data, y_data = dialog.curve.getData()
+    np.testing.assert_array_equal(x_data, [2.0])
+    np.testing.assert_array_equal(y_data, [16.0])
+    assert dialog.plot_widget.getAxis("left").labelText == "Integrated counts"
+    assert dialog.status_label.text().endswith("16 accumulated counts")
+
+    dialog.close()
+    qtbot.waitUntil(lambda: controller._roi_history_dialog is None)

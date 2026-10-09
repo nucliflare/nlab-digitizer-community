@@ -56,6 +56,7 @@ from nlab.hardware.digitizer.iio_listmode import TIME_Q_PER_NS, VDPP_ZC_CALC_SCH
 from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
 from nlab.utils.settings_io import write_configuration
 from nlab.views.energy_axis import CalibratedEnergyAxis
+from nlab.views.image_display import transparent_sparse_bins
 from nlab.views.plot_viewbox import ModifierZoomViewBox
 from nlab.workers.coincidence_worker import CoincidenceAnalysisThread
 
@@ -499,9 +500,10 @@ class CoincidenceController(QWidget):
         )
         logarithmic = self.matrix_scale.currentData() == "log"
         displayed = display_matrix(values, logarithmic=logarithmic)
+        image = transparent_sparse_bins(displayed, values)
         corrected = mode == "corrected"
         color_map = pg.colormap.get("CET-D1" if corrected else "CET-L9")
-        self.matrix_image.setImage(displayed, autoLevels=False)
+        self.matrix_image.setImage(image, autoLevels=False)
         self.matrix_image.setRect(QRectF(0.0, 0.0, HISTOGRAM_BINS, HISTOGRAM_BINS))
         if corrected:
             maximum = float(np.max(np.abs(displayed))) if displayed.size else 0.0

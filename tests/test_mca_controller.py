@@ -330,6 +330,9 @@ def test_controller_routes_running_write_through_reconfiguration() -> None:
     mca.reconfigure_while_running.assert_called_once_with(write)
     write.assert_called_once_with()
     assert controller._last_histogram is None
+    assert controller._display_histogram is None
+    assert controller._differential_reference_histogram is None
+    assert controller._display_interval_s == 0.0
     assert controller._last_elapsed_s == 0.0
     histogram_curve.setData.assert_called_once_with([], [])
 
@@ -555,6 +558,12 @@ def test_histogram_readback_skips_roi_statistics_during_drag() -> None:
     histogram_curve = Mock()
     controller = SimpleNamespace(
         _last_histogram=None,
+        _display_histogram=None,
+        _differential_histogram_enabled=False,
+        _differential_reference_histogram=None,
+        _differential_reference_elapsed_s=0.0,
+        _display_interval_s=0.0,
+        _last_elapsed_s=1.0,
         _hist_curve=histogram_curve,
         _roi=SimpleNamespace(isVisible=lambda: True),
         _roi_dragging=True,
@@ -564,8 +573,81 @@ def test_histogram_readback_skips_roi_statistics_during_drag() -> None:
     MCAController._update_histogram(controller, histogram)
 
     np.testing.assert_array_equal(controller._last_histogram, histogram)
+    np.testing.assert_array_equal(controller._display_histogram, histogram)
     histogram_curve.setData.assert_called_once()
     update_stats.assert_not_called()
+
+
+def test_differential_histogram_displays_non_negative_per_refresh_counts() -> None:
+    histogram_curve = Mock()
+    controller = SimpleNamespace(
+        _last_histogram=None,
+        _display_histogram=None,
+        _differential_histogram_enabled=True,
+        _differential_reference_histogram=None,
+        _differential_reference_elapsed_s=0.0,
+        _display_interval_s=0.0,
+        _last_elapsed_s=1.0,
+        _hist_curve=histogram_curve,
+        _roi=SimpleNamespace(isVisible=lambda: False),
+        _roi_dragging=False,
+    )
+
+    first = np.array([5, 7, 2], dtype=np.uint32)
+    MCAController._update_histogram(controller, first)
+    np.testing.assert_array_equal(controller._display_histogram, first)
+    assert controller._display_interval_s == 1.0
+
+    controller._last_elapsed_s = 2.5
+    current = np.array([8, 6, 10], dtype=np.uint32)
+    MCAController._update_histogram(controller, current)
+
+    np.testing.assert_array_equal(controller._last_histogram, current)
+    np.testing.assert_array_equal(controller._display_histogram, [3, 0, 8])
+    np.testing.assert_array_equal(controller._differential_reference_histogram, current)
+    assert controller._display_interval_s == 1.5
+    np.testing.assert_array_equal(histogram_curve.setData.call_args.args[1], [3, 0, 8])
+
+
+def test_histogram_display_switch_rebases_without_changing_accumulated_counts() -> None:
+    histogram_curve = Mock()
+    y_label = Mock()
+    roi_stats = Mock()
+    accumulated = np.array([10, 20], dtype=np.uint32)
+    controller = SimpleNamespace(
+        _last_histogram=accumulated,
+        _display_histogram=accumulated,
+        _differential_histogram_enabled=False,
+        _differential_reference_histogram=np.array([8, 18], dtype=np.uint32),
+        _differential_reference_elapsed_s=8.0,
+        _display_interval_s=2.0,
+        _last_elapsed_s=10.0,
+        _hist_curve=histogram_curve,
+        _histogram_y_label=y_label,
+        _roi=SimpleNamespace(isVisible=lambda: True),
+        _roi_dragging=False,
+        _update_roi_stats=roi_stats,
+    )
+
+    MCAController.set_differential_histogram(controller, True)
+
+    np.testing.assert_array_equal(controller._last_histogram, accumulated)
+    assert controller._differential_histogram_enabled is True
+    np.testing.assert_array_equal(controller._display_histogram, [0, 0])
+    np.testing.assert_array_equal(
+        controller._differential_reference_histogram,
+        accumulated,
+    )
+    assert controller._display_interval_s == 0.0
+    y_label.setText.assert_called_once_with("Counts / refresh")
+    roi_stats.assert_called_once_with()
+
+    MCAController.set_differential_histogram(controller, False)
+
+    np.testing.assert_array_equal(controller._display_histogram, accumulated)
+    assert controller._differential_histogram_enabled is False
+    assert controller._display_interval_s == 10.0
+    y_label.setText.assert_called_with("Counts")
 
 
 def _readback(seed: int) -> MCAReadback:

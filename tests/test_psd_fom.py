@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 from pytestqt.qtbot import QtBot
 
 from nlab.analysis.psd_fom import fit_psd_fom_lm
@@ -119,6 +120,7 @@ def test_offline_plot_fits_on_button_and_toggles_guides(qtbot: QtBot) -> None:
     plot.fom_widget.fit_region.setRegion((-0.05, 0.65))
     plot.fom_widget.centroid_lines[0].setPos(0.1)
     plot.fom_widget.centroid_lines[1].setPos(0.5)
+    assert not plot.fom_widget.copy_button.isEnabled()
 
     qtbot.mouseClick(plot.fom_widget.fit_button, Qt.MouseButton.LeftButton)
 
@@ -126,7 +128,50 @@ def test_offline_plot_fits_on_button_and_toggles_guides(qtbot: QtBot) -> None:
     assert plot.fom_widget.last_fit.fom == pytest.approx(1.7, rel=0.12)
     assert plot.fom_widget.fom_label.text() != "—"
     assert "converged" in plot.fom_widget.status_label.text()
+    assert plot.fom_widget.copy_button.isEnabled()
+
+    qtbot.mouseClick(plot.fom_widget.copy_button, Qt.MouseButton.LeftButton)
+    rows = [line.split("\t") for line in QApplication.clipboard().text().splitlines()]
+    assert rows[0] == [
+        "Population",
+        "Centroid",
+        "Centroid uncertainty",
+        "FWHM",
+        "FWHM uncertainty",
+        "FOM",
+        "Reduced Poisson deviance",
+        "Fit status",
+        "Evaluations",
+        "Warnings",
+    ]
+    assert [rows[1][0], rows[2][0]] == ["1", "2"]
+    assert float(rows[1][1]) == pytest.approx(plot.fom_widget.last_fit.centroids[0])
+    assert float(rows[2][3]) == pytest.approx(plot.fom_widget.last_fit.fwhms[1])
+    assert float(rows[1][5]) == pytest.approx(plot.fom_widget.last_fit.fom)
 
     plot.fom_widget.guides_checkbox.setChecked(False)
     assert not plot.fom_widget.fit_region.isVisible()
     assert all(not line.isVisible() for line in plot.fom_widget.centroid_lines)
+
+
+def test_offline_plot_report_state_is_a_read_only_snapshot(qtbot: QtBot) -> None:
+    plot = OfflinePsdPlot()
+    qtbot.addWidget(plot)
+    matrix = np.arange(32 * 64, dtype=np.uint64).reshape(32, 64)
+    plot.set_data(
+        matrix,
+        energy_range=(0.0, 32.0),
+        ratio_range=(-0.2, 0.8),
+        energy_label="Integrated charge",
+    )
+    plot.cut_spin.setValue(0.25)
+    plot.energy_region.setRegion((4.0, 20.0))
+
+    state = plot.report_state()
+
+    assert not state.matrix.flags.writeable
+    np.testing.assert_array_equal(state.matrix, matrix)
+    assert state.energy_label == "Integrated charge"
+    assert state.cut == pytest.approx(0.25)
+    assert state.energy_roi == pytest.approx((4.0, 20.0))
+    assert state.matrix_scale == "log"
