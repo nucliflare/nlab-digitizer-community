@@ -10,6 +10,9 @@ from uuid import uuid4
 
 import numpy as np
 
+from nlab.analysis.peak_fitting import PeakFitSpec, fit_spectrum_peaks
+from nlab.analysis.spectrum import Spectrum
+
 CalibrationModel = Literal["linear", "quadratic"]
 FingerprintValue = bool | int | float | str
 
@@ -48,6 +51,25 @@ class SpectrumSnapshot:
             live=live,
             fingerprint=dict(fingerprint),
         )
+
+
+@dataclass(frozen=True)
+class CalibrationPeakFit:
+    """Local Gaussian centroid estimate obtained from one calibration seed."""
+
+    seed_channel: float
+    centroid_channel: float
+    centroid_stderr: float | None
+    sigma_channel: float
+    fwhm_channel: float
+    area: float
+    fit_min: float
+    fit_max: float
+    half_width: float
+    statistic: str
+    x: np.ndarray
+    observed: np.ndarray
+    best_fit: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -179,6 +201,63 @@ class EnergyCalibration:
         )
         updated = str(value.get("updated_utc", fitted.updated_utc))
         return replace(fitted, updated_utc=updated)
+
+
+def fit_calibration_peak(
+    snapshot: SpectrumSnapshot,
+    seed_channel: float,
+    *,
+    half_width: float = 300.0,
+) -> CalibrationPeakFit:
+    """Fit a Gaussian plus linear background around a draggable channel seed."""
+
+    seed = float(seed_channel)
+    width = float(half_width)
+    if not np.isfinite(seed) or not 0 <= seed < len(snapshot.counts):
+        raise ValueError("calibration peak seed must fall inside its source spectrum")
+    if not np.isfinite(width) or width <= 0:
+        raise ValueError("calibration centroid fit half-width must be positive")
+    fit_min = max(0.0, seed - width)
+    fit_max = min(float(len(snapshot.counts) - 1), seed + width)
+    spectrum = Spectrum.create(
+        label=snapshot.label,
+        counts=snapshot.counts,
+        source="mca",
+        metadata={
+            "snapshot_id": snapshot.snapshot_id,
+            "elapsed_s": snapshot.elapsed_s,
+            "channel": snapshot.channel,
+        },
+    )
+    result = fit_spectrum_peaks(
+        spectrum,
+        PeakFitSpec(
+            peak_count=1,
+            background="linear",
+            statistic="weighted",
+            fit_min=fit_min,
+            fit_max=fit_max,
+            peak_centers=(seed,),
+        ),
+    )
+    if not result.success:
+        raise ValueError(f"Gaussian centroid fit did not converge: {result.message}")
+    peak = result.peaks[0]
+    return CalibrationPeakFit(
+        seed_channel=seed,
+        centroid_channel=peak.center,
+        centroid_stderr=peak.center_stderr,
+        sigma_channel=peak.sigma,
+        fwhm_channel=peak.fwhm,
+        area=peak.area,
+        fit_min=float(result.x[0]),
+        fit_max=float(result.x[-1]),
+        half_width=width,
+        statistic=result.statistic,
+        x=result.x,
+        observed=result.observed,
+        best_fit=result.best_fit,
+    )
 
 
 def fit_energy_calibration(

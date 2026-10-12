@@ -574,9 +574,20 @@ incrementally through a bounded queue rather than accumulated in RAM.
 Open **Tools → MCA Energy Calibration...**, choose an MCA channel, and copy its
 current spectrum into the calibration workspace. Double-click a known peak to
 add a draggable reference line, then enter its expected energy in keV. The
-channel value can also be edited numerically. At least two enabled references
-are required for a linear least-squares fit and three for a quadratic fit; the
-table reports each residual and the tool reports RMS and maximum residuals.
+line position is an initial peak seed, not the calibration coordinate itself.
+After a drag completes, the tool fits a Gaussian plus linear background within
+the selected centroid half-width, which defaults to 300 channels; a solid marker
+and the **Centroid ch.** column show the fitted position used by the energy
+calibration. The seed can also be edited numerically. At least two enabled
+references are required for a linear
+least-squares fit and three for a quadratic fit; the table reports each residual
+and the tool reports RMS and maximum residuals. A failed local peak fit prevents
+application rather than silently falling back to the seed position.
+Applying the calibration snaps each draggable seed line to its fitted centroid
+and overlays the corresponding local Gaussian fit on the source spectrum, with
+an aligned lower plot of observed-minus-fitted count residuals. A subsequent
+point, model, fit-width, or spectrum edit hides these applied-fit overlays and
+residuals until the revised calibration is applied.
 
 Use **Add current as overlay** after changing radioactive sources to combine
 lines from several spectra. Existing points remain in place. Overlays are
@@ -596,6 +607,13 @@ applied. Binning is handled specially: changing its power-of-two factor
 automatically rescales the channel coordinates, so a calibration made at (for
 example) binning 16 remains valid at binning 32 or 8. Other energy-processing
 changes still mark the calibration stale.
+
+After a valid fit, **Download report...** creates a uniquely named report folder
+with a branded two-page PDF, all copied source spectra, the draggable seeds and
+Gaussian centroid-fit curves and their count residuals, calibration points and
+energy residuals, plus complete JSON metadata. The PDF typesets the Gaussian
+centroid and linear or quadratic energy-calibration equations in mathematical
+notation.
 
 ### MCA peak-analysis workbench
 
@@ -676,7 +694,11 @@ normalization, addition, subtraction, live- or elapsed-time-scaled background
 subtraction, integer rebinning, and cropping to the fit range. Arithmetic
 requires identical coordinate grids, propagates variance, and never performs
 implicit interpolation. Spectra export to CSV; fit summaries export to JSON or
-CSV without overwriting existing files.
+CSV without overwriting existing files. After a completed fit, **Download
+report...** creates a non-overwriting folder with a branded two-page PDF of the
+spectrum, fitted components, residuals, peak results, statistics, and typeset
+Gaussian, FWHM, and selected-background equations, together with full fit-curve,
+peak, parameter, and JSON metadata files.
 
 ### Live coincidence measurement
 
