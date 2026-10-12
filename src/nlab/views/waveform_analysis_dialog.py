@@ -34,6 +34,10 @@ from PySide6.QtWidgets import (
 from nlab.analysis.capture_metadata import capture_digitizer_info
 from nlab.analysis.psd_report import PsdReportRequest, export_psd_report
 from nlab.analysis.waveform_file import MappedWaveformFile, WaveformFileIndex, WaveformFrame
+from nlab.analysis.waveform_fom_optimization import (
+    WaveformFomOptimizationRequest,
+    WaveformFomOptimizationResult,
+)
 from nlab.analysis.waveform_psd import (
     BaselineMethod,
     WaveformPsdResult,
@@ -44,6 +48,7 @@ from nlab.analysis.waveform_psd import (
 from nlab.views.offline_psd_plot import OfflinePsdPlot
 from nlab.views.plot_viewbox import ModifierZoomViewBox, style_plot_widget
 from nlab.workers.waveform_file_worker import WaveformFileIndexWorker
+from nlab.workers.waveform_fom_optimization_worker import WaveformFomOptimizationWorker
 from nlab.workers.waveform_psd_worker import WaveformPsdWorker
 
 log = logging.getLogger(__name__)
@@ -51,7 +56,7 @@ _MAX_QT_INDEX = 2_147_483_647
 _AUTO_PREVIEW_STRIDE_MULTIPLIER = 20
 _AUTO_PREVIEW_DEBOUNCE_MS = 120
 _WINDOW_TITLE = "Waveform Analysis Workbench"
-AnalysisKind = Literal["manual", "sparse", "full"]
+AnalysisKind = Literal["manual", "sparse", "full", "optimized"]
 
 
 @dataclass(frozen=True)
@@ -62,6 +67,14 @@ class _WaveformAnalysisContext:
     maximum_events: int
     analysis_kind: AnalysisKind
     sample_period_ns: float
+    optimization: WaveformFomOptimizationResult | None = None
+
+
+@dataclass(frozen=True)
+class _FomOptimizationContext:
+    fit_roi: tuple[float, float]
+    centroid_seeds: tuple[float, float]
+    result: WaveformFomOptimizationResult | None = None
 
 
 class WaveformAnalysisDialog(QDialog):
@@ -79,8 +92,13 @@ class WaveformAnalysisDialog(QDialog):
         self._index_worker: WaveformFileIndexWorker | None = None
         self._analysis_thread: QThread | None = None
         self._analysis_worker: WaveformPsdWorker | None = None
+        self._optimization_thread: QThread | None = None
+        self._optimization_worker: WaveformFomOptimizationWorker | None = None
         self._active_analysis_kind: AnalysisKind | None = None
         self._pending_analysis_kind: AnalysisKind | None = None
+        self._active_optimization_context: _FomOptimizationContext | None = None
+        self._completed_optimization: _FomOptimizationContext | None = None
+        self._pending_optimized_reconstruction: _FomOptimizationContext | None = None
         self._active_report_context: _WaveformAnalysisContext | None = None
         self._last_report_context: _WaveformAnalysisContext | None = None
         self._last_psd_result: WaveformPsdResult | None = None
@@ -236,6 +254,7 @@ class WaveformAnalysisDialog(QDialog):
             line.sigPositionChangeFinished.connect(self._on_gate_change_finished)
         self._auto_preview_timer.timeout.connect(self._request_sparse_analysis)
         self.analyze_button.clicked.connect(self._start_analysis)
+        self.optimize_button.clicked.connect(self._start_fom_optimization)
         self.cancel_button.clicked.connect(self._cancel_analysis)
         self.report_button.clicked.connect(self._download_report)
         self.psd_plot.fom_widget.fit_changed.connect(self._fit_changed)
@@ -296,6 +315,19 @@ class WaveformAnalysisDialog(QDialog):
         self.maximum_events = QSpinBox(self)
         self.maximum_events.setRange(0, _MAX_QT_INDEX)
         self.maximum_events.setSpecialValueText("All")
+        self.optimization_events = QSpinBox(self)
+        self.optimization_events.setRange(100, 1_000_000)
+        self.optimization_events.setValue(20_000)
+        self.optimization_events.setToolTip(
+            "Maximum sampled waveforms used to compare candidate gate pairs."
+        )
+        self.optimization_radius = QSpinBox(self)
+        self.optimization_radius.setRange(1, _MAX_QT_INDEX)
+        self.optimization_radius.setValue(32)
+        self.optimization_radius.setSuffix(" samples")
+        self.optimization_radius.setToolTip(
+            "Search this many samples on either side of both current gate endpoints."
+        )
         form.addRow("Energy bins:", self.energy_bins)
         form.addRow("Energy maximum:", self.energy_max)
         form.addRow("Ratio bins:", self.ratio_bins)
@@ -303,6 +335,8 @@ class WaveformAnalysisDialog(QDialog):
         form.addRow("Ratio maximum:", self.ratio_max)
         form.addRow("Event stride:", self.event_stride)
         form.addRow("Maximum events:", self.maximum_events)
+        form.addRow("Optimization events:", self.optimization_events)
+        form.addRow("Gate search radius:", self.optimization_radius)
         layout.addLayout(form)
         self.auto_recalculate = QCheckBox(
             "Auto-recalculate while dragging (every 20th event)",
@@ -317,9 +351,16 @@ class WaveformAnalysisDialog(QDialog):
         buttons = QHBoxLayout()
         self.analyze_button = QPushButton("Reconstruct PSD", self)
         self.analyze_button.setEnabled(False)
+        self.optimize_button = QPushButton("Optimize FOM gates", self)
+        self.optimize_button.setEnabled(False)
+        self.optimize_button.setToolTip(
+            "Maximize FOM by varying the short- and long-gate endpoints while keeping "
+            "the baseline, integration start, energy ROI, fit ROI, and seeds fixed."
+        )
         self.cancel_button = QPushButton("Cancel", self)
         self.cancel_button.setEnabled(False)
         buttons.addWidget(self.analyze_button)
+        buttons.addWidget(self.optimize_button)
         buttons.addWidget(self.cancel_button)
         layout.addLayout(buttons)
         return group
@@ -347,7 +388,11 @@ class WaveformAnalysisDialog(QDialog):
             self.open_path(Path(path_text))
 
     def open_path(self, path: Path) -> None:
-        if self._index_thread is not None or self._analysis_thread is not None:
+        if (
+            self._index_thread is not None
+            or self._analysis_thread is not None
+            or self._optimization_thread is not None
+        ):
             QMessageBox.warning(self, "Waveform Analysis", "Cancel the current operation first.")
             return
         self.close_file()
@@ -437,10 +482,12 @@ class WaveformAnalysisDialog(QDialog):
         self.load_button.setEnabled(not indexing)
         if indexing:
             self.close_file_button.setEnabled(False)
+        self._update_optimize_button()
 
     def _source_changed(self) -> None:
         if self._index is None or self.source_combo.currentIndex() < 0:
             return
+        self._update_optimize_button()
         source = self._index.channels[self.source_combo.currentIndex()]
         self.frame_spin.blockSignals(True)
         self.frame_spin.setRange(0, min(source.frame_count - 1, _MAX_QT_INDEX))
@@ -458,6 +505,7 @@ class WaveformAnalysisDialog(QDialog):
             self.status.setText(f"Could not read waveform: {exc}")
             return
         samples = self._frame.samples
+        self.optimization_radius.setMaximum(max(1, len(samples)))
         period = self.sample_period.value()
         times = np.arange(len(samples), dtype=np.float64) * period
         self.raw_curve.setData(times, samples)
@@ -602,6 +650,7 @@ class WaveformAnalysisDialog(QDialog):
         if self._updating_gates:
             return
         self._preview()
+        self._update_optimize_button()
         if self.auto_recalculate.isChecked() and self._index is not None:
             self._auto_preview_timer.start()
 
@@ -619,6 +668,181 @@ class WaveformAnalysisDialog(QDialog):
 
     def _start_analysis(self) -> None:
         self._request_analysis("manual")
+
+    def _start_fom_optimization(self) -> None:
+        index = self._index
+        frame = self._frame
+        report_context = self._last_report_context
+        if index is None or frame is None or report_context is None:
+            return
+        if self._analysis_thread is not None or self._optimization_thread is not None:
+            QMessageBox.warning(
+                self,
+                "FOM Gate Optimization",
+                "Cancel the current operation before starting gate optimization.",
+            )
+            return
+        try:
+            settings = self._settings()
+            if (
+                report_context.settings != settings
+                or report_context.source_index != self.source_combo.currentIndex()
+            ):
+                raise ValueError(
+                    "Reconstruct the PSD with the current source and gate settings first"
+                )
+            fit_widget = self.psd_plot.fom_widget
+            fit_roi_values = sorted(map(float, fit_widget.fit_region.getRegion()))
+            centroid_seeds = (
+                float(fit_widget.centroid_lines[0].value()),
+                float(fit_widget.centroid_lines[1].value()),
+            )
+            fit = fit_widget.last_fit
+            if fit is None:
+                raise ValueError("Complete a valid two-population FOM fit first")
+            if fit.poor_convergence:
+                raise ValueError(
+                    "The current FOM fit has convergence warnings; adjust the fit ROI, "
+                    "centroid seeds, or event count before optimizing"
+                )
+            radius = self.optimization_radius.value()
+            sample_count = len(frame.samples)
+            short_bounds = (
+                max(settings.gate_start + 1, settings.short_end - radius),
+                min(sample_count - 1, settings.short_end + radius),
+            )
+            long_bounds = (
+                max(settings.gate_start + 2, settings.long_end - radius),
+                min(sample_count, settings.long_end + radius),
+            )
+            initial_step = 1 << (radius.bit_length() - 1)
+            energy_roi_values = sorted(
+                map(float, self.psd_plot.energy_region.getRegion())
+            )
+            request = WaveformFomOptimizationRequest(
+                settings=settings,
+                energy_roi=(energy_roi_values[0], energy_roi_values[1]),
+                fit_roi=(fit_roi_values[0], fit_roi_values[1]),
+                centroid_seeds=centroid_seeds,
+                short_bounds=short_bounds,
+                long_bounds=long_bounds,
+                initial_step=initial_step,
+            )
+            worker = WaveformFomOptimizationWorker(
+                index,
+                source_index=self.source_combo.currentIndex(),
+                request=request,
+                stride=self.event_stride.value(),
+                maximum_events=self.optimization_events.value(),
+            )
+        except ValueError as exc:
+            self.status.setText(f"FOM gate optimization unavailable: {exc}.")
+            QMessageBox.warning(self, "FOM Gate Optimization", str(exc))
+            return
+
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.status.connect(self._optimization_status)
+        worker.progress.connect(self._optimization_progress)
+        worker.loaded.connect(self._optimization_loaded)
+        worker.cancelled.connect(self._optimization_cancelled)
+        worker.error.connect(self._optimization_failed)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(
+            self._optimization_thread_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._optimization_worker = worker
+        self._optimization_thread = thread
+        self._active_optimization_context = _FomOptimizationContext(
+            fit_roi=request.fit_roi,
+            centroid_seeds=request.centroid_seeds,
+        )
+        self._completed_optimization = None
+        self._set_optimization_busy(True)
+        self.progress.setRange(0, 0)
+        self.status.setText("Preparing waveform sample for FOM gate optimization...")
+        thread.start()
+
+    def _optimization_status(self, message: str) -> None:
+        self.status.setText(message)
+
+    def _optimization_progress(
+        self,
+        evaluated: int,
+        valid: int,
+        best_fom: float | None,
+        short_end: int | None,
+        long_end: int | None,
+    ) -> None:
+        if best_fom is None:
+            self.status.setText(
+                f"FOM gate search: {evaluated} candidates evaluated; "
+                "no trustworthy fit yet."
+            )
+            return
+        self.status.setText(
+            f"FOM gate search: {evaluated} evaluated, {valid} valid; "
+            f"best FOM {best_fom:.5g} at short={short_end}, "
+            f"long={long_end} samples."
+        )
+
+    def _optimization_loaded(self, value: object) -> None:
+        context = self._active_optimization_context
+        if not isinstance(value, WaveformFomOptimizationResult) or context is None:
+            self._optimization_failed("FOM optimizer returned an invalid result")
+            return
+        self._completed_optimization = _FomOptimizationContext(
+            fit_roi=context.fit_roi,
+            centroid_seeds=context.centroid_seeds,
+            result=value,
+        )
+
+    def _optimization_failed(self, message: str) -> None:
+        self._completed_optimization = None
+        self.status.setText(f"FOM gate optimization failed: {message}")
+        QMessageBox.critical(self, "FOM Gate Optimization Failed", message)
+
+    def _optimization_cancelled(self) -> None:
+        self._completed_optimization = None
+        self.status.setText("FOM gate optimization cancelled.")
+
+    def _optimization_thread_finished(self) -> None:
+        thread = self._optimization_thread
+        completed = self._completed_optimization
+        self._optimization_worker = None
+        self._optimization_thread = None
+        self._active_optimization_context = None
+        self._completed_optimization = None
+        self.progress.setRange(0, 1000)
+        self.progress.setValue(0)
+        self._set_optimization_busy(False)
+        if thread is not None:
+            thread.deleteLater()
+        if completed is not None and completed.result is not None:
+            QTimer.singleShot(0, lambda: self._apply_optimized_gates(completed))
+
+    def _apply_optimized_gates(self, context: _FomOptimizationContext) -> None:
+        result = context.result
+        if result is None:
+            return
+        period = self.sample_period.value()
+        previous_update_state = self._updating_gates
+        self._updating_gates = True
+        try:
+            self.short_end_line.setPos(result.best.short_end * period)
+            self.long_end_line.setPos(result.best.long_end * period)
+        finally:
+            self._updating_gates = previous_update_state
+        self._preview()
+        self._pending_optimized_reconstruction = context
+        self.status.setText(
+            f"Best sampled FOM {result.best.fom:.5g} at short={result.best.short_end}, "
+            f"long={result.best.long_end}; rebuilding the full PSD..."
+        )
+        self._request_analysis("optimized")
 
     def _request_analysis(self, kind: AnalysisKind) -> None:
         if self._index is None:
@@ -679,18 +903,30 @@ class WaveformAnalysisDialog(QDialog):
             maximum_events=maximum_events,
             analysis_kind=kind,
             sample_period_ns=self.sample_period.value(),
+            optimization=(
+                self._pending_optimized_reconstruction.result
+                if kind == "optimized" and self._pending_optimized_reconstruction is not None
+                else None
+            ),
         )
         self._set_analysis_busy(True)
         self.progress.setValue(0)
         if kind == "sparse":
             self.status.setText("Updating sparse PSD preview (every 20th selected event)...")
+        elif kind == "optimized":
+            self.status.setText("Reconstructing the full PSD with optimized gates...")
         else:
             self.status.setText("Reconstructing full PSD from waveforms...")
         thread.start()
 
     def _analysis_progress(self, processed: int, total: int) -> None:
         self.progress.setValue(round(1000 * processed / total) if total else 0)
-        prefix = "Sparse preview" if self._active_analysis_kind == "sparse" else "Full PSD"
+        if self._active_analysis_kind == "sparse":
+            prefix = "Sparse preview"
+        elif self._active_analysis_kind == "optimized":
+            prefix = "Optimized PSD"
+        else:
+            prefix = "Full PSD"
         self.status.setText(f"{prefix}: integrating {processed:,}/{total:,} waveforms...")
 
     def _analysis_loaded(self, value: object) -> None:
@@ -723,7 +959,35 @@ class WaveformAnalysisDialog(QDialog):
             f"{stats.too_short:,}; nonpositive Qlong {stats.nonpositive_long:,}; outside "
             f"view {stats.outside_range:,}.{comparison}"
         )
-        if self._active_analysis_kind == "sparse":
+        optimization = (
+            self._pending_optimized_reconstruction
+            if self._active_analysis_kind == "optimized"
+            else None
+        )
+        if optimization is not None and optimization.result is not None:
+            fit_widget = self.psd_plot.fom_widget
+            fit_widget.fit_region.setRegion(optimization.fit_roi)
+            for line, seed in zip(
+                fit_widget.centroid_lines,
+                optimization.centroid_seeds,
+                strict=True,
+            ):
+                line.setPos(seed)
+            final_fit = fit_widget.fit_current_projection()
+            result = optimization.result
+            self._pending_optimized_reconstruction = None
+            if final_fit is None:
+                fit_text = "the full-data confirmation fit was unavailable"
+            elif final_fit.poor_convergence:
+                fit_text = f"full-data FOM {final_fit.fom:.5g} has convergence warnings"
+            else:
+                fit_text = f"confirmed full-data FOM {final_fit.fom:.5g}"
+            self.status.setText(
+                f"FOM gate optimization complete: short={result.best.short_end}, "
+                f"long={result.best.long_end} samples; sampled FOM "
+                f"{result.best.fom:.5g}, {fit_text}; {summary}"
+            )
+        elif self._active_analysis_kind == "sparse":
             self.status.setText(
                 f"Sparse PSD preview complete: {summary} Release a gate for a full update."
             )
@@ -731,17 +995,24 @@ class WaveformAnalysisDialog(QDialog):
             self.status.setText(f"PSD complete: {summary}")
 
     def _analysis_failed(self, message: str) -> None:
+        if self._active_analysis_kind == "optimized":
+            self._pending_optimized_reconstruction = None
         self.status.setText(f"PSD reconstruction failed: {message}")
         QMessageBox.critical(self, "PSD Reconstruction Failed", message)
 
     def _analysis_cancelled(self) -> None:
+        if self._active_analysis_kind == "optimized":
+            self._pending_optimized_reconstruction = None
         if self._pending_analysis_kind is None:
             self.status.setText("PSD reconstruction cancelled.")
 
     def _cancel_analysis(self) -> None:
         self._auto_preview_timer.stop()
         self._pending_analysis_kind = None
-        if self._analysis_worker is not None:
+        if self._optimization_worker is not None:
+            self._optimization_worker.stop()
+            self.status.setText("Cancelling FOM gate optimization...")
+        elif self._analysis_worker is not None:
             self._analysis_worker.stop()
             self.status.setText("Cancelling PSD reconstruction...")
 
@@ -766,13 +1037,78 @@ class WaveformAnalysisDialog(QDialog):
             not busy and self._index is not None and len(self._index.channels) > 1
         )
         self._update_report_button()
+        self._update_optimize_button()
+
+    def _set_optimization_busy(self, busy: bool) -> None:
+        available = not busy and self._index is not None
+        self.load_button.setEnabled(not busy and self._index_thread is None)
+        self.close_file_button.setEnabled(available)
+        self.analyze_button.setEnabled(available)
+        self.cancel_button.setEnabled(busy)
+        self.frame_spin.setEnabled(available)
+        self.source_combo.setEnabled(
+            available and self._index is not None and len(self._index.channels) > 1
+        )
+        self.sample_period.setEnabled(
+            available and self._index is not None and self._index.sample_period_ns is None
+        )
+        for control in (
+            self.baseline_method,
+            self.polarity_combo,
+            self.energy_bins,
+            self.energy_max,
+            self.ratio_bins,
+            self.ratio_min,
+            self.ratio_max,
+            self.event_stride,
+            self.maximum_events,
+            self.optimization_events,
+            self.optimization_radius,
+            self.auto_recalculate,
+        ):
+            control.setEnabled(not busy)
+        for item in (
+            self.baseline_region,
+            self.gate_start_line,
+            self.short_end_line,
+            self.long_end_line,
+            self.psd_plot.energy_region,
+            self.psd_plot.fom_widget.fit_region,
+            *self.psd_plot.fom_widget.centroid_lines,
+        ):
+            item.setMovable(not busy)
+        self.psd_plot.fom_widget.fit_button.setEnabled(not busy)
+        self.psd_plot.fom_widget.guides_checkbox.setEnabled(not busy)
+        self._update_report_button()
+        self._update_optimize_button()
 
     def _fit_changed(self, _fit: object) -> None:
         self._update_report_button()
+        self._update_optimize_button()
+
+    def _update_optimize_button(self) -> None:
+        fit = self.psd_plot.fom_widget.last_fit
+        context = self._last_report_context
+        context_matches = False
+        if context is not None and context.source_index == self.source_combo.currentIndex():
+            try:
+                context_matches = context.settings == self._settings()
+            except ValueError:
+                pass
+        self.optimize_button.setEnabled(
+            self._analysis_thread is None
+            and self._optimization_thread is None
+            and self._index_thread is None
+            and self._index is not None
+            and context_matches
+            and fit is not None
+            and not fit.poor_convergence
+        )
 
     def _update_report_button(self) -> None:
         self.report_button.setEnabled(
             self._analysis_thread is None
+            and self._optimization_thread is None
             and self._index_thread is None
             and self._index is not None
             and self._last_psd_result is not None
@@ -812,6 +1148,36 @@ class WaveformAnalysisDialog(QDialog):
         source = index.channels[context.source_index]
         settings = context.settings
         state = self.psd_plot.report_state()
+        processing_settings: dict[str, object] = {
+            "baseline estimator": settings.baseline_method,
+            "baseline samples": (settings.baseline_start, settings.baseline_end),
+            "integration start sample": settings.gate_start,
+            "short-gate end sample": settings.short_end,
+            "long-gate end sample": settings.long_end,
+            "pulse polarity": settings.polarity,
+            "sample period ns": context.sample_period_ns,
+            "baseline time ns": (
+                settings.baseline_start * context.sample_period_ns,
+                settings.baseline_end * context.sample_period_ns,
+            ),
+            "integration start time ns": settings.gate_start * context.sample_period_ns,
+            "short-gate end time ns": settings.short_end * context.sample_period_ns,
+            "long-gate end time ns": settings.long_end * context.sample_period_ns,
+            "event stride used": context.stride,
+            "maximum events": (context.maximum_events if context.maximum_events else "All"),
+            "analysis mode": context.analysis_kind,
+            "PSD ratio definition": "(Qlong - Qshort) / Qlong",
+        }
+        if context.optimization is not None:
+            optimization = context.optimization
+            processing_settings.update(
+                {
+                    "optimization sampled FOM": optimization.best.fom,
+                    "optimization sampled waveforms": optimization.sampled_waveforms,
+                    "optimization candidates evaluated": optimization.evaluated_candidates,
+                    "optimization valid candidates": optimization.valid_candidates,
+                }
+            )
         request = PsdReportRequest(
             source_path=index.path,
             title="Waveform PSD/FOM Analysis Report",
@@ -824,26 +1190,7 @@ class WaveformAnalysisDialog(QDialog):
             matrix_scale=state.matrix_scale,
             energy_log_y=state.energy_log_y,
             fit=fit,
-            settings={
-                "baseline estimator": settings.baseline_method,
-                "baseline samples": (settings.baseline_start, settings.baseline_end),
-                "integration start sample": settings.gate_start,
-                "short-gate end sample": settings.short_end,
-                "long-gate end sample": settings.long_end,
-                "pulse polarity": settings.polarity,
-                "sample period ns": context.sample_period_ns,
-                "baseline time ns": (
-                    settings.baseline_start * context.sample_period_ns,
-                    settings.baseline_end * context.sample_period_ns,
-                ),
-                "integration start time ns": settings.gate_start * context.sample_period_ns,
-                "short-gate end time ns": settings.short_end * context.sample_period_ns,
-                "long-gate end time ns": settings.long_end * context.sample_period_ns,
-                "event stride used": context.stride,
-                "maximum events": (context.maximum_events if context.maximum_events else "All"),
-                "analysis mode": context.analysis_kind,
-                "PSD ratio definition": "(Qlong - Qshort) / Qlong",
-            },
+            settings=processing_settings,
             digitizer_info={
                 **capture_digitizer_info(index.path),
                 "source format": index.format_name,
@@ -881,6 +1228,7 @@ class WaveformAnalysisDialog(QDialog):
         self._auto_preview_timer.stop()
         self._pending_analysis_kind = None
         self._stop_analysis_sync()
+        self._stop_optimization_sync()
         self._stop_index_sync()
         if self._reader is not None:
             self._reader.close()
@@ -890,6 +1238,9 @@ class WaveformAnalysisDialog(QDialog):
         self._active_report_context = None
         self._last_report_context = None
         self._last_psd_result = None
+        self._active_optimization_context = None
+        self._completed_optimization = None
+        self._pending_optimized_reconstruction = None
         self._set_current_file(None)
         self.source_combo.clear()
         self.source_combo.setEnabled(False)
@@ -898,11 +1249,13 @@ class WaveformAnalysisDialog(QDialog):
         self.sample_period.setEnabled(False)
         self.close_file_button.setEnabled(False)
         self.analyze_button.setEnabled(False)
+        self.optimize_button.setEnabled(False)
         self.raw_curve.clear()
         self.oriented_curve.clear()
         self.preview_status.setText("No frame loaded.")
         self.psd_plot.fom_widget.clear_fit()
         self._update_report_button()
+        self._update_optimize_button()
 
     def _set_current_file(self, path: Path | None) -> None:
         if path is None:
@@ -931,6 +1284,15 @@ class WaveformAnalysisDialog(QDialog):
             if not self._analysis_thread.wait(5_000):
                 log.warning("Waveform PSD worker did not stop within 5 seconds")
 
+    def _stop_optimization_sync(self) -> None:
+        if self._optimization_worker is not None:
+            self._optimization_worker.stop()
+        if self._optimization_thread is not None and self._optimization_thread.isRunning():
+            if not self._optimization_thread.wait(5_000):
+                log.warning("Waveform FOM optimization worker did not stop within 5 seconds")
+        self._completed_optimization = None
+        self._pending_optimized_reconstruction = None
+
     def show_workspace(self) -> None:
         self.show()
         self.raise_()
@@ -938,6 +1300,7 @@ class WaveformAnalysisDialog(QDialog):
 
     def close_without_prompt(self) -> None:
         self._stop_analysis_sync()
+        self._stop_optimization_sync()
         self._stop_index_sync()
         if self._reader is not None:
             self._reader.close()
@@ -950,6 +1313,7 @@ class WaveformAnalysisDialog(QDialog):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
         self._stop_analysis_sync()
+        self._stop_optimization_sync()
         self._stop_index_sync()
         if self._reader is not None:
             self._reader.close()

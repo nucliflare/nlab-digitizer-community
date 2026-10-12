@@ -23,6 +23,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import (
+    Flowable,
     Image,
     PageBreak,
     Paragraph,
@@ -486,8 +487,8 @@ def _write_pdf(
     story.append(
         Image(
             _fom_figure(projection, request.fit),
-            width=180 * mm,
-            height=105 * mm,
+            width=172 * mm,
+            height=100 * mm,
         )
     )
     story.append(Spacer(1, 3 * mm))
@@ -496,6 +497,9 @@ def _write_pdf(
         warning = "; ".join(request.fit.warnings) or request.fit.message
         story.append(Spacer(1, 2 * mm))
         story.append(Paragraph(f"<b>Fit warning:</b> {_escape(warning)}", styles["ReportWarning"]))
+    story.append(Spacer(1, 3 * mm))
+    story.append(Paragraph("Fitting method and FOM", styles["Heading3"]))
+    story.extend(_fit_method_explanation(styles))
     story.append(PageBreak())
 
     story.append(Paragraph("Cut-separated energy spectra", styles["Heading1"]))
@@ -597,6 +601,91 @@ def _settings_table(
         ),
     ]
     return _key_value_table(values, styles)
+
+
+
+def _fit_method_explanation(styles: Mapping[str, ParagraphStyle]) -> list[Flowable]:
+    """Explain the equations implemented by :func:`fit_psd_fom_lm` in the PDF."""
+    return [
+        Paragraph(
+            "Counts in the selected energy ROI are summed by PSD-ratio bin. "
+            "Only the selected ratio fit ROI enters the fit. For ratio x, the "
+            "expected bin count is a constant background plus two Gaussian peaks:",
+            styles["ReportSmall"],
+        ),
+        _math_formula(
+            r"m(x)=B+A_1\exp\!\left[-\frac{(x-\mu_1)^2}{2\sigma_1^2}\right]"
+            r"+A_2\exp\!\left[-\frac{(x-\mu_2)^2}{2\sigma_2^2}\right]"
+        ),
+        Paragraph(
+            "The background and peak heights are non-negative; the peak widths "
+            "are positive and the fitted centroids remain ordered. Bounded "
+            "Levenberg-Marquardt minimizes the sum of squared signed "
+            "Poisson-deviance residuals. For each observed bin count, the "
+            "expected count is floored at a small positive value:",
+            styles["ReportSmall"],
+        ),
+        _math_formula(r"m_i=\max\!\left(m(x_i),10^{-12}\right)"),
+        _math_formula(
+            r"r_i=\mathrm{sgn}(y_i-m_i)"
+            r"\sqrt{2\!\left[m_i-y_i+y_i\ln\!\left(\frac{y_i}{m_i}\right)\right]}"
+        ),
+        Paragraph(
+            "The logarithmic contribution is defined as zero for an empty bin. "
+            "The reported reduced Poisson deviance uses the number of fitted "
+            "bins and varied parameters:",
+            styles["ReportSmall"],
+        ),
+        _math_formula(
+            r"D_{\mathrm{reduced}}="
+            r"\frac{\sum_{i=1}^{n}r_i^2}{\max(n-p,1)}"
+        ),
+        Paragraph(
+            "Each Gaussian width is converted to full width at half maximum "
+            "(FWHM). The dimensionless FOM measures centroid separation "
+            "relative to the sum of those widths:",
+            styles["ReportSmall"],
+        ),
+        _math_formula(r"\mathrm{FWHM}_j=2\sqrt{2\ln 2}\,\sigma_j"),
+        _math_formula(
+            r"\mathrm{FOM}="
+            r"\frac{\left|\mu_2-\mu_1\right|}{\mathrm{FWHM}_1+\mathrm{FWHM}_2}"
+        ),
+    ]
+
+
+def _math_formula(expression: str) -> Image:
+    """Render one TeX-style math expression without requiring a LaTeX install."""
+    figure = Figure(figsize=(8.0, 0.55), dpi=240)
+    figure.text(
+        0.01,
+        0.5,
+        f"${expression}$",
+        color="#1F2937",
+        fontsize=9.5,
+        horizontalalignment="left",
+        verticalalignment="center",
+    )
+    FigureCanvasAgg(figure)
+    output = BytesIO()
+    figure.savefig(
+        output,
+        format="png",
+        dpi=240,
+        transparent=True,
+        bbox_inches="tight",
+        pad_inches=0.015,
+    )
+    output.seek(0)
+
+    image = Image(output)
+    scale = min(72 / 240, (168 * mm) / image.imageWidth)
+    image.drawWidth = image.imageWidth * scale
+    image.drawHeight = image.imageHeight * scale
+    image.hAlign = "LEFT"
+    image.spaceBefore = 0.2 * mm
+    image.spaceAfter = 0.5 * mm
+    return image
 
 
 def _fit_table(fit: PsdFomFit, styles: Mapping[str, ParagraphStyle]) -> Table:
@@ -772,8 +861,9 @@ def _spectra_figure(request: PsdReportRequest, projection: _ProjectionData) -> B
         linewidth=1.1,
         label="Above cut",
     )
-    if request.energy_log_y and np.any((projection.below > 0) | (projection.above > 0)):
-        axis.set_yscale("log")
+    if request.energy_log_y and not np.any((projection.below > 0) | (projection.above > 0)):
+        axis.set_ylim(1.0, 10.0)
+    axis.set_yscale("log" if request.energy_log_y else "linear")
     axis.set(xlabel=f"{request.energy_label} (raw)", ylabel="Counts")
     axis.set_xlim(request.energy_range)
     axis.grid(alpha=0.2)

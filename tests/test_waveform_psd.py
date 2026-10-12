@@ -352,11 +352,14 @@ def test_waveform_workbench_indexes_and_reconstructs_ndma(
     dialog.psd_plot.fom_widget.centroid_lines[1].setPos(0.5)
     assert dialog.psd_plot.fom_widget.fit_current_projection() is not None
     assert dialog.report_button.isEnabled()
+    assert dialog.optimize_button.isEnabled()
+    assert "short- and long-gate endpoints" in dialog.optimize_button.toolTip()
 
     dialog.close_file()
     assert dialog.current_file_label.text() == "Current file: No file loaded"
     assert dialog.current_file_label.toolTip() == ""
     assert dialog.windowTitle() == "Waveform Analysis Workbench"
+    assert not dialog.optimize_button.isEnabled()
 
 
 def test_waveform_worker_is_deleted_by_its_finished_thread(

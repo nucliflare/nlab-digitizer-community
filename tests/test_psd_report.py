@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import h5py
@@ -11,6 +12,7 @@ import numpy as np
 import pytest
 from pypdf import PdfReader
 
+import nlab.analysis.psd_report as psd_report
 from nlab import __version__
 from nlab.analysis.capture_metadata import capture_digitizer_info
 from nlab.analysis.psd_fom import fit_psd_fom_lm
@@ -67,6 +69,13 @@ def test_export_psd_report_writes_pdf_and_complete_plot_data(tmp_path: Path) -> 
     assert "ewt.tech" in pdf_text
     assert "Cut and binning settings" in pdf_text
     assert "PSD figure of merit" in pdf_text
+    fit_page = pdf.pages[1].extract_text() or ""
+    assert "Fitting method and FOM" in fit_page
+    assert "Poisson-deviance residuals" in fit_page
+    assert "The logarithmic contribution is defined as zero" in fit_page
+    assert "The dimensionless FOM measures centroid separation" in fit_page
+    # The plot plus six TeX-style equations are embedded as images on the FOM page.
+    assert len(pdf.pages[1].images) >= 7
     assert f"NLab Digitizer {__version__}" in pdf_text
 
     with bundle.psd_matrix_csv.open(encoding="utf-8", newline="") as stream:
@@ -110,6 +119,29 @@ def test_export_psd_report_writes_pdf_and_complete_plot_data(tmp_path: Path) -> 
     assert "energy bin width" in settings_text
     assert "effective cut boundary" in settings_text
     assert "population 1 centroid" in settings_text
+
+
+@pytest.mark.parametrize("log_y", [False, True])
+@pytest.mark.parametrize("empty", [False, True])
+def test_report_energy_spectra_use_panel_scale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, log_y: bool, empty: bool
+) -> None:
+    request = _request(tmp_path / "events.bin")
+    if empty:
+        request = replace(request, matrix=np.zeros_like(request.matrix))
+    request = replace(request, energy_log_y=log_y)
+    projection = psd_report._projection_data(request, request.matrix)
+    figures = []
+    render_figure = psd_report._figure_png
+    monkeypatch.setattr(psd_report, "_figure_png", lambda figure: figures.append(figure))
+
+    psd_report._spectra_figure(request, projection)
+
+    axis = figures[0].axes[0]
+    assert axis.get_yscale() == ("log" if log_y else "linear")
+    if log_y and empty:
+        assert axis.get_ylim()[0] > 0
+        assert render_figure(figures[0]).getvalue().startswith(b"\x89PNG")
 
 
 def test_export_psd_report_never_overwrites_an_existing_bundle(tmp_path: Path) -> None:

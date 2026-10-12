@@ -153,6 +153,11 @@ def test_offline_plot_fits_on_button_and_toggles_guides(qtbot: QtBot) -> None:
     assert not plot.fom_widget.fit_region.isVisible()
     assert all(not line.isVisible() for line in plot.fom_widget.centroid_lines)
 
+    first_line = plot.fom_widget.centroid_lines[0]
+    first_line.sigPositionChangeFinished.emit(first_line)
+    assert plot.fom_widget.last_fit is None
+    assert not plot.fom_widget.copy_button.isEnabled()
+
 
 def test_offline_plot_report_state_is_a_read_only_snapshot(qtbot: QtBot) -> None:
     plot = OfflinePsdPlot()
@@ -166,6 +171,7 @@ def test_offline_plot_report_state_is_a_read_only_snapshot(qtbot: QtBot) -> None
     )
     plot.cut_spin.setValue(0.25)
     plot.energy_region.setRegion((4.0, 20.0))
+    plot.set_energy_log_y(True)
 
     state = plot.report_state()
 
@@ -175,3 +181,4 @@ def test_offline_plot_report_state_is_a_read_only_snapshot(qtbot: QtBot) -> None
     assert state.cut == pytest.approx(0.25)
     assert state.energy_roi == pytest.approx((4.0, 20.0))
     assert state.matrix_scale == "log"
+    assert state.energy_log_y is True

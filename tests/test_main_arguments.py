@@ -30,14 +30,26 @@ def test_yaml_connection_values_are_type_checked() -> None:
     assert _int_value(True) is None
 
 
-def test_logging_configuration_suppresses_matplotlib_font_debug_records() -> None:
-    font_logger = logging.getLogger("matplotlib.font_manager")
-    original_level = font_logger.level
+def test_logging_configuration_suppresses_report_renderer_debug_records() -> None:
+    logger_names = (
+        "matplotlib",
+        "matplotlib.colorbar",
+        "matplotlib.font_manager",
+        "PIL",
+        "PIL.PngImagePlugin",
+    )
+    loggers = [logging.getLogger(name) for name in logger_names]
+    original_levels = [logger.level for logger in loggers]
     try:
-        font_logger.setLevel(logging.NOTSET)
+        for logger in loggers:
+            logger.setLevel(logging.NOTSET)
 
         _configure_logging()
 
-        assert font_logger.level == logging.WARNING
+        assert logging.getLogger("matplotlib").level == logging.WARNING
+        assert logging.getLogger("PIL").level == logging.WARNING
+        for logger in loggers:
+            assert logger.getEffectiveLevel() == logging.WARNING
     finally:
-        font_logger.setLevel(original_level)
+        for logger, original_level in zip(loggers, original_levels, strict=True):
+            logger.setLevel(original_level)
