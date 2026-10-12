@@ -824,10 +824,14 @@ After a fit, **Download report...** saves a uniquely named folder based on the
 investigated file. The bundle contains a three-page PDF with the EWT identity,
 software version, source/digitizer metadata, PSD matrix, fitted FOM projection,
 cut-separated energy spectra, fit diagnostics, and the exact cut, binning, and
-projection-ROI settings. CSV files preserve the complete matrix, both separated
-spectra, the full FOM projection and every fitted component; settings are also
-written as CSV and machine-readable JSON. Source formats that do not embed a
-device identity are marked explicitly instead of being inferred.
+projection-ROI settings. The FOM page typesets the two-Gaussian model,
+Poisson-deviance fit, FWHM conversion, and FOM formula in TeX-style mathematical
+notation. The PDF energy spectra
+use the same linear or logarithmic count axis selected in the panel. CSV
+files preserve the complete matrix, both separated spectra, the full FOM
+projection and every fitted component; settings are also written as CSV and
+machine-readable JSON. Source formats that do not embed a device identity are
+marked explicitly instead of being inferred.
 Both analysis workbenches keep the full current source path visible and show
 the source filename in the window title, so subsequent status and report
 messages do not obscure which file is being analyzed.
@@ -881,10 +885,21 @@ the marker cancels any stale preview and queues a full calculation using the
 configured event stride and maximum-event limit. The initial PSD ratio view spans
 -1 to 1. Gate-driven PSD recalculations preserve the selected energy-projection
 ROI, and the workbench sizes its waveform and full PSD panes to the available desktop.
+After reconstructing the PSD and obtaining a warning-free double-Gaussian fit,
+**Optimize FOM gates** performs a local discrete search around the current
+short- and long-gate endpoints. The baseline, integration start, pulse polarity,
+energy ROI, ratio fit ROI, and centroid seeds remain fixed. **Gate search radius**
+sets the per-endpoint search bounds, while **Optimization events** limits the
+sample used to compare candidates; an additional 128 MiB working-memory bound
+may reduce that sample for very long records. Candidates with failed or warned
+fits are excluded. Because larger FOM means better separation, the procedure
+maximizes FOM, applies the best sample-domain gates, and then reconstructs and
+refits the normal full dataset for confirmation. The operation is cancellable
+and does not modify the source capture.
 Its report bundle additionally records the exact baseline method, polarity,
 sample-domain gates and their time equivalents, sample period, source channel,
-event stride/limit, reconstruction statistics, and analysis mode that produced
-the fitted matrix.
+event stride/limit, reconstruction statistics, analysis mode, and optimization
+diagnostics that produced the fitted matrix.
 
 For Scope NDMA timing checks, edit `FILENAME` in
 [`notebooks/check_dma.py`](notebooks/check_dma.py) and run it from the repository

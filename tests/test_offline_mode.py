@@ -23,6 +23,7 @@ def test_offline_digitizer_exposes_replay_capabilities_without_transport() -> No
     digitizer.mca.set_energy_bin(4)
     assert digitizer.scope.get_trigger_level() == 123
     assert digitizer.mca.get_energy_bin() == 4
+    assert digitizer.mca.get_debug_signal_selectors() == tuple(range(9))
     digitizer.close()
 
 

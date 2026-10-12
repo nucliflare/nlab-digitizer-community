@@ -18,6 +18,7 @@ from nlab_modbus.core.register_specs import RegisterSpec, RegisterType
 from nlab.hardware.digitizer.backends.base import DigitizerBackend, IDSBackend
 from nlab.hardware.digitizer.digitizer import Digitizer
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer
+from nlab.hardware.digitizer.mca import MCA_DEBUG_SIGNAL_SELECTORS
 
 if TYPE_CHECKING:
     from nlab.hardware.digitizer.diagnostics import GlobalDiagnosticReading
@@ -73,7 +74,7 @@ class _OfflineDigitizerBackend:
         return np.full(2, max(1, samples), dtype=np.uint32)
 
     def get_debug_signal_selectors(self) -> tuple[int, ...]:
-        return tuple(range(16))
+        return MCA_DEBUG_SIGNAL_SELECTORS
 
     def get_lp_coeffs_size(self) -> int:
         return 64

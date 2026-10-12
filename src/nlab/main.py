@@ -51,9 +51,11 @@ def _configure_logging() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
-    # Debug mode is intended for NLab diagnostics. Matplotlib emits hundreds
-    # of font-scoring records while the PSD report figures are rendered.
-    logging.getLogger("matplotlib.font_manager").setLevel(logging.WARNING)
+    # Debug mode is intended for NLab diagnostics. Report rendering otherwise
+    # exposes verbose Matplotlib internals and Pillow PNG chunk parsing through
+    # the root logger when developer debug mode is enabled.
+    for logger_name in ("matplotlib", "PIL"):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 
 def _verify_libiio_runtime() -> None:

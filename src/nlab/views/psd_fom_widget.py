@@ -126,6 +126,9 @@ class PsdFomWidget(QGroupBox):
         self.guides_checkbox.toggled.connect(self.set_guides_visible)
         self.fit_button.clicked.connect(self.fit_current_projection)
         self.copy_button.clicked.connect(self.copy_results_table)
+        self.fit_region.sigRegionChangeFinished.connect(self.clear_fit)
+        for line in self.centroid_lines:
+            line.sigPositionChangeFinished.connect(self.clear_fit)
 
     def set_projection(self, ratio: np.ndarray, counts: np.ndarray) -> None:
         """Store the currently displayed ratio projection for the next button press."""

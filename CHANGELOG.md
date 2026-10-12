@@ -35,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without changing projections, fits, or exported matrix values.
 - Waveform gate-driven PSD recalculation preserves the user's energy-projection
   ROI instead of restoring the default first-quarter region after every update.
+- Waveform Analysis can optimize short- and long-gate endpoints for a local
+  maximum of the fitted PSD figure of merit. The bounded, cancellable search
+  holds the baseline, integration start, energy/fit ROIs, and centroid seeds
+  fixed, excludes poor-convergence candidates, then rebuilds and refits the
+  full PSD at the selected gates.
 - PSD Event Readback and Waveform Analysis now keep the current source file's
   full path visible and include its filename in the workbench window title.
 - PSD Event Readback and Waveform Analysis can export a file-named report folder
@@ -44,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matrix, spectrum, projection, fit-component, settings, and JSON metadata files.
   Waveform reports also preserve the exact integration gates and processing
   context used to produce the fit.
+  The FOM page now typesets the fit model, Poisson-deviance objective, FWHM,
+  and FOM equations in TeX-style mathematical notation.
 - Live and offline/readback PSD ratio projections now provide a toggleable
   draggable fit ROI, two draggable centroid seeds, and button-triggered bounded
   Levenberg-Marquardt double-Gaussian fitting with Poisson-deviance residuals,
@@ -71,8 +78,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- PSD report rendering no longer floods the system log with Matplotlib font-
-  matching diagnostics when developer debug mode is enabled.
+- PSD report energy spectra now always follow the panel's linear or logarithmic
+  count-axis selection, including empty spectra.
+- PSD report rendering no longer floods the system log with Matplotlib or
+  Pillow internals when developer debug mode is enabled.
+- Offline analysis no longer advertises nonexistent MCA debug selectors 9-15
+  and consequently no longer warns about them during workspace startup.
 - Frozen builds now detect a missing or unloadable native libiio runtime after
   Qt starts but before importing hardware modules. A recovery dialog directs
   users to the pinned v0.26 Windows installer instead of exposing a

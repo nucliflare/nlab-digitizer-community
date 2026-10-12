@@ -59,6 +59,9 @@ class MCAParam(IntEnum):
     LP_PRESET = 202  # preset selector (0=200 MHz, 1=70 MHz, 2=moving average)
 
 
+MCA_DEBUG_SIGNAL_SELECTORS = tuple(range(9))
+
+
 MCA_PARAMETER_SPECS: dict[MCAParam, ParameterSpec] = {
     # Ranges below follow user-api.md and the checked-in kernel drivers.
     # int16_t (hw_def: MIN–MAX, step 1)
@@ -122,8 +125,8 @@ MCA_PARAMETER_SPECS: dict[MCAParam, ParameterSpec] = {
     MCAParam.CFD_TW_LOW: RangeSpec(min_val=0, max_val=65534, step=2, default=8),
     MCAParam.CFD_TW_HIGH: RangeSpec(min_val=0, max_val=65534, step=2, default=64),
     # Corrected pulse-processor v101 drivers expose the complete 0..8 mux.
-    MCAParam.MEM1_SIG_SELECT: ListSpec(items=(0, 1, 2, 3, 4, 5, 6, 7, 8), default=0),
-    MCAParam.MEM2_SIG_SELECT: ListSpec(items=(0, 1, 2, 3, 4, 5, 6, 7, 8), default=1),
+    MCAParam.MEM1_SIG_SELECT: ListSpec(items=MCA_DEBUG_SIGNAL_SELECTORS, default=0),
+    MCAParam.MEM2_SIG_SELECT: ListSpec(items=MCA_DEBUG_SIGNAL_SELECTORS, default=1),
     MCAParam.EXT_TRIG_ENABLE: ListSpec(items=(False, True), default=False),
     # uint32_t (hw_def: not present; using full C type range)
     MCAParam.EDGE_DET_COEFF: RangeSpec(min_val=0, max_val=4294967295, step=1, default=1),
