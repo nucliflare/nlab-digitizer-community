@@ -45,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   residuals and preserves source spectra, seeds, centroid fits, calibration
   points, energy residuals, settings, and typeset model equations in PDF, CSV,
   and JSON files.
+- A persistent **ENERGY CALIBRATED** status-bar badge identifies when one or
+  more MCA channels have an applied calibration. Its tooltip lists those
+  channels, and double-clicking the badge opens the calibration workspace.
 - A dual-channel MCA gain-drift CLI diagnostic tracks the Na-22 511-keV peak
   maximum and local centroid from saved differential ROI spectra while logging
   MCA statistics, temperature correction, detector/board temperatures, power

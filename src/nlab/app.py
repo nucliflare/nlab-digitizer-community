@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import cast
 
 from PySide6.QtCore import QEvent, QObject, QProcess, QSettings, QStandardPaths, Qt, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QIcon, QKeyEvent, QScreen, QShowEvent
+from PySide6.QtGui import QCloseEvent, QIcon, QKeyEvent, QMouseEvent, QScreen, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -76,6 +76,19 @@ _GENERAL_CONTROLLER_KEYS = {
 }
 
 
+class _EnergyCalibrationIndicator(QLabel):
+    """Status-bar badge that opens the calibration workspace on double-click."""
+
+    double_clicked = Signal()
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class MainAppWindow(QMainWindow):
     """Top-level application window. Owns the UI and its controller."""
 
@@ -125,6 +138,7 @@ class MainAppWindow(QMainWindow):
             on_progress=on_progress,
             offline=self._offline,
         )
+        self.refresh_energy_calibration_indicator()
         self._application = QApplication.instance()
         if self._application is not None:
             self._application.installEventFilter(self)
@@ -246,6 +260,28 @@ class MainAppWindow(QMainWindow):
         self._offline_indicator.setVisible(self._offline)
         self.statusBar().addPermanentWidget(self._offline_indicator)
 
+        self._energy_calibration_indicator = _EnergyCalibrationIndicator(
+            "ENERGY CALIBRATED",
+            self,
+        )
+        self._energy_calibration_indicator.setObjectName("energyCalibrationIndicator")
+        self._energy_calibration_indicator.setStyleSheet(
+            "QLabel { background: #2e7d32; color: white; border-radius: 3px; "
+            "font-weight: 600; padding: 2px 8px; }"
+        )
+        self._energy_calibration_indicator.setAccessibleName(
+            "Energy calibration active indicator"
+        )
+        self._energy_calibration_indicator.setToolTip(
+            "No MCA energy calibration is active."
+        )
+        self._energy_calibration_indicator.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._energy_calibration_indicator.double_clicked.connect(
+            self._on_energy_calibration
+        )
+        self._energy_calibration_indicator.hide()
+        self.statusBar().addPermanentWidget(self._energy_calibration_indicator)
+
         self._sync_connection_actions()
 
         self._restore_developer_settings()
@@ -314,7 +350,28 @@ class MainAppWindow(QMainWindow):
             self._base_window_title = f"Nuclear Lab Digitizer — {endpoint_title}"
         self.setWindowTitle(self._base_window_title)
         self._offline_indicator.setVisible(self._offline)
+        self.refresh_energy_calibration_indicator()
         self._sync_connection_actions()
+
+    def refresh_energy_calibration_indicator(self, *_args: object) -> None:
+        """Mirror the applied MCA energy-calibration state in the status bar."""
+        indicator = getattr(self, "_energy_calibration_indicator", None)
+        controller = getattr(self, "_controller", None)
+        if indicator is None or controller is None:
+            return
+        labels_getter = getattr(controller, "energy_calibrated_channel_labels", None)
+        labels = labels_getter() if callable(labels_getter) else ()
+        if not isinstance(labels, tuple):
+            labels = ()
+        indicator.setVisible(bool(labels))
+        if labels:
+            channels = ", ".join(labels)
+            indicator.setToolTip(
+                f"Energy calibration is active for {channels}. "
+                "Double-click to open MCA Energy Calibration."
+            )
+        else:
+            indicator.setToolTip("No MCA energy calibration is active.")
 
     def _apply_post_connection_settings(
         self,

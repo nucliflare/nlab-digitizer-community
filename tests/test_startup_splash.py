@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 from pytestqt.qtbot import QtBot
 
@@ -88,6 +89,42 @@ def test_offline_window_is_identified_and_hardware_actions_are_disabled(
     ):
         assert not action.isEnabled()
     assert factory.call_args.kwargs["offline"] is True
+
+
+def test_energy_calibration_status_badge_opens_calibration_tool(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = Mock()
+    controller.energy_calibrated_channel_labels.return_value = ()
+    monkeypatch.setattr(app_module, "MainWindowController", Mock(return_value=controller))
+    monkeypatch.setattr(MainAppWindow, "_apply_stored_general_settings", lambda _self: None)
+    monkeypatch.setattr(
+        MainAppWindow,
+        "_persist_current_general_settings",
+        lambda _self: None,
+    )
+    monkeypatch.setattr(MainAppWindow, "_apply_view_state", lambda _self: None)
+
+    window = MainAppWindow(channels=2, offline=True)
+    qtbot.addWidget(window)
+    indicator = window._energy_calibration_indicator
+
+    assert indicator.isHidden()
+    assert indicator.text() == "ENERGY CALIBRATED"
+
+    controller.energy_calibrated_channel_labels.return_value = ("D1:CH0", "D1:CH1")
+    window.refresh_energy_calibration_indicator()
+    window.show()
+
+    assert indicator.isVisibleTo(window)
+    assert "D1:CH0, D1:CH1" in indicator.toolTip()
+    qtbot.mouseDClick(indicator, Qt.MouseButton.LeftButton)
+    controller.show_energy_calibration.assert_called_once_with()
+
+    controller.energy_calibrated_channel_labels.return_value = ()
+    window.refresh_energy_calibration_indicator()
+    assert indicator.isHidden()
 
 
 def test_offline_window_can_connect_without_restarting(

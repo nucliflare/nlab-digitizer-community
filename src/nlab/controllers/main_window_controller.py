@@ -374,6 +374,14 @@ class MainWindowController:
     def channel_count(self) -> int:
         return len(self._devices)
 
+    def energy_calibrated_channel_labels(self) -> tuple[str, ...]:
+        """Return display labels for MCAs with an applied energy calibration."""
+        return tuple(
+            controller.channel_label
+            for controller in self._mca_controllers
+            if controller.energy_calibration is not None
+        )
+
     # ------------------------------------------------------------------
     # Dock construction
     # ------------------------------------------------------------------
@@ -520,6 +528,17 @@ class MainWindowController:
                 )
                 self._set_controller_channel_label(mca_ctrl, ch_label)
                 self._mca_controllers.append(mca_ctrl)
+                calibration_indicator_slot = getattr(
+                    self._window,
+                    "refresh_energy_calibration_indicator",
+                    None,
+                )
+                if callable(calibration_indicator_slot):
+                    self._connect_optional_signal(
+                        mca_ctrl,
+                        "energy_calibration_changed",
+                        calibration_indicator_slot,
+                    )
                 self._connect_optional_signal(
                     mca_ctrl,
                     "session_readback",

@@ -619,7 +619,10 @@ coordinates, or raw list-mode records. The MCA histogram keeps raw channels on
 the bottom axis and displays calibrated keV on the top axis. ROI statistics and
 CSV exports include calibrated values, and Save Settings plus subsequent capture
 metadata preserve the reference points, coefficients, fit residuals, and energy-
-processing fingerprint. If a relevant MCA setting changes, the top axis is
+processing fingerprint. While any MCA calibration is applied, a persistent
+**ENERGY CALIBRATED** badge in the bottom status bar lists the calibrated channels
+in its tooltip; double-click the badge to reopen the calibration workspace. If a
+relevant MCA setting changes, the top axis is
 marked stale until the original settings are restored or a new calibration is
 applied. Binning is handled specially: changing its power-of-two factor
 automatically rescales the channel coordinates, so a calibration made at (for
