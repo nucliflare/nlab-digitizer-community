@@ -37,7 +37,7 @@ class GlobalController(QWidget):
     def __init__(
         self,
         devices: Sequence[Digitizer],
-        channel_labels: Sequence[int] | None = None,
+        channel_labels: Sequence[int | str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         if not devices:
@@ -603,10 +603,17 @@ class GlobalController(QWidget):
         errors: list[str] = []
         for label, device in zip(self._channel_labels, self._devices, strict=True):
             if not device.mca.get_global_enable():
-                errors.append(f"Ch {label} is not armed")
+                errors.append(f"{self._formatted_channel_label(label)} is not armed")
             if not device.mca.get_ext_trig_enable():
-                errors.append(f"Ch {label} has External Trigger disabled")
+                errors.append(
+                    f"{self._formatted_channel_label(label)} has External Trigger disabled"
+                )
         return errors
+
+    @staticmethod
+    def _formatted_channel_label(label: int | str) -> str:
+        text = str(label)
+        return text if text.startswith("D") else f"Ch {text}"
 
     def _start_armed_channels(self) -> None:
         if getattr(self, "_replay_hardware_interlocked", False):

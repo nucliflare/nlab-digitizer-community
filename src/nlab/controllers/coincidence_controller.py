@@ -87,6 +87,8 @@ class CoincidenceController(QWidget):
         mca_views: list[MCAController],
         global_view: GlobalController,
         parent: QWidget | None = None,
+        *,
+        channel_labels: list[str] | None = None,
     ) -> None:
         super().__init__(parent)
         if len(devices) < 2 or len(mca_views) < 2:
@@ -94,6 +96,9 @@ class CoincidenceController(QWidget):
         self._devices = devices[:2]
         self._mca_views = mca_views[:2]
         self._global_view = global_view
+        self._channel_labels = tuple(channel_labels or ("CH0", "CH1"))
+        if len(self._channel_labels) != 2:
+            raise ValueError("channel_labels must contain two entries")
         self._sync = devices[0].mca.sync
         self._state = "idle"
         self._replay_hardware_interlocked = False
@@ -148,6 +153,8 @@ class CoincidenceController(QWidget):
 
         run_box = QGroupBox("Synchronized acquisition")
         run_layout = QVBoxLayout(run_box)
+        self._run_layout = run_layout
+        self._digitizer_selector_widget: QWidget | None = None
         buttons = QHBoxLayout()
         self.btnStart = QPushButton("Start coincidence")
         self.btnStop = QPushButton("Stop")
@@ -168,6 +175,12 @@ class CoincidenceController(QWidget):
         self.status = QLabel("Ready; both MCA channels must be idle.")
         self.status.setWordWrap(True)
         run_layout.addWidget(self.status)
+        hardware_pair = QLabel(" + ".join(self._channel_labels))
+        hardware_pair.setToolTip(
+            "Both coincidence channels belong to this physical digitizer. "
+            "Cross-digitizer synchronization is not enabled."
+        )
+        run_layout.addWidget(hardware_pair)
         left.addWidget(run_box)
 
         gate_box = QGroupBox("Energy gates")
@@ -402,6 +415,20 @@ class CoincidenceController(QWidget):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         self._refresh_matrix_axes()
+
+    def set_digitizer_selector_widget(self, widget: QWidget | None) -> None:
+        """Place the owning workspace's board selector in the run controls."""
+        current = self._digitizer_selector_widget
+        if current is widget:
+            return
+        if current is not None:
+            self._run_layout.removeWidget(current)
+            current.hide()
+            current.setParent(None)
+        self._digitizer_selector_widget = widget
+        if widget is not None:
+            self._run_layout.insertWidget(0, widget)
+            widget.show()
 
     @staticmethod
     def _plot(title: str, axis: str, unit: str | None, color: str) -> tuple[Any, Any]:

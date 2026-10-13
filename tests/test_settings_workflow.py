@@ -95,7 +95,10 @@ def test_menu_save_writes_one_document_with_each_channel(
     )
     controller._external_controllers = []
     controller._window = SimpleNamespace(configuration_settings=lambda: {"show_roi": True})
-    dock = SimpleNamespace(saveState=lambda: QByteArray(b"dock-state"))
+    dock = SimpleNamespace(
+        saveState=lambda: QByteArray(b"dock-state"),
+        findChildren=lambda _widget_type: [],
+    )
     controller._scope_dock_host = dock
     controller._current_dock_host = dock
     controller._mca_dock_host = dock
@@ -129,8 +132,27 @@ def test_menu_save_writes_one_document_with_each_channel(
     }
     assert "current" in document["application"]["dock_layout"]
     assert "psd" in document["application"]["dock_layout"]
-    assert document["connection"] == {
-        "ip": "board.local",
-        "port": 30431,
-        "channels": 2,
+    assert document["application"]["dock_layout"]["topology"] == {
+        "scope": [],
+        "current": [],
+        "mca": [],
+        "psd": [],
+        "psu": [],
+        "global": [],
+        "external": [],
+    }
+    assert document["connection"]["ip"] == "board.local"
+    assert document["connection"]["port"] == 30431
+    assert document["connection"]["channels"] == 2
+    assert document["connection"]["digitizers"] == [
+        {
+            "id": "D1",
+            "ip": "board.local",
+            "port": 30431,
+            "channels": 2,
+        }
+    ]
+    assert document["connection"]["channel_topology"] == {
+        "0": "D1:CH0",
+        "1": "D1:CH1",
     }

@@ -9,7 +9,14 @@ from typing import cast
 
 from PySide6.QtCore import QEvent, QObject, QProcess, QSettings, QStandardPaths, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QIcon, QKeyEvent, QScreen, QShowEvent
-from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMainWindow, QMessageBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QInputDialog,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+)
 
 from nlab import __version__
 from nlab.controllers.main_window_controller import MainWindowController
@@ -22,6 +29,8 @@ from nlab.utils.remote_board_power import (
     power_command_was_delivered,
     ssh_arguments,
 )
+from nlab.views.connection_dialog import ConnectionDialog
+from nlab.views.connection_progress_dialog import ConnectionProgressDialog
 from nlab.views.dma_settings_dialog import (
     DMA_FOLDER_KEY,
     MCA_DMA_OUTPUT_MODE_KEY,
@@ -83,8 +92,12 @@ class MainAppWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self._host = host
+        self._port = port
+        self._channels = channels
+        self._config_path = config_path
         self._offline = bool(offline)
         self._closing = False
+        self._connection_busy = False
         self._modbus_refresh_running = False
         self._screen_change_connected = False
         self._board_power_process: QProcess | None = None
@@ -187,6 +200,8 @@ class MainAppWindow(QMainWindow):
         self.ui.actionMcaPeakAnalysis.triggered.connect(self._on_mca_peak_analysis)
         self.ui.actionValidateTiming.triggered.connect(self._on_validate_timing)
         self.ui.actionConvertToHdf5.triggered.connect(self._on_convert_to_hdf5)
+        self.ui.actionConnectDevice.triggered.connect(self._on_connect_device)
+        self.ui.actionDisconnectDevice.triggered.connect(self._on_disconnect_device)
         self.ui.actionReconnectDevice.triggered.connect(self._on_reconnect_device)
         self.ui.actionRefreshModbus.triggered.connect(self._on_refresh_modbus_devices)
         self._modbus_refresh_finished.connect(self._on_modbus_refresh_finished)
@@ -231,28 +246,99 @@ class MainAppWindow(QMainWindow):
         self._offline_indicator.setVisible(self._offline)
         self.statusBar().addPermanentWidget(self._offline_indicator)
 
-        power_actions_enabled = bool(self._host.strip())
-        self.ui.actionRebootBoard.setEnabled(power_actions_enabled)
-        self.ui.actionShutdownBoard.setEnabled(power_actions_enabled)
-
-        if self._offline:
-            for action_name in (
-                "actionStartSessionRecording",
-                "actionSaveSettings",
-                "actionLoadSettings",
-                "actionReconnectDevice",
-                "actionRefreshModbus",
-                "actionRebootBoard",
-                "actionShutdownBoard",
-            ):
-                action = getattr(self.ui, action_name, None)
-                if action is not None:
-                    action.setEnabled(False)
-            self.ui.actionReconnectDevice.setToolTip(
-                "Restart the application and choose Connect to open a hardware session."
-            )
+        self._sync_connection_actions()
 
         self._restore_developer_settings()
+
+    def _sync_connection_actions(self) -> None:
+        """Reflect whether this window owns an offline or live controller set."""
+        live = not self._offline
+        available = not self._connection_busy and not self._modbus_refresh_running
+        self.ui.actionConnectDevice.setEnabled(available)
+        self.ui.actionConnectDevice.setText("Add Digitizer..." if live else "Connect...")
+        self.ui.actionConnectDevice.setToolTip(
+            "Connect another digitizer as additional channels."
+            if live
+            else "Connect this offline workspace to a digitizer."
+        )
+        self.ui.actionDisconnectDevice.setEnabled(live and available)
+        self.ui.actionDisconnectDevice.setToolTip(
+            "Stop measurements and disconnect one physical digitizer."
+            if live
+            else "Connect to a digitizer before using Disconnect Digitizer."
+        )
+        for action_name in (
+            "actionStartSessionRecording",
+            "actionSaveSettings",
+            "actionLoadSettings",
+            "actionReconnectDevice",
+            "actionRefreshModbus",
+        ):
+            action = getattr(self.ui, action_name, None)
+            if action is not None:
+                action.setEnabled(live and available)
+        remote_power_enabled = live and available and bool(self._host.strip())
+        self.ui.actionRebootBoard.setEnabled(remote_power_enabled)
+        self.ui.actionShutdownBoard.setEnabled(remote_power_enabled)
+        self.ui.actionReconnectDevice.setToolTip(
+            "Re-establish the current digitizer connection."
+            if live
+            else "Connect to a digitizer before using Reconnect Device."
+        )
+
+    def _set_connection_busy(self, busy: bool) -> None:
+        """Interlock every connection entry point during a topology change."""
+        self._connection_busy = busy
+        self.ui.mainTabs.setEnabled(not busy)
+        self._sync_connection_actions()
+
+    def _sync_connection_presentation(self) -> None:
+        """Refresh mirrored window state from the controller's topology."""
+        self._offline = self._controller.offline
+        self._channels = self._controller.channel_count
+        endpoints = self._controller.endpoint_descriptions
+        primary = self._controller.primary_endpoint
+        if self._offline or primary is None:
+            self._host = ""
+            self._base_window_title = "Nuclear Lab Digitizer — Offline"
+        else:
+            self._host, self._port = primary
+            endpoint_title = (
+                endpoints[0]
+                if len(endpoints) == 1
+                else "; ".join(
+                    f"D{index + 1} {endpoint}"
+                    for index, endpoint in enumerate(endpoints)
+                )
+            )
+            self._base_window_title = f"Nuclear Lab Digitizer — {endpoint_title}"
+        self.setWindowTitle(self._base_window_title)
+        self._offline_indicator.setVisible(self._offline)
+        self._sync_connection_actions()
+
+    def _apply_post_connection_settings(
+        self,
+        *,
+        restore_hardware_configuration: bool,
+        on_progress: Callable[[str], None] | None,
+    ) -> Exception | None:
+        """Restore shared UI state after any successful topology transition."""
+        try:
+            self._apply_stored_general_settings()
+            if restore_hardware_configuration and self._config_path is not None:
+                if on_progress is not None:
+                    on_progress("Applying saved settings...")
+                self._controller.load_all_settings(self._config_path)
+            elif restore_hardware_configuration and auto_configuration_enabled():
+                self._restore_auto_configuration(on_progress)
+            self._persist_current_general_settings()
+            self._apply_view_state()
+        except Exception as exc:
+            logging.getLogger(__name__).exception(
+                "Connection changed, but post-connection settings could not be applied"
+            )
+            return exc
+        return None
 
     def _resize_for_available_screen(self, screen: QScreen | None = None) -> None:
         """Choose a useful initial size without exceeding the desktop.
@@ -509,6 +595,8 @@ class MainAppWindow(QMainWindow):
         self.ui.actionExitReplay.setEnabled(active)
         hardware_action_names = (
             "actionStartSessionRecording",
+            "actionConnectDevice",
+            "actionDisconnectDevice",
             "actionReconnectDevice",
             "actionRefreshModbus",
             "actionLoadSettings",
@@ -1002,7 +1090,189 @@ class MainAppWindow(QMainWindow):
     def _on_reset_zoom(self) -> None:
         self._controller.reset_all_zoom()
 
+    def _on_connect_device(self) -> None:
+        if self._connection_busy or self._modbus_refresh_running:
+            return
+        was_offline = self._offline
+        dialog = (
+            ConnectionDialog(self, channels=self._channels)
+            if was_offline
+            else ConnectionDialog(self, allow_offline=False)
+        )
+        if dialog.exec() != ConnectionDialog.DialogCode.Accepted or dialog.offline:
+            return
+
+        progress = ConnectionProgressDialog(
+            "Connecting to Device" if was_offline else "Adding Digitizer",
+            "Connecting to digitizer..." if was_offline else "Adding digitizer...",
+            self,
+        )
+        progress.show()
+
+        def update_progress(message: str) -> None:
+            progress.setLabelText(message)
+            QApplication.processEvents()
+
+        self._set_connection_busy(True)
+        try:
+            if was_offline:
+                self._controller.connect_to_device(
+                    dialog.ip,
+                    dialog.port,
+                    dialog.channels,
+                    on_progress=update_progress,
+                )
+                digitizer_number = 1
+            else:
+                digitizer_number = self._controller.add_digitizer(
+                    dialog.ip,
+                    dialog.port,
+                    dialog.channels,
+                    on_progress=update_progress,
+                )
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Digitizer connection failed")
+            progress.close()
+            self._set_connection_busy(False)
+            self._sync_replay_indicator()
+            QMessageBox.critical(self, "Connection Failed", str(exc))
+            return
+
+        self._sync_connection_presentation()
+        settings_error = self._apply_post_connection_settings(
+            restore_hardware_configuration=was_offline,
+            on_progress=update_progress,
+        )
+        progress.close()
+        self._set_connection_busy(False)
+        self._sync_replay_indicator()
+        self.statusBar().showMessage(
+            (
+                f"Connected to {self._host}:{self._port}"
+                if was_offline
+                else f"Added D{digitizer_number} at {dialog.ip}:{dialog.port}"
+            ),
+            10_000,
+        )
+        if settings_error is not None:
+            QMessageBox.warning(
+                self,
+                "Connected with Settings Warning",
+                "The digitizer is connected and measurement controls are enabled, but "
+                f"some saved settings could not be applied:\n{settings_error}",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Connected" if was_offline else "Digitizer Added",
+                (
+                    f"Connected to {self._host}:{self._port}. "
+                    "Measurement controls are enabled."
+                    if was_offline
+                    else f"Added D{digitizer_number} at {dialog.ip}:{dialog.port}. "
+                    "Coincidence remains limited to channels on one digitizer."
+                ),
+            )
+
+    def _on_disconnect_device(self) -> None:
+        if self._connection_busy or self._modbus_refresh_running:
+            return
+        endpoints = self._controller.endpoint_descriptions
+        if not endpoints:
+            return
+
+        digitizer = 0
+        if len(endpoints) > 1:
+            choices = [
+                f"D{index + 1} — {endpoint}"
+                for index, endpoint in enumerate(endpoints)
+            ]
+            selected, accepted = QInputDialog.getItem(
+                self,
+                "Disconnect Digitizer",
+                "Digitizer:",
+                choices,
+                0,
+                False,
+            )
+            if not accepted:
+                return
+            digitizer = choices.index(selected)
+
+        board = f"D{digitizer + 1}"
+        endpoint = endpoints[digitizer]
+        final_endpoint = len(endpoints) == 1
+        consequence = (
+            "The application will return to offline analysis mode."
+            if final_endpoint
+            else "Remaining digitizers will be renumbered."
+        )
+        reply = QMessageBox.question(
+            self,
+            "Disconnect Digitizer",
+            f"This will stop all running measurements and disconnect "
+            f"{board} at {endpoint}. {consequence}\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        progress = ConnectionProgressDialog(
+            "Disconnecting Digitizer",
+            f"Disconnecting {board}...",
+            self,
+        )
+        progress.show()
+
+        def update_progress(message: str) -> None:
+            progress.setLabelText(message)
+            QApplication.processEvents()
+
+        self._set_connection_busy(True)
+        try:
+            offline = self._controller.disconnect_digitizer(
+                digitizer,
+                on_progress=update_progress,
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Digitizer disconnect failed")
+            progress.close()
+            self._set_connection_busy(False)
+            self._sync_replay_indicator()
+            QMessageBox.critical(self, "Disconnect Failed", str(exc))
+            return
+
+        self._sync_connection_presentation()
+        settings_error = self._apply_post_connection_settings(
+            restore_hardware_configuration=False,
+            on_progress=update_progress,
+        )
+        progress.close()
+        self._set_connection_busy(False)
+        self._sync_replay_indicator()
+        self.statusBar().showMessage(f"Disconnected {board} at {endpoint}", 10_000)
+        if settings_error is not None:
+            QMessageBox.warning(
+                self,
+                "Disconnected with Settings Warning",
+                f"Disconnected {board} at {endpoint}, but some saved UI settings "
+                f"could not be applied:\n{settings_error}",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Digitizer Disconnected",
+                (
+                    f"Disconnected {board} at {endpoint}. Offline analysis mode is active."
+                    if offline
+                    else f"Disconnected {board} at {endpoint}. Remaining digitizers were "
+                    "renumbered."
+                ),
+            )
+
     def _on_reconnect_device(self) -> None:
+        if self._connection_busy or self._modbus_refresh_running:
+            return
         reply = QMessageBox.question(
             self,
             "Reconnect Device",
@@ -1012,31 +1282,58 @@ class MainAppWindow(QMainWindow):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
+
+        progress = ConnectionProgressDialog(
+            "Reconnecting Digitizers",
+            "Preparing replacement connections...",
+            self,
+        )
+        progress.show()
+
+        def update_progress(message: str) -> None:
+            progress.setLabelText(message)
+            QApplication.processEvents()
+
+        self._set_connection_busy(True)
         try:
-            self._controller.reconnect()
-            self._apply_stored_general_settings()
-            self._apply_view_state()
-            self.ui.mainTabs.setEnabled(True)
-            QMessageBox.information(self, "Reconnect", "Device reconnected successfully.")
-        except Exception as e:
+            self._controller.reconnect(on_progress=update_progress)
+        except Exception as exc:
             logging.getLogger(__name__).exception("Reconnect failed")
-            QMessageBox.critical(self, "Reconnect Failed", str(e))
-        finally:
+            progress.close()
+            self._set_connection_busy(False)
             self._sync_replay_indicator()
+            QMessageBox.critical(self, "Reconnect Failed", str(exc))
+            return
+
+        self._sync_connection_presentation()
+        settings_error = self._apply_post_connection_settings(
+            restore_hardware_configuration=False,
+            on_progress=update_progress,
+        )
+        progress.close()
+        self._set_connection_busy(False)
+        self._sync_replay_indicator()
+        if settings_error is not None:
+            QMessageBox.warning(
+                self,
+                "Reconnected with Settings Warning",
+                "Digitizer transports were replaced, but some saved UI settings "
+                f"could not be applied:\n{settings_error}",
+            )
+        else:
+            QMessageBox.information(self, "Reconnect", "Device reconnected successfully.")
 
     def _on_refresh_modbus_devices(self) -> None:
         """Start a non-blocking scan of both digitizer ser2net bridges."""
-        if self._modbus_refresh_running:
+        if self._modbus_refresh_running or self._connection_busy:
             return
         self._modbus_refresh_running = True
-        self.ui.actionRefreshModbus.setEnabled(False)
-        self.ui.actionReconnectDevice.setEnabled(False)
+        self._sync_connection_actions()
         try:
             self._controller.prepare_external_device_refresh()
         except Exception as exc:
             self._modbus_refresh_running = False
-            self.ui.actionRefreshModbus.setEnabled(True)
-            self.ui.actionReconnectDevice.setEnabled(True)
+            self._sync_connection_actions()
             logging.getLogger(__name__).exception("Failed to prepare Modbus refresh")
             self.statusBar().showMessage("Modbus refresh failed", 10000)
             QMessageBox.critical(self, "Modbus Refresh Failed", str(exc))
@@ -1075,8 +1372,7 @@ class MainAppWindow(QMainWindow):
                 scan.manager.close()
             return
 
-        self.ui.actionRefreshModbus.setEnabled(True)
-        self.ui.actionReconnectDevice.setEnabled(True)
+        self._sync_connection_actions()
         if error is not None or scan is None:
             if scan is not None:
                 scan.manager.close()

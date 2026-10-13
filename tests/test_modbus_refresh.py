@@ -16,12 +16,14 @@ from nlab.hardware.modbus_devices import ExternalDevices, ExternalDeviceScan
 from nlab.ui.ui_main_window import Ui_MainWindow
 
 
-def test_connection_menu_contains_reconnect_and_modbus_refresh(qtbot: QtBot) -> None:
+def test_connection_menu_contains_connection_and_modbus_actions(qtbot: QtBot) -> None:
     window = QMainWindow()
     qtbot.addWidget(window)
     ui = Ui_MainWindow()
     ui.setupUi(window)
 
+    assert ui.actionConnectDevice in ui.menuConnection.actions()
+    assert ui.actionDisconnectDevice in ui.menuConnection.actions()
     assert ui.actionReconnectDevice in ui.menuConnection.actions()
     assert ui.actionRefreshModbus in ui.menuConnection.actions()
     assert ui.actionReconnectDevice not in ui.menuFile.actions()
@@ -108,16 +110,33 @@ def test_apply_scan_stops_old_pollers_and_rebuilds_external_docks() -> None:
 
 
 def test_refresh_action_starts_background_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    connect_action = SimpleNamespace(setEnabled=Mock())
+    disconnect_action = SimpleNamespace(setEnabled=Mock())
     refresh_action = SimpleNamespace(setEnabled=Mock())
     reconnect_action = SimpleNamespace(setEnabled=Mock())
     status_bar = SimpleNamespace(showMessage=Mock())
     scan_target = Mock()
     controller = SimpleNamespace(prepare_external_device_refresh=Mock())
+
+    def sync_connection_actions() -> None:
+        for action in (
+            connect_action,
+            disconnect_action,
+            reconnect_action,
+            refresh_action,
+        ):
+            action.setEnabled(False)
+
+    sync_actions = Mock(side_effect=sync_connection_actions)
     window = SimpleNamespace(
         _modbus_refresh_running=False,
+        _connection_busy=False,
         _scan_modbus_in_background=scan_target,
+        _sync_connection_actions=sync_actions,
         _controller=controller,
         ui=SimpleNamespace(
+            actionConnectDevice=connect_action,
+            actionDisconnectDevice=disconnect_action,
             actionRefreshModbus=refresh_action,
             actionReconnectDevice=reconnect_action,
         ),
@@ -130,6 +149,9 @@ def test_refresh_action_starts_background_scan(monkeypatch: pytest.MonkeyPatch) 
     MainAppWindow._on_refresh_modbus_devices(cast(MainAppWindow, window))
 
     assert window._modbus_refresh_running
+    sync_actions.assert_called_once_with()
+    connect_action.setEnabled.assert_called_once_with(False)
+    disconnect_action.setEnabled.assert_called_once_with(False)
     refresh_action.setEnabled.assert_called_once_with(False)
     reconnect_action.setEnabled.assert_called_once_with(False)
     controller.prepare_external_device_refresh.assert_called_once_with()
@@ -143,17 +165,33 @@ def test_refresh_action_starts_background_scan(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_completed_refresh_is_applied_and_actions_are_reenabled() -> None:
+    connect_action = SimpleNamespace(setEnabled=Mock())
+    disconnect_action = SimpleNamespace(setEnabled=Mock())
     refresh_action = SimpleNamespace(setEnabled=Mock())
     reconnect_action = SimpleNamespace(setEnabled=Mock())
     status_bar = SimpleNamespace(showMessage=Mock())
     controller = SimpleNamespace(apply_external_device_scan=Mock(return_value=2))
     owner = SimpleNamespace(close=Mock())
     scan = ExternalDeviceScan(cast(ExternalDevices, owner), (SimpleNamespace(),) * 2)
+
+    def sync_connection_actions() -> None:
+        for action in (
+            connect_action,
+            disconnect_action,
+            reconnect_action,
+            refresh_action,
+        ):
+            action.setEnabled(True)
+
+    sync_actions = Mock(side_effect=sync_connection_actions)
     window = SimpleNamespace(
         _closing=False,
         _modbus_refresh_running=True,
         _controller=controller,
+        _sync_connection_actions=sync_actions,
         ui=SimpleNamespace(
+            actionConnectDevice=connect_action,
+            actionDisconnectDevice=disconnect_action,
             actionRefreshModbus=refresh_action,
             actionReconnectDevice=reconnect_action,
         ),
@@ -163,6 +201,9 @@ def test_completed_refresh_is_applied_and_actions_are_reenabled() -> None:
     MainAppWindow._on_modbus_refresh_finished(cast(MainAppWindow, window), scan, None)
 
     assert not window._modbus_refresh_running
+    sync_actions.assert_called_once_with()
+    connect_action.setEnabled.assert_called_once_with(True)
+    disconnect_action.setEnabled.assert_called_once_with(True)
     refresh_action.setEnabled.assert_called_once_with(True)
     reconnect_action.setEnabled.assert_called_once_with(True)
     controller.apply_external_device_scan.assert_called_once_with(scan)

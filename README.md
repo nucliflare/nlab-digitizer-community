@@ -146,8 +146,11 @@ uv run python examples/measure_current.py
 - Save and restore hardware plus application settings in YAML
 - Convert Scope and MCA binary captures to HDF5 from the File menu
 - Remote board reboot and shutdown controls
-- A dedicated **Connection** menu for full digitizer reconnects and background
-  external Modbus rescans
+- A dedicated **Connection** menu for connecting an offline workspace, adding
+  digitizers as extra channels, reconnecting all live endpoints, and running
+  background external Modbus rescans. Add Digitizer resolves hostnames and IP
+  addresses before opening a channel, so the same board cannot be added again
+  through an Avahi/mDNS alias.
 - An explicit **Offline / Replay Mode** in the startup dialog that opens the
   analysis workspace without IIO or Modbus hardware, keeps all hardware
   controls locked, and supports recorded Scope, Current, MCA, PSD, coincidence,
@@ -249,7 +252,20 @@ application opens no IIO or Modbus transport, marks the whole window `OFFLINE`,
 constructs read-only analysis targets for the selected channel count, and builds
 external-module panels from the fields stored in the bundle. File-based waveform,
 PSD, calibration, and peak-analysis tools remain available. To acquire data or
-change hardware, restart the application and choose **Connect**.
+change hardware without restarting, choose **Connection -> Connect...**, select
+the endpoint and channel count, and connect. The live controls replace the
+read-only channel workspace after every requested IIO channel opens successfully.
+Once live, the same action becomes **Add Digitizer...**. Each added endpoint is
+opened completely before the workspace is rebuilt, and channels are labelled by
+physical source (`D1:CH0`, `D1:CH1`, `D2:CH0`, and so on). Global trigger and
+diagnostic controls remain separate for each board. Coincidence acquisition uses
+two eligible channels from one board only; cross-board synchronization is left
+disabled until it can be validated in hardware. **Connection -> Disconnect
+Digitizer...** removes a selected board, renumbers the remaining `D#` labels, and
+returns the application to offline analysis mode when the final board is removed.
+Connect, add, disconnect, and reconnect prepare the replacement topology before
+committing it; if transport preparation, teardown, or view reconstruction fails,
+the application restores the previous consistent workspace.
 
 ## Hardware and firmware requirements
 
@@ -369,7 +385,9 @@ To work without a board, select the desired channel count and click
 **Offline / Replay Mode** instead. The analysis workspace opens no hardware
 endpoint; live acquisition, session recording, hardware settings, reconnect,
 Modbus refresh, and board-power actions remain disabled. Analysis tools and
-**File -> Replay Session...** remain available.
+**File -> Replay Session...** remain available. **Connection -> Connect...**
+opens the same discovery dialog later and promotes the running offline workspace
+to a live measurement session without restarting the application.
 
 When opened, the dialog scans for network `iiod` services with libiio's
 DNS-SD/mDNS discovery (Avahi on Linux) and also probes `192.168.3.1:30431`, the
@@ -681,7 +699,9 @@ CSV without overwriting existing files.
 ### Live coincidence measurement
 
 The **Coincidence** tab requires two current-IIO MCA list-mode channels and
-the shared software-start core. Set the energy ROIs in the two MCA histograms,
+the shared software-start core. When multiple connected digitizers qualify,
+use the **Digitizer** selector to choose one board's channel pair; cross-board
+coincidence remains disabled. Set the energy ROIs in the two MCA histograms,
 then select **Use CH0/CH1 MCA ROI** in the coincidence view. A hidden ROI, or
 an unchecked Use ROI option, accepts the channel's full MCA-channel range.
 Each accepted-energy plot shows its MCA ROI as a dashed, shaded band; an

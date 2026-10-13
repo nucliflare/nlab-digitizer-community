@@ -186,3 +186,11 @@ def test_offline_mode_accepts_without_an_address_or_saving_connection(
     assert dialog.result() == ConnectionDialog.DialogCode.Accepted
     assert dialog.offline
     assert "connection/recent_ips" not in _Settings.values
+
+
+def test_add_digitizer_mode_hides_offline_choice(qtbot: QtBot) -> None:
+    dialog = ConnectionDialog(allow_offline=False)
+    qtbot.addWidget(dialog)
+
+    assert dialog._ui.buttonOffline.isHidden()
+    assert dialog.windowTitle() == "Add Digitizer"

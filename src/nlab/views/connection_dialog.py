@@ -48,6 +48,7 @@ class ConnectionDialog(QDialog):
         ip: str | None = None,
         port: int | None = None,
         channels: int | None = None,
+        allow_offline: bool = True,
     ) -> None:
         super().__init__(parent)
         self._ui = Ui_ConnectionDialog()
@@ -56,6 +57,9 @@ class ConnectionDialog(QDialog):
         self._ui.buttonBox.accepted.connect(self._on_accept)
         self._ui.buttonBox.rejected.connect(self.reject)
         self._ui.buttonOffline.clicked.connect(self._on_offline)
+        self._ui.buttonOffline.setVisible(allow_offline)
+        if not allow_offline:
+            self.setWindowTitle("Add Digitizer")
         self._ui.comboIp.currentIndexChanged.connect(self._on_address_selected)
         line_edit = self._ui.comboIp.lineEdit()
         if line_edit is not None:

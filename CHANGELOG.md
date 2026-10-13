@@ -11,6 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Offline analysis mode now provides **Connection -> Connect...**. It reopens
+  digitizer discovery, validates every requested IIO channel before replacing
+  the read-only workspace, rebuilds the live measurement controls in place, and
+  restores the offline workspace if live controller construction fails. The
+  connection progress bar now spans the full dialog content width.
+- A live workspace can use **Connection -> Add Digitizer...** to append another
+  IIO endpoint. Channels are identified as `D1:CH0`, `D1:CH1`, `D2:CH0`, and so
+  on, and each board receives independent global controls. **Disconnect
+  Digitizer...** removes a selected endpoint, renumbers remaining boards, and
+  returns the app to offline analysis when the final board is removed. The
+  Coincidence tab can select any eligible digitizer while retaining per-board
+  settings, but each pair remains deliberately restricted to one physical
+  digitizer; cross-board synchronization is not assumed or enabled. Global
+  controls use a compact two-column layout, with diagnostics beside the
+  shared-start and temperature controls; synchronized-start guidance wraps
+  beside compact action buttons. Power-supply controls form a compact band
+  above the full-width monitoring plot instead of reserving a tall sidebar.
 - A dual-channel MCA gain-drift CLI diagnostic tracks the Na-22 511-keV peak
   maximum and local centroid from saved differential ROI spectra while logging
   MCA statistics, temperature correction, detector/board temperatures, power
@@ -78,6 +95,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Adding a digitizer now compares resolved IPv4/IPv6 endpoints as well as the
+  entered address. A board already connected by numeric IP cannot be added a
+  second time through its Avahi/mDNS hostname (or vice versa).
+- Saved dock layouts are now restored only when their digitizer/channel topology
+  matches the current workspace. Restarting with fewer digitizers no longer
+  reapplies obsolete dock placeholders that stack channel views vertically and
+  force the main window beyond the available screen height.
 - PSD report energy spectra now always follow the panel's linear or logarithmic
   count-axis selection, including empty spectra.
 - PSD report rendering no longer floods the system log with Matplotlib or
@@ -150,6 +174,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Connect, add, disconnect, and reconnect now share one validated topology
+  transition with explicit transport ownership and rollback. Replacement
+  transports are prepared before the active workspace is stopped, teardown or
+  view-rebuild failures restore the previous workspace, and the window derives
+  its title, channel count, offline indicator, and connection actions from the
+  controller after every successful transition.
 - External-device settings and telemetry tables use a compact layout with
   bounded register-name columns, aligned table edges, and full-name tooltips,
   keeping every column visible beside the live plot at the default window size.

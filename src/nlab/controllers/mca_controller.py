@@ -201,6 +201,11 @@ class MCAController(QWidget):
     def channel(self) -> int:
         return self._channel
 
+    @property
+    def channel_label(self) -> str:
+        """Human-readable physical channel label supplied by the workspace."""
+        return getattr(self, "display_channel_label", f"CH{self._channel}")
+
     def set_replay_hardware_interlock(self, enabled: bool) -> None:
         """Stop acquisition and block every MCA hardware-setting surface."""
         enabled = bool(enabled)
@@ -1066,12 +1071,12 @@ class MCAController(QWidget):
     def spectrum_snapshot(self) -> SpectrumSnapshot:
         """Return an immutable copy of the latest accumulated MCA histogram."""
         if self._last_histogram is None or len(self._last_histogram) == 0:
-            raise RuntimeError(f"MCA channel {self._channel} has no spectrum to copy")
+            raise RuntimeError(f"MCA {self.channel_label} has no spectrum to copy")
         created = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
         return SpectrumSnapshot.create(
             channel=self._channel,
             counts=self._last_histogram,
-            label=f"MCA {self._channel} — {created}",
+            label=f"MCA {self.channel_label} — {created}",
             elapsed_s=self._last_elapsed_s,
             live=self._worker is not None or self._dma_worker is not None,
             fingerprint=self.energy_calibration_fingerprint(),
@@ -1639,7 +1644,7 @@ class MCAController(QWidget):
             return
 
         with open(path, "w", newline="") as f:
-            f.write(f"# MCA channel {self._channel} spectrum export\n")
+            f.write(f"# MCA channel {self.channel_label} spectrum export\n")
             f.write(f"# elapsed_s={self._last_elapsed_s:.1f}\n")
             calibration = self._energy_calibration
             if calibration is not None:

@@ -102,6 +102,619 @@ def test_offline_startup_uses_in_memory_channels_and_interlocks_hardware(
     ]
 
 
+def test_offline_connect_opens_all_channels_before_replacing_workspace() -> None:
+    controller = _bare_controller()
+    controller._offline = True
+    controller._channels = 2
+    offline_devices = [SimpleNamespace(close=Mock()) for _ in range(2)]
+    controller._devices = offline_devices  # type: ignore[assignment]
+    connected = [SimpleNamespace(close=Mock()) for _ in range(2)]
+    connector = Mock(side_effect=connected)
+    controller._connect_endpoint_channel = connector  # type: ignore[method-assign]
+    controller._teardown_connection_runtime = Mock()  # type: ignore[method-assign]
+    controller._rebuild_connection_views = Mock()  # type: ignore[method-assign]
+    controller._set_replay_hardware_interlock = Mock()  # type: ignore[method-assign]
+    progress: list[str] = []
+
+    controller.connect_to_device(
+        " digitizer.local ",
+        30431,
+        2,
+        on_progress=progress.append,
+    )
+
+    assert connector.call_args_list == [
+        call("digitizer.local", 30431, 0),
+        call("digitizer.local", 30431, 1),
+    ]
+    controller._teardown_connection_runtime.assert_called_once_with()  # type: ignore[attr-defined]
+    controller._rebuild_connection_views.assert_called_once_with(  # type: ignore[attr-defined]
+        on_progress=progress.append,
+        normalize_docks=False,
+    )
+    for device in offline_devices:
+        device.close.assert_called_once_with()
+    assert controller._devices == connected
+    assert controller._host == "digitizer.local"
+    assert controller._port == 30431
+    assert controller._channels == 2
+    assert not controller._offline
+    assert progress == [
+        "Connecting channel 1 of 2...",
+        "Connecting channel 2 of 2...",
+    ]
+
+
+def test_offline_connect_failure_preserves_workspace() -> None:
+    controller = _bare_controller()
+    controller._offline = True
+    controller._channels = 2
+    original_devices = [object(), object()]
+    controller._devices = original_devices  # type: ignore[assignment]
+    opened = SimpleNamespace(close=Mock())
+    controller._connect_endpoint_channel = Mock(  # type: ignore[method-assign]
+        side_effect=[opened, RuntimeError("unavailable")]
+    )
+    controller._teardown_connection_runtime = Mock()  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        controller.connect_to_device("digitizer.local", 30431, 2)
+
+    opened.close.assert_called_once_with()
+    controller._teardown_connection_runtime.assert_not_called()  # type: ignore[attr-defined]
+    assert controller._devices is original_devices
+    assert controller._offline
+
+
+def test_offline_connect_rebuild_failure_restores_offline_workspace() -> None:
+    controller = _bare_controller()
+    controller._offline = True
+    controller._channels = 2
+    offline_devices = [SimpleNamespace(close=Mock()) for _ in range(2)]
+    connected = [SimpleNamespace(close=Mock()) for _ in range(2)]
+    controller._devices = offline_devices  # type: ignore[assignment]
+    controller._endpoints = []
+    controller._device_channels = [
+        main_window_module.DigitizerChannel(0, 0),
+        main_window_module.DigitizerChannel(0, 1),
+    ]
+    controller._connect_endpoint_channel = Mock(  # type: ignore[method-assign]
+        side_effect=connected
+    )
+    controller._teardown_connection_runtime = Mock()  # type: ignore[method-assign]
+    controller._rebuild_connection_views = Mock(  # type: ignore[method-assign]
+        side_effect=[RuntimeError("live views failed"), None]
+    )
+    controller._set_replay_hardware_interlock = Mock()  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="live views failed"):
+        controller.connect_to_device("digitizer.local", 30431, 2)
+
+    assert controller._offline
+    assert controller._devices == offline_devices
+    assert controller._endpoints == []
+    for device in connected:
+        device.close.assert_called_once_with()
+    for device in offline_devices:
+        device.close.assert_not_called()
+    assert controller._teardown_connection_runtime.call_args_list == [  # type: ignore[attr-defined]
+        call(),
+        call(),
+    ]
+    controller._set_replay_hardware_interlock.assert_called_once_with(  # type: ignore[attr-defined]
+        True,
+        resume_background=False,
+    )
+
+
+def _install_address_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    addresses: dict[str, str],
+) -> None:
+    def getaddrinfo(host: object, *_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        address = addresses[str(host)]
+        return [
+            (
+                main_window_module.socket.AF_INET,
+                main_window_module.socket.SOCK_STREAM,
+                main_window_module.socket.IPPROTO_TCP,
+                "",
+                (address, 0),
+            )
+        ]
+
+    monkeypatch.setattr(main_window_module.socket, "getaddrinfo", getaddrinfo)
+
+
+def test_live_connect_adds_a_second_digitizer_with_physical_channel_addresses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_address_resolution(
+        monkeypatch,
+        {
+            "board.local": "192.0.2.10",
+            "board-2.local": "192.0.2.11",
+        },
+    )
+    controller = _bare_controller()
+    controller._offline = False
+    controller._channels = 2
+    original_devices = [object(), object()]
+    controller._devices = original_devices  # type: ignore[assignment]
+    controller._endpoints = [main_window_module.DigitizerEndpoint("board.local", 30431, 2)]
+    controller._device_channels = [
+        main_window_module.DigitizerChannel(0, 0),
+        main_window_module.DigitizerChannel(0, 1),
+    ]
+    added = [object(), object()]
+    controller._connect_endpoint_channel = Mock(side_effect=added)  # type: ignore[method-assign]
+    controller._teardown_connection_runtime = Mock()  # type: ignore[method-assign]
+    controller._rebuild_connection_views = Mock()  # type: ignore[method-assign]
+    progress: list[str] = []
+
+    number = controller.add_digitizer(
+        " board-2.local ",
+        30431,
+        2,
+        on_progress=progress.append,
+    )
+
+    assert number == 2
+    assert controller._devices == [*original_devices, *added]
+    assert controller._endpoints[-1] == main_window_module.DigitizerEndpoint(
+        "board-2.local", 30431, 2
+    )
+    assert [controller._channel_label(index) for index in range(4)] == [
+        "D1:CH0",
+        "D1:CH1",
+        "D2:CH0",
+        "D2:CH1",
+    ]
+    controller._teardown_connection_runtime.assert_called_once_with()  # type: ignore[attr-defined]
+    controller._rebuild_connection_views.assert_called_once_with(  # type: ignore[attr-defined]
+        on_progress=progress.append,
+        normalize_docks=True,
+    )
+    assert progress == [
+        "Connecting D2:CH0 (1 of 2)...",
+        "Connecting D2:CH1 (2 of 2)...",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("connected_host", "candidate_host"),
+    (
+        ("192.168.10.128", "nucliflare-001ec0ade4c7.local"),
+        ("nucliflare-001ec0ade4c7.local", "192.168.10.128"),
+    ),
+)
+def test_live_add_rejects_ip_and_avahi_aliases_of_the_same_digitizer(
+    monkeypatch: pytest.MonkeyPatch,
+    connected_host: str,
+    candidate_host: str,
+) -> None:
+    _install_address_resolution(
+        monkeypatch,
+        {"nucliflare-001ec0ade4c7.local": "192.168.10.128"},
+    )
+    controller = _bare_controller()
+    controller._offline = False
+    controller._channels = 2
+    controller._devices = [object(), object()]  # type: ignore[assignment]
+    controller._endpoints = [
+        main_window_module.DigitizerEndpoint(connected_host, 30431, 2)
+    ]
+    controller._connect_endpoint_channel = Mock()  # type: ignore[method-assign]
+    controller._teardown_connection_runtime = Mock()  # type: ignore[method-assign]
+
+    with pytest.raises(
+        ValueError,
+        match="already connected as D1",
+    ):
+        controller.add_digitizer(candidate_host, 30431, 2)
+
+    controller._connect_endpoint_channel.assert_not_called()  # type: ignore[attr-defined]
+    controller._teardown_connection_runtime.assert_not_called()  # type: ignore[attr-defined]
+
+
+def test_live_add_does_not_connect_when_alias_resolution_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main_window_module.socket,
+        "getaddrinfo",
+        Mock(side_effect=main_window_module.socket.gaierror("unresolved")),
+    )
+    controller = _bare_controller()
+    controller._offline = False
+    controller._channels = 2
+    controller._devices = [object(), object()]  # type: ignore[assignment]
+    controller._endpoints = [
+        main_window_module.DigitizerEndpoint("192.168.10.128", 30431, 2)
+    ]
+    controller._connect_endpoint_channel = Mock()  # type: ignore[method-assign]
+    controller._teardown_connection_runtime = Mock()  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="duplicate-device safety check"):
+        controller.add_digitizer("unresolved.local", 30431, 2)
+
+    controller._connect_endpoint_channel.assert_not_called()  # type: ignore[attr-defined]
+    controller._teardown_connection_runtime.assert_not_called()  # type: ignore[attr-defined]
+
+
+def test_live_add_connection_failure_leaves_existing_workspace_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_address_resolution(
+        monkeypatch,
+        {
+            "board.local": "192.0.2.10",
+            "board-2.local": "192.0.2.11",
+        },
+    )
+    controller = _bare_controller()
+    controller._offline = False
+    controller._channels = 2
+    original_devices = [object(), object()]
+    controller._devices = original_devices  # type: ignore[assignment]
+    controller._endpoints = [main_window_module.DigitizerEndpoint("board.local", 30431, 2)]
+    opened = SimpleNamespace(close=Mock())
+    controller._connect_endpoint_channel = Mock(  # type: ignore[method-assign]
+        side_effect=[opened, RuntimeError("unavailable")]
+    )
+    controller._teardown_connection_runtime = Mock()  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        controller.add_digitizer("board-2.local", 30431, 2)
+
+    opened.close.assert_called_once_with()
+    controller._teardown_connection_runtime.assert_not_called()  # type: ignore[attr-defined]
+    assert controller._devices is original_devices
+
+
+def test_disconnect_digitizer_reindexes_remaining_physical_channels() -> None:
+    controller = _bare_controller()
+    controller._offline = False
+    devices = [SimpleNamespace(close=Mock()) for _ in range(4)]
+    controller._devices = devices  # type: ignore[assignment]
+    controller._endpoints = [
+        main_window_module.DigitizerEndpoint("board-1.local", 30431, 2),
+        main_window_module.DigitizerEndpoint("board-2.local", 30432, 2),
+    ]
+    controller._device_channels = [
+        main_window_module.DigitizerChannel(0, 0),
+        main_window_module.DigitizerChannel(0, 1),
+        main_window_module.DigitizerChannel(1, 0),
+        main_window_module.DigitizerChannel(1, 1),
+    ]
+    controller._channels = 4
+    controller._coincidence_settings_by_digitizer = {
+        0: {"gate_ns": 100},
+        1: {"gate_ns": 200},
+    }
+    controller._selected_coincidence_digitizer = 1
+    controller._teardown_connection_runtime = Mock()  # type: ignore[method-assign]
+    controller._rebuild_connection_views = Mock()  # type: ignore[method-assign]
+    progress: list[str] = []
+
+    offline = controller.disconnect_digitizer(0, on_progress=progress.append)
+
+    assert not offline
+    assert controller._devices == devices[2:]
+    assert controller._endpoints == [
+        main_window_module.DigitizerEndpoint("board-2.local", 30432, 2)
+    ]
+    assert controller._device_channels == [
+        main_window_module.DigitizerChannel(0, 0),
+        main_window_module.DigitizerChannel(0, 1),
+    ]
+    assert controller._host == "board-2.local"
+    assert controller._port == 30432
+    assert controller._channels == 2
+    assert controller._coincidence_settings_by_digitizer == {0: {"gate_ns": 200}}
+    assert controller._selected_coincidence_digitizer == 0
+    for device in devices[:2]:
+        device.close.assert_called_once_with()
+    for device in devices[2:]:
+        device.close.assert_not_called()
+    controller._teardown_connection_runtime.assert_called_once_with()  # type: ignore[attr-defined]
+    controller._rebuild_connection_views.assert_called_once_with(  # type: ignore[attr-defined]
+        on_progress=progress.append,
+        normalize_docks=True,
+    )
+    assert progress == [
+        "Stopping measurements for D1...",
+        "Rebuilding remaining digitizer views...",
+    ]
+
+
+def test_disconnect_final_digitizer_restores_offline_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _bare_controller()
+    controller._offline = False
+    live_devices = [SimpleNamespace(close=Mock()) for _ in range(2)]
+    offline_devices = [object(), object()]
+    controller._devices = live_devices  # type: ignore[assignment]
+    controller._endpoints = [
+        main_window_module.DigitizerEndpoint("board.local", 30431, 2)
+    ]
+    controller._device_channels = [
+        main_window_module.DigitizerChannel(0, 0),
+        main_window_module.DigitizerChannel(0, 1),
+    ]
+    controller._channels = 2
+    controller._coincidence_settings_by_digitizer = {0: {"gate_ns": 100}}
+    controller._selected_coincidence_digitizer = 0
+    controller._teardown_connection_runtime = Mock()  # type: ignore[method-assign]
+    controller._rebuild_connection_views = Mock()  # type: ignore[method-assign]
+    controller._set_replay_hardware_interlock = Mock()  # type: ignore[method-assign]
+    factory = Mock(side_effect=offline_devices)
+    monkeypatch.setattr(main_window_module, "create_offline_digitizer", factory)
+
+    offline = controller.disconnect_digitizer(0)
+
+    assert offline
+    assert controller._offline
+    assert controller._host == ""
+    assert controller._endpoints == []
+    assert controller._devices == offline_devices
+    assert controller._device_channels == [
+        main_window_module.DigitizerChannel(0, 0),
+        main_window_module.DigitizerChannel(0, 1),
+    ]
+    assert controller._coincidence_settings_by_digitizer == {}
+    factory.assert_has_calls([call(0), call(1)])
+    for device in live_devices:
+        device.close.assert_called_once_with()
+    controller._set_replay_hardware_interlock.assert_called_once_with(  # type: ignore[attr-defined]
+        True,
+        resume_background=False,
+    )
+
+
+def test_disconnect_rebuild_failure_restores_original_live_workspace() -> None:
+    controller = _bare_controller()
+    controller._offline = False
+    devices = [SimpleNamespace(close=Mock()) for _ in range(4)]
+    endpoints = [
+        main_window_module.DigitizerEndpoint("board-1.local", 30431, 2),
+        main_window_module.DigitizerEndpoint("board-2.local", 30432, 2),
+    ]
+    addresses = [
+        main_window_module.DigitizerChannel(0, 0),
+        main_window_module.DigitizerChannel(0, 1),
+        main_window_module.DigitizerChannel(1, 0),
+        main_window_module.DigitizerChannel(1, 1),
+    ]
+    controller._devices = devices  # type: ignore[assignment]
+    controller._endpoints = endpoints
+    controller._device_channels = addresses
+    controller._channels = 4
+    controller._coincidence_settings_by_digitizer = {}
+    controller._selected_coincidence_digitizer = 0
+    controller._teardown_connection_runtime = Mock()  # type: ignore[method-assign]
+    controller._rebuild_connection_views = Mock(  # type: ignore[method-assign]
+        side_effect=[RuntimeError("rebuild failed"), None]
+    )
+
+    with pytest.raises(RuntimeError, match="rebuild failed"):
+        controller.disconnect_digitizer(1)
+
+    assert controller._devices == devices
+    assert controller._endpoints == endpoints
+    assert controller._device_channels == addresses
+    assert controller._host == "board-1.local"
+    assert controller._port == 30431
+    assert controller._channels == 4
+    assert not controller._offline
+    for device in devices:
+        device.close.assert_not_called()
+    assert controller._teardown_connection_runtime.call_args_list == [  # type: ignore[attr-defined]
+        call(),
+        call(),
+    ]
+    assert controller._rebuild_connection_views.call_count == 2  # type: ignore[attr-defined]
+
+
+def test_disconnect_teardown_failure_restores_original_live_workspace() -> None:
+    controller = _bare_controller()
+    controller._offline = False
+    devices = [SimpleNamespace(close=Mock()) for _ in range(4)]
+    endpoints = [
+        main_window_module.DigitizerEndpoint("board-1.local", 30431, 2),
+        main_window_module.DigitizerEndpoint("board-2.local", 30432, 2),
+    ]
+    addresses = [
+        main_window_module.DigitizerChannel(0, 0),
+        main_window_module.DigitizerChannel(0, 1),
+        main_window_module.DigitizerChannel(1, 0),
+        main_window_module.DigitizerChannel(1, 1),
+    ]
+    controller._devices = devices  # type: ignore[assignment]
+    controller._endpoints = endpoints
+    controller._device_channels = addresses
+    controller._channels = 4
+    controller._coincidence_settings_by_digitizer = {}
+    controller._selected_coincidence_digitizer = 0
+    controller._teardown_connection_runtime = Mock(  # type: ignore[method-assign]
+        side_effect=[RuntimeError("worker stop failed"), None]
+    )
+    controller._rebuild_connection_views = Mock()  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="worker stop failed"):
+        controller.disconnect_digitizer(1)
+
+    assert controller._devices == devices
+    assert controller._endpoints == endpoints
+    assert controller._device_channels == addresses
+    assert controller._host == "board-1.local"
+    assert controller._channels == 4
+    for device in devices:
+        device.close.assert_not_called()
+    assert controller._teardown_connection_runtime.call_args_list == [  # type: ignore[attr-defined]
+        call(),
+        call(),
+    ]
+    controller._rebuild_connection_views.assert_called_once_with(  # type: ignore[attr-defined]
+        on_progress=None,
+        normalize_docks=True,
+    )
+
+
+def test_final_disconnect_offline_creation_failure_restores_live_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _bare_controller()
+    controller._offline = False
+    devices = [SimpleNamespace(close=Mock()) for _ in range(2)]
+    endpoints = [
+        main_window_module.DigitizerEndpoint("board.local", 30431, 2)
+    ]
+    addresses = [
+        main_window_module.DigitizerChannel(0, 0),
+        main_window_module.DigitizerChannel(0, 1),
+    ]
+    controller._devices = devices  # type: ignore[assignment]
+    controller._endpoints = endpoints
+    controller._device_channels = addresses
+    controller._channels = 2
+    controller._coincidence_settings_by_digitizer = {}
+    controller._selected_coincidence_digitizer = 0
+    controller._teardown_connection_runtime = Mock()  # type: ignore[method-assign]
+    controller._rebuild_connection_views = Mock()  # type: ignore[method-assign]
+    partial_offline = SimpleNamespace(close=Mock())
+    monkeypatch.setattr(
+        main_window_module,
+        "create_offline_digitizer",
+        Mock(side_effect=[partial_offline, RuntimeError("offline creation failed")]),
+    )
+
+    with pytest.raises(RuntimeError, match="offline creation failed"):
+        controller.disconnect_digitizer(0)
+
+    assert controller._devices == devices
+    assert controller._endpoints == endpoints
+    assert controller._device_channels == addresses
+    assert not controller._offline
+    for device in devices:
+        device.close.assert_not_called()
+    partial_offline.close.assert_called_once_with()
+    controller._teardown_connection_runtime.assert_not_called()  # type: ignore[attr-defined]
+    controller._rebuild_connection_views.assert_not_called()  # type: ignore[attr-defined]
+
+
+def test_reconnect_reopens_every_configured_digitizer_endpoint() -> None:
+    controller = _bare_controller()
+    controller._offline = False
+    controller._channels = 4
+    previous = [SimpleNamespace(close=Mock()) for _ in range(4)]
+    controller._devices = previous  # type: ignore[assignment]
+    controller._endpoints = [
+        main_window_module.DigitizerEndpoint("board-1.local", 30431, 2),
+        main_window_module.DigitizerEndpoint("board-2.local", 30432, 2),
+    ]
+    controller._device_channels = [
+        main_window_module.DigitizerChannel(0, 0),
+        main_window_module.DigitizerChannel(0, 1),
+        main_window_module.DigitizerChannel(1, 0),
+        main_window_module.DigitizerChannel(1, 1),
+    ]
+    connected = [SimpleNamespace(close=Mock()) for _ in range(4)]
+    connector = Mock(side_effect=connected)
+    controller._connect_endpoint_channel = connector  # type: ignore[method-assign]
+    controller._teardown_connection_runtime = Mock()  # type: ignore[method-assign]
+    controller._rebuild_connection_views = Mock()  # type: ignore[method-assign]
+
+    controller.reconnect()
+
+    assert connector.call_args_list == [
+        call("board-1.local", 30431, 0),
+        call("board-1.local", 30431, 1),
+        call("board-2.local", 30432, 0),
+        call("board-2.local", 30432, 1),
+    ]
+    assert controller._devices == connected
+    assert controller._device_channels == [
+        main_window_module.DigitizerChannel(0, 0),
+        main_window_module.DigitizerChannel(0, 1),
+        main_window_module.DigitizerChannel(1, 0),
+        main_window_module.DigitizerChannel(1, 1),
+    ]
+    controller._teardown_connection_runtime.assert_called_once_with()  # type: ignore[attr-defined]
+    for device in previous:
+        device.close.assert_called_once_with()
+    for device in connected:
+        device.close.assert_not_called()
+
+
+def test_reconnect_open_failure_leaves_existing_workspace_running() -> None:
+    controller = _bare_controller()
+    controller._offline = False
+    previous = [SimpleNamespace(close=Mock()) for _ in range(2)]
+    opened = SimpleNamespace(close=Mock())
+    controller._devices = previous  # type: ignore[assignment]
+    controller._endpoints = [
+        main_window_module.DigitizerEndpoint("board.local", 30431, 2)
+    ]
+    controller._device_channels = [
+        main_window_module.DigitizerChannel(0, 0),
+        main_window_module.DigitizerChannel(0, 1),
+    ]
+    controller._channels = 2
+    controller._connect_endpoint_channel = Mock(  # type: ignore[method-assign]
+        side_effect=[opened, RuntimeError("replacement unavailable")]
+    )
+    controller._teardown_connection_runtime = Mock()  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="replacement unavailable"):
+        controller.reconnect()
+
+    opened.close.assert_called_once_with()
+    controller._teardown_connection_runtime.assert_not_called()  # type: ignore[attr-defined]
+    assert controller._devices == previous
+    for device in previous:
+        device.close.assert_not_called()
+
+
+def test_reconnect_rebuild_failure_restores_existing_transports() -> None:
+    controller = _bare_controller()
+    controller._offline = False
+    previous = [SimpleNamespace(close=Mock()) for _ in range(2)]
+    replacement = [SimpleNamespace(close=Mock()) for _ in range(2)]
+    endpoints = [main_window_module.DigitizerEndpoint("board.local", 30431, 2)]
+    addresses = [
+        main_window_module.DigitizerChannel(0, 0),
+        main_window_module.DigitizerChannel(0, 1),
+    ]
+    controller._devices = previous  # type: ignore[assignment]
+    controller._endpoints = endpoints
+    controller._device_channels = addresses
+    controller._channels = 2
+    controller._connect_endpoint_channel = Mock(  # type: ignore[method-assign]
+        side_effect=replacement
+    )
+    controller._teardown_connection_runtime = Mock()  # type: ignore[method-assign]
+    controller._rebuild_connection_views = Mock(  # type: ignore[method-assign]
+        side_effect=[RuntimeError("view rebuild failed"), None]
+    )
+
+    with pytest.raises(RuntimeError, match="view rebuild failed"):
+        controller.reconnect()
+
+    assert controller._devices == previous
+    assert controller._endpoints == endpoints
+    assert controller._device_channels == addresses
+    for device in replacement:
+        device.close.assert_called_once_with()
+    for device in previous:
+        device.close.assert_not_called()
+    assert controller._teardown_connection_runtime.call_args_list == [  # type: ignore[attr-defined]
+        call(),
+        call(),
+    ]
+
+
 def test_offline_external_replay_panels_are_derived_from_recorded_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -557,6 +1170,60 @@ def test_global_telemetry_is_dispatched_during_replay(
         [{"key": "pll", "value": True}]
     )
     global_controller.finish_session_replay.assert_called_once_with()
+
+
+def test_second_digitizer_global_telemetry_replays_to_its_own_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _bare_controller()
+    controller._session_replay = object()
+    controller._session_telemetry_replay_timer = SimpleNamespace(start=Mock(), stop=Mock())
+    controller._psu_controller_by_device = {}
+    controller._external_controllers = []
+    globals_ = [
+        SimpleNamespace(
+            begin_session_replay=Mock(),
+            display_session_replay_temperature=Mock(),
+            display_session_replay_diagnostics=Mock(),
+            finish_session_replay=Mock(),
+        )
+        for _index in range(2)
+    ]
+    controller._global_controller = globals_[0]
+    controller._global_controllers = globals_
+    events = [
+        TelemetryReplayEvent(
+            0,
+            100,
+            "digitizer.d2.temperature_correction",
+            {"readback": {"temperature": 67.5}},
+        ),
+        TelemetryReplayEvent(
+            1,
+            200,
+            "digitizer.d2.diagnostics",
+            {"readings": [{"key": "pll", "value": True}]},
+        ),
+    ]
+    replay = SimpleNamespace(manifest={"started_monotonic_ns": 100})
+    monkeypatch.setattr(
+        main_window_module,
+        "monotonic_ns",
+        Mock(side_effect=[1_000, 1_000, 1_100]),
+    )
+
+    controller._start_session_telemetry_replay(replay, events)
+    controller._advance_session_telemetry_replay()
+
+    globals_[0].begin_session_replay.assert_not_called()
+    globals_[1].begin_session_replay.assert_called_once_with()
+    globals_[1].display_session_replay_temperature.assert_called_once_with(
+        {"temperature": 67.5}
+    )
+    globals_[1].display_session_replay_diagnostics.assert_called_once_with(
+        [{"key": "pll", "value": True}]
+    )
+    globals_[1].finish_session_replay.assert_called_once_with()
 
 
 def test_analysis_replay_feeds_recorded_events_to_psd_and_coincidence() -> None:
@@ -1031,10 +1698,10 @@ def test_startup_builds_mca_features_only_for_capable_channels(
     assert controller._psd_controller_by_device == {0: psd}
     assert controller._mca_controller_by_device == {0: mca}
     main_tabs.setTabEnabled.assert_any_call(1, True)
-    assert "channel(s): 1" in tab_mca.setToolTip.call_args.args[0]
+    assert "channel(s): D1:CH1" in tab_mca.setToolTip.call_args.args[0]
 
 
-def test_startup_builds_one_global_controller_for_all_channels(
+def test_startup_builds_one_global_controller_for_each_digitizer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _bare_controller()
@@ -1053,11 +1720,12 @@ def test_startup_builds_one_global_controller_for_all_channels(
 
     controller._build_global_tab()
 
-    factory.assert_called_once_with(controller._devices, [0, 1])
+    factory.assert_called_once_with(controller._devices, ["D1:CH0", "D1:CH1"])
     assert controller._global_controller is expected
+    assert controller._global_controllers == [expected]
     controller._make_dock.assert_called_once_with(
         "global_panel",
-        "Global",
+        "D1",
         expected,
     )
     controller._populate_dock_host.assert_called_once_with(
@@ -1065,6 +1733,330 @@ def test_startup_builds_one_global_controller_for_all_channels(
         [expected_dock],
     )
     layout.addWidget.assert_called_once_with(controller._global_dock_host)
+
+
+def test_coincidence_pair_never_crosses_digitizer_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    qapp: object,
+) -> None:
+    controller = _bare_controller()
+    controller._devices = [
+        SimpleNamespace(capabilities=SimpleNamespace(mca_dma=True)),
+        SimpleNamespace(capabilities=SimpleNamespace(mca_dma=True)),
+        SimpleNamespace(capabilities=SimpleNamespace(mca_dma=True)),
+    ]
+    controller._device_channels = [
+        main_window_module.DigitizerChannel(0, 0),
+        main_window_module.DigitizerChannel(1, 0),
+        main_window_module.DigitizerChannel(1, 1),
+    ]
+    mca = [object(), object(), object()]
+    controller._mca_controller_by_device = dict(enumerate(mca))
+    d1_global = SimpleNamespace(sync_available=True)
+    d2_global = SimpleNamespace(sync_available=True)
+    controller._global_controller_by_digitizer = {0: d1_global, 1: d2_global}
+    controller._coincidence_controller = None
+    tab = SimpleNamespace(setToolTip=Mock())
+    tabs = SimpleNamespace(indexOf=Mock(return_value=5), setTabEnabled=Mock())
+    layout = SimpleNamespace(addWidget=Mock())
+    controller._window = SimpleNamespace(
+        ui=SimpleNamespace(
+            mainTabs=tabs,
+            tabCoincidence=tab,
+            layoutTabCoincidence=layout,
+        )
+    )
+    created = object()
+    factory = Mock(return_value=created)
+    monkeypatch.setattr(main_window_module, "CoincidenceController", factory)
+
+    controller._build_coincidence_tab()
+
+    assert controller._coincidence_channels == (1, 2)
+    factory.assert_called_once_with(
+        controller._devices[1:3],
+        mca[1:3],
+        d2_global,
+        channel_labels=["D2:CH0", "D2:CH1"],
+    )
+    assert "Cross-digitizer coincidence is disabled" in tab.setToolTip.call_args.args[0]
+
+
+def test_coincidence_digitizer_selector_switches_same_board_pairs(
+    monkeypatch: pytest.MonkeyPatch,
+    qapp: object,
+) -> None:
+    controller = _bare_controller()
+    controller._devices = [
+        SimpleNamespace(capabilities=SimpleNamespace(mca_dma=True))
+        for _ in range(4)
+    ]
+    controller._device_channels = [
+        main_window_module.DigitizerChannel(0, 0),
+        main_window_module.DigitizerChannel(0, 1),
+        main_window_module.DigitizerChannel(1, 0),
+        main_window_module.DigitizerChannel(1, 1),
+    ]
+    mca = [object(), object(), object(), object()]
+    controller._mca_controller_by_device = dict(enumerate(mca))
+    globals_by_digitizer = {
+        index: SimpleNamespace(sync_available=True) for index in range(2)
+    }
+    controller._global_controller_by_digitizer = globals_by_digitizer
+    controller._coincidence_controller = None
+    controller._coincidence_settings_by_digitizer = {}
+    controller._selected_coincidence_digitizer = 0
+    tab = SimpleNamespace(setToolTip=Mock())
+    tabs = SimpleNamespace(indexOf=Mock(return_value=5), setTabEnabled=Mock())
+    layout = SimpleNamespace(addWidget=Mock(), removeWidget=Mock())
+    controller._window = SimpleNamespace(
+        ui=SimpleNamespace(
+            mainTabs=tabs,
+            tabCoincidence=tab,
+            layoutTabCoincidence=layout,
+        )
+    )
+
+    first = SimpleNamespace(
+        active=False,
+        configuration_settings=Mock(return_value={"gate_ns": 120}),
+        apply_configuration_settings=Mock(),
+        set_digitizer_selector_widget=Mock(),
+        setParent=Mock(),
+        deleteLater=Mock(),
+    )
+    second = SimpleNamespace(
+        active=False,
+        configuration_settings=Mock(return_value={"gate_ns": 240}),
+        apply_configuration_settings=Mock(),
+        set_digitizer_selector_widget=Mock(),
+        setParent=Mock(),
+        deleteLater=Mock(),
+    )
+    restored_first = SimpleNamespace(
+        active=False,
+        configuration_settings=Mock(return_value={"gate_ns": 120}),
+        apply_configuration_settings=Mock(),
+        set_digitizer_selector_widget=Mock(),
+        setParent=Mock(),
+        deleteLater=Mock(),
+    )
+    factory = Mock(side_effect=[first, second, restored_first])
+    monkeypatch.setattr(main_window_module, "CoincidenceController", factory)
+
+    controller._build_coincidence_tab()
+
+    selector = controller._coincidence_selector
+    assert selector is not None
+    assert selector.count() == 2
+    assert selector.itemData(0) == 0
+    assert selector.itemData(1) == 1
+    assert "D1:CH0 + D1:CH1" in selector.itemText(0)
+    assert "D2:CH0 + D2:CH1" in selector.itemText(1)
+    assert controller._coincidence_channels == (0, 1)
+    first.set_digitizer_selector_widget.assert_called_once_with(
+        controller._coincidence_selector_row
+    )
+
+    selector.setCurrentIndex(1)
+
+    assert controller._coincidence_controller is second
+    assert controller._coincidence_channels == (2, 3)
+    assert controller._selected_coincidence_digitizer == 1
+    first.configuration_settings.assert_called_once_with()
+    assert first.set_digitizer_selector_widget.call_args_list == [
+        call(controller._coincidence_selector_row),
+        call(None),
+    ]
+    second.set_digitizer_selector_widget.assert_called_once_with(
+        controller._coincidence_selector_row
+    )
+    first.setParent.assert_called_once_with(None)
+    first.deleteLater.assert_called_once_with()
+
+    second.active = True
+    selector.setCurrentIndex(0)
+
+    assert selector.currentData() == 1
+    assert controller._coincidence_controller is second
+    assert factory.call_count == 2
+
+    second.active = False
+    selector.setCurrentIndex(0)
+
+    assert controller._coincidence_controller is restored_first
+    assert controller._coincidence_channels == (0, 1)
+    assert second.set_digitizer_selector_widget.call_args_list == [
+        call(controller._coincidence_selector_row),
+        call(None),
+    ]
+    restored_first.set_digitizer_selector_widget.assert_called_once_with(
+        controller._coincidence_selector_row
+    )
+    restored_first.apply_configuration_settings.assert_called_once_with(
+        {"gate_ns": 120}
+    )
+
+
+def test_reset_dock_host_restores_flat_physical_channel_order() -> None:
+    docks = {
+        index: SimpleNamespace(
+            objectName=Mock(return_value=f"scope_ch{index}"),
+            setFloating=Mock(),
+            show=Mock(),
+            raise_=Mock(),
+        )
+        for index in range(4)
+    }
+    scrambled = [docks[0], docks[3], docks[2], docks[1]]
+    host = SimpleNamespace(
+        findChildren=Mock(return_value=scrambled),
+        removeDockWidget=Mock(),
+        addDockWidget=Mock(),
+        tabifyDockWidget=Mock(),
+    )
+
+    MainWindowController._reset_dock_host(host)  # type: ignore[arg-type]
+
+    ordered = [docks[index] for index in range(4)]
+    assert host.removeDockWidget.call_args_list == [call(dock) for dock in ordered]
+    assert host.addDockWidget.call_args_list == [
+        call(main_window_module.Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+        for dock in ordered
+    ]
+    assert host.tabifyDockWidget.call_args_list == [
+        call(docks[0], docks[1]),
+        call(docks[1], docks[2]),
+        call(docks[2], docks[3]),
+    ]
+    docks[0].raise_.assert_called_once_with()
+
+
+def test_saved_dock_layout_is_reset_when_channel_topology_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values: dict[str, object] = {
+        MainWindowController._DOCK_STATE_KEY_SCOPE: b"four-channel-state",
+        MainWindowController._dock_topology_key("scope"): [
+            "scope_ch0",
+            "scope_ch1",
+            "scope_ch2",
+            "scope_ch3",
+        ],
+    }
+
+    class MemorySettings:
+        def value(self, key: str) -> object | None:
+            return values.get(key)
+
+        def setValue(self, key: str, value: object) -> None:  # noqa: N802
+            values[key] = value
+
+    docks = [
+        SimpleNamespace(
+            objectName=Mock(return_value=f"scope_ch{index}"),
+            setFloating=Mock(),
+            show=Mock(),
+            raise_=Mock(),
+        )
+        for index in range(2)
+    ]
+    host = SimpleNamespace(
+        findChildren=Mock(return_value=docks),
+        removeDockWidget=Mock(),
+        addDockWidget=Mock(),
+        tabifyDockWidget=Mock(),
+        restoreState=Mock(return_value=True),
+        saveState=Mock(return_value=b"two-channel-state"),
+    )
+    controller = _bare_controller()
+    controller._dock_state_hosts = Mock(  # type: ignore[method-assign]
+        return_value=(("scope", controller._DOCK_STATE_KEY_SCOPE, host),)
+    )
+    monkeypatch.setattr(main_window_module, "QSettings", MemorySettings)
+
+    controller._restore_dock_state()
+
+    host.restoreState.assert_not_called()
+    assert host.tabifyDockWidget.call_args_list == [call(docks[0], docks[1])]
+    assert values[controller._DOCK_STATE_KEY_SCOPE] == b"two-channel-state"
+    assert values[controller._dock_topology_key("scope")] == [
+        "scope_ch0",
+        "scope_ch1",
+    ]
+
+
+def test_saved_dock_layout_is_restored_when_channel_topology_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = b"two-channel-state"
+    values: dict[str, object] = {
+        MainWindowController._DOCK_STATE_KEY_SCOPE: state,
+        MainWindowController._dock_topology_key("scope"): [
+            "scope_ch0",
+            "scope_ch1",
+        ],
+    }
+
+    class MemorySettings:
+        def value(self, key: str) -> object | None:
+            return values.get(key)
+
+        def setValue(self, key: str, value: object) -> None:  # noqa: N802
+            values[key] = value
+
+    docks = [
+        SimpleNamespace(objectName=Mock(return_value=f"scope_ch{index}"))
+        for index in range(2)
+    ]
+    host = SimpleNamespace(
+        findChildren=Mock(return_value=docks),
+        restoreState=Mock(return_value=True),
+    )
+    controller = _bare_controller()
+    controller._dock_state_hosts = Mock(  # type: ignore[method-assign]
+        return_value=(("scope", controller._DOCK_STATE_KEY_SCOPE, host),)
+    )
+    monkeypatch.setattr(main_window_module, "QSettings", MemorySettings)
+
+    controller._restore_dock_state()
+
+    host.restoreState.assert_called_once_with(state)
+
+
+def test_configured_dock_layout_is_ignored_when_channel_topology_changed() -> None:
+    docks = [
+        SimpleNamespace(
+            objectName=Mock(return_value=f"mca_ch{index}"),
+            setFloating=Mock(),
+            show=Mock(),
+            raise_=Mock(),
+        )
+        for index in range(2)
+    ]
+    host = SimpleNamespace(
+        findChildren=Mock(return_value=docks),
+        removeDockWidget=Mock(),
+        addDockWidget=Mock(),
+        tabifyDockWidget=Mock(),
+        restoreState=Mock(return_value=True),
+    )
+    controller = _bare_controller()
+    controller._dock_state_hosts = Mock(  # type: ignore[method-assign]
+        return_value=(("mca", controller._DOCK_STATE_KEY_MCA, host),)
+    )
+
+    controller._restore_yaml_dock_layout(
+        {
+            "mca": "c3RhbGU=",
+            "topology": {
+                "mca": ["mca_ch0", "mca_ch1", "mca_ch2", "mca_ch3"],
+            },
+        }
+    )
+
+    host.restoreState.assert_not_called()
+    assert host.tabifyDockWidget.call_args_list == [call(docks[0], docks[1])]
 
 
 def test_startup_discovers_external_modules_and_builds_one_dock_each(

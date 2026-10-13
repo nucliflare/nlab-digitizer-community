@@ -152,6 +152,9 @@
    </widget>
    <widget class="QMenu" name="menuConnection">
     <property name="title"><string>Connection</string></property>
+    <addaction name="actionConnectDevice"/>
+    <addaction name="actionDisconnectDevice"/>
+    <addaction name="separator"/>
     <addaction name="actionReconnectDevice"/>
     <addaction name="actionRefreshModbus"/>
    </widget>
@@ -246,6 +249,15 @@
   </action>
   <action name="actionReconnectDevice">
    <property name="text"><string>Reconnect Device</string></property>
+  </action>
+  <action name="actionConnectDevice">
+   <property name="text"><string>Connect...</string></property>
+   <property name="toolTip"><string>Open the connection dialog and connect this offline workspace to a digitizer</string></property>
+  </action>
+  <action name="actionDisconnectDevice">
+   <property name="enabled"><bool>false</bool></property>
+   <property name="text"><string>Disconnect Digitizer...</string></property>
+   <property name="toolTip"><string>Stop measurements and disconnect a selected digitizer</string></property>
   </action>
   <action name="actionRefreshModbus">
    <property name="text"><string>Refresh Modbus Devices</string></property>

@@ -9,7 +9,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 from PySide6.QtCore import QLocale, QObject, Signal
-from PySide6.QtWidgets import QApplication, QCheckBox, QGroupBox, QSpinBox
+from PySide6.QtWidgets import QApplication, QCheckBox, QGroupBox, QSpinBox, QWidget
 
 from nlab.analysis.coincidence import CoincidenceAnalyzer, CoincidencePeakFit, CoincidenceSettings
 from nlab.controllers import coincidence_controller as coincidence_module
@@ -233,6 +233,25 @@ def test_coincidence_buttons_match_scope_and_mca_color_scheme(
     assert "QPushButton:disabled" in controller.btnStop.styleSheet()
     assert controller.btnStart.isCheckable()
     assert controller.btnStop.isCheckable()
+
+
+def test_digitizer_selector_is_placed_in_synchronized_acquisition_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _make_controller(monkeypatch)
+    selector_row = QWidget()
+    groups = {group.title(): group for group in controller.findChildren(QGroupBox)}
+    run_box = groups["Synchronized acquisition"]
+
+    controller.set_digitizer_selector_widget(selector_row)
+
+    assert run_box.layout().indexOf(selector_row) == 0
+    assert selector_row.parent() is run_box
+
+    controller.set_digitizer_selector_widget(None)
+
+    assert run_box.layout().indexOf(selector_row) == -1
+    assert selector_row.parent() is None
 
 
 def test_coincidence_explanations_are_compact_tooltips(
