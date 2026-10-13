@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import heapq
 import logging
+import socket
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
 from functools import partial
+from ipaddress import IPv6Address, ip_address
 from pathlib import Path
 from time import monotonic_ns
 from typing import TYPE_CHECKING, Any, cast
 
 from PySide6.QtCore import QByteArray, QSettings, Qt, QThread, QThreadPool, QTimer
-from PySide6.QtWidgets import QDockWidget, QMainWindow, QWidget
+from PySide6.QtWidgets import QComboBox, QDockWidget, QHBoxLayout, QLabel, QMainWindow, QWidget
 
 from nlab.controllers.coincidence_controller import CoincidenceController
 from nlab.controllers.current_monitor_controller import CurrentMonitorController
@@ -54,6 +57,77 @@ _REPLAY_CURRENT_SAMPLES_PER_TICK = 4096
 _REPLAY_TELEMETRY_EVENTS_PER_TICK = 1024
 
 
+@dataclass(frozen=True)
+class DigitizerEndpoint:
+    """One physical digitizer and the channels opened from its IIO endpoint."""
+
+    host: str
+    port: int
+    channels: int
+
+
+@dataclass(frozen=True)
+class DigitizerChannel:
+    """Physical address for one entry in the flat controller/device lists."""
+
+    digitizer: int
+    channel: int
+
+
+@dataclass(frozen=True)
+class _ConnectionTopology:
+    """Validated device ownership and addressing for one complete workspace."""
+
+    offline: bool
+    endpoints: tuple[DigitizerEndpoint, ...]
+    devices: tuple[Digitizer, ...]
+    device_channels: tuple[DigitizerChannel, ...]
+    offline_port: int
+
+    def __post_init__(self) -> None:
+        if len(self.devices) != len(self.device_channels):
+            raise ValueError("every digitizer channel requires one physical address")
+        if self.offline:
+            if self.endpoints:
+                raise ValueError("offline topology cannot contain hardware endpoints")
+            return
+        if not self.endpoints:
+            raise ValueError("live topology requires at least one hardware endpoint")
+        expected_channels = tuple(
+            DigitizerChannel(digitizer, channel)
+            for digitizer, endpoint in enumerate(self.endpoints)
+            for channel in range(endpoint.channels)
+        )
+        if self.device_channels != expected_channels:
+            raise ValueError("digitizer devices and endpoint channels are inconsistent")
+
+    @property
+    def host(self) -> str:
+        return "" if self.offline else self.endpoints[0].host
+
+    @property
+    def port(self) -> int:
+        return self.offline_port if self.offline else self.endpoints[0].port
+
+
+@dataclass(frozen=True)
+class _ConnectionRuntime:
+    """Rollback snapshot for a topology and its per-board UI state."""
+
+    topology: _ConnectionTopology
+    coincidence_settings: dict[int, dict[str, object]]
+    selected_coincidence_digitizer: int
+    replay_hardware_interlocked: bool
+
+
+@dataclass(frozen=True)
+class CoincidenceDigitizerOption:
+    """One same-board pair eligible for the coincidence workspace."""
+
+    digitizer: int
+    device_indices: tuple[int, int]
+
+
 class MainWindowController:
     """Handles all business logic for MainAppWindow.
 
@@ -77,6 +151,10 @@ class MainWindowController:
         self._channels = channels
         self._offline = bool(offline)
         self._devices: list[Digitizer] = []
+        self._endpoints: list[DigitizerEndpoint] = (
+            [] if self._offline else [DigitizerEndpoint(host, port, channels)]
+        )
+        self._device_channels = [DigitizerChannel(0, channel) for channel in range(channels)]
         self._on_progress = on_progress
 
         if self._offline:
@@ -105,7 +183,15 @@ class MainWindowController:
         self._external_controllers: list[ExternalDeviceController] = []
         self._external_refresh_application_settings: dict[str, dict[str, object]] = {}
         self._global_controller: GlobalController | None = None
+        self._global_controllers: list[GlobalController] = []
+        self._global_controller_by_digitizer: dict[int, GlobalController] = {}
         self._coincidence_controller: CoincidenceController | None = None
+        self._coincidence_channels: tuple[int, int] | None = None
+        self._coincidence_options: list[CoincidenceDigitizerOption] = []
+        self._coincidence_selector: QComboBox | None = None
+        self._coincidence_selector_row: QWidget | None = None
+        self._selected_coincidence_digitizer = 0
+        self._coincidence_settings_by_digitizer: dict[int, dict[str, object]] = {}
         self._energy_calibration_dialog: EnergyCalibrationDialog | None = None
         self._mca_peak_analysis_dialog: McaPeakAnalysisDialog | None = None
         self._psd_readback_dialog: PsdReadbackDialog | None = None
@@ -164,6 +250,7 @@ class MainWindowController:
         self._session_telemetry_replay_psu_channels: set[int] = set()
         self._session_telemetry_replay_external_ids: set[str] = set()
         self._session_telemetry_replay_global_active = False
+        self._session_telemetry_replay_global_digitizers: set[int] = set()
         self._session_telemetry_replay_timer = QTimer()
         self._session_telemetry_replay_timer.setSingleShot(True)
         self._session_telemetry_replay_timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -221,15 +308,71 @@ class MainWindowController:
 
     def _connect_channel(self, channel: int) -> Digitizer:
         """Connect one zero-based IIO hardware channel."""
+        return self._connect_endpoint_channel(self._host, self._port, channel)
+
+    @staticmethod
+    def _connect_endpoint_channel(host: str, port: int, channel: int) -> Digitizer:
+        """Open one channel at an explicit endpoint without mutating controller state."""
         return Digitizer.from_iio(
             channel=channel,
-            uri=f"ip:{self._host}:{self._port}",
+            uri=f"ip:{host}:{port}",
             with_ids=True,
         )
 
     def _display_channel(self, idx: int) -> int:
-        """Return the zero-based IIO channel number shown throughout the UI."""
+        """Return the stable flat channel ID used in settings and session files."""
         return idx
+
+    def _physical_channel(self, idx: int) -> DigitizerChannel:
+        """Return a channel's board-local address, including for legacy test fixtures."""
+        addresses = cast(
+            Sequence[DigitizerChannel],
+            getattr(self, "_device_channels", ()),
+        )
+        if idx < len(addresses):
+            return addresses[idx]
+        return DigitizerChannel(0, idx)
+
+    def _channel_label(self, idx: int) -> str:
+        address = self._physical_channel(idx)
+        return f"D{address.digitizer + 1}:CH{address.channel}"
+
+    @staticmethod
+    def _set_controller_channel_label(controller: object, label: str) -> None:
+        """Attach a display label while tolerating immutable lightweight test doubles."""
+        try:
+            setattr(controller, "display_channel_label", label)
+        except AttributeError:
+            pass
+
+    def _devices_for_digitizer(self) -> dict[int, list[int]]:
+        grouped: dict[int, list[int]] = {}
+        for index in range(len(self._devices)):
+            grouped.setdefault(self._physical_channel(index).digitizer, []).append(index)
+        return grouped
+
+    @property
+    def digitizer_count(self) -> int:
+        return len(getattr(self, "_endpoints", ()))
+
+    @property
+    def offline(self) -> bool:
+        return bool(self._offline)
+
+    @property
+    def endpoint_descriptions(self) -> tuple[str, ...]:
+        return tuple(f"{endpoint.host}:{endpoint.port}" for endpoint in self._endpoints)
+
+    @property
+    def primary_endpoint(self) -> tuple[str, int] | None:
+        endpoints = getattr(self, "_endpoints", ())
+        if not endpoints:
+            return None
+        return endpoints[0].host, endpoints[0].port
+
+    @property
+    def channel_count(self) -> int:
+        return len(self._devices)
 
     # ------------------------------------------------------------------
     # Dock construction
@@ -316,8 +459,8 @@ class MainWindowController:
         # repeat transport-specific discovery or inspect backend classes.
         for idx, device in enumerate(self._devices):
             ch = self._display_channel(idx)
-            self._report_progress(f"Initializing channel {ch} controls...")
-            ch_label = f"Ch {ch}"
+            ch_label = self._channel_label(idx)
+            self._report_progress(f"Initializing {ch_label} controls...")
 
             scope_current_accumulator = ScopeCurrentAccumulator()
             scope_frame_buffer = ScopeFrameBuffer()
@@ -328,6 +471,7 @@ class MainWindowController:
                 dma_frame_buffer=scope_frame_buffer,
                 current_accumulator=scope_current_accumulator,
             )
+            self._set_controller_channel_label(scope_ctrl, ch_label)
             self._connect_optional_signal(
                 scope_ctrl,
                 "session_viewer_frame",
@@ -345,6 +489,7 @@ class MainWindowController:
                     scope_controller=scope_ctrl,
                     scope_current_accumulator=scope_current_accumulator,
                 )
+                self._set_controller_channel_label(current_ctrl, ch_label)
                 self._connect_optional_signal(
                     current_ctrl,
                     "session_samples",
@@ -361,6 +506,7 @@ class MainWindowController:
                     event_buffer = McaEventBuffer()
                     self._mca_event_buffers[ch] = event_buffer
                     psd_ctrl = PSDController(event_buffer=event_buffer, channel=ch)
+                    self._set_controller_channel_label(psd_ctrl, ch_label)
                     self._psd_controllers.append(psd_ctrl)
                     self._psd_controller_by_device[idx] = psd_ctrl
                     psd_docks.append(self._make_dock(f"psd_ch{ch}", ch_label, psd_ctrl))
@@ -372,6 +518,7 @@ class MainWindowController:
                     psd_capture=psd_ctrl,
                     measurement_configuration=self.configuration_document,
                 )
+                self._set_controller_channel_label(mca_ctrl, ch_label)
                 self._mca_controllers.append(mca_ctrl)
                 self._connect_optional_signal(
                     mca_ctrl,
@@ -389,6 +536,7 @@ class MainWindowController:
                 log.warning("PSU controls unavailable for channel %s", ch)
             else:
                 psu_ctrl = PSUController(hv)
+                self._set_controller_channel_label(psu_ctrl, ch_label)
                 self._connect_optional_signal(
                     psu_ctrl,
                     "session_readback",
@@ -415,7 +563,9 @@ class MainWindowController:
         if not current_docks:
             current_tooltip = "Current monitor is disabled: no input-filter device was found."
         elif missing_mca_channels:
-            channels = ", ".join(str(channel) for channel in missing_mca_channels)
+            channels = ", ".join(
+                self._channel_label(channel) for channel in missing_mca_channels
+            )
             current_tooltip = f"Current monitor unavailable for channel(s): {channels}."
         else:
             current_tooltip = ""
@@ -426,7 +576,9 @@ class MainWindowController:
         if not mca_docks:
             mca_tooltip = "MCA is disabled: no pulse-processor/input-filter device was found."
         elif missing_mca_channels:
-            channels = ", ".join(str(channel) for channel in missing_mca_channels)
+            channels = ", ".join(
+                self._channel_label(channel) for channel in missing_mca_channels
+            )
             mca_tooltip = f"MCA controls unavailable for channel(s): {channels}."
         else:
             mca_tooltip = ""
@@ -445,61 +597,247 @@ class MainWindowController:
         if not psu_docks:
             psu_tooltip = "PSU is disabled: no IDS/HV backend connected."
         elif missing_psu_channels:
-            channels = ", ".join(str(channel) for channel in missing_psu_channels)
+            channels = ", ".join(
+                self._channel_label(channel) for channel in missing_psu_channels
+            )
             psu_tooltip = f"PSU controls unavailable for channel(s): {channels}."
         else:
             psu_tooltip = ""
         self._window.ui.tabPSU.setToolTip(psu_tooltip)
 
     def _build_global_tab(self) -> None:
-        """Build the one floatable channel-independent digitizer panel."""
-        labels = [self._display_channel(index) for index in range(len(self._devices))]
-        self._global_controller = GlobalController(self._devices, labels)
-        self._connect_optional_signal(
-            self._global_controller,
-            "session_temperature_readback",
-            self._record_temperature_readback,
-        )
-        self._connect_optional_signal(
-            self._global_controller,
-            "session_diagnostics_readback",
-            self._record_global_diagnostics,
-        )
-        dock = self._make_dock("global_panel", "Global", self._global_controller)
-        self._populate_dock_host(self._global_dock_host, [dock])
+        """Build one independent global-control panel per physical digitizer."""
+        self._global_controllers = []
+        self._global_controller_by_digitizer = {}
+        docks: list[QDockWidget] = []
+        for digitizer, indices in self._devices_for_digitizer().items():
+            devices = [self._devices[index] for index in indices]
+            labels = [self._channel_label(index) for index in indices]
+            controller = GlobalController(devices, labels)
+            self._global_controllers.append(controller)
+            self._global_controller_by_digitizer[digitizer] = controller
+            if digitizer == 0:
+                self._connect_optional_signal(
+                    controller,
+                    "session_temperature_readback",
+                    self._record_temperature_readback,
+                )
+                self._connect_optional_signal(
+                    controller,
+                    "session_diagnostics_readback",
+                    self._record_global_diagnostics,
+                )
+            else:
+                self._connect_optional_signal(
+                    controller,
+                    "session_temperature_readback",
+                    partial(self._record_digitizer_temperature_readback, digitizer),
+                )
+                self._connect_optional_signal(
+                    controller,
+                    "session_diagnostics_readback",
+                    partial(self._record_digitizer_diagnostics, digitizer),
+                )
+            board_label = f"D{digitizer + 1}"
+            docks.append(
+                self._make_dock(
+                    "global_panel" if digitizer == 0 else f"global_panel_d{digitizer + 1}",
+                    board_label,
+                    controller,
+                )
+            )
+        self._global_controller = self._global_controllers[0] if self._global_controllers else None
+        self._populate_dock_host(self._global_dock_host, docks)
         layout = self._window.ui.layoutTabGlobal
         if layout.indexOf(self._global_dock_host) < 0:
             layout.addWidget(self._global_dock_host)
 
     def _build_coincidence_tab(self) -> None:
-        mca_pair = tuple(self._mca_controller_by_device.get(index) for index in range(2))
-        available = (
-            len(self._devices) >= 2
-            and all(controller is not None for controller in mca_pair)
-            and all(device.capabilities.mca_dma for device in self._devices[:2])
-            and self._global_controller is not None
-            and self._global_controller.sync_available
-        )
+        self._coincidence_options = []
+        for digitizer, indices in self._devices_for_digitizer().items():
+            eligible = [
+                index
+                for index in indices
+                if self._mca_controller_by_device.get(index) is not None
+                and self._devices[index].capabilities.mca_dma
+            ]
+            global_controller = self._global_controller_by_digitizer.get(digitizer)
+            if (
+                len(eligible) >= 2
+                and global_controller is not None
+                and global_controller.sync_available
+            ):
+                self._coincidence_options.append(
+                    CoincidenceDigitizerOption(
+                        digitizer=digitizer,
+                        device_indices=(eligible[0], eligible[1]),
+                    )
+                )
+
+        available = bool(self._coincidence_options)
         index = self._window.ui.mainTabs.indexOf(self._window.ui.tabCoincidence)
         self._window.ui.mainTabs.setTabEnabled(index, available)
-        self._window.ui.tabCoincidence.setToolTip(
-            ""
-            if available
-            else "Coincidence requires two IIO MCA list-mode channels and shared software start."
-        )
         if available:
-            assert self._global_controller is not None
-            mca_a, mca_b = mca_pair
-            assert mca_a is not None and mca_b is not None
-            self._coincidence_controller = CoincidenceController(
-                self._devices[:2], [mca_a, mca_b], self._global_controller
+            boards = ", ".join(
+                f"D{option.digitizer + 1}" for option in self._coincidence_options
             )
-            self._connect_optional_signal(
-                self._coincidence_controller,
-                "session_state",
-                self._record_coincidence_state,
+            tooltip = (
+                f"Choose a same-board coincidence pair from {boards}. Cross-digitizer "
+                "coincidence is disabled because board synchronization has not been validated."
             )
-            self._window.ui.layoutTabCoincidence.addWidget(self._coincidence_controller)
+        else:
+            tooltip = (
+                "Coincidence requires two IIO MCA list-mode channels on the same digitizer "
+                "and shared software start. Cross-digitizer coincidence is disabled."
+            )
+        self._window.ui.tabCoincidence.setToolTip(tooltip)
+        if not available:
+            self._coincidence_channels = None
+            return
+
+        row = QWidget()
+        row.setObjectName("coincidenceDigitizerRow")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.addWidget(QLabel("Digitizer:", row))
+        selector = QComboBox(row)
+        selector.setObjectName("coincidenceDigitizerSelector")
+        for option in self._coincidence_options:
+            pair = option.device_indices
+            selector.addItem(
+                f"D{option.digitizer + 1} — "
+                f"{self._channel_label(pair[0])} + {self._channel_label(pair[1])}",
+                option.digitizer,
+            )
+        row_layout.addWidget(selector)
+        row_layout.addStretch(1)
+        self._coincidence_selector = selector
+        self._coincidence_selector_row = row
+
+        selected_index = selector.findData(
+            getattr(self, "_selected_coincidence_digitizer", 0)
+        )
+        if selected_index < 0:
+            selected_index = 0
+        selector.setCurrentIndex(selected_index)
+        selector.currentIndexChanged.connect(self._on_coincidence_digitizer_changed)
+        selected = selector.currentData()
+        assert isinstance(selected, int)
+        self._install_coincidence_digitizer(selected)
+
+    def _install_coincidence_digitizer(self, digitizer: int) -> None:
+        option = next(
+            (
+                candidate
+                for candidate in self._coincidence_options
+                if candidate.digitizer == digitizer
+            ),
+            None,
+        )
+        if option is None:
+            return
+        current = self._coincidence_controller
+        selected_digitizer = getattr(self, "_selected_coincidence_digitizer", 0)
+        if current is not None and digitizer == selected_digitizer:
+            self._sync_coincidence_selector_enabled()
+            return
+        if current is not None:
+            if current.active:
+                return
+            settings_by_digitizer = getattr(
+                self, "_coincidence_settings_by_digitizer", None
+            )
+            if settings_by_digitizer is None:
+                settings_by_digitizer = {}
+                self._coincidence_settings_by_digitizer = settings_by_digitizer
+            settings_by_digitizer[
+                selected_digitizer
+            ] = current.configuration_settings()
+            detach_selector = getattr(
+                current, "set_digitizer_selector_widget", None
+            )
+            if callable(detach_selector):
+                detach_selector(None)
+            self._window.ui.layoutTabCoincidence.removeWidget(current)
+            current.setParent(None)
+            current.deleteLater()
+
+        pair = option.device_indices
+        mca_a, mca_b = (self._mca_controller_by_device[index] for index in pair)
+        global_controller = self._global_controller_by_digitizer[digitizer]
+        controller = CoincidenceController(
+            [self._devices[index] for index in pair],
+            [mca_a, mca_b],
+            global_controller,
+            channel_labels=[self._channel_label(index) for index in pair],
+        )
+        saved = getattr(self, "_coincidence_settings_by_digitizer", {}).get(
+            digitizer
+        )
+        if saved is not None:
+            controller.apply_configuration_settings(saved)
+        if getattr(self, "_replay_hardware_interlocked", False):
+            controller.set_replay_hardware_interlock(True)
+        self._coincidence_controller = controller
+        self._coincidence_channels = pair
+        self._selected_coincidence_digitizer = digitizer
+        self._connect_optional_signal(
+            controller,
+            "session_state",
+            self._on_coincidence_session_state,
+        )
+        attach_selector = getattr(
+            controller, "set_digitizer_selector_widget", None
+        )
+        if callable(attach_selector):
+            attach_selector(self._coincidence_selector_row)
+        self._window.ui.layoutTabCoincidence.addWidget(controller)
+        self._sync_coincidence_selector_enabled()
+
+    def _on_coincidence_digitizer_changed(self, index: int) -> None:
+        selector = getattr(self, "_coincidence_selector", None)
+        if selector is None or index < 0:
+            return
+        current = self._coincidence_controller
+        if current is not None and current.active:
+            previous = selector.findData(self._selected_coincidence_digitizer)
+            selector.blockSignals(True)
+            selector.setCurrentIndex(previous)
+            selector.blockSignals(False)
+            return
+        digitizer = selector.itemData(index)
+        if isinstance(digitizer, int):
+            self._install_coincidence_digitizer(digitizer)
+
+    def _on_coincidence_session_state(self, state: str, values: object) -> None:
+        self._record_coincidence_state(state, values)
+        self._sync_coincidence_selector_enabled()
+
+    def _sync_coincidence_selector_enabled(self) -> None:
+        selector = getattr(self, "_coincidence_selector", None)
+        if selector is None:
+            return
+        controller = self._coincidence_controller
+        selector.setEnabled(
+            len(self._coincidence_options) > 1
+            and not getattr(self, "_replay_hardware_interlocked", False)
+            and (controller is None or not getattr(controller, "active", False))
+        )
+
+    @staticmethod
+    def _saved_coincidence_digitizer(settings: object) -> int | None:
+        if not isinstance(settings, dict):
+            return None
+        value = settings.get("digitizer")
+        if (
+            isinstance(value, str)
+            and value.startswith("D")
+            and value[1:].isdigit()
+        ):
+            return int(value[1:]) - 1
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        return None
 
     def _build_external_docks(
         self,
@@ -630,8 +968,8 @@ class MainWindowController:
     # Dock state persistence
     # ------------------------------------------------------------------
 
-    # Bump suffix when dock object names or topology change so stale layouts
-    # are silently discarded rather than corrupting the initial tab arrangement.
+    # Bump a state-key suffix when its format or object-name scheme changes.
+    # Runtime dock-count changes are handled by the per-host topology signatures.
     _DOCK_STATE_KEY_SCOPE = "docks/v2/scope"
     _DOCK_STATE_KEY_CURRENT = "docks/v1/current"
     _DOCK_STATE_KEY_MCA = "docks/v2/mca"
@@ -639,72 +977,121 @@ class MainWindowController:
     _DOCK_STATE_KEY_PSU = "docks/v2/psu"
     _DOCK_STATE_KEY_GLOBAL = "docks/v2/global"
     _DOCK_STATE_KEY_EXTERNAL = "docks/v2/external"
+    _DOCK_TOPOLOGY_KEY_PREFIX = "docks/topology/v1"
+
+    def _dock_state_hosts(self) -> tuple[tuple[str, str, QMainWindow], ...]:
+        """Return persistent layout names, keys, and their current dock hosts."""
+        return (
+            ("scope", self._DOCK_STATE_KEY_SCOPE, self._scope_dock_host),
+            ("current", self._DOCK_STATE_KEY_CURRENT, self._current_dock_host),
+            ("mca", self._DOCK_STATE_KEY_MCA, self._mca_dock_host),
+            ("psd", self._DOCK_STATE_KEY_PSD, self._psd_dock_host),
+            ("psu", self._DOCK_STATE_KEY_PSU, self._psu_dock_host),
+            ("global", self._DOCK_STATE_KEY_GLOBAL, self._global_dock_host),
+            ("external", self._DOCK_STATE_KEY_EXTERNAL, self._external_dock_host),
+        )
+
+    @staticmethod
+    def _dock_topology(host: QMainWindow) -> list[str]:
+        """Identify the exact set of docks a saved host state belongs to."""
+        return sorted(dock.objectName() for dock in host.findChildren(QDockWidget))
+
+    @classmethod
+    def _dock_topology_key(cls, name: str) -> str:
+        return f"{cls._DOCK_TOPOLOGY_KEY_PREFIX}/{name}"
+
+    @classmethod
+    def _reset_and_store_dock_host(
+        cls,
+        settings: QSettings,
+        name: str,
+        state_key: str,
+        host: QMainWindow,
+    ) -> None:
+        """Replace an incompatible saved layout with the default tab group."""
+        cls._reset_dock_host(host)
+        settings.setValue(state_key, host.saveState())
+        settings.setValue(cls._dock_topology_key(name), cls._dock_topology(host))
 
     def _save_dock_state(self) -> None:
         settings = QSettings()
-        settings.setValue(self._DOCK_STATE_KEY_SCOPE, self._scope_dock_host.saveState())
-        settings.setValue(self._DOCK_STATE_KEY_CURRENT, self._current_dock_host.saveState())
-        settings.setValue(self._DOCK_STATE_KEY_MCA, self._mca_dock_host.saveState())
-        settings.setValue(self._DOCK_STATE_KEY_PSD, self._psd_dock_host.saveState())
-        settings.setValue(self._DOCK_STATE_KEY_PSU, self._psu_dock_host.saveState())
-        settings.setValue(self._DOCK_STATE_KEY_GLOBAL, self._global_dock_host.saveState())
-        settings.setValue(self._DOCK_STATE_KEY_EXTERNAL, self._external_dock_host.saveState())
+        for name, state_key, host in self._dock_state_hosts():
+            settings.setValue(state_key, host.saveState())
+            settings.setValue(self._dock_topology_key(name), self._dock_topology(host))
 
     def _restore_dock_state(self) -> None:
         settings = QSettings()
-        if state := settings.value(self._DOCK_STATE_KEY_SCOPE):
-            if not self._scope_dock_host.restoreState(state):
-                settings.remove(self._DOCK_STATE_KEY_SCOPE)
-        if state := settings.value(self._DOCK_STATE_KEY_CURRENT):
-            if not self._current_dock_host.restoreState(state):
-                settings.remove(self._DOCK_STATE_KEY_CURRENT)
-        if state := settings.value(self._DOCK_STATE_KEY_MCA):
-            if not self._mca_dock_host.restoreState(state):
-                settings.remove(self._DOCK_STATE_KEY_MCA)
-        if state := settings.value(self._DOCK_STATE_KEY_PSD):
-            if not self._psd_dock_host.restoreState(state):
-                settings.remove(self._DOCK_STATE_KEY_PSD)
-        if state := settings.value(self._DOCK_STATE_KEY_PSU):
-            if not self._psu_dock_host.restoreState(state):
-                settings.remove(self._DOCK_STATE_KEY_PSU)
-        if state := settings.value(self._DOCK_STATE_KEY_GLOBAL):
-            if not self._global_dock_host.restoreState(state):
-                settings.remove(self._DOCK_STATE_KEY_GLOBAL)
-        if state := settings.value(self._DOCK_STATE_KEY_EXTERNAL):
-            if not self._external_dock_host.restoreState(state):
-                settings.remove(self._DOCK_STATE_KEY_EXTERNAL)
+        for name, state_key, host in self._dock_state_hosts():
+            state = settings.value(state_key)
+            if state is None:
+                continue
+
+            saved_topology = settings.value(self._dock_topology_key(name))
+            current_topology = self._dock_topology(host)
+            if saved_topology != current_topology:
+                log.info(
+                    "Ignoring saved %s dock layout because its topology changed "
+                    "from %r to %r",
+                    name,
+                    saved_topology,
+                    current_topology,
+                )
+                self._reset_and_store_dock_host(
+                    settings,
+                    name,
+                    state_key,
+                    host,
+                )
+                continue
+
+            if not host.restoreState(state):
+                log.warning("Ignoring invalid saved %s dock layout", name)
+                self._reset_and_store_dock_host(
+                    settings,
+                    name,
+                    state_key,
+                    host,
+                )
+
+    @staticmethod
+    def _dock_default_order(dock: QDockWidget) -> tuple[int, str]:
+        """Sort generated dock names by their numeric channel/device suffix."""
+        name = dock.objectName()
+        suffix_start = len(name)
+        while suffix_start > 0 and name[suffix_start - 1].isdigit():
+            suffix_start -= 1
+        suffix = name[suffix_start:]
+        return (int(suffix) if suffix else -1, name)
+
+    @classmethod
+    def _reset_dock_host(cls, host: QMainWindow) -> None:
+        """Detach and rebuild one tab group in deterministic default order."""
+        docks = sorted(host.findChildren(QDockWidget), key=cls._dock_default_order)
+        if not docks:
+            return
+
+        # addDockWidget() alone does not dissolve an existing tab group. Fully
+        # detach first so a user-arranged order cannot leak into the reset.
+        for dock in docks:
+            dock.setFloating(False)
+            host.removeDockWidget(dock)
+        for dock in docks:
+            host.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+            dock.show()
+        for previous, current in zip(docks, docks[1:], strict=False):
+            host.tabifyDockWidget(previous, current)
+        docks[0].raise_()
 
     def reset_dock_layout(self) -> None:
-        """Clear saved dock state and re-tabify all channel docks."""
+        """Clear saved dock state and restore deterministic physical ordering."""
         settings = QSettings()
-        settings.remove(self._DOCK_STATE_KEY_SCOPE)
-        settings.remove(self._DOCK_STATE_KEY_CURRENT)
-        settings.remove(self._DOCK_STATE_KEY_MCA)
-        settings.remove(self._DOCK_STATE_KEY_PSD)
-        settings.remove(self._DOCK_STATE_KEY_PSU)
-        settings.remove(self._DOCK_STATE_KEY_GLOBAL)
-        settings.remove(self._DOCK_STATE_KEY_EXTERNAL)
+        dock_hosts = self._dock_state_hosts()
+        for name, state_key, _host in dock_hosts:
+            settings.remove(state_key)
+            settings.remove(self._dock_topology_key(name))
 
-        dock_hosts = (
-            self._scope_dock_host,
-            self._current_dock_host,
-            self._mca_dock_host,
-            self._psd_dock_host,
-            self._psu_dock_host,
-            self._global_dock_host,
-            self._external_dock_host,
-        )
-        for host in dock_hosts:
-            docks = host.findChildren(QDockWidget)
-            if not docks:
-                continue
-            for dock in docks:
-                host.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
-            if len(docks) < 2:
-                continue
-            for i in range(1, len(docks)):
-                host.tabifyDockWidget(docks[i - 1], docks[i])
-            docks[0].raise_()
+        for _name, _state_key, host in dock_hosts:
+            self._reset_dock_host(host)
 
         log.info("Dock layout reset to default (tabbed)")
 
@@ -984,16 +1371,15 @@ class MainWindowController:
         targets.extend(getattr(self, "_current_monitor_controllers", []))
         targets.extend(getattr(self, "_scope_controllers", []))
         targets.extend(getattr(self, "_mca_controllers", []))
-        global_controller = getattr(self, "_global_controller", None)
-        if global_controller is not None:
-            targets.append(global_controller)
+        global_controllers = self._all_global_controllers()
+        targets.extend(global_controllers)
         psu_controllers = getattr(self, "_psu_controllers", [])
         external_controllers = getattr(self, "_external_controllers", [])
         targets.extend(psu_controllers)
         targets.extend(external_controllers)
         background_targets = {
             id(target)
-            for target in [global_controller, *psu_controllers, *external_controllers]
+            for target in [*global_controllers, *psu_controllers, *external_controllers]
             if target is not None
         }
 
@@ -1020,6 +1406,7 @@ class MainWindowController:
                         log.exception("Failed to roll back replay hardware interlock")
             raise
         self._replay_hardware_interlocked = enabled
+        self._sync_coincidence_selector_enabled()
 
     def _install_offline_external_replay_controllers(
         self,
@@ -1163,6 +1550,19 @@ class MainWindowController:
         configuration = replay.configuration_snapshot()
         application = configuration.get("application")
         application = application if isinstance(application, dict) else {}
+        replay_coincidence_settings = application.get("coincidence")
+        replay_digitizer = self._saved_coincidence_digitizer(
+            replay_coincidence_settings
+        )
+        selector = getattr(self, "_coincidence_selector", None)
+        if replay_digitizer is not None and selector is not None:
+            selector_index = selector.findData(replay_digitizer)
+            if selector_index >= 0:
+                selector.blockSignals(True)
+                selector.setCurrentIndex(selector_index)
+                selector.blockSignals(False)
+                self._install_coincidence_digitizer(replay_digitizer)
+                coincidence = self._coincidence_controller
         channel_settings = application.get("channels")
         channel_settings = channel_settings if isinstance(channel_settings, dict) else {}
         hardware = configuration.get("hardware")
@@ -1202,7 +1602,6 @@ class MainWindowController:
                 replayed_psd.add(channel)
         self._session_replay_psd_channels = replayed_psd
 
-        ordered_mca = getattr(self, "_mca_controllers", [])
         coincidence_channels: dict[int, int] = {}
         interval_reader = getattr(replay, "coincidence_intervals", None)
         coincidence_intervals = interval_reader() if interval_reader is not None else []
@@ -1211,8 +1610,13 @@ class MainWindowController:
             explicit_timing_reader() if explicit_timing_reader is not None else False
         )
         allow_coincidence = bool(coincidence_intervals) or not explicit_timing
-        if coincidence is not None and len(ordered_mca) >= 2 and allow_coincidence:
-            channels = (ordered_mca[0].channel, ordered_mca[1].channel)
+        selected_pair = getattr(self, "_coincidence_channels", None)
+        if selected_pair is None:
+            ordered_mca = getattr(self, "_mca_controllers", [])
+            if len(ordered_mca) >= 2:
+                selected_pair = (ordered_mca[0].channel, ordered_mca[1].channel)
+        if coincidence is not None and selected_pair is not None and allow_coincidence:
+            channels = selected_pair
             if set(channels).issubset(event_channels):
                 try:
                     settings, display_settings = replay.coincidence_settings(channels)
@@ -1610,6 +2014,24 @@ class MainWindowController:
             result[self._display_channel(device_index)] = controller
         return result
 
+    def _global_replay_sources(
+        self,
+    ) -> dict[str, tuple[int, GlobalController, str]]:
+        result: dict[str, tuple[int, GlobalController, str]] = {}
+        for digitizer, controller in enumerate(self._all_global_controllers()):
+            prefix = "global" if digitizer == 0 else f"digitizer.d{digitizer + 1}"
+            result[f"{prefix}.temperature_correction"] = (
+                digitizer,
+                controller,
+                "temperature",
+            )
+            result[f"{prefix}.diagnostics"] = (
+                digitizer,
+                controller,
+                "diagnostics",
+            )
+        return result
+
     def _start_session_telemetry_replay(
         self,
         replay: SessionReplay,
@@ -1622,11 +2044,7 @@ class MainWindowController:
         }
         psu_channels: set[int] = set()
         external_ids: set[str] = set()
-        global_controller = getattr(self, "_global_controller", None)
-        global_sources = {
-            "global.temperature_correction",
-            "global.diagnostics",
-        }
+        global_sources = self._global_replay_sources()
         if events is None:
             latest_reader = getattr(replay, "latest_telemetry_events", None)
             latest = latest_reader() if latest_reader is not None else {}
@@ -1648,7 +2066,7 @@ class MainWindowController:
                 if configuration_id in external_controllers:
                     playable_sources.add(source)
                     external_ids.add(configuration_id)
-            elif source in global_sources and global_controller is not None:
+            elif source in global_sources:
                 playable_sources.add(source)
         if not playable_sources:
             return
@@ -1674,15 +2092,19 @@ class MainWindowController:
         self._session_telemetry_replay_started_ns = started
         self._session_telemetry_replay_psu_channels = psu_channels
         self._session_telemetry_replay_external_ids = external_ids
-        self._session_telemetry_replay_global_active = bool(
-            playable_sources & global_sources
-        )
+        global_digitizers = {
+            global_sources[source][0]
+            for source in playable_sources
+            if source in global_sources
+        }
+        self._session_telemetry_replay_global_digitizers = global_digitizers
+        self._session_telemetry_replay_global_active = 0 in global_digitizers
         for channel in psu_channels:
             psu_controllers[channel].begin_session_replay()
         for configuration_id in external_ids:
             external_controllers[configuration_id].begin_session_replay()
-        if global_controller is not None and self._session_telemetry_replay_global_active:
-            global_controller.begin_session_replay()
+        for digitizer in sorted(global_digitizers):
+            self._all_global_controllers()[digitizer].begin_session_replay()
         self._advance_session_telemetry_replay()
 
     def _advance_session_telemetry_replay(self) -> None:
@@ -1696,7 +2118,7 @@ class MainWindowController:
             controller.configuration_id: controller
             for controller in getattr(self, "_external_controllers", [])
         }
-        global_controller = getattr(self, "_global_controller", None)
+        global_sources = self._global_replay_sources()
         processed = 0
         while event is not None and processed < _REPLAY_TELEMETRY_EVENTS_PER_TICK:
             recorded_elapsed_ns = max(
@@ -1718,24 +2140,29 @@ class MainWindowController:
                 values = event.payload.get("values")
                 if controller is not None and isinstance(timestamp, int | float):
                     controller.display_session_replay_readback(float(timestamp), values)
-            elif event.source == "global.temperature_correction":
-                readback = event.payload.get("readback")
-                if global_controller is not None:
-                    global_controller.display_session_replay_temperature(readback)
-            elif event.source == "global.diagnostics":
-                readings = event.payload.get("readings")
-                if global_controller is not None:
-                    global_controller.display_session_replay_diagnostics(readings)
+            elif event.source in global_sources:
+                _digitizer, global_replay_controller, kind = global_sources[event.source]
+                if kind == "temperature":
+                    global_replay_controller.display_session_replay_temperature(
+                        event.payload.get("readback")
+                    )
+                else:
+                    global_replay_controller.display_session_replay_diagnostics(
+                        event.payload.get("readings")
+                    )
             self._session_telemetry_replay_index += 1
             processed += 1
             event = next(iterator, None) if iterator is not None else None
         self._session_telemetry_replay_next = event
         if event is None:
-            if (
-                global_controller is not None
-                and self._session_telemetry_replay_global_active
+            global_controllers = self._all_global_controllers()
+            for digitizer in getattr(
+                self,
+                "_session_telemetry_replay_global_digitizers",
+                set(),
             ):
-                global_controller.finish_session_replay()
+                if digitizer < len(global_controllers):
+                    global_controllers[digitizer].finish_session_replay()
             log.info("Session telemetry replay reached EOF; final readbacks are held")
             return
         next_elapsed_ns = max(
@@ -1848,13 +2275,15 @@ class MainWindowController:
             controller = external_controllers.get(configuration_id)
             if controller is not None:
                 controller.end_session_replay()
-        global_controller = getattr(self, "_global_controller", None)
-        if global_controller is not None and getattr(
+        global_controllers = self._all_global_controllers()
+        replayed_global_digitizers = getattr(
             self,
-            "_session_telemetry_replay_global_active",
-            False,
-        ):
-            global_controller.end_session_replay()
+            "_session_telemetry_replay_global_digitizers",
+            {0} if getattr(self, "_session_telemetry_replay_global_active", False) else set(),
+        )
+        for digitizer in replayed_global_digitizers:
+            if digitizer < len(global_controllers):
+                global_controllers[digitizer].end_session_replay()
         spectrum_ids: set[str] = getattr(
             self,
             "_session_replay_spectrum_ids",
@@ -1901,6 +2330,7 @@ class MainWindowController:
         self._session_telemetry_replay_psu_channels = set()
         self._session_telemetry_replay_external_ids = set()
         self._session_telemetry_replay_global_active = False
+        self._session_telemetry_replay_global_digitizers = set()
         if getattr(self, "_offline", False) and getattr(
             self, "_external_controllers", []
         ):
@@ -1951,6 +2381,26 @@ class MainWindowController:
         recorder = self._session_recorder
         if recorder is not None:
             recorder.record_telemetry("global.diagnostics", {"readings": readings})
+
+    def _record_digitizer_temperature_readback(
+        self,
+        digitizer: int,
+        readback: object,
+    ) -> None:
+        recorder = self._session_recorder
+        if recorder is not None:
+            recorder.record_telemetry(
+                f"digitizer.d{digitizer + 1}.temperature_correction",
+                {"readback": readback},
+            )
+
+    def _record_digitizer_diagnostics(self, digitizer: int, readings: object) -> None:
+        recorder = self._session_recorder
+        if recorder is not None:
+            recorder.record_telemetry(
+                f"digitizer.d{digitizer + 1}.diagnostics",
+                {"readings": readings},
+            )
 
     def _record_external_readback(
         self,
@@ -2018,6 +2468,13 @@ class MainWindowController:
         self._stop_all_workers()
         log.info("Remote board power action: acquisition stopped")
 
+    def _all_global_controllers(self) -> list[GlobalController]:
+        controllers = getattr(self, "_global_controllers", None)
+        if controllers is not None:
+            return list(controllers)
+        controller = getattr(self, "_global_controller", None)
+        return [controller] if controller is not None else []
+
     def _stop_all_workers(self) -> None:
         """Stop all running timers/workers (blocking). Devices stay open."""
         coincidence = getattr(self, "_coincidence_controller", None)
@@ -2026,8 +2483,8 @@ class MainWindowController:
         # Broadcast the cheap stop requests before waiting for any individual
         # worker. Independent IIO/Modbus calls then finish concurrently rather
         # than making shutdown pay every transport timeout in series.
-        if self._global_controller is not None:
-            self._global_controller.request_polling_stop()
+        for global_controller in self._all_global_controllers():
+            global_controller.request_polling_stop()
         for psu_controller in self._psu_controllers:
             psu_controller.request_monitor_stop()
         for external_controller in self._external_controllers:
@@ -2035,9 +2492,9 @@ class MainWindowController:
         for current_controller in self._current_monitor_controllers:
             current_controller.request_monitor_stop()
 
-        if self._global_controller is not None:
-            self._global_controller.disarm_sync()
-            self._global_controller.stop_polling_sync()
+        for global_controller in self._all_global_controllers():
+            global_controller.disarm_sync()
+            global_controller.stop_polling_sync()
 
         # 1. Stop scope timers — no new workers will be submitted
         for scope_controller in self._scope_controllers:
@@ -2125,39 +2582,555 @@ class MainWindowController:
         self._external_devices.close()
         log.info("Shutdown complete")
 
-    def reconnect(self) -> None:
-        """Tear down all devices/controllers and reconnect from scratch.
+    @staticmethod
+    def _validated_endpoint(host: str, port: int, channels: int) -> DigitizerEndpoint:
+        endpoint = host.strip()
+        if not endpoint:
+            raise ValueError("digitizer address cannot be empty")
+        if not 1 <= port <= 65_535:
+            raise ValueError("digitizer port must be within 1-65535")
+        if channels < 1:
+            raise ValueError("at least one digitizer channel is required")
+        return DigitizerEndpoint(endpoint, port, channels)
 
-        Keeps the window and dock layout positions; rebuilds the channel
-        docks and their controllers since they hold direct references to
-        the (now-closed) backend connections.
-        """
-        if getattr(self, "_offline", False):
-            raise RuntimeError(
-                "offline mode has no saved hardware endpoint; restart and choose Connect"
+    @staticmethod
+    def _normalized_host(host: str) -> str:
+        """Normalize spelling differences that do not identify another host."""
+        return host.strip().removeprefix("[").removesuffix("]").rstrip(".").casefold()
+
+    @staticmethod
+    def _normalized_ip(value: str) -> str:
+        """Canonicalize an address, including IPv4-mapped IPv6 results."""
+        address = ip_address(value.split("%", 1)[0])
+        if isinstance(address, IPv6Address) and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        return address.compressed
+
+    @classmethod
+    def _resolved_host_addresses(cls, host: str) -> frozenset[str]:
+        """Resolve a host for duplicate-board detection, failing closed."""
+        normalized_host = cls._normalized_host(host)
+        try:
+            return frozenset((cls._normalized_ip(normalized_host),))
+        except ValueError:
+            pass
+
+        try:
+            records = socket.getaddrinfo(
+                normalized_host,
+                None,
+                family=socket.AF_UNSPEC,
+                type=socket.SOCK_STREAM,
             )
-        log.info("Reconnect: stopping workers and closing current devices")
-        self.clear_session_replay(resume_background=False)
+        except OSError as exc:
+            raise ValueError(
+                f"cannot resolve digitizer address {host!r}; the duplicate-device "
+                "safety check could not be completed"
+            ) from exc
+
+        addresses = frozenset(cls._normalized_ip(str(record[4][0])) for record in records)
+        if not addresses:
+            raise ValueError(
+                f"digitizer address {host!r} resolved to no network addresses; "
+                "the duplicate-device safety check could not be completed"
+            )
+        return addresses
+
+    @classmethod
+    def _duplicate_endpoint_index(
+        cls,
+        candidate: DigitizerEndpoint,
+        connected: Sequence[DigitizerEndpoint],
+    ) -> int | None:
+        """Find an existing endpoint reached by the candidate host alias."""
+        same_port = [
+            (index, endpoint)
+            for index, endpoint in enumerate(connected)
+            if endpoint.port == candidate.port
+        ]
+        candidate_host = cls._normalized_host(candidate.host)
+        for index, endpoint in same_port:
+            if cls._normalized_host(endpoint.host) == candidate_host:
+                return index
+
+        if not same_port:
+            return None
+        candidate_addresses = cls._resolved_host_addresses(candidate.host)
+        for index, endpoint in same_port:
+            if candidate_addresses & cls._resolved_host_addresses(endpoint.host):
+                return index
+        return None
+
+    @staticmethod
+    def _close_connection_devices(
+        devices: Sequence[Digitizer],
+        *,
+        context: str,
+    ) -> None:
+        """Best-effort close without replacing the transition's primary error."""
+        for device in devices:
+            try:
+                device.close()
+            except Exception:
+                log.warning("%s: closing one channel transport failed", context, exc_info=True)
+
+    def _open_endpoint_devices(
+        self,
+        endpoint: DigitizerEndpoint,
+        digitizer: int,
+        *,
+        board_label: str | None,
+        on_progress: Callable[[str], None] | None,
+    ) -> tuple[list[Digitizer], list[DigitizerChannel]]:
+        devices: list[Digitizer] = []
+        try:
+            for channel in range(endpoint.channels):
+                if on_progress is not None:
+                    message = (
+                        f"Connecting channel {channel + 1} of {endpoint.channels}..."
+                        if board_label is None
+                        else f"Connecting {board_label}:CH{channel} "
+                        f"({channel + 1} of {endpoint.channels})..."
+                    )
+                    on_progress(message)
+                devices.append(
+                    self._connect_endpoint_channel(endpoint.host, endpoint.port, channel)
+                )
+        except Exception:
+            self._close_connection_devices(
+                devices,
+                context=f"Opening {endpoint.host}:{endpoint.port}",
+            )
+            raise
+        addresses = [
+            DigitizerChannel(digitizer, channel) for channel in range(endpoint.channels)
+        ]
+        return devices, addresses
+
+    def _open_configured_endpoints(
+        self,
+        endpoints: Sequence[DigitizerEndpoint],
+        *,
+        on_progress: Callable[[str], None] | None,
+    ) -> tuple[list[Digitizer], list[DigitizerChannel]]:
+        devices: list[Digitizer] = []
+        addresses: list[DigitizerChannel] = []
+        try:
+            for digitizer, endpoint in enumerate(endpoints):
+                opened, opened_addresses = self._open_endpoint_devices(
+                    endpoint,
+                    digitizer,
+                    board_label=f"D{digitizer + 1}",
+                    on_progress=on_progress,
+                )
+                devices.extend(opened)
+                addresses.extend(opened_addresses)
+        except Exception:
+            self._close_connection_devices(devices, context="Preparing reconnect")
+            raise
+        return devices, addresses
+
+    def _capture_connection_runtime(self) -> _ConnectionRuntime:
+        """Capture the topology and latest coincidence settings before teardown."""
+        devices = tuple(self._devices)
+        endpoints = tuple(
+            getattr(
+                self,
+                "_endpoints",
+                ()
+                if self._offline
+                else (DigitizerEndpoint(self._host, self._port, len(devices)),),
+            )
+        )
+        addresses = tuple(
+            getattr(
+                self,
+                "_device_channels",
+                (DigitizerChannel(0, channel) for channel in range(len(devices))),
+            )
+        )
+        settings = {
+            index: dict(value)
+            for index, value in getattr(
+                self,
+                "_coincidence_settings_by_digitizer",
+                {},
+            ).items()
+        }
+        selected = getattr(self, "_selected_coincidence_digitizer", 0)
+        coincidence = getattr(self, "_coincidence_controller", None)
+        if coincidence is not None:
+            settings[selected] = coincidence.configuration_settings()
+        return _ConnectionRuntime(
+            topology=_ConnectionTopology(
+                offline=self._offline,
+                endpoints=endpoints,
+                devices=devices,
+                device_channels=addresses,
+                offline_port=self._port,
+            ),
+            coincidence_settings=settings,
+            selected_coincidence_digitizer=selected,
+            replay_hardware_interlocked=bool(
+                getattr(self, "_replay_hardware_interlocked", False)
+            ),
+        )
+
+    def _install_connection_runtime(self, runtime: _ConnectionRuntime) -> None:
+        topology = runtime.topology
+        self._devices = list(topology.devices)
+        self._endpoints = list(topology.endpoints)
+        self._device_channels = list(topology.device_channels)
+        self._host = topology.host
+        self._port = topology.port
+        self._channels = len(topology.devices)
+        self._offline = topology.offline
+        self._coincidence_settings_by_digitizer = {
+            index: dict(value)
+            for index, value in runtime.coincidence_settings.items()
+        }
+        self._selected_coincidence_digitizer = runtime.selected_coincidence_digitizer
+        # Reapply the interlock after endpoint-bound widgets have been rebuilt.
+        self._replay_hardware_interlocked = False
+
+    def _rebuild_connection_runtime(
+        self,
+        runtime: _ConnectionRuntime,
+        *,
+        on_progress: Callable[[str], None] | None,
+        normalize_docks: bool,
+    ) -> None:
+        self._install_connection_runtime(runtime)
+        self._rebuild_connection_views(
+            on_progress=on_progress,
+            normalize_docks=normalize_docks,
+        )
+        if runtime.topology.offline or runtime.replay_hardware_interlocked:
+            self._set_replay_hardware_interlock(True, resume_background=False)
+
+    def _transition_connection_runtime(
+        self,
+        target: _ConnectionRuntime,
+        *,
+        previous: _ConnectionRuntime,
+        close_on_success: Sequence[Digitizer],
+        close_on_failure: Sequence[Digitizer],
+        on_progress: Callable[[str], None] | None,
+        normalize_docks: bool,
+        description: str,
+    ) -> None:
+        """Atomically rebuild a prepared topology or restore the prior one."""
+        try:
+            self._teardown_connection_runtime()
+            self._rebuild_connection_runtime(
+                target,
+                on_progress=on_progress,
+                normalize_docks=normalize_docks,
+            )
+        except Exception:
+            log.exception("%s failed; restoring the previous workspace", description)
+            try:
+                self._teardown_connection_runtime()
+            except Exception:
+                log.exception("Failed to tear down the partial connection workspace")
+            self._close_connection_devices(
+                close_on_failure,
+                context=f"Rolling back {description.lower()}",
+            )
+            try:
+                self._rebuild_connection_runtime(
+                    previous,
+                    on_progress=on_progress,
+                    normalize_docks=normalize_docks,
+                )
+            except Exception:
+                log.exception("Failed to restore the previous connection workspace")
+            raise
+        self._close_connection_devices(
+            close_on_success,
+            context=f"Committing {description.lower()}",
+        )
+
+    def connect_to_device(
+        self,
+        host: str,
+        port: int,
+        channels: int,
+        *,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> None:
+        """Promote an offline workspace to a live IIO hardware session."""
+        if not getattr(self, "_offline", False):
+            raise RuntimeError("Connect is available only from offline analysis mode")
+        endpoint = self._validated_endpoint(host, port, channels)
+        previous = self._capture_connection_runtime()
+        log.info(
+            "Connect: opening IIO endpoint %s:%d with %d channel(s)",
+            endpoint.host,
+            endpoint.port,
+            endpoint.channels,
+        )
+        connected, addresses = self._open_endpoint_devices(
+            endpoint,
+            0,
+            board_label=None,
+            on_progress=on_progress,
+        )
+        target = _ConnectionRuntime(
+            topology=_ConnectionTopology(
+                offline=False,
+                endpoints=(endpoint,),
+                devices=tuple(connected),
+                device_channels=tuple(addresses),
+                offline_port=endpoint.port,
+            ),
+            coincidence_settings=previous.coincidence_settings,
+            selected_coincidence_digitizer=0,
+            replay_hardware_interlocked=False,
+        )
+        self._transition_connection_runtime(
+            target,
+            previous=previous,
+            close_on_success=previous.topology.devices,
+            close_on_failure=connected,
+            on_progress=on_progress,
+            normalize_docks=False,
+            description="Live connection setup",
+        )
+        log.info("Connect complete: offline workspace promoted to live hardware")
+
+    def add_digitizer(
+        self,
+        host: str,
+        port: int,
+        channels: int,
+        *,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> int:
+        """Add another physical board through the atomic topology transition."""
+        if getattr(self, "_offline", False):
+            raise RuntimeError("connect the first digitizer before adding another")
+        endpoint = self._validated_endpoint(host, port, channels)
+        previous = self._capture_connection_runtime()
+        endpoints = previous.topology.endpoints
+        duplicate_index = self._duplicate_endpoint_index(endpoint, endpoints)
+        if duplicate_index is not None:
+            existing_endpoint = endpoints[duplicate_index]
+            raise ValueError(
+                f"digitizer {endpoint.host}:{endpoint.port} is already connected as "
+                f"D{duplicate_index + 1} "
+                f"({existing_endpoint.host}:{existing_endpoint.port})"
+            )
+
+        digitizer = len(endpoints)
+        board_label = f"D{digitizer + 1}"
+        log.info(
+            "Connect: opening %s at %s:%d with %d channel(s)",
+            board_label,
+            endpoint.host,
+            endpoint.port,
+            endpoint.channels,
+        )
+        connected, addresses = self._open_endpoint_devices(
+            endpoint,
+            digitizer,
+            board_label=board_label,
+            on_progress=on_progress,
+        )
+        target = _ConnectionRuntime(
+            topology=_ConnectionTopology(
+                offline=False,
+                endpoints=(*endpoints, endpoint),
+                devices=(*previous.topology.devices, *connected),
+                device_channels=(*previous.topology.device_channels, *addresses),
+                offline_port=previous.topology.offline_port,
+            ),
+            coincidence_settings=previous.coincidence_settings,
+            selected_coincidence_digitizer=previous.selected_coincidence_digitizer,
+            replay_hardware_interlocked=False,
+        )
+        self._transition_connection_runtime(
+            target,
+            previous=previous,
+            close_on_success=(),
+            close_on_failure=connected,
+            on_progress=on_progress,
+            normalize_docks=True,
+            description=f"Adding {board_label}",
+        )
+        log.info(
+            "Connect complete: %s added at %s:%d",
+            board_label,
+            endpoint.host,
+            endpoint.port,
+        )
+        return digitizer + 1
+
+    def disconnect_digitizer(
+        self,
+        digitizer: int,
+        *,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> bool:
+        """Remove one board atomically, returning whether the workspace is offline."""
+        if getattr(self, "_offline", False):
+            raise RuntimeError("offline mode has no digitizer to disconnect")
+        previous = self._capture_connection_runtime()
+        endpoints = previous.topology.endpoints
+        if not 0 <= digitizer < len(endpoints):
+            raise IndexError("digitizer index is out of range")
+
+        board_label = f"D{digitizer + 1}"
+        endpoint = endpoints[digitizer]
+        paired = tuple(
+            zip(
+                previous.topology.devices,
+                previous.topology.device_channels,
+                strict=True,
+            )
+        )
+        removed_devices = tuple(
+            device for device, address in paired if address.digitizer == digitizer
+        )
+        remaining_endpoints = tuple(
+            item for index, item in enumerate(endpoints) if index != digitizer
+        )
+        digitizer_map = {
+            old: new
+            for new, old in enumerate(
+                index for index in range(len(endpoints)) if index != digitizer
+            )
+        }
+
+        if remaining_endpoints:
+            remaining_devices = tuple(
+                device for device, address in paired if address.digitizer != digitizer
+            )
+            remaining_addresses = tuple(
+                DigitizerChannel(digitizer_map[address.digitizer], address.channel)
+                for _device, address in paired
+                if address.digitizer != digitizer
+            )
+            target_topology = _ConnectionTopology(
+                offline=False,
+                endpoints=remaining_endpoints,
+                devices=remaining_devices,
+                device_channels=remaining_addresses,
+                offline_port=previous.topology.offline_port,
+            )
+            target_settings = {
+                digitizer_map[index]: settings
+                for index, settings in previous.coincidence_settings.items()
+                if index in digitizer_map
+            }
+            selected = digitizer_map.get(
+                previous.selected_coincidence_digitizer,
+                0,
+            )
+            failure_devices: Sequence[Digitizer] = ()
+            rebuild_message = "Rebuilding remaining digitizer views..."
+        else:
+            offline_devices: list[Digitizer] = []
+            try:
+                for channel in range(max(1, endpoint.channels)):
+                    offline_devices.append(create_offline_digitizer(channel))
+            except Exception:
+                self._close_connection_devices(
+                    offline_devices,
+                    context="Preparing offline workspace",
+                )
+                raise
+            target_topology = _ConnectionTopology(
+                offline=True,
+                endpoints=(),
+                devices=tuple(offline_devices),
+                device_channels=tuple(
+                    DigitizerChannel(0, channel)
+                    for channel in range(len(offline_devices))
+                ),
+                offline_port=previous.topology.port,
+            )
+            target_settings = {}
+            selected = 0
+            failure_devices = offline_devices
+            rebuild_message = "Preparing offline analysis workspace..."
+
+        target = _ConnectionRuntime(
+            topology=target_topology,
+            coincidence_settings=target_settings,
+            selected_coincidence_digitizer=selected,
+            replay_hardware_interlocked=target_topology.offline,
+        )
+        if on_progress is not None:
+            on_progress(f"Stopping measurements for {board_label}...")
+            on_progress(rebuild_message)
+        self._transition_connection_runtime(
+            target,
+            previous=previous,
+            close_on_success=removed_devices,
+            close_on_failure=failure_devices,
+            on_progress=on_progress,
+            normalize_docks=True,
+            description=f"Disconnecting {board_label}",
+        )
+        log.info(
+            "Disconnect complete: %s at %s:%d removed; %d endpoint(s) remain",
+            board_label,
+            endpoint.host,
+            endpoint.port,
+            len(remaining_endpoints),
+        )
+        return target_topology.offline
+
+    def reconnect(
+        self,
+        *,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> None:
+        """Open replacement transports before atomically rebuilding all views."""
+        if getattr(self, "_offline", False):
+            raise RuntimeError("offline mode has no hardware endpoint; use Connect")
+        previous = self._capture_connection_runtime()
+        endpoints = previous.topology.endpoints
+        log.info("Reconnect: preparing %d replacement endpoint(s)", len(endpoints))
+        connected, addresses = self._open_configured_endpoints(
+            endpoints,
+            on_progress=on_progress,
+        )
+        target = _ConnectionRuntime(
+            topology=_ConnectionTopology(
+                offline=False,
+                endpoints=endpoints,
+                devices=tuple(connected),
+                device_channels=tuple(addresses),
+                offline_port=previous.topology.offline_port,
+            ),
+            coincidence_settings=previous.coincidence_settings,
+            selected_coincidence_digitizer=previous.selected_coincidence_digitizer,
+            replay_hardware_interlocked=False,
+        )
+        self._transition_connection_runtime(
+            target,
+            previous=previous,
+            close_on_success=previous.topology.devices,
+            close_on_failure=connected,
+            on_progress=on_progress,
+            normalize_docks=False,
+            description="Reconnect",
+        )
+        log.info("Reconnect: all %d device(s) connected", len(connected))
+
+    def _close_connection_analysis_dialogs(self) -> None:
+        """Close analysis dialogs whose models refer to the current controllers."""
         if self._energy_calibration_dialog is not None:
             self._energy_calibration_dialog.close_without_prompt()
             self._energy_calibration_dialog = None
         if self._mca_peak_analysis_dialog is not None:
             self._mca_peak_analysis_dialog.close_without_prompt()
             self._mca_peak_analysis_dialog = None
-        self._save_dock_state()
-        for ctrl in self._scope_controllers:
-            ctrl.save_display_settings()
 
-        self._stop_all_workers()
-
-        self._global_controller = None
-
-        for device in self._devices:
-            device.close()
-        self._devices.clear()
-        self._external_devices.close()
-        self._external_devices = ExternalDevices()
-
+    def _remove_connection_docks(self) -> None:
+        """Detach and schedule deletion of every endpoint-bound dock."""
         dock_hosts = (
             self._scope_dock_host,
             self._current_dock_host,
@@ -2170,14 +3143,43 @@ class MainWindowController:
         for host in dock_hosts:
             for dock in host.findChildren(QDockWidget):
                 host.removeDockWidget(dock)
+                dock.setParent(None)
                 widget = dock.widget()
                 if widget is not None:
                     widget.deleteLater()
                 dock.deleteLater()
 
+    def _remove_coincidence_workspace(self) -> None:
+        """Preserve coincidence settings, then detach its endpoint-bound widgets."""
+        coincidence = self._coincidence_controller
+        if coincidence is not None:
+            self._coincidence_settings_by_digitizer[
+                self._selected_coincidence_digitizer
+            ] = coincidence.configuration_settings()
+            coincidence.set_digitizer_selector_widget(None)
+            self._window.ui.layoutTabCoincidence.removeWidget(coincidence)
+            coincidence.setParent(None)
+            coincidence.deleteLater()
+            self._coincidence_controller = None
+        selector_row = self._coincidence_selector_row
+        if selector_row is not None:
+            selector_row.setParent(None)
+            selector_row.deleteLater()
+        self._coincidence_selector = None
+        self._coincidence_selector_row = None
+        self._coincidence_options = []
+
+    def _clear_connection_controller_references(self) -> None:
+        """Release controller and replay-buffer references after widget teardown."""
+        self._global_controller = None
+        self._global_controllers = []
+        self._global_controller_by_digitizer = {}
+        self._coincidence_channels = None
         self._scope_controllers.clear()
         self._current_monitor_controllers.clear()
+        self._current_monitor_controller_by_device.clear()
         self._mca_controllers.clear()
+        self._mca_controller_by_device.clear()
         self._psd_controllers.clear()
         self._psd_controller_by_device.clear()
         self._psu_controllers.clear()
@@ -2186,22 +3188,60 @@ class MainWindowController:
         self._mca_event_buffers.clear()
         self._scope_frame_buffers.clear()
 
-        log.info(
-            "Reconnect: connecting via IIO to %s:%d, %d channel(s)",
-            self._host,
-            self._port,
-            self._channels,
-        )
-        for channel in range(self._channels):
-            self._devices.append(self._connect_channel(channel))
-        log.info("Reconnect: all %d device(s) connected", len(self._devices))
+    def _teardown_connection_runtime(self) -> None:
+        """Stop and detach endpoint-bound views while leaving transports owned."""
+        self.clear_session_replay(resume_background=False)
+        self._close_connection_analysis_dialogs()
+        self._save_dock_state()
+        for ctrl in self._scope_controllers:
+            ctrl.save_display_settings()
 
+        self._stop_all_workers()
+        self._external_devices.close()
+        self._external_devices = ExternalDevices()
+        self._remove_connection_docks()
+        self._remove_coincidence_workspace()
+        self._clear_connection_controller_references()
+
+    def _rebuild_connection_views(
+        self,
+        *,
+        on_progress: Callable[[str], None] | None = None,
+        normalize_docks: bool = False,
+    ) -> None:
+        """Recreate every controller that holds endpoint-specific objects."""
+        if on_progress is not None:
+            on_progress("Preparing global controls...")
         self._build_global_tab()
+        if on_progress is not None:
+            on_progress("Preparing channel views...")
         self._build_channel_docks()
+        if on_progress is not None:
+            on_progress("Preparing coincidence view...")
+        self._build_coincidence_tab()
+        if on_progress is not None:
+            on_progress("Discovering external devices...")
         self._build_external_docks()
+        if on_progress is not None:
+            on_progress("Restoring dock layout...")
         self._restore_dock_state()
+        if normalize_docks:
+            # The state saved before adding a board knows only the old dock
+            # names. Qt can partially restore it and strand one of the new
+            # channel docks in a second row. A topology change therefore gets
+            # a fresh, deterministic one-row layout which is saved immediately.
+            for host in (
+                self._scope_dock_host,
+                self._current_dock_host,
+                self._mca_dock_host,
+                self._psd_dock_host,
+                self._psu_dock_host,
+                self._global_dock_host,
+            ):
+                self._reset_dock_host(host)
+            self._save_dock_state()
         log.info(
-            "Reconnect complete, %d scope / %d current / %d MCA / %d PSD / %d PSU / "
+            "Connection rebuilt, %d scope / %d current / %d MCA / %d PSD / %d PSU / "
             "%d external controllers",
             len(self._scope_controllers),
             len(self._current_monitor_controllers),
@@ -2272,17 +3312,36 @@ class MainWindowController:
             ctrl.configuration_id: ctrl.replay_schema()
             for ctrl in self._external_controllers
         }
+        global_controllers = self._all_global_controllers()
         shared_hardware = (
-            self._global_controller.hardware_configuration_settings()
-            if self._global_controller is not None
+            global_controllers[0].hardware_configuration_settings()
+            if global_controllers
             else {}
         )
         global_application = (
-            self._global_controller.configuration_settings()
-            if self._global_controller is not None
-            else {}
+            global_controllers[0].configuration_settings() if global_controllers else {}
         )
+        digitizer_hardware = {
+            f"D{index + 1}": controller.hardware_configuration_settings()
+            for index, controller in enumerate(global_controllers)
+        }
+        digitizer_application = {
+            f"D{index + 1}": controller.configuration_settings()
+            for index, controller in enumerate(global_controllers)
+        }
         coincidence = getattr(self, "_coincidence_controller", None)
+        coincidence_application = (
+            coincidence.configuration_settings() if coincidence is not None else {}
+        )
+        if coincidence is not None:
+            coincidence_application = dict(coincidence_application)
+            coincidence_application["digitizer"] = (
+                f"D{self._selected_coincidence_digitizer + 1}"
+            )
+            coincidence_application["physical_channels"] = [
+                self._channel_label(channel)
+                for channel in (self._coincidence_channels or ())
+            ]
         layout = {
             "scope": self._encoded_dock_state(self._scope_dock_host),
             "current": self._encoded_dock_state(self._current_dock_host),
@@ -2291,25 +3350,47 @@ class MainWindowController:
             "psu": self._encoded_dock_state(self._psu_dock_host),
             "global": self._encoded_dock_state(self._global_dock_host),
             "external": self._encoded_dock_state(self._external_dock_host),
+            "topology": {
+                name: self._dock_topology(host)
+                for name, _state_key, host in self._dock_state_hosts()
+            },
         }
+        configuration_endpoints = getattr(self, "_endpoints", None)
+        if configuration_endpoints is None:
+            configuration_endpoints = [
+                DigitizerEndpoint(self._host, self._port, self._channels)
+            ]
         document = {
             "format_version": FORMAT_VERSION,
             "connection": {
                 "ip": self._host,
                 "port": self._port,
                 "channels": self._channels,
+                "digitizers": [
+                    {
+                        "id": f"D{index + 1}",
+                        "ip": endpoint.host,
+                        "port": endpoint.port,
+                        "channels": endpoint.channels,
+                    }
+                    for index, endpoint in enumerate(configuration_endpoints)
+                ],
+                "channel_topology": {
+                    str(index): self._channel_label(index)
+                    for index in range(len(self._devices))
+                },
             },
             "hardware": {
                 "channels": hardware_channels,
                 "shared_trigger": shared_hardware,
+                "digitizers": digitizer_hardware,
                 "external_devices": external_hardware,
             },
             "application": {
                 "main_window": self._window.configuration_settings(),
                 "global": global_application,
-                "coincidence": (
-                    coincidence.configuration_settings() if coincidence is not None else {}
-                ),
+                "digitizers": digitizer_application,
+                "coincidence": coincidence_application,
                 "channels": application_channels,
                 "external_devices": external_application,
                 "external_device_schemas": external_schemas,
@@ -2396,23 +3477,50 @@ class MainWindowController:
                 if psd_ctrl is not None:
                     psd_ctrl.apply_configuration_settings(app_channel.get("psd"))
 
+        application = document.get("application", {})
+        coincidence_settings = (
+            application.get("coincidence") if isinstance(application, dict) else None
+        )
+        if isinstance(coincidence_settings, dict):
+            digitizer = self._saved_coincidence_digitizer(coincidence_settings)
+            selector = self._coincidence_selector
+            if digitizer is not None and selector is not None:
+                selector_index = selector.findData(digitizer)
+                if selector_index >= 0:
+                    selector.blockSignals(True)
+                    selector.setCurrentIndex(selector_index)
+                    selector.blockSignals(False)
+                    self._install_coincidence_digitizer(digitizer)
         if self._coincidence_controller is not None:
-            application = document.get("application", {})
-            if isinstance(application, dict):
-                self._coincidence_controller.apply_configuration_settings(
-                    application.get("coincidence")
-                )
+            self._coincidence_controller.apply_configuration_settings(
+                coincidence_settings
+            )
 
         hardware_root = document.get("hardware", {})
-        application = document.get("application", {})
-        if isinstance(hardware_root, dict) and self._global_controller is not None:
-            self._global_controller.apply_hardware_configuration_settings(
-                hardware_root.get("shared_trigger")
-            )
-        if self._global_controller is not None:
-            if isinstance(application, dict):
-                self._global_controller.apply_configuration_settings(application.get("global"))
-            self._global_controller.refresh_temperature_state()
+        global_controllers = self._all_global_controllers()
+        hardware_digitizers = (
+            hardware_root.get("digitizers", {}) if isinstance(hardware_root, dict) else {}
+        )
+        hardware_digitizers = (
+            hardware_digitizers if isinstance(hardware_digitizers, dict) else {}
+        )
+        application_digitizers = (
+            application.get("digitizers", {}) if isinstance(application, dict) else {}
+        )
+        application_digitizers = (
+            application_digitizers if isinstance(application_digitizers, dict) else {}
+        )
+        for index, global_controller in enumerate(global_controllers):
+            digitizer_key = f"D{index + 1}"
+            hardware_settings = hardware_digitizers.get(digitizer_key)
+            if hardware_settings is None and index == 0 and isinstance(hardware_root, dict):
+                hardware_settings = hardware_root.get("shared_trigger")
+            global_controller.apply_hardware_configuration_settings(hardware_settings)
+            application_settings = application_digitizers.get(digitizer_key)
+            if application_settings is None and index == 0 and isinstance(application, dict):
+                application_settings = application.get("global")
+            global_controller.apply_configuration_settings(application_settings)
+            global_controller.refresh_temperature_state()
         if isinstance(hardware_root, dict):
             external = hardware_root.get("external_devices", {})
             if isinstance(external, dict):
@@ -2430,19 +3538,31 @@ class MainWindowController:
     def _restore_yaml_dock_layout(self, settings: object) -> None:
         if not isinstance(settings, dict):
             return
-        hosts = {
-            "scope": self._scope_dock_host,
-            "current": self._current_dock_host,
-            "mca": self._mca_dock_host,
-            "psd": self._psd_dock_host,
-            "psu": self._psu_dock_host,
-            "global": self._global_dock_host,
-            "external": self._external_dock_host,
-        }
-        for name, host in hosts.items():
+        saved_topology = settings.get("topology")
+        for name, _state_key, host in self._dock_state_hosts():
             encoded = settings.get(name)
-            if isinstance(encoded, str):
-                host.restoreState(QByteArray.fromBase64(encoded.encode("ascii")))
+            if not isinstance(encoded, str):
+                continue
+
+            current_topology = self._dock_topology(host)
+            host_topology = (
+                saved_topology.get(name) if isinstance(saved_topology, dict) else None
+            )
+            if host_topology != current_topology:
+                log.info(
+                    "Ignoring configured %s dock layout because its topology "
+                    "changed from %r to %r",
+                    name,
+                    host_topology,
+                    current_topology,
+                )
+                self._reset_dock_host(host)
+                continue
+
+            state = QByteArray.fromBase64(encoded.encode("ascii"))
+            if not host.restoreState(state):
+                log.warning("Ignoring invalid configured %s dock layout", name)
+                self._reset_dock_host(host)
 
     def _connect_signals(self) -> None:
         self._window.ui.mainTabs.currentChanged.connect(self._on_tab_changed)

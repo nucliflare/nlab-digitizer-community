@@ -75,10 +75,12 @@ def test_offline_window_is_identified_and_hardware_actions_are_disabled(
     assert not window._offline_indicator.isHidden()
     assert window._offline_indicator.text() == "OFFLINE"
     assert window.ui.actionReplaySession.isEnabled()
+    assert window.ui.actionConnectDevice.isEnabled()
     for action in (
         window.ui.actionStartSessionRecording,
         window.ui.actionSaveSettings,
         window.ui.actionLoadSettings,
+        window.ui.actionDisconnectDevice,
         window.ui.actionReconnectDevice,
         window.ui.actionRefreshModbus,
         window.ui.actionRebootBoard,
@@ -86,6 +88,366 @@ def test_offline_window_is_identified_and_hardware_actions_are_disabled(
     ):
         assert not action.isEnabled()
     assert factory.call_args.kwargs["offline"] is True
+
+
+def test_offline_window_can_connect_without_restarting(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = Mock(
+        session_replay=None,
+        session_replay_path=None,
+        offline=False,
+        channel_count=2,
+        endpoint_descriptions=("digitizer.local:30431",),
+        primary_endpoint=("digitizer.local", 30431),
+    )
+    factory = Mock(return_value=controller)
+    apply_general = Mock()
+    persist_general = Mock()
+    apply_view = Mock()
+
+    class FakeDialog:
+        DialogCode = SimpleNamespace(Accepted=1)
+        ip = "digitizer.local"
+        port = 30431
+        channels = 2
+        offline = False
+
+        def __init__(self, _parent: object, *, channels: int) -> None:
+            assert channels == 2
+
+        @staticmethod
+        def exec() -> int:
+            return 1
+
+    monkeypatch.setattr(app_module, "MainWindowController", factory)
+    monkeypatch.setattr(app_module, "ConnectionDialog", FakeDialog)
+    monkeypatch.setattr(app_module, "auto_configuration_enabled", lambda: False)
+    monkeypatch.setattr(MainAppWindow, "_apply_stored_general_settings", apply_general)
+    monkeypatch.setattr(MainAppWindow, "_persist_current_general_settings", persist_general)
+    monkeypatch.setattr(MainAppWindow, "_apply_view_state", apply_view)
+    information = Mock()
+    monkeypatch.setattr(app_module.QMessageBox, "information", information)
+
+    window = MainAppWindow(channels=2, offline=True)
+    qtbot.addWidget(window)
+    apply_general.reset_mock()
+    persist_general.reset_mock()
+    apply_view.reset_mock()
+
+    window._on_connect_device()
+
+    call_args = controller.connect_to_device.call_args
+    assert call_args.args == ("digitizer.local", 30431, 2)
+    assert callable(call_args.kwargs["on_progress"])
+    assert not window._offline
+    assert window._host == "digitizer.local"
+    assert window.windowTitle().endswith("digitizer.local:30431")
+    assert window._offline_indicator.isHidden()
+    assert window.ui.actionConnectDevice.isEnabled()
+    assert window.ui.actionConnectDevice.text() == "Add Digitizer..."
+    assert window.ui.actionReconnectDevice.isEnabled()
+    assert window.ui.actionStartSessionRecording.isEnabled()
+    apply_general.assert_called_once_with()
+    persist_general.assert_called_once_with()
+    apply_view.assert_called_once_with()
+    information.assert_called_once()
+
+
+def test_live_connect_action_adds_another_digitizer(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = Mock(
+        session_replay=None,
+        session_replay_path=None,
+        offline=False,
+        channel_count=4,
+        primary_endpoint=("board-1.local", 30431),
+        endpoint_descriptions=("board-1.local:30431", "board-2.local:30431"),
+    )
+    controller.add_digitizer.return_value = 2
+
+    class FakeDialog:
+        DialogCode = SimpleNamespace(Accepted=1)
+        ip = "board-2.local"
+        port = 30431
+        channels = 2
+        offline = False
+
+        def __init__(self, _parent: object, *, allow_offline: bool) -> None:
+            assert not allow_offline
+
+        @staticmethod
+        def exec() -> int:
+            return 1
+
+    monkeypatch.setattr(app_module, "MainWindowController", Mock(return_value=controller))
+    monkeypatch.setattr(app_module, "ConnectionDialog", FakeDialog)
+    monkeypatch.setattr(app_module, "auto_configuration_enabled", lambda: False)
+    monkeypatch.setattr(MainAppWindow, "_apply_stored_general_settings", lambda _self: None)
+    monkeypatch.setattr(MainAppWindow, "_persist_current_general_settings", lambda _self: None)
+    monkeypatch.setattr(MainAppWindow, "_apply_view_state", lambda _self: None)
+    information = Mock()
+    monkeypatch.setattr(app_module.QMessageBox, "information", information)
+
+    window = MainAppWindow(host="board-1.local", channels=2)
+    qtbot.addWidget(window)
+    window._on_connect_device()
+
+    call_args = controller.add_digitizer.call_args
+    assert call_args.args == ("board-2.local", 30431, 2)
+    assert callable(call_args.kwargs["on_progress"])
+    assert window._channels == 4
+    assert window.ui.actionConnectDevice.text() == "Add Digitizer..."
+    assert "D1 board-1.local:30431; D2 board-2.local:30431" in window.windowTitle()
+    information.assert_called_once()
+
+
+def test_live_disconnect_selects_a_digitizer_and_renumbers_remaining_board(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = Mock(
+        session_replay=None,
+        session_replay_path=None,
+        offline=False,
+        endpoint_descriptions=("board-1.local:30431", "board-2.local:30431"),
+        channel_count=4,
+        primary_endpoint=("board-1.local", 30431),
+    )
+
+    def disconnect(digitizer: int, *, on_progress: object) -> bool:
+        assert digitizer == 1
+        assert callable(on_progress)
+        controller.endpoint_descriptions = ("board-1.local:30431",)
+        controller.channel_count = 2
+        controller.primary_endpoint = ("board-1.local", 30431)
+        controller.offline = False
+        return False
+
+    controller.disconnect_digitizer.side_effect = disconnect
+    monkeypatch.setattr(app_module, "MainWindowController", Mock(return_value=controller))
+    monkeypatch.setattr(MainAppWindow, "_apply_stored_general_settings", lambda _self: None)
+    monkeypatch.setattr(MainAppWindow, "_persist_current_general_settings", lambda _self: None)
+    monkeypatch.setattr(MainAppWindow, "_apply_view_state", lambda _self: None)
+    monkeypatch.setattr(
+        app_module.QInputDialog,
+        "getItem",
+        Mock(return_value=("D2 — board-2.local:30431", True)),
+    )
+    monkeypatch.setattr(
+        app_module.QMessageBox,
+        "question",
+        Mock(return_value=app_module.QMessageBox.StandardButton.Yes),
+    )
+    information = Mock()
+    monkeypatch.setattr(app_module.QMessageBox, "information", information)
+
+    window = MainAppWindow(host="board-1.local", channels=4)
+    qtbot.addWidget(window)
+    window._on_disconnect_device()
+
+    controller.disconnect_digitizer.assert_called_once()
+    assert controller.disconnect_digitizer.call_args.args == (1,)
+    assert window._channels == 2
+    assert not window._offline
+    assert window._host == "board-1.local"
+    assert window.windowTitle().endswith("board-1.local:30431")
+    assert window.ui.actionDisconnectDevice.isEnabled()
+    information.assert_called_once()
+
+
+def test_disconnecting_final_digitizer_returns_window_to_offline_mode(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = Mock(
+        session_replay=None,
+        session_replay_path=None,
+        offline=False,
+        endpoint_descriptions=("board.local:30431",),
+        channel_count=2,
+        primary_endpoint=("board.local", 30431),
+    )
+
+    def disconnect(digitizer: int, *, on_progress: object) -> bool:
+        assert digitizer == 0
+        assert callable(on_progress)
+        controller.endpoint_descriptions = ()
+        controller.primary_endpoint = None
+        controller.offline = True
+        return True
+
+    controller.disconnect_digitizer.side_effect = disconnect
+    monkeypatch.setattr(app_module, "MainWindowController", Mock(return_value=controller))
+    monkeypatch.setattr(MainAppWindow, "_apply_stored_general_settings", lambda _self: None)
+    monkeypatch.setattr(MainAppWindow, "_persist_current_general_settings", lambda _self: None)
+    monkeypatch.setattr(MainAppWindow, "_apply_view_state", lambda _self: None)
+    item_dialog = Mock()
+    monkeypatch.setattr(app_module.QInputDialog, "getItem", item_dialog)
+    monkeypatch.setattr(
+        app_module.QMessageBox,
+        "question",
+        Mock(return_value=app_module.QMessageBox.StandardButton.Yes),
+    )
+    monkeypatch.setattr(app_module.QMessageBox, "information", Mock())
+
+    window = MainAppWindow(host="board.local", channels=2)
+    qtbot.addWidget(window)
+    window._on_disconnect_device()
+
+    item_dialog.assert_not_called()
+    assert window._offline
+    assert window._host == ""
+    assert window.windowTitle().endswith("Offline")
+    assert not window._offline_indicator.isHidden()
+    assert window.ui.actionConnectDevice.text() == "Connect..."
+    assert not window.ui.actionDisconnectDevice.isEnabled()
+    assert not window.ui.actionReconnectDevice.isEnabled()
+
+
+def test_reconnect_uses_progress_and_restores_connection_actions(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = Mock(
+        session_replay=None,
+        session_replay_path=None,
+        offline=False,
+        channel_count=2,
+        endpoint_descriptions=("board.local:30431",),
+        primary_endpoint=("board.local", 30431),
+    )
+    action_state_during_reconnect: dict[str, bool] = {}
+    window: MainAppWindow
+
+    def reconnect(*, on_progress: object) -> None:
+        assert callable(on_progress)
+        action_state_during_reconnect.update(
+            connect=window.ui.actionConnectDevice.isEnabled(),
+            disconnect=window.ui.actionDisconnectDevice.isEnabled(),
+            reconnect=window.ui.actionReconnectDevice.isEnabled(),
+            refresh=window.ui.actionRefreshModbus.isEnabled(),
+        )
+
+    controller.reconnect.side_effect = reconnect
+    monkeypatch.setattr(app_module, "MainWindowController", Mock(return_value=controller))
+    monkeypatch.setattr(MainAppWindow, "_apply_stored_general_settings", lambda _self: None)
+    monkeypatch.setattr(MainAppWindow, "_persist_current_general_settings", lambda _self: None)
+    monkeypatch.setattr(MainAppWindow, "_apply_view_state", lambda _self: None)
+    monkeypatch.setattr(
+        app_module.QMessageBox,
+        "question",
+        Mock(return_value=app_module.QMessageBox.StandardButton.Yes),
+    )
+    information = Mock()
+    monkeypatch.setattr(app_module.QMessageBox, "information", information)
+
+    window = MainAppWindow(host="board.local", channels=2)
+    qtbot.addWidget(window)
+    window._on_reconnect_device()
+
+    assert action_state_during_reconnect == {
+        "connect": False,
+        "disconnect": False,
+        "reconnect": False,
+        "refresh": False,
+    }
+    controller.reconnect.assert_called_once()
+    assert window.ui.mainTabs.isEnabled()
+    assert window.ui.actionConnectDevice.isEnabled()
+    assert window.ui.actionDisconnectDevice.isEnabled()
+    assert window.ui.actionReconnectDevice.isEnabled()
+    assert window.ui.actionRefreshModbus.isEnabled()
+    information.assert_called_once_with(
+        window,
+        "Reconnect",
+        "Device reconnected successfully.",
+    )
+
+
+def test_reconnect_failure_keeps_existing_live_presentation(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = Mock(
+        session_replay=None,
+        session_replay_path=None,
+        offline=False,
+        channel_count=2,
+        endpoint_descriptions=("board.local:30431",),
+        primary_endpoint=("board.local", 30431),
+    )
+    controller.reconnect.side_effect = RuntimeError("replacement unavailable")
+    monkeypatch.setattr(app_module, "MainWindowController", Mock(return_value=controller))
+    monkeypatch.setattr(MainAppWindow, "_apply_stored_general_settings", lambda _self: None)
+    monkeypatch.setattr(MainAppWindow, "_persist_current_general_settings", lambda _self: None)
+    monkeypatch.setattr(MainAppWindow, "_apply_view_state", lambda _self: None)
+    monkeypatch.setattr(
+        app_module.QMessageBox,
+        "question",
+        Mock(return_value=app_module.QMessageBox.StandardButton.Yes),
+    )
+    critical = Mock()
+    monkeypatch.setattr(app_module.QMessageBox, "critical", critical)
+
+    window = MainAppWindow(host="board.local", channels=2)
+    qtbot.addWidget(window)
+    window._on_reconnect_device()
+
+    assert not window._offline
+    assert window.windowTitle().endswith("board.local:30431")
+    assert window.ui.mainTabs.isEnabled()
+    assert window.ui.actionReconnectDevice.isEnabled()
+    critical.assert_called_once_with(
+        window,
+        "Reconnect Failed",
+        "replacement unavailable",
+    )
+
+
+def test_failed_offline_connection_keeps_offline_actions_available(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = Mock(session_replay=None, session_replay_path=None)
+    controller.connect_to_device.side_effect = RuntimeError("device unavailable")
+
+    class FakeDialog:
+        DialogCode = SimpleNamespace(Accepted=1)
+        ip = "missing.local"
+        port = 30431
+        channels = 2
+        offline = False
+
+        def __init__(self, _parent: object, *, channels: int) -> None:
+            assert channels == 2
+
+        @staticmethod
+        def exec() -> int:
+            return 1
+
+    monkeypatch.setattr(app_module, "MainWindowController", Mock(return_value=controller))
+    monkeypatch.setattr(app_module, "ConnectionDialog", FakeDialog)
+    monkeypatch.setattr(MainAppWindow, "_apply_stored_general_settings", lambda _self: None)
+    monkeypatch.setattr(MainAppWindow, "_persist_current_general_settings", lambda _self: None)
+    monkeypatch.setattr(MainAppWindow, "_apply_view_state", lambda _self: None)
+    critical = Mock()
+    monkeypatch.setattr(app_module.QMessageBox, "critical", critical)
+
+    window = MainAppWindow(channels=2, offline=True)
+    qtbot.addWidget(window)
+
+    window._on_connect_device()
+
+    assert window._offline
+    assert window._host == ""
+    assert window._offline_indicator.isVisibleTo(window)
+    assert window.ui.actionConnectDevice.isEnabled()
+    assert not window.ui.actionReconnectDevice.isEnabled()
+    critical.assert_called_once_with(window, "Connection Failed", "device unavailable")
 
 
 def _prepare_fake_main(monkeypatch: pytest.MonkeyPatch) -> tuple[list[object], Mock, Mock]:

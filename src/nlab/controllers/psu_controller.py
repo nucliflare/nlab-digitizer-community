@@ -32,12 +32,10 @@ class PSUController(QWidget):
         self.hv = hv
         self.ui = Ui_PSUView()
         self.ui.setupUi(self)
-        configure_psu_layout(self, self.ui)
+        self._control_scroll = configure_psu_layout(self, self.ui)
 
         self._sipm_available = hv.sipm_available()
-        if not self._sipm_available:
-            self.ui.groupSipm.setVisible(False)
-            self.ui.groupSipmCompens.setVisible(False)
+        self._set_sipm_controls_visible(self._sipm_available)
 
         self._ts: deque[float] = deque()
         self._voltages: deque[float] = deque()
@@ -54,6 +52,15 @@ class PSUController(QWidget):
         self._send_defaults()
         self._load_hardware_state()
         self._connect_signals()
+
+    def _set_sipm_controls_visible(self, visible: bool) -> None:
+        """Show the SiPM column without reserving space while it is hidden."""
+        self.ui.groupSipm.setVisible(visible)
+        self.ui.groupSipmCompens.setVisible(visible)
+        self.ui.columnsLayout.setStretch(0, 1 if visible else 0)
+        self.ui.columnsLayout.invalidate()
+        self._control_scroll.setMinimumHeight(300 if visible else 250)
+        self._control_scroll.setMaximumHeight(320 if visible else 250)
 
     # ------------------------------------------------------------------
     # Plot setup
@@ -508,14 +515,12 @@ class PSUController(QWidget):
                 readback.sipm_compens_output,
             )
         )
-        self.ui.groupSipm.setVisible(recorded_sipm)
-        self.ui.groupSipmCompens.setVisible(recorded_sipm)
+        self._set_sipm_controls_visible(recorded_sipm)
         self._display_readback(readback)
 
     def end_session_replay(self) -> None:
         self._session_replay_active = False
-        self.ui.groupSipm.setVisible(self._sipm_available)
-        self.ui.groupSipmCompens.setVisible(self._sipm_available)
+        self._set_sipm_controls_visible(self._sipm_available)
 
     def _update_plot(self) -> None:
         if not self._ts:

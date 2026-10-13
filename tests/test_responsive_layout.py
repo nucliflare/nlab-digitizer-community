@@ -159,6 +159,74 @@ def test_dense_control_regions_are_scrollable(
     assert scroll.widgetResizable()
 
 
+def test_global_controls_use_available_width_in_two_columns(qtbot: QtBot) -> None:
+    view = QWidget()
+    qtbot.addWidget(view)
+    ui = Ui_GlobalView()
+    ui.setupUi(view)
+
+    configure_global_layout(view, ui)
+
+    scroll = view.findChild(QScrollArea, "globalContentScroll")
+    assert scroll is not None
+    content_layout = scroll.widget().layout()
+    assert content_layout is not None
+    panel_columns = content_layout.itemAt(0).layout()
+    assert isinstance(panel_columns, QBoxLayout)
+    assert panel_columns.objectName() == "globalPanelColumns"
+    assert panel_columns.direction() == QBoxLayout.Direction.LeftToRight
+    assert panel_columns.stretch(0) == panel_columns.stretch(1) == 1
+
+    control_column = panel_columns.itemAt(0).layout()
+    assert isinstance(control_column, QBoxLayout)
+    assert control_column.indexOf(ui.groupSoftwareStart) == 0
+    assert control_column.indexOf(ui.groupTemperatureCorrection) == 1
+    assert panel_columns.indexOf(ui.groupDiagnostics) == 1
+    assert ui.layoutSyncButtons.direction() == QBoxLayout.Direction.TopToBottom
+    sync_actions = ui.layoutSyncButtons.itemAt(1).layout()
+    assert isinstance(sync_actions, QBoxLayout)
+    assert sync_actions.indexOf(ui.btnSoftwareStart) == 0
+    assert sync_actions.indexOf(ui.btnSoftwareReset) == 1
+    assert ui.labelSoftwareStartHelp.wordWrap()
+    assert ui.labelSoftwareStartHelp.maximumWidth() == 520
+    assert ui.btnPrepareSoftware.maximumWidth() == 240
+    assert ui.btnSoftwareStart.maximumWidth() == 260
+    assert ui.btnSoftwareReset.maximumWidth() == 240
+    assert all(
+        group.maximumWidth() > 720
+        for group in (
+            ui.groupSoftwareStart,
+            ui.groupTemperatureCorrection,
+            ui.groupDiagnostics,
+        )
+    )
+
+
+def test_psu_controls_form_a_compact_band_above_the_plot(qtbot: QtBot) -> None:
+    view = QWidget()
+    qtbot.addWidget(view)
+    ui = Ui_PSUView()
+    ui.setupUi(view)
+
+    configure_psu_layout(view, ui)
+    view.resize(1180, 560)
+    view.show()
+    assert view.layout() is not None
+    view.layout().activate()
+
+    scroll = view.findChild(QScrollArea, "psuControlScroll")
+    assert scroll is not None
+    assert ui.horizontalLayout.direction() == QBoxLayout.Direction.TopToBottom
+    telemetry_column = ui.columnsLayout.itemAt(2).layout()
+    assert isinstance(telemetry_column, QBoxLayout)
+    assert telemetry_column.objectName() == "psuTelemetryColumn"
+    assert telemetry_column.indexOf(ui.groupTemp) == 0
+    assert telemetry_column.indexOf(ui.groupMonitoring) == 1
+    assert scroll.geometry().y() < ui.plotHvVoltage.geometry().y()
+    assert scroll.width() == ui.plotHvVoltage.width()
+    assert scroll.horizontalScrollBar().maximum() == 0
+
+
 def test_mca_header_groups_move_into_scrollable_controls(qtbot: QtBot) -> None:
     view = QWidget()
     qtbot.addWidget(view)

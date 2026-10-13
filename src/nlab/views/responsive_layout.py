@@ -369,7 +369,7 @@ def configure_psd_layout(view: QWidget, ui: Ui_PSDView) -> None:
     ui.controlsLayout.setColumnStretch(5, 1)
 
 
-def configure_psu_layout(view: QWidget, ui: Ui_PSUView) -> None:
+def configure_psu_layout(view: QWidget, ui: Ui_PSUView) -> QScrollArea:
     del view
     _compact_forms(
         (
@@ -381,15 +381,77 @@ def configure_psu_layout(view: QWidget, ui: Ui_PSUView) -> None:
             ui.formMonitoring,
         )
     )
+
+    ui.controlLayout.removeWidget(ui.groupTemp)
+    ui.controlLayout.removeWidget(ui.groupMonitoring)
+    ui.controlLayout.removeItem(ui.verticalSpacer)
+    telemetry_column = QVBoxLayout()
+    telemetry_column.setObjectName("psuTelemetryColumn")
+    telemetry_column.setSpacing(ui.columnsLayout.spacing())
+    telemetry_column.addWidget(ui.groupTemp)
+    telemetry_column.addWidget(ui.groupMonitoring)
+    telemetry_column.addStretch(1)
+    ui.columnsLayout.addLayout(telemetry_column)
+    for column in range(3):
+        ui.columnsLayout.setStretch(column, 1)
+
     scroll = _wrap_layout(ui.horizontalLayout, ui.controlLayout, "psuControlScroll")
-    scroll.setMinimumWidth(380)
-    scroll.setMaximumWidth(700)
+    ui.horizontalLayout.setDirection(QBoxLayout.Direction.TopToBottom)
+    scroll.setMinimumWidth(0)
+    scroll.setMaximumWidth(16_777_215)
+    scroll.setMinimumHeight(300)
+    scroll.setMaximumHeight(320)
+    scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
     ui.plotHvVoltage.setMinimumSize(300, 220)
+    return scroll
 
 
 def configure_global_layout(view: QWidget, ui: Ui_GlobalView) -> None:
     del view
     _compact_forms((ui.formSyncState, ui.formTemperatureSettings, ui.formTemperatureReadback))
+
+    ui.labelSoftwareStartHelp.setMaximumWidth(520)
+    ui.btnPrepareSoftware.setMaximumWidth(240)
+    ui.btnSoftwareStart.setMaximumWidth(260)
+    ui.btnSoftwareReset.setMaximumWidth(240)
+
+    _clear_box(ui.layoutSyncButtons, set())
+    ui.layoutSyncButtons.setDirection(QBoxLayout.Direction.TopToBottom)
+    ui.layoutSyncButtons.addWidget(ui.btnPrepareSoftware)
+    sync_actions = QHBoxLayout()
+    sync_actions.setObjectName("globalSyncActions")
+    sync_actions.setSpacing(ui.layoutSyncButtons.spacing())
+    sync_actions.addWidget(ui.btnSoftwareStart)
+    sync_actions.addWidget(ui.btnSoftwareReset)
+    sync_actions.addStretch(1)
+    ui.layoutSyncButtons.addLayout(sync_actions)
+
+    groups = (
+        ui.groupSoftwareStart,
+        ui.groupTemperatureCorrection,
+        ui.groupDiagnostics,
+    )
+    for group in groups:
+        ui.verticalLayout.removeWidget(group)
+        group.setMaximumWidth(16_777_215)
+
+    control_column = QVBoxLayout()
+    control_column.setObjectName("globalControlColumn")
+    control_column.setSpacing(ui.verticalLayout.spacing())
+    control_column.addWidget(ui.groupSoftwareStart)
+    control_column.addWidget(ui.groupTemperatureCorrection)
+    control_column.addStretch(1)
+
+    panel_columns = QHBoxLayout()
+    panel_columns.setObjectName("globalPanelColumns")
+    panel_columns.setSpacing(ui.verticalLayout.spacing())
+    panel_columns.addLayout(control_column, 1)
+    panel_columns.addWidget(
+        ui.groupDiagnostics,
+        1,
+        Qt.AlignmentFlag.AlignTop,
+    )
+    ui.verticalLayout.addLayout(panel_columns)
     _scroll_layout_contents(ui.verticalLayout, "globalContentScroll")
 
 

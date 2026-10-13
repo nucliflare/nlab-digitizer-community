@@ -89,7 +89,9 @@ class EnergyCalibrationDialog(QDialog):
         self._allow_close = False
         self._build_ui()
         for channel in sorted(self._controllers):
-            self.channel_combo.addItem(f"MCA channel {channel}", channel)
+            controller = self._controllers[channel]
+            label = getattr(controller, "channel_label", f"CH{channel}")
+            self.channel_combo.addItem(f"MCA {label}", channel)
             self._workspaces[channel] = self._workspace_from_applied(
                 self._controllers[channel].energy_calibration
             )
@@ -582,8 +584,9 @@ class EnergyCalibrationDialog(QDialog):
         controller.apply_energy_calibration(workspace.fit)
         workspace.dirty = False
         self.snapshot_status.setText(
-            f"Applied {workspace.fit.model} energy calibration to MCA channel "
-            f"{controller.channel}. Raw channels were not modified."
+            f"Applied {workspace.fit.model} energy calibration to MCA "
+            f"{getattr(controller, 'channel_label', f'CH{controller.channel}')}. "
+            "Raw channels were not modified."
         )
 
     def _clear_applied(self) -> None:
@@ -592,7 +595,8 @@ class EnergyCalibrationDialog(QDialog):
             return
         controller.clear_energy_calibration()
         self.snapshot_status.setText(
-            f"Cleared the applied calibration from MCA channel {controller.channel}."
+            "Cleared the applied calibration from MCA "
+            f"{getattr(controller, 'channel_label', f'CH{controller.channel}')}."
         )
 
     def show_workspace(self) -> None:
