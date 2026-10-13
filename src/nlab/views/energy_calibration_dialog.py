@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -28,11 +31,18 @@ from PySide6.QtWidgets import (
 
 from nlab.analysis.energy_calibration import (
     CalibrationModel,
+    CalibrationPeakFit,
     CalibrationPoint,
     EnergyCalibration,
     FingerprintValue,
     SpectrumSnapshot,
+    fit_calibration_peak,
     fit_energy_calibration,
+)
+from nlab.analysis.mca_report import (
+    EnergyCalibrationReportPoint,
+    EnergyCalibrationReportRequest,
+    export_energy_calibration_report,
 )
 from nlab.views.plot_viewbox import ModifierZoomViewBox
 
@@ -42,23 +52,31 @@ if TYPE_CHECKING:
 _COL_POINT = 0
 _COL_LABEL = 1
 _COL_SOURCE = 2
-_COL_CHANNEL = 3
-_COL_ENERGY = 4
-_COL_RESIDUAL = 5
-_COL_ENABLED = 6
+_COL_SEED = 3
+_COL_CENTROID = 4
+_COL_ENERGY = 5
+_COL_RESIDUAL = 6
+_COL_ENABLED = 7
 _OVERLAY_COLORS = ("#1f77b4", "#d28b38", "#648b71", "#7353a6", "#a66f6f")
+_FIT_COLORS = ("#2a9d8f", "#7c3aed", "#e76f51", "#0891b2", "#ca8a04")
 
 
 @dataclass
 class _DraftPoint:
     point_id: str
+    seed_channel: float
     channel: float
     energy_kev: float | None
     label: str
     source: str
     fingerprint: dict[str, FingerprintValue]
+    snapshot_id: str | None = None
+    peak_fit: CalibrationPeakFit | None = None
     enabled: bool = True
     line: pg.InfiniteLine | None = None
+    centroid_line: pg.InfiniteLine | None = None
+    fit_curve: pg.PlotDataItem | None = None
+    residual_curve: pg.PlotDataItem | None = None
 
 
 @dataclass
@@ -68,6 +86,7 @@ class _Workspace:
     model: CalibrationModel = "linear"
     fit: EnergyCalibration | None = None
     dirty: bool = False
+    show_peak_fits: bool = False
 
 
 class EnergyCalibrationDialog(QDialog):
@@ -124,13 +143,34 @@ class EnergyCalibrationDialog(QDialog):
         root.addLayout(source_row)
 
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        self.plot = pg.PlotWidget(self, viewBox=ModifierZoomViewBox())
+        self.plot_splitter = QSplitter(Qt.Orientation.Vertical, self)
+        self.plot = pg.PlotWidget(self.plot_splitter, viewBox=ModifierZoomViewBox())
+        self.plot.setMinimumHeight(260)
         self.plot.setBackground("#f8f9fa")
         self.plot.setLabel("bottom", "MCA channel")
         self.plot.setLabel("left", "Counts")
         self.plot.showGrid(x=True, y=True, alpha=0.2)
         self.legend = self.plot.addLegend()
-        splitter.addWidget(self.plot)
+        self.plot_splitter.addWidget(self.plot)
+
+        self.residual_plot = pg.PlotWidget(
+            self.plot_splitter,
+            viewBox=ModifierZoomViewBox(),
+        )
+        self.residual_plot.setMinimumHeight(120)
+        self.residual_plot.setMaximumHeight(220)
+        self.residual_plot.setBackground("#f8f9fa")
+        self.residual_plot.setLabel("left", "Fit residual", units="counts")
+        self.residual_plot.setLabel("bottom", "MCA channel")
+        self.residual_plot.showGrid(x=True, y=True, alpha=0.2)
+        self.residual_plot.getPlotItem().setXLink(self.plot.getPlotItem())
+        self.residual_legend = self.residual_plot.addLegend()
+        self._reset_residual_plot()
+        self.plot_splitter.addWidget(self.residual_plot)
+        self.plot_splitter.setStretchFactor(0, 4)
+        self.plot_splitter.setStretchFactor(1, 1)
+        self.plot_splitter.setSizes([480, 150])
+        splitter.addWidget(self.plot_splitter)
 
         side = QWidget(self)
         side.setMinimumWidth(400)
@@ -142,12 +182,28 @@ class EnergyCalibrationDialog(QDialog):
         self.model_combo.addItem("Linear", "linear")
         self.model_combo.addItem("Quadratic", "quadratic")
         model_row.addWidget(self.model_combo)
+        model_row.addWidget(QLabel("Centroid half-width:", self))
+        self.centroid_half_width = QDoubleSpinBox(self)
+        self.centroid_half_width.setRange(6.0, 500.0)
+        self.centroid_half_width.setDecimals(1)
+        self.centroid_half_width.setValue(300.0)
+        self.centroid_half_width.setSuffix(" ch")
+        model_row.addWidget(self.centroid_half_width)
         model_row.addStretch(1)
         side_layout.addLayout(model_row)
 
-        self.table = QTableWidget(0, 7, self)
+        self.table = QTableWidget(0, 8, self)
         self.table.setHorizontalHeaderLabels(
-            ["Point", "Label", "Spectrum", "Channel", "Energy [keV]", "Residual", "Use"]
+            [
+                "Point",
+                "Label",
+                "Spectrum",
+                "Seed ch.",
+                "Centroid ch.",
+                "Energy [keV]",
+                "Residual",
+                "Use",
+            ]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -158,12 +214,13 @@ class EnergyCalibrationDialog(QDialog):
         for column in range(self.table.columnCount()):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(_COL_SOURCE, QHeaderView.ResizeMode.Stretch)
-        self.table.setColumnWidth(_COL_POINT, 40)
-        self.table.setColumnWidth(_COL_LABEL, 48)
-        self.table.setColumnWidth(_COL_CHANNEL, 65)
-        self.table.setColumnWidth(_COL_ENERGY, 82)
-        self.table.setColumnWidth(_COL_RESIDUAL, 60)
-        self.table.setColumnWidth(_COL_ENABLED, 36)
+        self.table.setColumnWidth(_COL_POINT, 32)
+        self.table.setColumnWidth(_COL_LABEL, 36)
+        self.table.setColumnWidth(_COL_SEED, 50)
+        self.table.setColumnWidth(_COL_CENTROID, 60)
+        self.table.setColumnWidth(_COL_ENERGY, 60)
+        self.table.setColumnWidth(_COL_RESIDUAL, 48)
+        self.table.setColumnWidth(_COL_ENABLED, 28)
         side_layout.addWidget(self.table, 1)
 
         point_row = QHBoxLayout()
@@ -192,10 +249,13 @@ class EnergyCalibrationDialog(QDialog):
         self.snapshot_status.setWordWrap(True)
         action_row.addWidget(self.snapshot_status, 1)
         self.clear_calibration_button = QPushButton("Clear applied calibration", self)
+        self.report_button = QPushButton("Download report...", self)
+        self.report_button.setEnabled(False)
         self.apply_button = QPushButton("Apply calibration", self)
         self.apply_button.setEnabled(False)
         close_button = QPushButton("Close", self)
         action_row.addWidget(self.clear_calibration_button)
+        action_row.addWidget(self.report_button)
         action_row.addWidget(self.apply_button)
         action_row.addWidget(close_button)
         root.addLayout(action_row)
@@ -206,12 +266,14 @@ class EnergyCalibrationDialog(QDialog):
         self.replace_button.clicked.connect(lambda: self._load_current(replace=True))
         self.overlay_button.clicked.connect(lambda: self._load_current(replace=False))
         self.model_combo.currentIndexChanged.connect(self._model_changed)
+        self.centroid_half_width.valueChanged.connect(self._centroid_width_changed)
         self.add_button.clicked.connect(lambda: self._add_point())
         self.remove_button.clicked.connect(self._remove_selected)
         self.clear_points_button.clicked.connect(self._clear_points)
         self.table.cellChanged.connect(self._table_changed)
         self.apply_button.clicked.connect(self._apply)
         self.clear_calibration_button.clicked.connect(self._clear_applied)
+        self.report_button.clicked.connect(self._download_report)
         self._close_button.clicked.connect(self.reject)
         self.plot.scene().sigMouseClicked.connect(self._plot_clicked)
 
@@ -221,6 +283,7 @@ class EnergyCalibrationDialog(QDialog):
         points = [
             _DraftPoint(
                 point_id=uuid4().hex,
+                seed_channel=point.channel,
                 channel=point.channel,
                 energy_kev=point.energy_kev,
                 label=point.label,
@@ -251,6 +314,7 @@ class EnergyCalibrationDialog(QDialog):
             button.setEnabled(enabled)
         if workspace is None:
             self.plot.clear()
+            self._reset_residual_plot()
             self.table.setRowCount(0)
             self.snapshot_status.setText("No MCA channel is available.")
             return
@@ -285,9 +349,16 @@ class EnergyCalibrationDialog(QDialog):
                 return
         if replace:
             workspace.snapshots = [snapshot]
+            for point in workspace.points:
+                point.source = snapshot.label
+                point.fingerprint = dict(snapshot.fingerprint)
+                point.snapshot_id = snapshot.snapshot_id
+                point.peak_fit = None
         else:
             workspace.snapshots.append(snapshot)
+        workspace.show_peak_fits = False
         self._render_workspace()
+        self._refit()
         state = "live, non-atomic snapshot" if snapshot.live else "stopped snapshot"
         self.snapshot_status.setText(
             f"{len(workspace.snapshots)} spectrum/spectra loaded; newest is a {state}, "
@@ -300,6 +371,7 @@ class EnergyCalibrationDialog(QDialog):
             return
         self.plot.clear()
         self.legend.clear()
+        self._reset_residual_plot()
         for index, snapshot in enumerate(workspace.snapshots):
             color = _OVERLAY_COLORS[index % len(_OVERLAY_COLORS)]
             x = np.arange(len(snapshot.counts) + 1, dtype=np.float64)
@@ -311,8 +383,24 @@ class EnergyCalibrationDialog(QDialog):
                 name=snapshot.label,
             )
         for index, point in enumerate(workspace.points):
+            point.fit_curve = None
+            point.residual_curve = None
+            if workspace.show_peak_fits and point.peak_fit is not None:
+                color = _FIT_COLORS[index % len(_FIT_COLORS)]
+                point.fit_curve = self.plot.plot(
+                    point.peak_fit.x,
+                    point.peak_fit.best_fit,
+                    pen=pg.mkPen(color, width=2.0),
+                    name=f"P{index + 1} Gaussian fit",
+                )
+                point.residual_curve = self.residual_plot.plot(
+                    point.peak_fit.x,
+                    point.peak_fit.observed - point.peak_fit.best_fit,
+                    pen=pg.mkPen(color, width=1.2),
+                    name=f"P{index + 1}",
+                )
             line = pg.InfiniteLine(
-                pos=point.channel,
+                pos=point.seed_channel,
                 angle=90,
                 movable=True,
                 pen=pg.mkPen("#a66f6f", width=1.5, style=Qt.PenStyle.DashLine),
@@ -322,11 +410,23 @@ class EnergyCalibrationDialog(QDialog):
             )
             line.setBounds((0, 16_383))
             line.sigPositionChanged.connect(
-                lambda moved, point_id=point.point_id: self._line_moved(point_id, moved)
+                lambda moved, point_id=point.point_id: self._line_moved(
+                    point_id, moved, refit=False
+                )
+            )
+            line.sigPositionChangeFinished.connect(
+                lambda moved, point_id=point.point_id: self._line_moved(
+                    point_id, moved, refit=True
+                )
             )
             self.plot.addItem(line)
             point.line = line
         self._rebuild_table()
+
+    def _reset_residual_plot(self) -> None:
+        self.residual_plot.clear()
+        self.residual_legend.clear()
+        self.residual_plot.addLine(y=0.0, pen=pg.mkPen("#64748b", width=1.0))
 
     def _plot_clicked(self, event: object) -> None:
         double = getattr(event, "double", None)
@@ -351,6 +451,7 @@ class EnergyCalibrationDialog(QDialog):
         workspace.points.append(
             _DraftPoint(
                 point_id=uuid4().hex,
+                seed_channel=float(np.clip(channel, 0, 16_383)),
                 channel=float(np.clip(channel, 0, 16_383)),
                 energy_kev=None,
                 label="",
@@ -360,27 +461,60 @@ class EnergyCalibrationDialog(QDialog):
                     if snapshot is not None
                     else self._controller().energy_calibration_fingerprint()  # type: ignore[union-attr]
                 ),
+                snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
             )
         )
         workspace.dirty = True
+        workspace.show_peak_fits = False
         self._render_workspace()
         self._refit()
 
-    def _line_moved(self, point_id: str, line: pg.InfiniteLine) -> None:
+    def _line_moved(
+        self,
+        point_id: str,
+        line: pg.InfiniteLine,
+        *,
+        refit: bool,
+    ) -> None:
         workspace = self._workspace()
         if workspace is None:
             return
         for row, point in enumerate(workspace.points):
             if point.point_id != point_id:
                 continue
-            point.channel = float(np.clip(line.value(), 0, 16_383))
+            point.seed_channel = float(np.clip(line.value(), 0, 16_383))
+            point.channel = point.seed_channel
+            point.peak_fit = None
+            if point.centroid_line is not None:
+                try:
+                    self.plot.removeItem(point.centroid_line)
+                except RuntimeError:
+                    pass
+                point.centroid_line = None
+            if point.fit_curve is not None:
+                try:
+                    self.plot.removeItem(point.fit_curve)
+                except RuntimeError:
+                    pass
+                point.fit_curve = None
+            if point.residual_curve is not None:
+                try:
+                    self.residual_plot.removeItem(point.residual_curve)
+                except RuntimeError:
+                    pass
+                point.residual_curve = None
             workspace.dirty = True
-            item = self.table.item(row, _COL_CHANNEL)
+            workspace.show_peak_fits = False
+            item = self.table.item(row, _COL_SEED)
             if item is not None:
                 self._building_table = True
-                item.setText(f"{point.channel:.3f}")
+                item.setText(f"{point.seed_channel:.3f}")
+                centroid_item = self.table.item(row, _COL_CENTROID)
+                if centroid_item is not None:
+                    centroid_item.setText("")
                 self._building_table = False
-            self._refit()
+            if refit:
+                self._refit()
             return
 
     def _rebuild_table(self) -> None:
@@ -397,7 +531,12 @@ class EnergyCalibrationDialog(QDialog):
             source_item = QTableWidgetItem(point.source)
             source_item.setFlags(source_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(row, _COL_SOURCE, source_item)
-            self.table.setItem(row, _COL_CHANNEL, QTableWidgetItem(f"{point.channel:.3f}"))
+            self.table.setItem(row, _COL_SEED, QTableWidgetItem(f"{point.seed_channel:.3f}"))
+            centroid = QTableWidgetItem(
+                "" if point.peak_fit is None else f"{point.channel:.4f}"
+            )
+            centroid.setFlags(centroid.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(row, _COL_CENTROID, centroid)
             self.table.setItem(
                 row,
                 _COL_ENERGY,
@@ -430,13 +569,15 @@ class EnergyCalibrationDialog(QDialog):
         try:
             if column == _COL_LABEL:
                 point.label = item.text().strip()
-            elif column == _COL_CHANNEL:
-                point.channel = float(item.text())
-                if not 0 <= point.channel <= 16_383:
+            elif column == _COL_SEED:
+                point.seed_channel = float(item.text())
+                if not 0 <= point.seed_channel <= 16_383:
                     raise ValueError("channel must be within 0-16383")
+                point.channel = point.seed_channel
+                point.peak_fit = None
                 if point.line is not None:
                     point.line.blockSignals(True)
-                    point.line.setValue(point.channel)
+                    point.line.setValue(point.seed_channel)
                     point.line.blockSignals(False)
             elif column == _COL_ENERGY:
                 text = item.text().strip()
@@ -450,6 +591,7 @@ class EnergyCalibrationDialog(QDialog):
             self._rebuild_table()
             return
         workspace.dirty = True
+        workspace.show_peak_fits = False
         self._refit()
 
     def _model_changed(self) -> None:
@@ -458,6 +600,14 @@ class EnergyCalibrationDialog(QDialog):
             return
         workspace.model = str(self.model_combo.currentData())  # type: ignore[assignment]
         workspace.dirty = True
+        workspace.show_peak_fits = False
+        self._refit()
+
+    def _centroid_width_changed(self) -> None:
+        workspace = self._workspace()
+        if workspace is not None:
+            workspace.dirty = True
+            workspace.show_peak_fits = False
         self._refit()
 
     def _calibration_points(self, workspace: _Workspace) -> tuple[CalibrationPoint, ...]:
@@ -478,6 +628,16 @@ class EnergyCalibrationDialog(QDialog):
         controller = self._controller()
         if workspace is None or controller is None:
             self.apply_button.setEnabled(False)
+            self.report_button.setEnabled(False)
+            return
+        centroid_errors = self._fit_centroids(workspace)
+        self._update_centroid_display(workspace)
+        if centroid_errors:
+            workspace.fit = None
+            self.fit_status.setText(" ".join(centroid_errors))
+            self.apply_button.setEnabled(False)
+            self.report_button.setEnabled(False)
+            self._update_residuals()
             return
         complete_enabled = [
             point for point in workspace.points if point.enabled and point.energy_kev is not None
@@ -486,6 +646,7 @@ class EnergyCalibrationDialog(QDialog):
             workspace.fit = None
             self.fit_status.setText("Enter an expected energy for every enabled reference point.")
             self.apply_button.setEnabled(False)
+            self.report_button.setEnabled(False)
             self._update_residuals()
             return
         fingerprints = {tuple(sorted(point.fingerprint.items())) for point in complete_enabled}
@@ -496,6 +657,7 @@ class EnergyCalibrationDialog(QDialog):
                 "points from one configuration."
             )
             self.apply_button.setEnabled(False)
+            self.report_button.setEnabled(False)
             self._update_residuals()
             return
         fingerprint = dict(complete_enabled[0].fingerprint) if complete_enabled else {}
@@ -509,6 +671,7 @@ class EnergyCalibrationDialog(QDialog):
             workspace.fit = None
             self.fit_status.setText(str(exc))
             self.apply_button.setEnabled(False)
+            self.report_button.setEnabled(False)
             self._update_residuals()
             return
         calibration = workspace.fit
@@ -524,7 +687,80 @@ class EnergyCalibrationDialog(QDialog):
             f"{calibration.max_residual_kev:.4g} keV.{warning}"
         )
         self.apply_button.setEnabled(not stale)
+        self.report_button.setEnabled(True)
         self._update_residuals()
+
+    def _fit_centroids(self, workspace: _Workspace) -> list[str]:
+        snapshots = {snapshot.snapshot_id: snapshot for snapshot in workspace.snapshots}
+        errors: list[str] = []
+        half_width = self.centroid_half_width.value()
+        for index, point in enumerate(workspace.points, start=1):
+            point.channel = point.seed_channel
+            snapshot = snapshots.get(point.snapshot_id or "")
+            if snapshot is None or not point.enabled:
+                point.peak_fit = None
+                continue
+            if (
+                point.peak_fit is not None
+                and point.peak_fit.half_width == half_width
+                and (
+                    point.peak_fit.seed_channel == point.seed_channel
+                    or (
+                        workspace.show_peak_fits
+                        and point.peak_fit.centroid_channel == point.seed_channel
+                    )
+                )
+            ):
+                point.channel = point.peak_fit.centroid_channel
+                continue
+            try:
+                point.peak_fit = fit_calibration_peak(
+                    snapshot,
+                    point.seed_channel,
+                    half_width=half_width,
+                )
+            except ValueError as exc:
+                errors.append(f"P{index} Gaussian centroid fit failed: {exc}")
+                continue
+            point.channel = point.peak_fit.centroid_channel
+        return errors
+
+    def _update_centroid_display(self, workspace: _Workspace) -> None:
+        self._building_table = True
+        for row, point in enumerate(workspace.points):
+            item = self.table.item(row, _COL_CENTROID)
+            if item is not None:
+                item.setText("" if point.peak_fit is None else f"{point.channel:.4f}")
+            if point.centroid_line is not None:
+                try:
+                    self.plot.removeItem(point.centroid_line)
+                except RuntimeError:
+                    pass
+                point.centroid_line = None
+            if not workspace.show_peak_fits and point.fit_curve is not None:
+                try:
+                    self.plot.removeItem(point.fit_curve)
+                except RuntimeError:
+                    pass
+                point.fit_curve = None
+            if not workspace.show_peak_fits and point.residual_curve is not None:
+                try:
+                    self.residual_plot.removeItem(point.residual_curve)
+                except RuntimeError:
+                    pass
+                point.residual_curve = None
+            if point.peak_fit is not None and not workspace.show_peak_fits:
+                centroid_line = pg.InfiniteLine(
+                    pos=point.channel,
+                    angle=90,
+                    movable=False,
+                    pen=pg.mkPen("#2a9d8f", width=1.5),
+                    label=f"C{row + 1}",
+                    labelOpts={"color": "#2a9d8f", "position": 0.85},
+                )
+                self.plot.addItem(centroid_line)
+                point.centroid_line = centroid_line
+        self._building_table = False
 
     def _update_residuals(self) -> None:
         workspace = self._workspace()
@@ -552,6 +788,7 @@ class EnergyCalibrationDialog(QDialog):
             del workspace.points[row]
         if rows:
             workspace.dirty = True
+            workspace.show_peak_fits = False
             self._render_workspace()
             self._refit()
 
@@ -562,6 +799,7 @@ class EnergyCalibrationDialog(QDialog):
         workspace.points.clear()
         workspace.fit = None
         workspace.dirty = True
+        workspace.show_peak_fits = False
         self._render_workspace()
         self._refit()
 
@@ -582,7 +820,13 @@ class EnergyCalibrationDialog(QDialog):
             )
             return
         controller.apply_energy_calibration(workspace.fit)
+        for point in workspace.points:
+            if point.peak_fit is not None:
+                point.seed_channel = point.channel
+        workspace.show_peak_fits = True
         workspace.dirty = False
+        self._render_workspace()
+        self._update_centroid_display(workspace)
         self.snapshot_status.setText(
             f"Applied {workspace.fit.model} energy calibration to MCA "
             f"{getattr(controller, 'channel_label', f'CH{controller.channel}')}. "
@@ -591,12 +835,75 @@ class EnergyCalibrationDialog(QDialog):
 
     def _clear_applied(self) -> None:
         controller = self._controller()
-        if controller is None:
+        workspace = self._workspace()
+        if controller is None or workspace is None:
             return
         controller.clear_energy_calibration()
+        workspace.show_peak_fits = False
+        self._render_workspace()
+        self._refit()
         self.snapshot_status.setText(
             "Cleared the applied calibration from MCA "
             f"{getattr(controller, 'channel_label', f'CH{controller.channel}')}."
+        )
+
+    def _download_report(self) -> None:
+        workspace = self._workspace()
+        channel = self._channel()
+        if workspace is None or workspace.fit is None or channel is None:
+            QMessageBox.information(
+                self,
+                "Energy Calibration Report",
+                "Complete a valid energy calibration before creating a report.",
+            )
+            return
+        default_folder = str(
+            QSettings().value("analysis/energy_calibration_report_folder", "measurements")
+        )
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select Energy Calibration Report Destination",
+            default_folder,
+        )
+        if not selected:
+            return
+        report_points = tuple(
+            EnergyCalibrationReportPoint(
+                point=CalibrationPoint(
+                    channel=point.channel,
+                    energy_kev=point.energy_kev,
+                    label=point.label,
+                    source=point.source,
+                    enabled=point.enabled,
+                ),
+                seed_channel=(
+                    point.peak_fit.seed_channel
+                    if point.peak_fit is not None
+                    else point.seed_channel
+                ),
+                peak_fit=point.peak_fit,
+            )
+            for point in workspace.points
+            if point.energy_kev is not None
+        )
+        request = EnergyCalibrationReportRequest(
+            channel=channel,
+            snapshots=tuple(workspace.snapshots),
+            calibration=workspace.fit,
+            points=report_points,
+            centroid_half_width=self.centroid_half_width.value(),
+        )
+        try:
+            bundle = export_energy_calibration_report(request, Path(selected))
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Energy Calibration Report Failed", str(exc))
+            return
+        QSettings().setValue("analysis/energy_calibration_report_folder", selected)
+        self.snapshot_status.setText(f"Energy calibration report saved to {bundle.directory}.")
+        QMessageBox.information(
+            self,
+            "Energy Calibration Report Saved",
+            f"Report and data files were saved to:\n{bundle.directory}",
         )
 
     def show_workspace(self) -> None:

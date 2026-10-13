@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from nlab.analysis.mca_report import PeakFitReportRequest, export_peak_fit_report
 from nlab.analysis.peak_fitting import (
     BackgroundModel,
     FitStatistic,
@@ -524,6 +525,12 @@ class McaPeakAnalysisDialog(QDialog):
         self.export_fit_button = QPushButton("Export fit results...", self)
         self.export_fit_button.setEnabled(False)
         layout.addWidget(self.export_fit_button)
+        self.report_fit_button = QPushButton("Download report...", self)
+        self.report_fit_button.setEnabled(False)
+        self.report_fit_button.setToolTip(
+            "Save a PDF report and complete fitted spectrum, peak, and parameter data."
+        )
+        layout.addWidget(self.report_fit_button)
         return tab
 
     def _connect_signals(self) -> None:
@@ -555,6 +562,7 @@ class McaPeakAnalysisDialog(QDialog):
         self.operation_combo.currentIndexChanged.connect(self._update_operation_controls)
         self.apply_operation_button.clicked.connect(self._apply_operation)
         self.export_fit_button.clicked.connect(self._export_fit_result)
+        self.report_fit_button.clicked.connect(self._download_fit_report)
         self.close_button.clicked.connect(self.reject)
 
     def _load_reference_favourites(self) -> list[str]:
@@ -899,6 +907,7 @@ class McaPeakAnalysisDialog(QDialog):
         self._fit_result = None
         self._fit_spectrum_id = None
         self.export_fit_button.setEnabled(False)
+        self.report_fit_button.setEnabled(False)
         self._suggest_peaks()
         self._update_other_spectra()
         self._update_source_status()
@@ -1324,6 +1333,7 @@ class McaPeakAnalysisDialog(QDialog):
         self._last_fit_spec = spec
         self.fit_button.setEnabled(False)
         self.cancel_fit_button.setEnabled(True)
+        self.report_fit_button.setEnabled(False)
         self.fit_status.setText("Fitting...")
         thread.start()
 
@@ -1338,6 +1348,7 @@ class McaPeakAnalysisDialog(QDialog):
         )
         self._populate_results(result)
         self.export_fit_button.setEnabled(True)
+        self.report_fit_button.setEnabled(True)
         self._render()
 
     def _fit_failed(self, message: str) -> None:
@@ -1517,6 +1528,48 @@ class McaPeakAnalysisDialog(QDialog):
             QMessageBox.critical(self, "Fit Export Failed", str(exc))
             return
         self.workbench_status.setText(f"Fit results exported to {path}")
+
+    def _download_fit_report(self) -> None:
+        result = self._fit_result
+        spectrum = self._spectra.get(self._fit_spectrum_id or "")
+        spec = self._last_fit_spec
+        if result is None or spectrum is None or spec is None:
+            QMessageBox.information(
+                self,
+                "Peak-Fitting Report",
+                "Complete a peak fit before creating a report.",
+            )
+            return
+        default_folder = str(
+            QSettings().value("analysis/peak_fit_report_folder", "measurements")
+        )
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select Peak-Fitting Report Destination",
+            default_folder,
+        )
+        if not selected:
+            return
+        request = PeakFitReportRequest(
+            spectrum=spectrum,
+            spec=spec,
+            result=result,
+            reference_overlay=self._reference_selection_document(),
+            y_scale=cast(Literal["linear", "log"], str(self.scale_combo.currentData())),
+        )
+        try:
+            bundle = export_peak_fit_report(request, Path(selected))
+        except (OSError, ValueError) as exc:
+            log.exception("Could not create MCA peak-fitting report")
+            QMessageBox.critical(self, "Peak-Fitting Report Failed", str(exc))
+            return
+        QSettings().setValue("analysis/peak_fit_report_folder", selected)
+        self.workbench_status.setText(f"Peak-fitting report saved to {bundle.directory}.")
+        QMessageBox.information(
+            self,
+            "Peak-Fitting Report Saved",
+            f"Report and data files were saved to:\n{bundle.directory}",
+        )
 
     def show_workspace(self) -> None:
         self.show()

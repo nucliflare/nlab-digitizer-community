@@ -28,6 +28,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shared-start and temperature controls; synchronized-start guidance wraps
   beside compact action buttons. Power-supply controls form a compact band
   above the full-width monitoring plot instead of reserving a tall sidebar.
+- The MCA peak-analysis workbench can download a non-overwriting report bundle
+  after a completed fit. It includes a branded two-page PDF with the spectrum,
+  model components, residuals, fitted peak table, statistics, and TeX-style
+  Gaussian, FWHM, and selected-background equations, plus complete curve, peak,
+  parameter, provenance, and reference-overlay data in CSV and JSON files.
+- MCA Energy Calibration now treats each draggable reference marker as an
+  initial seed for a local Gaussian-plus-linear-background fit and uses the
+  fitted centroid for the channel-to-energy polynomial. The configurable fit
+  half-width defaults to 300 channels to avoid locking onto narrow noise peaks;
+  separate seed and centroid columns, solid centroid overlays, and explicit
+  convergence failures make the refinement visible. Applying the
+  calibration snaps the draggable seeds to their centroids and overlays each
+  local Gaussian fit with an aligned observed-minus-fit residual plot;
+  subsequent edits hide both. A matching report download shows the local fit
+  residuals and preserves source spectra, seeds, centroid fits, calibration
+  points, energy residuals, settings, and typeset model equations in PDF, CSV,
+  and JSON files.
 - A dual-channel MCA gain-drift CLI diagnostic tracks the Na-22 511-keV peak
   maximum and local centroid from saved differential ROI spectra while logging
   MCA statistics, temperature correction, detector/board temperatures, power

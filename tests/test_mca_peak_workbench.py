@@ -147,6 +147,7 @@ def test_workbench_runs_peak_fit_off_the_gui_thread(qtbot: QtBot) -> None:
     assert result.statistic == "poisson"
     assert dialog.peak_table.rowCount() == 1
     assert dialog.export_fit_button.isEnabled()
+    assert dialog.report_fit_button.isEnabled()
     dialog.close_without_prompt()
 
 

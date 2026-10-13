@@ -147,7 +147,7 @@ def fit_spectrum_peaks(
 
     minimizer = Minimizer(objective, parameters, iter_cb=iteration_callback)
     result = minimizer.minimize(method="least_squares", max_nfev=10_000)
-    if cancel_check() or result.aborted:
+    if cancel_check():
         raise PeakFitCancelledError("peak fit cancelled")
 
     best_fit = np.asarray(model.eval(params=result.params, x=x), dtype=np.float64)
