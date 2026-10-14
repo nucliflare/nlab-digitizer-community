@@ -191,6 +191,7 @@
    <widget class="QMenu" name="menuTools">
     <property name="title"><string>Tools</string></property>
     <addaction name="actionEnergyCalibration"/>
+    <addaction name="actionDoseCalibration"/>
     <addaction name="actionMcaPeakAnalysis"/>
     <addaction name="separator"/>
     <addaction name="actionOpenPsdEvents"/>
@@ -283,6 +284,9 @@
   </action>
   <action name="actionEnergyCalibration">
    <property name="text"><string>MCA Energy Calibration...</string></property>
+  </action>
+  <action name="actionDoseCalibration">
+   <property name="text"><string>Dose Calibration Logger...</string></property>
   </action>
   <action name="actionMcaPeakAnalysis">
    <property name="text"><string>MCA Peak Analysis Workbench...</string></property>

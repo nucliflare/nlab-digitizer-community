@@ -9,6 +9,7 @@ import pyqtgraph as pg
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import QCheckBox, QComboBox, QDoubleSpinBox, QWidget
 
+from nlab.analysis.dose_calibration import PsuDoseCalibrationSnapshot
 from nlab.hardware.digitizer.hv import HV_PARAMETER_SPECS, HVParam, HVSupply
 from nlab.hardware.digitizer.scope import RangeSpec
 from nlab.ui.ui_psu_view import Ui_PSUView
@@ -46,6 +47,7 @@ class PSUController(QWidget):
         self._replay_hardware_interlocked = False
         self._session_replay_active = False
         self._replay_resume_monitoring = False
+        self._latest_readback: PSUReadback | None = None
 
         self._setup_plot()
         self._apply_parameter_specs()
@@ -127,21 +129,49 @@ class PSUController(QWidget):
 
     def _load_hardware_state(self) -> None:
         try:
-            self.ui.spinHvVoltage.setValue(self.hv.get_hv_adc_voltage())
-            self.ui.lblHvVoltage.setText(f"{self.hv.get_hv_adc_voltage():.1f}")
-            self.ui.lblHvCompensOutput.setText(f"{self.hv.get_hv_compens_output():.1f}")
+            hv_voltage = self.hv.get_hv_adc_voltage()
+            hv_compens_output = self.hv.get_hv_compens_output()
+            temp_analog = self.hv.get_temp_analog()
+            temp_digital = self.hv.get_temp_digital()
+            temp_digital_status = self.hv.get_temp_digital_status()
+            ads_temp = self.hv.get_ads_temp()
+            sipm_voltage: float | None = None
+            sipm_current: float | None = None
+            sipm_overload: int | None = None
+            sipm_compens_output: float | None = None
 
-            self.ui.lblTempAnalog.setText(f"{self.hv.get_temp_analog():.1f}")
-            self.ui.lblTempDigital.setText(f"{self.hv.get_temp_digital():.1f}")
-            self.ui.lblTempDigitalStatus.setText(str(self.hv.get_temp_digital_status()))
-            self.ui.lblAdsTemp.setText(f"{self.hv.get_ads_temp():.1f}")
+            self.ui.spinHvVoltage.setValue(hv_voltage)
+            self.ui.lblHvVoltage.setText(f"{hv_voltage:.1f}")
+            self.ui.lblHvCompensOutput.setText(f"{hv_compens_output:.1f}")
+
+            self.ui.lblTempAnalog.setText(f"{temp_analog:.1f}")
+            self.ui.lblTempDigital.setText(f"{temp_digital:.1f}")
+            self.ui.lblTempDigitalStatus.setText(str(temp_digital_status))
+            self.ui.lblAdsTemp.setText(f"{ads_temp:.1f}")
 
             if self._sipm_available:
-                self.ui.spinSipmVoltage.setValue(self.hv.get_sipm_adc_voltage())
-                self.ui.lblSipmVoltage.setText(f"{self.hv.get_sipm_adc_voltage():.2f}")
-                self.ui.lblSipmCurrent.setText(f"{self.hv.get_sipm_adc_current():.4f}")
-                self.ui.lblSipmOverload.setText(str(self.hv.get_sipm_overload()))
-                self.ui.lblSipmCompensOutput.setText(f"{self.hv.get_sipm_compens_output():.2f}")
+                sipm_voltage = self.hv.get_sipm_adc_voltage()
+                sipm_current = self.hv.get_sipm_adc_current()
+                sipm_overload = self.hv.get_sipm_overload()
+                sipm_compens_output = self.hv.get_sipm_compens_output()
+                self.ui.spinSipmVoltage.setValue(sipm_voltage)
+                self.ui.lblSipmVoltage.setText(f"{sipm_voltage:.2f}")
+                self.ui.lblSipmCurrent.setText(f"{sipm_current:.4f}")
+                self.ui.lblSipmOverload.setText(str(sipm_overload))
+                self.ui.lblSipmCompensOutput.setText(f"{sipm_compens_output:.2f}")
+            self._latest_readback = PSUReadback(
+                timestamp=0.0,
+                hv_voltage=hv_voltage,
+                hv_compens_output=hv_compens_output,
+                temp_analog=temp_analog,
+                temp_digital=temp_digital,
+                temp_digital_status=temp_digital_status,
+                ads_temp=ads_temp,
+                sipm_voltage=sipm_voltage,
+                sipm_current=sipm_current,
+                sipm_overload=sipm_overload,
+                sipm_compens_output=sipm_compens_output,
+            )
         except Exception:
             log.exception("Failed to read initial HV state")
 
@@ -449,6 +479,7 @@ class PSUController(QWidget):
         self._display_readback(rb)
 
     def _display_readback(self, rb: PSUReadback) -> None:
+        self._latest_readback = rb
         time_range = self.ui.spinTimeRange.value()
 
         self._ts.append(rb.timestamp)
@@ -461,6 +492,30 @@ class PSUController(QWidget):
 
         self._update_plot()
         self._update_readback_labels(rb)
+
+    def dose_calibration_snapshot(self) -> PsuDoseCalibrationSnapshot:
+        """Return non-blocking bias and temperature values for CSV logging."""
+        readback = self._latest_readback
+        return PsuDoseCalibrationSnapshot(
+            hv_setpoint_v=float(self.ui.spinHvVoltage.value()),
+            hv_readback_v=None if readback is None else float(readback.hv_voltage),
+            sipm_setpoint_v=(
+                float(self.ui.spinSipmVoltage.value()) if self._sipm_available else None
+            ),
+            sipm_readback_v=(
+                None if readback is None or readback.sipm_voltage is None
+                else float(readback.sipm_voltage)
+            ),
+            temperature_analog_c=(
+                None if readback is None else float(readback.temp_analog)
+            ),
+            temperature_digital_c=(
+                None if readback is None else float(readback.temp_digital)
+            ),
+            adc_temperature_c=(
+                None if readback is None else float(readback.ads_temp)
+            ),
+        )
 
     def begin_session_replay(self) -> None:
         self._session_replay_active = True

@@ -8,6 +8,7 @@ from PySide6.QtCore import QSettings, Qt, QThread, QTime, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QHeaderView, QTableWidgetItem, QWidget
 
+from nlab.analysis.dose_calibration import DigitizerTemperatureSnapshot
 from nlab.hardware.digitizer.diagnostics import GlobalDiagnosticReading
 from nlab.hardware.digitizer.digitizer import Digitizer
 from nlab.hardware.digitizer.mca import MCA_PARAMETER_SPECS, MCAParam
@@ -79,6 +80,8 @@ class GlobalController(QWidget):
         self._replay_resume_temperature_correction = False
         self._replay_resume_diagnostics = False
         self._session_replay_active = False
+        self._latest_temperature_readback: TemperatureCorrectionReadback | None = None
+        self._latest_diagnostics_readback: tuple[GlobalDiagnosticReading, ...] = ()
         self._reset_sync_for_initialization()
         self._sync_available = self._load_sync_state()
         self._load_settings()
@@ -295,6 +298,7 @@ class GlobalController(QWidget):
         self,
         readback: TemperatureCorrectionReadback,
     ) -> None:
+        self._latest_temperature_readback = readback
         try:
             self.session_temperature_readback.emit(readback)
         except RuntimeError:
@@ -322,6 +326,7 @@ class GlobalController(QWidget):
             applied_coefficient=float(value["applied_coefficient"]),
             applied_offset=int(value["applied_offset"]),
         )
+        self._latest_temperature_readback = readback
         self.ui.lblAdsTemperature.setText(f"{readback.temperature:g} raw")
         self.ui.lblAppliedTempCoeff.setText(f"{readback.applied_coefficient:.9f}")
         self.ui.lblAppliedTempOffset.setText(str(readback.applied_offset))
@@ -706,6 +711,7 @@ class GlobalController(QWidget):
         self,
         readings: list[GlobalDiagnosticReading],
     ) -> None:
+        self._latest_diagnostics_readback = tuple(readings)
         table = self.ui.tableDiagnostics
         table.setRowCount(len(readings))
         for row, reading in enumerate(readings):
@@ -731,6 +737,24 @@ class GlobalController(QWidget):
         width += table.frameWidth() * 2 + 2
         table.setFixedWidth(width)
         self.ui.lblLastUpdate.setText(QTime.currentTime().toString("HH:mm:ss"))
+
+    def dose_calibration_temperature_snapshot(self) -> DigitizerTemperatureSnapshot:
+        """Return cached board temperatures without performing hardware I/O."""
+        values = {
+            reading.key: float(reading.value)
+            for reading in self._latest_diagnostics_readback
+            if isinstance(reading.value, int | float)
+            and not isinstance(reading.value, bool)
+        }
+        correction = self._latest_temperature_readback
+        ads_raw = values.get("ads_temperature_raw")
+        if ads_raw is None and correction is not None:
+            ads_raw = float(correction.temperature)
+        return DigitizerTemperatureSnapshot(
+            hat_temperature_c=values.get("hat_temperature"),
+            fpga_temperature_c=values.get("fpga_temperature"),
+            ads5407_temperature_raw=ads_raw,
+        )
 
     @staticmethod
     def _format_diagnostic_value(reading: GlobalDiagnosticReading) -> str:

@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A dose-calibration logger under **Tools** writes interval-based CSV rows with
+  a reference dose rate that changes only after editing finishes. Users select
+  the desired MCA count-rate/dead-time statistics, total and visible-ROI
+  differential-spectrum integrals, PSU setpoints/readbacks, detector and board
+  temperatures, and cumulative PSD below/above-cut integrals over the full
+  energy range and selected PSD ROI. An adjacent live plot selects among the
+  enabled numeric fields, including the user-entered reference dose. Rows are
+  flushed immediately, unavailable values remain explicit blanks, and existing
+  files are not overwritten.
 - Offline analysis mode now provides **Connection -> Connect...**. It reopens
   digitizer discovery, validates every requested IIO channel before replacing
   the read-only workspace, rebuilds the live measurement controls in place, and
