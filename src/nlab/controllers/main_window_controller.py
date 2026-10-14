@@ -12,7 +12,15 @@ from time import monotonic_ns
 from typing import TYPE_CHECKING, Any, cast
 
 from PySide6.QtCore import QByteArray, QSettings, Qt, QThread, QThreadPool, QTimer
-from PySide6.QtWidgets import QComboBox, QDockWidget, QHBoxLayout, QLabel, QMainWindow, QWidget
+from PySide6.QtWidgets import (
+    QComboBox,
+    QDockWidget,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QWidget,
+)
 
 from nlab.controllers.coincidence_controller import CoincidenceController
 from nlab.controllers.current_monitor_controller import CurrentMonitorController
@@ -38,6 +46,10 @@ from nlab.session.replay import (
     ScopeReplayFrame,
     SessionReplay,
     TelemetryReplayEvent,
+)
+from nlab.views.dose_calibration_dialog import (
+    DoseCalibrationChannelSource,
+    DoseCalibrationDialog,
 )
 from nlab.views.energy_calibration_dialog import EnergyCalibrationDialog
 from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
@@ -193,6 +205,7 @@ class MainWindowController:
         self._selected_coincidence_digitizer = 0
         self._coincidence_settings_by_digitizer: dict[int, dict[str, object]] = {}
         self._energy_calibration_dialog: EnergyCalibrationDialog | None = None
+        self._dose_calibration_dialog: DoseCalibrationDialog | None = None
         self._mca_peak_analysis_dialog: McaPeakAnalysisDialog | None = None
         self._psd_readback_dialog: PsdReadbackDialog | None = None
         self._waveform_analysis_dialog: WaveformAnalysisDialog | None = None
@@ -1213,6 +1226,40 @@ class MainWindowController:
                 parent=self._window,
             )
         self._energy_calibration_dialog.show_workspace()
+
+    def _dose_calibration_sources(self) -> list[DoseCalibrationChannelSource]:
+        sources: list[DoseCalibrationChannelSource] = []
+        for device_index, mca in sorted(self._mca_controller_by_device.items()):
+            address = self._physical_channel(device_index)
+            sources.append(
+                DoseCalibrationChannelSource(
+                    label=mca.channel_label,
+                    mca=mca,
+                    psu=self._psu_controller_by_device.get(device_index),
+                    psd=self._psd_controller_by_device.get(device_index),
+                    temperatures=self._global_controller_by_digitizer.get(
+                        address.digitizer
+                    ),
+                )
+            )
+        return sources
+
+    def show_dose_calibration(self) -> None:
+        """Open a modeless logger for reference dose-rate calibration rows."""
+        if self._dose_calibration_dialog is None:
+            sources = self._dose_calibration_sources()
+            if not sources:
+                QMessageBox.information(
+                    self._window,
+                    "Dose Calibration",
+                    "No MCA channel is available for dose calibration logging.",
+                )
+                return
+            self._dose_calibration_dialog = DoseCalibrationDialog(
+                sources,
+                parent=self._window,
+            )
+        self._dose_calibration_dialog.show_workspace()
 
     def show_mca_peak_analysis(self) -> None:
         """Open one modeless peak-analysis workbench for live and saved spectra."""
@@ -2579,6 +2626,9 @@ class MainWindowController:
         if self._energy_calibration_dialog is not None:
             self._energy_calibration_dialog.close_without_prompt()
             self._energy_calibration_dialog = None
+        if self._dose_calibration_dialog is not None:
+            self._dose_calibration_dialog.close_without_prompt()
+            self._dose_calibration_dialog = None
         if self._mca_peak_analysis_dialog is not None:
             self._mca_peak_analysis_dialog.close_without_prompt()
             self._mca_peak_analysis_dialog = None
@@ -3144,6 +3194,9 @@ class MainWindowController:
         if self._energy_calibration_dialog is not None:
             self._energy_calibration_dialog.close_without_prompt()
             self._energy_calibration_dialog = None
+        if self._dose_calibration_dialog is not None:
+            self._dose_calibration_dialog.close_without_prompt()
+            self._dose_calibration_dialog = None
         if self._mca_peak_analysis_dialog is not None:
             self._mca_peak_analysis_dialog.close_without_prompt()
             self._mca_peak_analysis_dialog = None

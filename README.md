@@ -98,6 +98,9 @@ uv run python examples/measure_current.py
 - Modeless multi-spectrum energy calibration under **Tools**, with draggable
   reference lines, linear or quadratic fits, residuals, per-channel calibrated
   top axes, and raw-channel-preserving CSV/YAML metadata
+- A modeless dose-calibration CSV logger under **Tools** records a committed
+  reference dose rate beside selectable MCA, PSD, bias-voltage, and temperature
+  observables at a configurable interval
 - Modeless MCA peak-analysis workbench under **Tools** with automatic frozen
   snapshots of current MCA spectra, CSV/ASCII SPE/Tukan WDM/CAEN TXT3/ROOT
   loading, one-to-three Gaussian fits, selectable count-aware backgrounds,
@@ -635,6 +638,34 @@ Gaussian centroid-fit curves and their count residuals, calibration points and
 energy residuals, plus complete JSON metadata. The PDF typesets the Gaussian
 centroid and linear or quadratic energy-calibration equations in mathematical
 notation.
+
+### Dose calibration CSV logger
+
+Open **Tools → Dose Calibration Logger...**, select one detector channel, enter
+the known source/setup and expected dose rate, and choose a new CSV file. The
+reference dose is committed only when editing its field finishes, so a partially
+typed value cannot leak into timer-driven rows. Every row contains its UTC time,
+actual interval, channel, source label, committed dose value, and dose unit.
+
+The optional column groups capture the latest already-polled values without
+performing additional hardware reads or starting an acquisition:
+
+- MCA raw count rate, pulse dead time, and acquisition elapsed time;
+- total counts added between consecutive accumulated MCA spectra, plus the
+  integral inside the MCA ROI when that ROI is visible;
+- HV and optional SiPM setpoints and voltage readbacks;
+- analogue/digital detector, ADC, HAT, FPGA, and raw ADS5407 temperatures;
+- cumulative PSD energy-spectrum integrals below and above the current cut,
+  both over the full displayed energy range and inside the selected PSD energy
+  ROI. The current cut and ROI bounds are repeated in every row.
+
+The first accumulated MCA spectrum at **Start CSV recording** establishes the
+differential baseline; rows remain blank for data that have not yet produced a
+live readback. The adjacent live plot can display any enabled numeric CSV field,
+including the user-entered expected dose rate, against recording elapsed time.
+Each row is flushed immediately, and an existing CSV is never overwritten.
+Closing the tool, disconnecting a digitizer, or rebuilding the workspace closes
+the file cleanly.
 
 ### MCA peak-analysis workbench
 

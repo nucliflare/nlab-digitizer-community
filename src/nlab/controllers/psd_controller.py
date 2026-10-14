@@ -8,6 +8,7 @@ from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication, QWidget
 
+from nlab.analysis.dose_calibration import PsdDoseCalibrationSnapshot
 from nlab.analysis.psd import PsdAccumulator
 from nlab.hardware.digitizer.dma import McaEventBuffer
 from nlab.ui.ui_psd_view import Ui_PSDView
@@ -223,6 +224,35 @@ class PSDController(QWidget):
     @property
     def channel(self) -> int:
         return self._channel
+
+    def dose_calibration_snapshot(self) -> PsdDoseCalibrationSnapshot:
+        """Return cumulative below/above-cut totals for the full view and ROI."""
+        cut = float(self.ui.spinCut.value())
+        below, above = self._accumulator.energy_projections(cut)
+        roi = tuple(sorted(float(value) for value in self._energy_roi.getRegion()))
+        edges = self._accumulator.energy_edges
+        first = int(
+            np.clip(
+                np.searchsorted(edges, roi[0], side="right") - 1,
+                0,
+                self._accumulator.energy_bins,
+            )
+        )
+        last = int(
+            np.clip(
+                np.searchsorted(edges, roi[1], side="left"),
+                0,
+                self._accumulator.energy_bins,
+            )
+        )
+        return PsdDoseCalibrationSnapshot(
+            cut=cut,
+            roi=(roi[0], roi[1]),
+            below_cut_total_counts=int(np.sum(below, dtype=np.uint64)),
+            above_cut_total_counts=int(np.sum(above, dtype=np.uint64)),
+            below_cut_roi_counts=int(np.sum(below[first:last], dtype=np.uint64)),
+            above_cut_roi_counts=int(np.sum(above[first:last], dtype=np.uint64)),
+        )
 
     def process_pending_events(self) -> None:
         if self._session_replay_batches is not None:

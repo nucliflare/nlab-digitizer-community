@@ -13,6 +13,7 @@ import pyqtgraph as pg
 from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QDoubleSpinBox, QFileDialog, QSlider, QSpinBox, QWidget
 
+from nlab.analysis.dose_calibration import McaDoseCalibrationSnapshot
 from nlab.analysis.energy_calibration import (
     EnergyCalibration,
     FingerprintValue,
@@ -180,6 +181,7 @@ class MCAController(QWidget):
         self._last_elapsed_s: float = 0.0
         self._energy_calibration: EnergyCalibration | None = None
         self._pending_readback: MCAReadback | None = None
+        self._latest_readback: MCAReadback | None = None
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._render_pending_readback)
@@ -1082,6 +1084,21 @@ class MCAController(QWidget):
             fingerprint=self.energy_calibration_fingerprint(),
         )
 
+    def dose_calibration_snapshot(self) -> McaDoseCalibrationSnapshot | None:
+        """Copy the latest MCA values needed by the dose calibration logger."""
+        readback = self._latest_readback
+        if readback is None or len(readback.histogram) == 0:
+            return None
+        histogram = np.asarray(readback.histogram, dtype=np.uint64).copy()
+        roi = self._roi_bounds(len(histogram)) if self._roi.isVisible() else None
+        return McaDoseCalibrationSnapshot(
+            histogram=histogram,
+            count_rate_raw=int(readback.count_rate),
+            pulse_deadtime_ms=float(readback.pulse_deadtime_ms),
+            acquisition_elapsed_s=float(readback.elapsed_time) / 10.0,
+            roi=roi,
+        )
+
     def apply_energy_calibration(self, calibration: EnergyCalibration) -> None:
         self._energy_calibration = calibration
         self._refresh_energy_axis()
@@ -1260,6 +1277,7 @@ class MCAController(QWidget):
             # the polling worker waits for its next readback.
             self._last_histogram = None
             self._display_histogram = None
+            self._latest_readback = None
             MCAController._reset_histogram_difference_reference(self)
             MCAController._clear_roi_history(self)
             self._last_elapsed_s = 0.0
@@ -1621,6 +1639,7 @@ class MCAController(QWidget):
         self._hist_curve.setData([], [])
         self._last_histogram = None
         self._display_histogram = None
+        self._latest_readback = None
         MCAController._reset_histogram_difference_reference(self)
         MCAController._clear_roi_history(self)
         if self._roi.isVisible() and not self._roi_dragging:
@@ -2158,6 +2177,7 @@ class MCAController(QWidget):
         signal = getattr(self, "session_readback", None)
         if signal is not None:
             signal.emit(self._channel, rb)
+        self._latest_readback = rb
         self._pending_readback = rb
         if not self._render_timer.isActive():
             requested_hz = self.ui.spinRefreshRate.value()
@@ -2169,6 +2189,7 @@ class MCAController(QWidget):
         self._session_replay_active = True
         self._render_timer.stop()
         self._pending_readback = None
+        self._latest_readback = None
         self._last_histogram = np.zeros(16_384, dtype=np.uint64)
         self._display_histogram = self._last_histogram.copy()
         self._differential_reference_histogram = self._last_histogram.copy()
@@ -2210,6 +2231,8 @@ class MCAController(QWidget):
         self._pending_readback = None
         if rb is None:
             return
+
+        self._latest_readback = rb
 
         self._update_debug_plot(rb.debug1, rb.debug2)
         # Update elapsed time before ROI statistics, which are invoked from
