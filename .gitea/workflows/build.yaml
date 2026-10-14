@@ -64,9 +64,6 @@ jobs:
       - name: Generate UI modules
         run: ${{ matrix.venv-python }} scripts/build_ui.py
 
-      - name: Generate gRPC stubs
-        run: ${{ matrix.venv-python }} scripts/generate_proto.py
-
       - name: Lint
         if: false
         continue-on-error: true

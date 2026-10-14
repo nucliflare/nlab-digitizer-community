@@ -1,4 +1,4 @@
-"""Keep downloadable Windows artifacts to one archive layer."""
+"""Guard release workflows against obsolete steps and packaging regressions."""
 
 from __future__ import annotations
 
@@ -9,6 +9,18 @@ from zipfile import ZipFile
 
 import pytest
 import yaml
+
+
+@pytest.mark.parametrize(
+    "workflow_path",
+    [".gitea/workflows/build.yaml", ".github/workflows/build.yaml"],
+)
+def test_workflow_does_not_generate_removed_grpc_stubs(workflow_path: str) -> None:
+    root = Path(__file__).resolve().parents[1]
+    workflow_text = (root / workflow_path).read_text(encoding="utf-8")
+
+    assert "Generate gRPC stubs" not in workflow_text
+    assert "generate_proto.py" not in workflow_text
 
 
 @pytest.mark.parametrize(
