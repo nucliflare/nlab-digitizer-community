@@ -1,0 +1,184 @@
+---
+title: "Use Cases"
+format: gfm
+---
+
+This page maps measurement goals to the application's live and offline
+workflows. Start with the goal, then follow the linked specialist guide for
+configuration details and interpretation limits.
+
+## Choose a workflow
+
+| Goal | Start here | Primary result | Important limit |
+|---|---|---|---|
+| Check a detector signal and acquire a spectrum | Scope **Auto Setup**, then MCA | Live waveform and accumulated pulse-height spectrum | Raw ADC and MCA channels are not physical units |
+| Monitor a slowly changing sensor or detector current | Current: **IIR polling** or **Scope DMA** | Rolling calibrated trend and diagnostics | IIR and DMA are different raw signals and need separate calibration |
+| Calibrate energy and quantify photopeaks | **Tools -> MCA Energy Calibration...**, then **MCA Peak Analysis Workbench...** | Applied channel-to-keV mapping and PDF/CSV/JSON fit reports | A two-point fit does not independently prove detector linearity |
+| Measure detector response against a known dose rate | **Tools -> Dose Calibration Logger...** | Interval CSV with committed dose reference and selected observables | The logger records inputs; it does not certify or apply a dose-conversion model |
+| Separate pulse populations | Live PSD, **PSD Event Readback**, or **Waveform Analysis Workbench** | PSD matrix, fitted figure of merit, and optional report bundle | Fit quality and stable acquisition settings must be checked before comparing FOM values |
+| Measure two-channel timing or prompt coincidences | Coincidence workspace | Timing distribution, gated spectra, and prompt/random/corrected energy matrices | Both channels must belong to one physical digitizer |
+| Investigate gain drift during startup | `examples/mca_gain_drift_diagnostic.py` | Time-series CSV/NPZ/JSON/PNG diagnostic bundle | It is a diagnostic trace, not an automatic gain correction |
+| Reproduce an observed run without hardware | Session recording and **Replay Session...** | Integrity-checked `.nlab-session` bundle and deterministic analysis replay | Replay cannot recreate unrecorded device state or analogue conditions |
+| Analyse existing files without connecting a board | **Offline / Replay Mode** | Waveform, PSD, spectrum, calibration, timing, and report workbenches | Offline analysis cannot start acquisition or modify hardware |
+| Observe independent boards in one window | **Connection -> Add Digitizer...** | Channels labelled by board and independent per-board controls | Adding boards does not create cross-board clock synchronization |
+
+## Detector checkout and pulse-height measurement
+
+Use this path when bringing up a detector, checking polarity, or collecting a
+first MCA spectrum:
+
+1. Verify the IIO endpoint and physical channel identity.
+2. Keep Scope DMA off and run Scope **Auto Setup**, or load trigger and DAC
+   values qualified for that detector path.
+3. Inspect a fresh waveform and stop Scope before handing ownership to another
+   workflow.
+4. Start MCA accumulation. Use the accumulated view for the final spectrum;
+   the per-refresh differential view is for monitoring newly added counts.
+5. Show the MCA ROI and double-click it when a count-history trace is useful.
+   Moving the ROI or changing accumulated/differential mode begins a new trace.
+6. Stop MCA before treating the chunked histogram as a stable snapshot.
+
+The bottom MCA axis remains raw channel. The logarithmic display and the `L`
+shortcut change presentation only. See [Getting Started](getting_started) and
+[Acquisition Workflows](acquisition_workflows).
+
+The stopped live view below is CH0 on `192.168.10.135:30431` with a CAEN
+generator supplying artificial Na-22 test signals. It illustrates the retained
+histogram, processing controls, statistics, and debug waveform without using
+the PSU; it is not a radioactive-source measurement.
+
+![Stopped live MCA view with the generated 511 and 1274.5 keV test lines and
+the acquisition settings visible.](images/mca-na22-generator-ch0-live.png)
+
+## Energy calibration and quantitative peak fitting
+
+Use a stopped or explicitly labelled non-atomic MCA snapshot. In the energy
+calibration workspace, draggable markers are *seeds*: each seed starts a local
+Gaussian-plus-linear-background fit, and the fitted centroid becomes the
+calibration coordinate. Inspect local count residuals and convergence before
+applying a linear or quadratic mapping.
+
+An applied calibration adds a keV top axis without changing raw bins, ROI
+coordinates, or list-mode records. The **ENERGY CALIBRATED** badge identifies
+the affected channels; a relevant DSP change marks the mapping stale.
+
+For peak quantification, copy the calibrated spectrum into the peak-analysis
+workbench, choose a fit interval and background model, and inspect residuals,
+uncertainties, boundary warnings, and fit statistics together. The offline
+radionuclide catalogue can suggest reference lines inside the explicit fit ROI,
+but a matching line is not an isotope identification. Downloaded report
+bundles retain plots, numerical tables, equations, provenance, and the exact
+reference overlay. See [Analysis Tools](analysis_tools).
+
+![Applied two-point calibration of the live generator spectrum with local
+centroid fits and observed-minus-fit residuals.](images/mca-energy-calibration-na22-live.png)
+
+## Dose-response data collection
+
+Use the dose-calibration logger when a known source, geometry, and reference
+dose rate must be recorded beside detector response and environmental state.
+The expected dose and source label are committed only after editing finishes,
+so timer-driven rows never capture a partially typed reference.
+
+Selectable columns include MCA count rate and dead time, per-refresh total and
+ROI integrals derived from accumulated spectra, bias setpoints/readbacks,
+detector and board temperatures, and cumulative PSD integrals above/below the
+cut. Missing live values remain blank. Each row is flushed immediately and an
+existing file is never overwritten.
+
+The adjacent plot is an operator aid over the bounded in-memory history; the
+CSV is the record. Preserve source identity, geometry, shielding, detector
+settings, stabilization time, and the independent reference-instrument record
+when deriving a dose calibration. See [Analysis Tools](analysis_tools).
+
+This live functional example deliberately records `0 µSv/h` for the CAEN
+generator and disables PSU-dependent fields. It demonstrates logger and plot
+behaviour, not a dose conversion.
+
+![Dose logger after eight live MCA rows from the generator, with only MCA
+statistics and differential integrals enabled.](images/dose-calibration-na22-generator-live.png)
+
+## Pulse-shape-discrimination study
+
+Choose the entry path based on the available data:
+
+- **Live PSD** for immediate feedback from MCA charge-comparison events;
+- **PSD Event Readback** for NDMA, CAEN, HDF5, or ROOT list-mode data;
+- **Waveform Analysis Workbench** when short/long integrals must be rebuilt
+  from NLab or CAEN waveforms.
+
+Set the energy ROI before comparing populations. The ratio projection supports
+a bounded two-Gaussian fit with draggable centroid seeds and a fit ROI. Treat
+the reported FOM as qualified only when the convergence state, residuals,
+widths, bounds, and reduced Poisson deviance are acceptable.
+
+Waveform analysis can search short- and long-gate endpoints for a local FOM
+maximum while holding the baseline, integration start, ROIs, and centroid seeds
+fixed. This is a bounded local optimization, not proof of a globally optimal or
+portable detector setting. Report bundles preserve the source path, matrix,
+projections, separated spectra, fit components, settings, integration gates,
+and machine-readable metadata. See [Live Pulse-Shape Discrimination](pulse_shape_discrimination)
+and [Analysis Tools](analysis_tools).
+
+![Completed live PSD capture with two generator populations, fitted component
+curves, FOM values, and the poor-fit warning kept visible.](images/psd-ch0-live.png)
+
+## Coincidence and timing measurement
+
+Use Coincidence for two list-mode channels that share one digitizer's timing
+and software-start core. Set MCA energy ROIs, select the logic mode, confirm the
+timing convention, and inspect continuity before interpreting pair counts.
+
+The energy matrix can show prompt, delayed-random, or corrected content. Raw
+channels remain the primary axes; valid MCA calibrations add energy labels.
+Exported HDF5/ROOT matrices retain gates, timing settings, calibration metadata,
+and session diagnostics. Low-count transparency changes display only, not
+matrix values or projections. See [Coincidence Measurement](coincidence).
+
+![Live prompt coincidence energy matrix with both MCA gates and projections
+visible.](images/coincidence-na22-511-matrix-live.png)
+
+## Stability and gain-drift investigation
+
+Use `examples/mca_gain_drift_diagnostic.py` when a known photopeak must be
+tracked during startup, thermal settling, or a controlled bias study. The tool
+reproduces saved MCA and ADC-temperature-correction settings, tracks the raw
+maximum and a local centroid in separate channel ROIs, and logs available
+temperature, power, rail, clock, MCA, and HV telemetry.
+
+The script does not write Scope registers. Applying saved PSU bias requires the
+explicit `--apply-saved-psu` option and guarantees safe shutdown cleanup; keep
+an external supply's own log when detector bias is not controlled by the
+digitizer. Compare repeated runs using the emitted CSV, NPZ, JSON, and PNG
+artifacts rather than a screenshot alone.
+
+## Reproducible capture and offline review
+
+Start session recording before the measurements of interest. Recording is
+passive: it observes existing Scope, MCA, Current, list-mode, telemetry, and log
+streams without starting acquisition. A finalized `.nlab-session` bundle
+contains configuration, committed stream counts, integrity hashes, a timeline,
+and mutable analysis annotations.
+
+Open **Offline / Replay Mode** when no board should be contacted. Session replay
+validates finalized content and rebuilds recorded views from one replay clock;
+standalone file workbenches remain available without loading a session. Use
+**Connection -> Connect...** later to replace the offline workspace with a live
+one only after every requested channel validates successfully.
+
+Replay is suitable for review, report generation, training, and deterministic
+software comparisons. It is not a hardware simulator and does not resend
+recorded commands. See [Capture Files and Integrity](data_formats) and the
+session section in the project [README](https://github.com/nucliflare/nlab-digitizer-community#session-recording-and-deterministic-analysis-replay).
+
+## Multi-digitizer observation
+
+Use **Connection -> Add Digitizer...** to place independent boards in one live
+workspace. Channels are labelled `D1:CH0`, `D1:CH1`, `D2:CH0`, and so on;
+global diagnostics and shared-start controls remain per board. Resolved IP
+addresses prevent the same endpoint being added again through a hostname alias.
+
+This workflow is appropriate for consolidated monitoring and independent
+acquisition. It does not imply a shared clock. Coincidence pairs remain limited
+to two eligible channels on the same selected digitizer. Disconnecting the last
+board returns the application to offline analysis mode.

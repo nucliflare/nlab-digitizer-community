@@ -10,6 +10,11 @@ session.
 
 ## Before starting
 
+When several digitizers are connected, first select the intended board in the
+Coincidence workspace. Both channels must belong to that physical digitizer;
+cross-board coincidence is disabled because a shared application window does
+not establish a common hardware clock or trigger.
+
 1. Verify both physical channels and load compatible MCA settings.
 2. Configure CFD on both MCAs if fine timing will be used.
 3. Set and show the energy ROIs in the two MCA histograms if they should gate

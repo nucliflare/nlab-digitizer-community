@@ -117,16 +117,16 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
         hw.stop()
         hw.set_pulse_polarity(0)
         hw.set_baseline_window(3)
-        hw.set_trigger_level(-96)
-        hw.set_frame_samples(256)
+        hw.set_trigger_level(args.trigger_level)
+        hw.set_frame_samples(args.frame_samples)
         hw.set_pretrigger_samples(24)
         hw.set_trg_source(0)
         hw.set_pileup_window(0)
-        hw.set_energy_bin(5)
+        hw.set_energy_bin(args.binning_index)
         hw.set_mem1_sig_select(0)
         hw.set_mem2_sig_select(1)
         hw.set_ext_trig_enable(False)
-        hw.filters.charge_comparison.set_time(64)
+        hw.filters.charge_comparison.set_time(args.charge_comparison_time)
         hw.filters.charge_comparison.set_enable(True)
         hw.filters.psd_zc.set_enable(False)
         hw.filters.psd_zc.set_mode(0)
@@ -137,17 +137,17 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
         for control, method, value in (
             (ui.comboPulsePolarity, "setCurrentIndex", 0),
             (ui.comboBaseline, "setCurrentIndex", 3),
-            (ui.spinTriggerLevel, "setValue", -96),
-            (ui.spinFrameSamples, "setValue", 256),
+            (ui.spinTriggerLevel, "setValue", args.trigger_level),
+            (ui.spinFrameSamples, "setValue", args.frame_samples),
             (ui.spinPretrigger, "setValue", 24),
             (ui.comboTriggerSource, "setCurrentIndex", 0),
             (ui.spinPileupWindow, "setValue", 0),
-            (ui.comboBinning, "setCurrentIndex", 5),
+            (ui.comboBinning, "setCurrentIndex", args.binning_index),
             (ui.comboDebug1, "setCurrentIndex", 0),
             (ui.comboDebug2, "setCurrentIndex", 1),
             (ui.cbExtTrigger, "setChecked", False),
             (ui.cbCcEnable, "setChecked", True),
-            (ui.spinCcTime, "setValue", 64),
+            (ui.spinCcTime, "setValue", args.charge_comparison_time),
             (ui.cbPsdZcEnable, "setChecked", False),
             (ui.comboPsdZcMode, "setCurrentIndex", 0),
             (ui.spinPsdZcLow, "setValue", 8),
@@ -162,8 +162,8 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
                 "energy_bins": 1024,
                 "ratio_bins": 256,
                 "energy_right_shift": 0,
-                "ratio_range": [-1.0, 1.0],
-                "ratio_cut": 0.5834,
+                "ratio_range": [args.ratio_min, args.ratio_max],
+                "ratio_cut": args.ratio_cut,
                 "energy_roi": [0.0, 16384.0],
                 "energy_log_y": False,
             }
@@ -191,6 +191,31 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
         ratio_peaks = _ratio_peaks(
             psd._accumulator.matrix, psd._accumulator.ratio_centers
         )
+        strongest_below = max(
+            (peak for peak in ratio_peaks if peak["ratio"] < args.ratio_cut),
+            key=lambda peak: peak["prominence"],
+            default=None,
+        )
+        strongest_above = max(
+            (peak for peak in ratio_peaks if peak["ratio"] > args.ratio_cut),
+            key=lambda peak: peak["prominence"],
+            default=None,
+        )
+        if strongest_below is None or strongest_above is None:
+            raise RuntimeError(
+                "could not identify one PSD population on each side of the configured cut"
+            )
+        first_seed, second_seed = sorted(
+            (strongest_below["ratio"], strongest_above["ratio"])
+        )
+        fit_low = max(args.ratio_min, first_seed - 0.12)
+        fit_high = min(args.ratio_max, second_seed + 0.12)
+        psd._fom_widget.fit_region.setRegion((fit_low, fit_high))
+        psd._fom_widget.centroid_lines[0].setPos(first_seed)
+        psd._fom_widget.centroid_lines[1].setPos(second_seed)
+        fom_fit = psd._fom_widget.fit_current_projection()
+        if fom_fit is None:
+            raise RuntimeError(psd._fom_widget.status_label.text())
         psd_status = psd.ui.lblStatus.text()
         _log(f"PSD after drain: {psd_status}")
         window.ui.mainTabs.setCurrentWidget(window.ui.tabPSD)
@@ -199,6 +224,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
 
         window.ui.mainTabs.setCurrentWidget(window.ui.tabMCA)
         _raise_dock(window, "mca_ch0")
+        ui.tabFilters.setCurrentWidget(ui.tabPsd)
         mca.set_roi_visible(True)
         mca._roi.setRegion((100, 200))
         mca._on_roi_change_finished()
@@ -220,12 +246,12 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
                 "verified": auto.verified,
             },
             "mca": {
-                "trigger_level": -96,
+                "trigger_level": args.trigger_level,
                 "baseline_ns": 64,
-                "window_ns": 256,
+                "window_ns": args.frame_samples,
                 "pretrigger_ns": 24,
-                "binning": 32,
-                "charge_comparison_ns": 64,
+                "binning": 1 << args.binning_index,
+                "charge_comparison_ns": args.charge_comparison_time,
                 "zero_crossing_enabled": False,
             },
             "psd": {
@@ -237,6 +263,11 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
                 "below_cut": int(below.sum()),
                 "above_cut": int(above.sum()),
                 "ratio_peaks": ratio_peaks,
+                "fom": fom_fit.fom,
+                "fom_centroids": fom_fit.centroids,
+                "fom_fwhms": fom_fit.fwhms,
+                "fom_reduced_deviance": fom_fit.reduced_deviance,
+                "fom_warnings": fom_fit.warnings,
                 "status": psd_status,
             },
             "dma": {
@@ -260,10 +291,17 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="192.168.10.128")
+    parser.add_argument("--host", default="192.168.10.135")
     parser.add_argument("--port", type=int, default=30_431)
-    parser.add_argument("--minimum-events", type=int, default=200_000)
-    parser.add_argument("--timeout", type=float, default=45.0)
+    parser.add_argument("--trigger-level", type=int, default=-512)
+    parser.add_argument("--frame-samples", type=int, default=1024)
+    parser.add_argument("--binning-index", type=int, default=7)
+    parser.add_argument("--charge-comparison-time", type=int, default=150)
+    parser.add_argument("--ratio-cut", type=float, default=0.5344)
+    parser.add_argument("--ratio-min", type=float, default=-1.0)
+    parser.add_argument("--ratio-max", type=float, default=1.0)
+    parser.add_argument("--minimum-events", type=int, default=300_000)
+    parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--output-dir", type=Path, default=Path("docs/images"))
     args = parser.parse_args(argv)
     args.output_dir.mkdir(parents=True, exist_ok=True)

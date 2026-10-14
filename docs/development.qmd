@@ -76,6 +76,7 @@ python scripts/capture_live_wiki_current_coincidence.py \
   --mode coincidence-compare --capture-matrix
 python scripts/capture_live_wiki_psd.py
 python scripts/capture_live_wiki_peak_analysis.py
+python scripts/capture_live_wiki_dose_calibration.py
 quarto render docs
 ```
 
@@ -83,6 +84,11 @@ The live scripts configure and operate the reference hardware. Run them only
 when live validation is in scope, verify the endpoint and connected sources,
 and inspect their final stop/drain summaries. Never replace a live result with
 generated counts just to refresh a screenshot.
+
+The MCA/PSD/analysis helpers currently default to CH0 on
+`192.168.10.135:30431`, with the CAEN Na-22 generator setup and MCA binning
+128. Override their command-line settings only for another explicitly
+qualified reference setup, and update the accompanying provenance text.
 
 ## Driver-derived changes
 

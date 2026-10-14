@@ -7,6 +7,21 @@ The application separates control, blocking acquisition, and display work so
 that a slow plot cannot silently become the measurement clock. The practical
 consequence is that each hardware data path has an explicit owner.
 
+## Workspace topology
+
+The startup dialog can open either a live IIO connection or **Offline / Replay
+Mode**. An offline workspace opens no hardware or Modbus transport; use
+**Connection -> Connect...** when it should become live. The replacement is
+committed only after all requested channels validate, so a construction failure
+restores the previous offline workspace.
+
+Use **Connection -> Add Digitizer...** to append independent boards. Channels
+are labelled by source (`D1:CH0`, `D1:CH1`, `D2:CH0`, and so on), and Global
+diagnostics and shared-start controls remain per board. The same resolved
+endpoint cannot be added again through a hostname alias. Multi-digitizer mode
+consolidates monitoring and independent acquisitions; it does not create a
+shared clock or permit cross-board coincidence.
+
 ## Ownership at a glance
 
 | Activity | Hardware/data path owned | Can run alongside |
@@ -73,9 +88,21 @@ Histogram chunks are transferred sequentially and are not an atomic snapshot
 while acquisition is running. Stop acquisition before using a final histogram
 as a stable result.
 
+Use the **View** menu to switch between the accumulated histogram and the
+non-negative counts added since the previous refresh. This differential view
+resets when acquisition, configuration, or display mode changes. It affects
+presentation only: CSV exports and analysis snapshots continue to use the
+accumulated hardware spectrum.
+
+The same menu controls MCA ROI visibility and logarithmic Y scale; hovering an
+MCA plot and pressing `L` toggles the shared linear/logarithmic state.
+Double-click a visible ROI to open its integrated-count history against MCA
+acquisition elapsed time. The history follows accumulated or differential mode,
+and moving the ROI or changing modes begins a new trace.
+
 ## MCA list mode and PSD
 
-Choose the list-mode output under **Settings → DMA Settings...**:
+Choose the list-mode output under **Settings -> General Settings...**:
 
 - binary NDMA;
 - appendable HDF5;
@@ -104,6 +131,11 @@ start, and optional paired files. Use the dedicated
 [Coincidence Measurement](coincidence) guide before changing its timing schema
 or interpreting pair counts.
 
+When several digitizers are connected, select the desired board in the
+Coincidence workspace. A pair must use two eligible channels from that one
+board. Cross-board pairs remain disabled because network discovery and a common
+GUI do not establish hardware timing synchronization.
+
 ## PSU, global diagnostics, and external instruments
 
 Per-channel IDS/HV is available only when its converter and temperature devices
@@ -117,6 +149,7 @@ assume that closing a DPP-only connection controls an external supply.
 
 ## Related pages
 
+- [Use Cases](use_cases)
 - [Capture Files and Integrity](data_formats)
 - [Analysis Tools](analysis_tools)
 - [Architecture](architecture)

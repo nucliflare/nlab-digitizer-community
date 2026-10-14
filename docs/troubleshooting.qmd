@@ -29,12 +29,39 @@ expected devices:
 Do not map a missing hardware register to an unrelated statistic. A clear
 unsupported/capability error is preferable to plausible but false data.
 
+## A frozen build reports that libiio is unavailable
+
+The packaged application checks the native libiio runtime after Qt starts and
+before importing hardware modules. Install the pinned Analog Devices libiio
+v0.26 runtime and restart the application. A Python binding alone is not enough;
+the platform DLL/shared library must also be loadable.
+
+The direct backend targets the libiio 0.x API. A host runtime reporting major
+version 1 is rejected because its compatibility layer and DMA behavior have not
+been qualified for this client. Do not bypass the check for a release build.
+
+## Adding or connecting a digitizer fails
+
+The application validates every requested channel before replacing the current
+workspace. If transport preparation or controller construction fails, the
+previous offline/live topology is restored; inspect the first connection error
+rather than the later cleanup messages.
+
+An endpoint already connected by numeric IPv4/IPv6 address cannot be added
+again through an mDNS/Avahi hostname. This duplicate rejection is intentional.
+Use **Reconnect** for an existing board rather than adding an alias.
+
 ## Configuration fails with `EBUSY`
 
 An acquisition core or DMA buffer still owns the hardware. Stop the relevant
 Scope/MCA/Current/Coincidence activity and wait for worker teardown. A previous
 script may have crashed with `enable=1`; stop the core from a safe control path
 before writing configuration.
+
+After MCA list-mode Stop, Start and configuration controls remain disabled
+until the reader drains, destroys its native buffer, and releases the hardware
+gate. Do not interpret this short interlock as a frozen GUI or try to rearm from
+another path.
 
 Do not force `dma_enable` or list ownership gates. Buffer setup/teardown owns
 them, and direct writes can break the required reader-before-enable order.

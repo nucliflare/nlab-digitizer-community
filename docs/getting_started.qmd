@@ -93,6 +93,12 @@ In the connection dialog:
 2. keep port `30431` unless the target is configured differently;
 3. select the number of exposed channels and connect.
 
+Select **Offline / Replay Mode** instead when no board should be contacted.
+The application opens a read-only hardware workspace while keeping waveform,
+PSD-event, spectrum, calibration, peak-analysis, timing-validation, and session
+replay tools available. Use **Connection -> Connect...** later to validate every
+requested IIO channel and replace the offline workspace without restarting.
+
 ![Connection dialog configured for the live two-channel `.128` IIO reference
 board.](images/readme-first-steps-connection.png)
 
@@ -106,6 +112,16 @@ Explicit command-line address options override the saved file. The dialog also
 remembers the last successful connection. It scans local DNS-SD/mDNS services
 and directly probes the USB-network endpoint at `192.168.3.1:30431`; **Rescan**
 repeats both checks.
+
+After one board is live, **Connection -> Add Digitizer...** appends another
+independent endpoint. Channel labels include their physical source (`D1:CH0`,
+`D1:CH1`, `D2:CH0`, and so on), and each board keeps separate Global controls.
+Resolved IPv4/IPv6 addresses are compared so a board already connected by
+numeric address cannot be added again through an mDNS hostname. Coincidence
+still selects two channels from one physical digitizer; adding boards does not
+establish cross-board clock synchronization. **Disconnect Digitizer...**
+removes one endpoint and returns to offline analysis after the final board is
+removed.
 
 ## A safe first session
 
@@ -173,7 +189,11 @@ and continues with HV unavailable.
 
 ## Next steps
 
+- [Use Cases](use_cases)
 - [Acquisition Workflows](acquisition_workflows)
 - [Live Current Monitoring](current_monitor)
+- [Analysis Tools](analysis_tools)
+- [Live Pulse-Shape Discrimination](pulse_shape_discrimination)
+- [Coincidence Measurement](coincidence)
 - [Capture Files and Integrity](data_formats)
 - [Troubleshooting](troubleshooting)

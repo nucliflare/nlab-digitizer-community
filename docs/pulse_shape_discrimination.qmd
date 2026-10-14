@@ -19,10 +19,12 @@ PSD ratio = (Qlong - Qshort) / Qlong
 producer values until the detector response and event-field interpretation
 have been validated for the specific setup.
 
-## CH0 live workflow on `.128`
+## CH0 live workflow on `.135`
 
 The following reference run used channel 0 of
-`192.168.10.128:30431`. The application did not read or change the PSU.
+`192.168.10.135:30431`. A CAEN generator supplied artificial Na-22 test
+signals; this is a functional acquisition example, not a radioactive-source
+measurement. No PSU setting was applied or required.
 
 ### 1. Run Scope Auto Setup
 
@@ -34,9 +36,9 @@ The following reference run used channel 0 of
    reports *verified*.
 
 In this run Auto Setup found a negative pulse, selected **Falling edge**, set
-the DAC baseline to `256`, and set the raw Scope threshold to `27326`.
+the DAC baseline to `252`, and set the raw Scope threshold to `28322`.
 
-![Live CH0 Scope after a verified Auto Setup on the `.128` PSD
+![Live CH0 Scope after a verified Auto Setup on the `.135` generator
 signal.](images/psd-ch0-scope-auto-setup-live.png)
 
 These Scope values describe the Scope ADC path. They are not the MCA trigger
@@ -53,12 +55,12 @@ DMA is stopped:
 | Baseline | 64 ns |
 | Debug 1 / Debug 2 | Input signal / Trigger signal |
 | Pile-ups | 0 |
-| Binning | 32 |
-| Trigger level | `-96` raw |
-| Window length | 256 ns |
+| Binning | 128 |
+| Trigger level | `-512` raw |
+| Window length | 1024 ns |
 | Pretrigger offset | 24 ns |
 | Trigger source | Threshold |
-| Charge Comparison | Enabled, 64 ns |
+| Charge Comparison | Enabled, 150 ns |
 | PSD Zero Crossing | Disabled |
 | Zero Crossing mode/window | Mode 0, 8–16 ns (inactive while disabled) |
 
@@ -70,7 +72,7 @@ example.
 ![Live CH0 MCA settings and spectrum used for the PSD
 measurement.](images/psd-ch0-mca-settings-live.png)
 
-Select **Online only** under **Settings → DMA Settings...** when no raw file is
+Select **Online only** under **Settings -> General Settings...** when no raw file is
 required, then enable **Record list-mode DMA**. Choose Binary, HDF5, or ROOT
 instead when the same events must also be retained for offline analysis.
 
@@ -84,15 +86,15 @@ Use these client-side display settings:
 | Ratio display bins | 256 |
 | Energy shift | 0 bits |
 | Ratio range | `-1.0…1.0` |
-| PSD cut | `0.5834` |
+| PSD cut | `0.5344` |
 
 Return to MCA and press **Start**. The PSD workspace begins accumulating only
 when MCA list-mode DMA is active and Charge Comparison is enabled. Stop the
 MCA measurement and wait for the final drain before treating the matrix as a
 completed result.
 
-![Completed live CH0 PSD matrix showing two separated signal
-populations.](images/psd-ch0-live.png)
+![Completed live CH0 PSD matrix showing two separated generator populations,
+the fitted components, and the FOM quality warning.](images/psd-ch0-live.png)
 
 ## Reading the plots
 
@@ -105,23 +107,51 @@ populations.](images/psd-ch0-live.png)
 - The lower plot contains separate raw-energy projections for events below
   and above the cut.
 
-This live run produced two clear ratio populations near `0.355` and `0.785`.
-The cut at `0.5834` separates their displayed energy projections. These are
-two experimentally distinct pulse-shape populations, but they are
-intentionally not labelled as particle species. Such a label requires a
-controlled, independently identified source and a detector-specific
-validation.
+This live run produced two clear fitted ratio centroids near `0.04859` and
+`0.72593`. The cut at `0.5344` separates their displayed energy projections.
+They are generator populations and are intentionally not labelled as particle
+species. Such a label requires detector data from a controlled, independently
+identified source and detector-specific validation.
 
 Energy positions, ratio centres, and the best cut depend on detector gain,
 pulse shaping, integration time, and source geometry. Repeat the optimization
-instead of copying `0.5834` to another channel or setup.
+instead of copying `0.5344` to another channel or setup.
+
+## FOM fitting and gate optimization
+
+The live and offline ratio projections provide a shaded fit ROI and two
+draggable centroid seeds. **Fit double Gaussian** performs a bounded
+constant-background fit with Poisson-deviance residuals and reports both
+centroids and FWHMs, reduced deviance, and
+`FOM = |mu2 - mu1| / (FWHM1 + FWHM2)`. Inspect convergence, covariance,
+parameter bounds, population separation, and residuals before treating the FOM
+as qualified. **Copy table** exports the fitted populations and diagnostics.
+
+For the artificial signal shown above, the fit returned FWHM values `0.05892`
+and `0.01460` and a nominal FOM of `9.213`, but its reduced Poisson deviance was
+`236`. The visible poor-convergence warning therefore takes precedence: this
+large FOM is useful for exercising the workflow, not as a qualified detector
+performance result.
+
+In **Waveform Analysis Workbench**, a completed fit can seed **Optimize gates**.
+The bounded local search varies the short- and long-gate endpoints while
+holding the baseline, integration start, energy/fit ROIs, and centroid seeds
+fixed; poor-convergence candidates are rejected. The selected gates are
+rebuilt and refitted on the full selected dataset. They are specific to that
+detector, source, waveform sample period, and analysis constraints.
+
+PSD Event Readback and Waveform Analysis can download non-overwriting report
+bundles containing the matrix, projections, separated spectra, fit components,
+diagnostics, settings, provenance, and machine-readable metadata. Waveform
+reports also retain the exact gates. See [Analysis Tools](analysis_tools).
 
 ## Integrity of the reference run
 
-The final CH0 run transported 204,800 records in 200 complete frames. The MCA
-view reported verified continuity. Of those records, 203,950 entered the
-displayed ratio range; 815 had zero total energy and 35 lay outside the
-configured view. The PSD subscriber reported zero display-buffer drops.
+The final CH0 run transported 304,128 records in 297 complete frames. The MCA
+view reported verified continuity with zero DMA faults, zero DMA errors, and
+zero list dead time. Of those records, 303,693 entered the displayed ratio
+range; 394 had zero total energy and 41 lay outside the configured view. The
+PSD subscriber reported zero display-buffer drops.
 
 A visually clean matrix is not enough to establish integrity. Always inspect
 the final MCA DMA summary after Stop. A nonzero `list_deadtime_raw`, frame

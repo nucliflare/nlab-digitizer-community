@@ -23,6 +23,22 @@ acquisition ownership, current and coincidence workflows, capture integrity,
 offline analysis, troubleshooting, architecture, and development. These Quarto
 sources are also rendered into the project wiki.
 
+## Choose a workflow
+
+The [use-cases guide](docs/use_cases.qmd) maps measurement goals to entry
+points, outputs, and interpretation limits. Common paths are:
+
+| Goal | Workflow |
+|---|---|
+| Check a detector and collect a spectrum | Scope Auto Setup, then accumulated MCA |
+| Calibrate energy and quantify peaks | MCA Energy Calibration, then Peak Analysis and report export |
+| Record response against a known dose rate | Dose Calibration Logger |
+| Qualify PSD separation | Live/readback PSD or waveform reconstruction, FOM fit, and optional gate optimization |
+| Measure prompt coincidences | Same-digitizer Coincidence timing and energy matrices |
+| Investigate startup gain drift | Dual-channel MCA gain-drift diagnostic |
+| Review a run without hardware | Session recording/replay or standalone offline workbenches |
+| Monitor independent boards together | Add Digitizer with per-board global controls |
+
 ## Main features
 
 ### Scope

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- Added a goal-oriented use-cases guide and reconciled the getting-started,
+  acquisition, analysis, and troubleshooting documentation with the 0.7.x
+  calibration, reporting, PSD, offline/live connection, and multi-digitizer
+  workflows.
+- Refreshed the live MCA, energy-calibration, peak-fit, Scope Auto Setup, and
+  PSD images from the CH0 CAEN Na-22 generator on `192.168.10.135`, including
+  the new centroid-residual and FOM diagnostics. The MCA examples use binning
+  128 to retain both generated lines without energy overrange. Added a
+  live-count functional example of the dose-calibration logger without PSU
+  data.
+
 ## [0.7.1] — 2026-10-14
 
 ### Fixed

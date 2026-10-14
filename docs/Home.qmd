@@ -12,6 +12,7 @@ The final legacy gRPC/ZMQ version is archived on the `grpc-final` branch.
 
 | Goal | Guide |
 |---|---|
+| Choose the right workflow for a measurement goal | [Use Cases](use_cases) |
 | Install the application and connect a board | [Getting Started](getting_started) |
 | Understand Scope, MCA, PSD, and ownership | [Acquisition Workflows](acquisition_workflows) |
 | Monitor detector current | [Live Current Monitoring](current_monitor) |
@@ -35,14 +36,16 @@ The final legacy gRPC/ZMQ version is archived on the `grpc-final` branch.
 - live Scope viewing, trigger/DAC manipulation, persistence, Auto Setup, and
   full-resolution DMA recording;
 - MCA histograms, debug waveforms, list-mode capture, PSD, energy calibration,
-  and peak analysis;
+  dose-response logging, peak analysis, and reproducible report bundles;
 - scalar IIR and waveform-DMA current monitoring with saved linear calibration;
 - two-channel coincidence logic, timing histograms, energy matrices, delayed
   random subtraction, and HDF5/ROOT matrix export;
 - IDS/HV control, global diagnostics, optional Modbus instruments, and safe
   shutdown;
 - standalone waveform, PSD-event, spectrum, and timing-validation tools that
-  do not take ownership of live acquisition panels.
+  do not take ownership of live acquisition panels;
+- offline-to-live connection and independent multi-digitizer workspaces, with
+  coincidence deliberately limited to channels on one physical digitizer.
 
 ## Three rules worth knowing first
 

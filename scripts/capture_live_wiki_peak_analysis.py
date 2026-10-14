@@ -1,4 +1,4 @@
-"""Capture live Na-22 MCA calibration and 511 keV peak-fit wiki images."""
+"""Capture live Na-22 generator MCA and analysis documentation images."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QDockWidget, QWidget
 from scipy.signal import find_peaks
 
 from nlab.analysis.energy_calibration import (
@@ -79,6 +79,23 @@ def _save_widget(widget: QWidget, path: Path, size: tuple[int, int]) -> None:
     QApplication.processEvents()
     QTest.qWait(300)
     if not widget.grab().save(str(path), "PNG"):
+        raise RuntimeError(f"could not save {path}")
+    _log(f"Saved {path}")
+
+
+def _save_mca_window(window: MainAppWindow, channel: int, path: Path) -> None:
+    window.resize(1560, 1000)
+    window.ui.mainTabs.setCurrentWidget(window.ui.tabMCA)
+    dock = window.findChild(QDockWidget, f"mca_ch{channel}")
+    if dock is None:
+        raise RuntimeError(f"could not find MCA channel {channel} dock")
+    mca_ui = window._controller._mca_controllers[channel].ui
+    mca_ui.tabFilters.setCurrentWidget(mca_ui.tabPsd)
+    dock.raise_()
+    window.show()
+    QApplication.processEvents()
+    QTest.qWait(300)
+    if not window.grab().save(str(path), "PNG"):
         raise RuntimeError(f"could not save {path}")
     _log(f"Saved {path}")
 
@@ -179,7 +196,7 @@ def _render_analysis(
                 "binning": 1 << args.binning_index,
                 "live_hardware": True,
                 "stopped_snapshot": True,
-                "source": "Na-22",
+                "source": "CAEN Na-22 generator",
                 "readout": readout,
                 **(provenance or {}),
             },
@@ -231,6 +248,7 @@ def _render_analysis(
         calibration = workspace.fit
         if calibration is None:
             raise RuntimeError(f"energy calibration failed: {calibration_dialog.fit_status.text()}")
+        calibration_dialog._apply()
         calibration_dialog.plot.setXRange(
             max(0.0, channel_511 - 600.0),
             channel_1274 + 600.0,
@@ -281,7 +299,7 @@ def _render_analysis(
         peak_dialog._fit_spectrum_id = calibrated_spectrum.spectrum_id
         peak_dialog._last_fit_spec = peak_spec
         peak_dialog._fit_completed(peak_fit)
-        peak_dialog.side_tabs.setCurrentIndex(2)
+        peak_dialog.side_tabs.setCurrentIndex(peak_dialog.side_tabs.count() - 1)
         peak_dialog.spectrum_plot.setXRange(fit_low, fit_high, padding=0.03)
         _save_widget(
             peak_dialog,
@@ -293,14 +311,14 @@ def _render_analysis(
         return {
             "endpoint": f"{args.host}:{args.port}",
             "channel": args.channel,
-            "source": "Na-22",
+            "source": "CAEN Na-22 generator",
             "trigger_level": args.threshold,
             "binning": 1 << args.binning_index,
             "readout": readout,
             "spectrum_total_counts": total_counts,
             "provenance": provenance or {},
             "calibration": {
-                "reference_channels": [channel_511, channel_1274],
+                "reference_channels": [point.channel for point in workspace.points],
                 "reference_energies_kev": [args.energy_511, args.energy_1274],
                 "coefficients_kev": calibration.coefficients_kev,
                 "rms_residual_kev": calibration.rms_residual_kev,
@@ -341,7 +359,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
         return _render_analysis(
             args,
             histogram,
-            label=f"Recorded live Na-22 .128 CH{args.channel} spectrum",
+            label=f"Recorded CAEN Na-22 generator {args.host} CH{args.channel} spectrum",
             elapsed_s=elapsed_s,
             fingerprint={
                 "binning": args.binning_index,
@@ -377,7 +395,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
         hardware.set_pulse_polarity(0)
         hardware.set_baseline_window(3)
         hardware.set_trigger_level(args.threshold)
-        hardware.set_frame_samples(256)
+        hardware.set_frame_samples(args.frame_samples)
         hardware.set_pretrigger_samples(24)
         hardware.set_trg_source(0)
         hardware.set_pileup_window(0)
@@ -385,13 +403,15 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
         hardware.set_mem1_sig_select(0)
         hardware.set_mem2_sig_select(1)
         hardware.set_ext_trig_enable(False)
+        hardware.filters.charge_comparison.set_time(args.charge_comparison_time)
+        hardware.filters.charge_comparison.set_enable(True)
 
         ui = mca.ui
         for control, method, value in (
             (ui.comboPulsePolarity, "setCurrentIndex", 0),
             (ui.comboBaseline, "setCurrentIndex", 3),
             (ui.spinTriggerLevel, "setValue", args.threshold),
-            (ui.spinFrameSamples, "setValue", 256),
+            (ui.spinFrameSamples, "setValue", args.frame_samples),
             (ui.spinPretrigger, "setValue", 24),
             (ui.comboTriggerSource, "setCurrentIndex", 0),
             (ui.spinPileupWindow, "setValue", 0),
@@ -399,6 +419,8 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
             (ui.comboDebug1, "setCurrentIndex", 0),
             (ui.comboDebug2, "setCurrentIndex", 1),
             (ui.cbExtTrigger, "setChecked", False),
+            (ui.cbCcEnable, "setChecked", True),
+            (ui.spinCcTime, "setValue", args.charge_comparison_time),
             (ui.cbDmaEnable, "setChecked", False),
             (ui.spinTimeLimit, "setValue", 0),
             (ui.spinRefreshRate, "setValue", 5),
@@ -438,11 +460,17 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
         QTest.mouseClick(ui.btnStop, Qt.MouseButton.LeftButton)
         _wait_until(lambda: mca._worker_thread is None, 10, "MCA polling stop")
 
+        _save_mca_window(
+            window,
+            args.channel,
+            args.output_dir / f"mca-na22-generator-ch{args.channel}-live.png",
+        )
+
         raw_histogram = np.asarray(mca._last_histogram, dtype=np.uint32).copy()
         total_counts = int(raw_histogram.sum(dtype=np.uint64))
         _log(f"Frozen live Na-22 spectrum contains {total_counts:,} counts")
         raw_spectrum = Spectrum.create(
-            label=f"Live Na-22 .128 CH{args.channel} stopped spectrum",
+            label=f"CAEN Na-22 generator {args.host} CH{args.channel} stopped spectrum",
             x=np.arange(len(raw_histogram), dtype=np.float64),
             counts=raw_histogram,
             axis_unit="channel",
@@ -454,7 +482,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
                 "binning": 1 << args.binning_index,
                 "live_hardware": True,
                 "stopped_snapshot": True,
-                "source": "Na-22",
+                "source": "CAEN Na-22 generator",
             },
             poisson_counts=True,
         )
@@ -482,7 +510,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
         snapshot = SpectrumSnapshot.create(
             channel=args.channel,
             counts=raw_histogram,
-            label=f"Live Na-22 CH{args.channel}, stopped",
+            label=f"CAEN Na-22 generator CH{args.channel}, stopped",
             elapsed_s=float(mca._last_elapsed_s),
             live=False,
             fingerprint=fingerprint,
@@ -503,6 +531,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
         calibration = workspace.fit
         if calibration is None:
             raise RuntimeError(f"energy calibration failed: {calibration_dialog.fit_status.text()}")
+        calibration_dialog._apply()
         calibration_dialog.plot.setXRange(
             max(0.0, channel_511 - 600.0),
             channel_1274 + 600.0,
@@ -516,7 +545,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
 
         x: np.ndarray = np.arange(len(raw_histogram), dtype=np.float64)
         calibrated_spectrum = Spectrum.create(
-            label=f"Live Na-22 .128 CH{args.channel} stopped spectrum",
+            label=f"CAEN Na-22 generator {args.host} CH{args.channel} stopped spectrum",
             x=x,
             counts=raw_histogram,
             axis_unit="channel",
@@ -553,7 +582,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
         peak_dialog._fit_spectrum_id = calibrated_spectrum.spectrum_id
         peak_dialog._last_fit_spec = peak_spec
         peak_dialog._fit_completed(peak_fit)
-        peak_dialog.side_tabs.setCurrentIndex(2)
+        peak_dialog.side_tabs.setCurrentIndex(peak_dialog.side_tabs.count() - 1)
         peak_dialog.spectrum_plot.setXRange(fit_low, fit_high, padding=0.03)
         _save_widget(
             peak_dialog,
@@ -565,13 +594,13 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
         return {
             "endpoint": f"{args.host}:{args.port}",
             "channel": args.channel,
-            "source": "Na-22",
+            "source": "CAEN Na-22 generator",
             "trigger_level": args.threshold,
             "binning": 1 << args.binning_index,
             "readout": "IIO histogram polling",
             "spectrum_total_counts": total_counts,
             "calibration": {
-                "reference_channels": [channel_511, channel_1274],
+                "reference_channels": [point.channel for point in workspace.points],
                 "reference_energies_kev": [args.energy_511, args.energy_1274],
                 "coefficients_kev": calibration.coefficients_kev,
                 "rms_residual_kev": calibration.rms_residual_kev,
@@ -615,17 +644,19 @@ def run_capture(args: argparse.Namespace) -> dict[str, object]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="192.168.10.128")
+    parser.add_argument("--host", default="192.168.10.135")
     parser.add_argument("--port", type=int, default=30_431)
-    parser.add_argument("--channel", type=int, default=1)
+    parser.add_argument("--channel", type=int, default=0)
     parser.add_argument("--threshold", type=int, default=-512)
-    parser.add_argument("--binning-index", type=int, default=5)
-    parser.add_argument("--range-511", nargs=2, type=int, default=(1200, 2200))
-    parser.add_argument("--range-1274", nargs=2, type=int, default=(3200, 4600))
-    parser.add_argument("--minimum-511-count", type=int, default=1000)
-    parser.add_argument("--minimum-1274-count", type=int, default=150)
-    parser.add_argument("--fit-half-width-511", type=int, default=320)
-    parser.add_argument("--fit-half-width-1274", type=int, default=420)
+    parser.add_argument("--frame-samples", type=int, default=1024)
+    parser.add_argument("--binning-index", type=int, default=7)
+    parser.add_argument("--charge-comparison-time", type=int, default=150)
+    parser.add_argument("--range-511", nargs=2, type=int, default=(400, 900))
+    parser.add_argument("--range-1274", nargs=2, type=int, default=(4750, 6250))
+    parser.add_argument("--minimum-511-count", type=int, default=250)
+    parser.add_argument("--minimum-1274-count", type=int, default=40)
+    parser.add_argument("--fit-half-width-511", type=int, default=130)
+    parser.add_argument("--fit-half-width-1274", type=int, default=350)
     parser.add_argument("--energy-511", type=float, default=511.0)
     parser.add_argument("--energy-1274", type=float, default=1274.537)
     parser.add_argument("--timeout", type=float, default=90.0)
