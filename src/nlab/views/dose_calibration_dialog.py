@@ -382,8 +382,6 @@ class DoseCalibrationDialog(QDialog):
         self.plot_widget.showAxis("right")
         self.plot_widget.setLabel("bottom", "Recording elapsed time", units="s")
         self.plot_curve = self.plot_widget.plot(pen=pg.mkPen("#1f77b4", width=2.0))
-        self.plot_curve.setDownsampling(auto=True, method="peak")
-        self.plot_curve.setClipToView(True)
         plot_layout.addWidget(self.plot_widget, 1)
         self.plot_status = QLabel("The plot updates after each recorded CSV row.", plot_group)
         self.plot_status.setWordWrap(True)

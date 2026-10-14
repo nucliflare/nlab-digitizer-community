@@ -203,6 +203,8 @@ def test_dialog_records_committed_dose_and_selected_live_data(
         ]
     )
     qtbot.addWidget(dialog)
+    assert dialog.plot_curve.opts["autoDownsample"] is False
+    assert dialog.plot_curve.opts["clipToView"] is False
     path = tmp_path / "dose.csv"
     dialog.output_path.setText(str(path))
     dialog.interval_ms.setValue(60_000)

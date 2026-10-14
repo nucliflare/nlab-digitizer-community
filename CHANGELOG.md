@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The dose-calibration live plot no longer enables viewport-dependent
+  downsampling and clipping for its bounded history, preventing short series
+  from appearing empty in narrow or headless viewports.
+
 ## [0.7.0] — 2026-10-14
 
 ### Added
