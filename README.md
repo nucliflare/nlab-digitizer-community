@@ -157,6 +157,10 @@ uv run python examples/measure_current.py
 
 ### Application workflow
 
+- **Help → About → Check for Updates** compares the installed version with the
+  latest published stable release on GitHub. The check runs only on request,
+  keeps the interface responsive, and offers a release-page link when an update
+  is available. Downloads and installation remain manual.
 - Dockable and floatable channel panels, including multi-monitor layouts
 - Scope, Current, MCA, PSD, Coincidence, PSU, Global, External, and System Log
   workspaces

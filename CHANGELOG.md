@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Help → About → Check for Updates** checks GitHub's latest published stable
+  release without blocking the GUI, compares versions numerically, and offers
+  a release-page link when a newer version is available. Connection failures,
+  timeouts, rate limits, and missing releases are shown in the About dialog.
+
 ## [0.7.2] — 2026-10-15
 
 ### Added

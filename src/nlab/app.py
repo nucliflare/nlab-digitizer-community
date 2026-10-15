@@ -24,11 +24,13 @@ from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
 from nlab.hardware.modbus_devices import ExternalDeviceScan
 from nlab.session.replay import SessionReplay
 from nlab.ui.ui_main_window import Ui_MainWindow
+from nlab.utils.github_releases import GITHUB_REPOSITORY_URL
 from nlab.utils.remote_board_power import (
     BoardPowerCommand,
     power_command_was_delivered,
     ssh_arguments,
 )
+from nlab.views.about_dialog import AboutDialog
 from nlab.views.connection_dialog import ConnectionDialog
 from nlab.views.connection_progress_dialog import ConnectionProgressDialog
 from nlab.views.dma_settings_dialog import (
@@ -54,7 +56,7 @@ pulse-shape analysis with EWT digitizer hardware.<br>
 Organization: EWT<br>
 License: MIT<br>
 <br>
-Source: <a href="https://github.com/ewt/nlab-community">github.com/ewt/nlab-community</a>
+Source: <a href="{GITHUB_REPOSITORY_URL}">github.com/nucliflare/nlab-digitizer-community</a>
 """
 
 _KEY_SHOW_LOG = "developer/show_system_log"
@@ -1461,7 +1463,7 @@ class MainAppWindow(QMainWindow):
         self._controller.reset_dock_layout()
 
     def _on_about(self) -> None:
-        QMessageBox.about(self, "About Nuclear Lab Digitizer", _ABOUT_TEXT)
+        AboutDialog(_ABOUT_TEXT, self).exec()
 
     def _on_third_party_licenses(self) -> None:
         LicenseDialog(self).exec()
