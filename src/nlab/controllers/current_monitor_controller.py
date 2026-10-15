@@ -19,6 +19,7 @@ from nlab.hardware.digitizer.current_monitor import (
 from nlab.hardware.digitizer.mca import MultiChannelAnalyzer
 from nlab.hardware.digitizer.scope import SCOPE_DATAPATH_CLOCK_PERIOD_NS
 from nlab.ui.ui_current_monitor_view import Ui_CurrentMonitorView
+from nlab.views.panel_status import PanelStatus
 from nlab.workers.current_monitor_worker import (
     CurrentMonitorWorker,
     CurrentSample,
@@ -87,6 +88,7 @@ class CurrentMonitorController(QWidget):
 
         self.ui = Ui_CurrentMonitorView()
         self.ui.setupUi(self)  # type: ignore[no-untyped-call]
+        self.status = PanelStatus(self, "Monitor stopped.")
         self._setup_plot()
         self._connect_signals()
         if self._scope_controller is not None:
@@ -188,11 +190,11 @@ class CurrentMonitorController(QWidget):
         self.ui.spinDmaGap.setEnabled(dma_controls_enabled)
         self.ui.btnResetScopeDefaults.setEnabled(dma_controls_enabled)
         if dma_mode and not self._dma_supported():
-            self.ui.lblStatus.setText(
+            self.status.setText(
                 "Scope DMA mode is unavailable on this backend/firmware."
             )
         else:
-            self.ui.lblStatus.setText("Monitor stopped.")
+            self.status.setText("Monitor stopped.")
 
     @Slot()
     def _reset_scope_defaults(self) -> None:
@@ -204,11 +206,11 @@ class CurrentMonitorController(QWidget):
         try:
             scope_controller.reset_defaults()
         except Exception as exc:
-            self.ui.lblStatus.setText(f"Could not reset Scope defaults: {exc}")
+            self.status.setText(f"Could not reset Scope defaults: {exc}")
             log.exception("Resetting Scope defaults failed")
             return
         self._set_dma_gap_cycles(_DEFAULT_DMA_GAP_CYCLES)
-        self.ui.lblStatus.setText(
+        self.status.setText(
             "Scope defaults restored; Current DMA optimization is inactive."
         )
 
@@ -273,7 +275,7 @@ class CurrentMonitorController(QWidget):
             Qt.ConnectionType.QueuedConnection,
         )
         self._set_running_controls(True)
-        self.ui.lblStatus.setText("Opening an isolated current-monitor connection…")
+        self.status.setText("Opening an isolated current-monitor connection…")
         self._next_display_ns = time.perf_counter_ns() + self._display_period_ns
         self._schedule_display()
         thread.start()
@@ -312,7 +314,7 @@ class CurrentMonitorController(QWidget):
                 index = self.ui.comboUnit.findText(str(settings["unit"]))
                 if index >= 0:
                     self.ui.comboUnit.setCurrentIndex(index)
-        self.ui.lblStatus.setText("Session current replay ready.")
+        self.status.setText("Session current replay ready.")
 
     def display_session_replay_samples(
         self,
@@ -332,11 +334,11 @@ class CurrentMonitorController(QWidget):
         status = "Recorded FPGA IIR samples; replay does not access hardware."
         if self._dropped_samples:
             status += f" Capture dropped {self._dropped_samples:,} sample(s)."
-        self.ui.lblStatus.setText(status)
+        self.status.setText(status)
 
     def finish_session_replay(self) -> None:
         if self._session_replay_active:
-            self.ui.lblStatus.setText("Session current replay complete; final view held.")
+            self.status.setText("Session current replay complete; final view held.")
 
     def end_session_replay(self) -> None:
         self._session_replay_active = False
@@ -360,7 +362,7 @@ class CurrentMonitorController(QWidget):
                 "Scope DMA mode requires the direct IIO Scope backend with "
                 "periodic-frame support."
             )
-            self.ui.lblStatus.setText(self._monitor_error)
+            self.status.setText(self._monitor_error)
             return
 
         self._stop_requested = False
@@ -371,13 +373,13 @@ class CurrentMonitorController(QWidget):
             scope_controller.start_current_dma_monitor(gap_cycles=gap_cycles)
         except Exception as exc:
             self._monitor_error = f"Could not start Scope DMA current monitor: {exc}"
-            self.ui.lblStatus.setText(self._monitor_error)
+            self.status.setText(self._monitor_error)
             log.exception("Starting Scope DMA current monitor failed")
             return
 
         self._dma_active = True
         self._set_running_controls(True)
-        self.ui.lblStatus.setText(
+        self.status.setText(
             "Starting periodic Scope DMA current monitoring "
             f"(gap {gap_cycles * _DMA_GAP_CYCLE_NS / 1000:.3f} us)..."
         )
@@ -427,7 +429,7 @@ class CurrentMonitorController(QWidget):
         self._render_pending()
         self._set_running_controls(False)
         if self._monitor_error is None:
-            self.ui.lblStatus.setText("Monitor stopped.")
+            self.status.setText("Monitor stopped.")
 
     @Slot()
     def _on_worker_finished(self) -> None:
@@ -438,14 +440,14 @@ class CurrentMonitorController(QWidget):
         self._render_pending()
         self._set_running_controls(False)
         if self._monitor_error is None:
-            self.ui.lblStatus.setText("Monitor stopped.")
+            self.status.setText("Monitor stopped.")
 
     @Slot(bool, str)
     def _on_scope_dma_state_changed(self, running: bool, message: str) -> None:
         if not self._dma_active:
             return
         if running:
-            self.ui.lblStatus.setText(message)
+            self.status.setText(message)
             return
         self._finish_dma_monitor(message)
 
@@ -455,7 +457,7 @@ class CurrentMonitorController(QWidget):
         self._render_pending()
         self._stop_requested = False
         self._set_running_controls(False)
-        self.ui.lblStatus.setText(message)
+        self.status.setText(message)
 
     @staticmethod
     def _convert(raw_code: float, zero: float, scale: float) -> float:
@@ -570,7 +572,7 @@ class CurrentMonitorController(QWidget):
         latest_raw_sample = snapshot.latest_raw_sample
         if latest_raw_sample is None or not snapshot.bins:
             if self._monitor_error is not None:
-                self.ui.lblStatus.setText(self._monitor_error)
+                self.status.setText(self._monitor_error)
             return
 
         zero = self.ui.spinZero.value()
@@ -672,7 +674,7 @@ class CurrentMonitorController(QWidget):
                 f"Stale: newest DMA frame is "
                 f"{snapshot.data_age_ns / 1_000_000:.1f} ms old. " + status
             )
-        self.ui.lblStatus.setText(status)
+        self.status.setText(status)
 
     def _render_dma_plot(
         self,
@@ -730,7 +732,7 @@ class CurrentMonitorController(QWidget):
         latest = self._latest
         if latest is None:
             if self._monitor_error is not None:
-                self.ui.lblStatus.setText(self._monitor_error)
+                self.status.setText(self._monitor_error)
             return
 
         zero = self.ui.spinZero.value()
@@ -783,7 +785,7 @@ class CurrentMonitorController(QWidget):
             status = "Live FPGA IIR status; host timestamps are transaction midpoints."
         if self._dropped_samples:
             status += f" Display buffer dropped {self._dropped_samples:,} sample(s)."
-        self.ui.lblStatus.setText(status)
+        self.status.setText(status)
 
         if self._history:
             newest = self._history[-1]

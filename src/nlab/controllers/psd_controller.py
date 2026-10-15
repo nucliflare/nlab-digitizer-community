@@ -13,6 +13,7 @@ from nlab.analysis.psd import PsdAccumulator
 from nlab.hardware.digitizer.dma import McaEventBuffer
 from nlab.ui.ui_psd_view import Ui_PSDView
 from nlab.views.image_display import transparent_sparse_bins
+from nlab.views.panel_status import PanelStatus
 from nlab.views.plot_viewbox import style_plot_widget
 from nlab.views.psd_fom_widget import PsdFomWidget
 from nlab.views.responsive_layout import configure_psd_layout
@@ -52,6 +53,7 @@ class PSDController(QWidget):
 
         self.ui = Ui_PSDView()
         self.ui.setupUi(self)  # type: ignore[no-untyped-call]
+        self.status = PanelStatus(self, self._capture_note)
         configure_psd_layout(self, self.ui)
         self._accumulator = self._make_accumulator()
         self._setup_plots()
@@ -273,7 +275,7 @@ class PSDController(QWidget):
     def _on_analysis_settings_changed(self) -> None:
         ratio_range = (self.ui.spinRatioMin.value(), self.ui.spinRatioMax.value())
         if ratio_range[0] >= ratio_range[1]:
-            self.ui.lblStatus.setText("Ratio minimum must be smaller than ratio maximum.")
+            self.status.setText("Ratio minimum must be smaller than ratio maximum.")
             return
         self._event_buffer.clear()
         self._accumulator = self._make_accumulator()
@@ -395,7 +397,7 @@ class PSDController(QWidget):
     def _update_status(self) -> None:
         stats = self._accumulator.statistics
         state = "Recording" if self._capturing else self._capture_note
-        self.ui.lblStatus.setText(
+        self.status.setText(
             f"{state}  Accepted: {stats.accepted:,}/{stats.received:,}; "
             f"zero energy: {stats.zero_total:,}; outside view: {stats.outside_range:,}; "
             f"display drops: {self._last_dropped_records:,}."

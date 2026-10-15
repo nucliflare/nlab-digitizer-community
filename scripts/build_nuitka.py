@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parent.parent
 ENTRY = ROOT / "src" / "nlab" / "main.py"
 ICON = ROOT / "resources" / "icons" / "ewt.ico"
 RADIONUCLIDE_CATALOG = ROOT / "src" / "nlab" / "data" / "radionuclide_lines.sqlite3"
+N42_DATA = ROOT / "src" / "nlab" / "data"
 DIST = ROOT / "dist"
 
 # On Linux, the executable has no .exe extension so it would be named "nlab"
@@ -58,6 +59,12 @@ args = [
     "--include-module=PySide6.QtOpenGLWidgets",
     f"--include-data-files={ICON}=resources/icons/ewt.ico",
     f"--include-data-files={RADIONUCLIDE_CATALOG}=nlab/data/radionuclide_lines.sqlite3",
+    f"--include-data-files={N42_DATA / 'n42.xsd'}=nlab/data/n42.xsd",
+    (
+        f"--include-data-files={N42_DATA / 'N42SchemaAddin-2020.xsd'}="
+        "nlab/data/N42SchemaAddin-2020.xsd"
+    ),
+    f"--include-data-files={N42_DATA / 'n42.sch'}=nlab/data/n42.sch",
 ]
 
 if sys.platform == "win32":

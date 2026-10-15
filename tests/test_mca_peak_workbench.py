@@ -28,6 +28,7 @@ class _FakeMcaController:
     channel: int
     counts: np.ndarray
     elapsed_s: float = 10.0
+    live_time_s: float | None = 9.5
     energy_calibration: EnergyCalibration | None = None
     coincidence_energy_bin: int = 0
     calibration_stale: bool = False
@@ -42,6 +43,9 @@ class _FakeMcaController:
             elapsed_s=self.elapsed_s,
             live=True,
             fingerprint={"binning": self.coincidence_energy_bin},
+            live_time_s=self.live_time_s,
+            n42_instrument={"identifier": f"D1:CH{self.channel}@192.0.2.10:30431"},
+            n42_detector={"name": f"D1:CH{self.channel}", "category": "Other"},
         )
 
     def energy_calibration_is_stale(self) -> bool:
@@ -69,6 +73,9 @@ def test_workbench_automatically_snapshots_all_mcas_and_refreshes_selected(
     spectrum_id = dialog._current_id()
     assert spectrum_id is not None
     original = dialog._spectra[spectrum_id]
+    assert original.metadata["live_time_s"] == 9.5
+    assert original.metadata["dead_time_s"] == 0.5
+    assert original.metadata["n42_detector"] == {"name": "D1:CH0", "category": "Other"}
 
     controllers[0].counts = np.full(400, 7, dtype=np.uint32)
     dialog._refresh_selected()

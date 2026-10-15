@@ -27,7 +27,7 @@ def test_controller_drains_dma_batches_into_live_matrix(qtbot: QtBot) -> None:
     assert controller._accumulator.statistics.accepted == 2
     assert controller._accumulator.statistics.zero_total == 1
     assert controller._accumulator.matrix.sum() == 2
-    assert "Accepted: 2/3" in controller.ui.lblStatus.text()
+    assert "Accepted: 2/3" in controller.status.text()
     controller.stop_processing()
 
 
@@ -112,11 +112,11 @@ def test_session_replay_rebuilds_psd_and_restores_live_processing(qtbot: QtBot) 
     assert not controller._timer.isActive()
     assert controller._accumulator.statistics.received == 2
     assert controller._accumulator.statistics.accepted == 2
-    assert "Session replay in progress" in controller.ui.lblStatus.text()
+    assert "Session replay in progress" in controller.status.text()
 
     controller.finish_session_replay()
 
-    assert "Session replay complete" in controller.ui.lblStatus.text()
+    assert "Session replay complete" in controller.status.text()
 
     controller.end_session_replay()
 

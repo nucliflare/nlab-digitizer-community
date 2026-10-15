@@ -695,6 +695,12 @@ same reason as the calibration workspace.
 The workbench also loads NLab or ordinary delimited CSV spectra,
 Maestro/ORTEC-style ASCII `.Spe` files, legacy binary Tukan `.wdm` spectra,
 CAEN calibrated ASCII `.txt3` exports, and CAEN ROOT energy histograms. It
+also validates and imports ANSI/IEEE N42.42 `.n42`/`.xml` documents; every
+`Spectrum` becomes a separate workbench entry, including `CountedZeroes`
+channel data, real/live times, detector and instrument identity, and polynomial
+or energy-boundary calibration. Validation uses the bundled NIST base and
+add-in schemas offline, ignores instance schema-location hints, rejects XML
+entities, and checks the supported spectrum/calibration reference semantics.
 accepts counts-only CSV, channel and counts columns, or channel/energy/counts
 columns. A ROOT file contributes every `TH1` object from its `Energy` directory
 as a separate spectrum, including empty channel histograms; unrelated Time/PSD
@@ -761,8 +767,13 @@ sources. Available operations are scalar scaling, area/maximum/acquisition-time
 normalization, addition, subtraction, live- or elapsed-time-scaled background
 subtraction, integer rebinning, and cropping to the fit range. Arithmetic
 requires identical coordinate grids, propagates variance, and never performs
-implicit interpolation. Spectra export to CSV; fit summaries export to JSON or
-CSV without overwriting existing files. After a completed fit, **Download
+implicit interpolation. Spectra export to CSV or N42.42; fit summaries export
+to JSON, CSV, or N42.42 without overwriting existing files. N42 export requires
+positive real/live time and a current energy calibration, rejects negative
+derived counts and stale calibrations, and records known instrument/endpoint
+identity without inventing detector material or geometry. A fit N42 document
+contains both the measured spectrum and `SpectrumPeakAnalysisResults` with
+calibrated centroid, FWHM, net area, and area uncertainty. After a completed fit, **Download
 report...** creates a non-overwriting folder with a branded two-page PDF of the
 spectrum, fitted components, residuals, peak results, statistics, and typeset
 Gaussian, FWHM, and selected-background equations, together with full fit-curve,
@@ -884,8 +895,12 @@ sample. Existing capture files remain readable.
 
 Every recorded MCA run also writes a same-stem `.run.json` with channel,
 format, start/end time, record count, average rate, and continuity status.
-The MCA panel shows this outcome after stopping and its tooltip lists IIO
-driver counters (`dma_error_count` is cumulative since driver initialization).
+The bottom status bar shows acquisition progress, errors, and the final run
+outcome for the visible MCA, Scope, Current, PSD, or Coincidence panel, with
+panel/channel identification. Returning to a panel restores its latest message.
+Long messages no longer widen the measurement controls; hover over the status
+bar for the complete text and MCA run-health details, including IIO driver
+counters (`dma_error_count` is cumulative since driver initialization).
 IIO record counts include any zero-padded slots in the final complete frame;
 they are not an exact accepted-pulse count. Online-only DMA still creates no
 file and shows the summary only in the panel. A missing `.run.json` after a

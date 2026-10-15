@@ -34,7 +34,6 @@
      <item row="1" column="0" colspan="2"><widget class="NLabPlotWidget" name="plotEnergy" native="true"/></item>
     </layout>
    </item>
-   <item><widget class="QLabel" name="lblStatus"><property name="text"><string>Waiting for DMA with Charge Comparison enabled.</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
   </layout>
  </widget>
  <customwidgets>

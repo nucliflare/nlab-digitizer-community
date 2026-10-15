@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from nlab.analysis.mca_report import PeakFitReportRequest, export_peak_fit_report
+from nlab.analysis.n42 import export_n42_peak_fit, export_n42_spectrum
 from nlab.analysis.peak_fitting import (
     BackgroundModel,
     FitStatistic,
@@ -1141,11 +1142,19 @@ class McaPeakAnalysisDialog(QDialog):
                 "channel": snapshot.channel,
                 "created_utc": snapshot.created_utc,
                 "elapsed_s": snapshot.elapsed_s,
+                "live_time_s": snapshot.live_time_s,
+                "dead_time_s": (
+                    max(snapshot.elapsed_s - snapshot.live_time_s, 0.0)
+                    if snapshot.live_time_s is not None
+                    else None
+                ),
                 "live_non_atomic": snapshot.live,
                 "settings_fingerprint": snapshot.fingerprint,
                 "binning": binning,
                 "energy_calibration": calibration.to_dict() if calibration is not None else None,
                 "calibration_stale": controller.energy_calibration_is_stale(),
+                "n42_instrument": snapshot.n42_instrument or {},
+                "n42_detector": snapshot.n42_detector or {},
             },
             energy_kev=energy,
             poisson_counts=True,
@@ -1202,7 +1211,7 @@ class McaPeakAnalysisDialog(QDialog):
             "Load MCA Spectra",
             folder,
             "Spectrum files (*.csv *.CSV *.spe *.SPE *.wdm *.WDM *.txt *.txt3 *.tsv "
-            "*.root *.ROOT);;All files (*)",
+            "*.root *.ROOT *.n42 *.N42 *.xml *.XML);;All files (*)",
         )
         if not paths:
             return
@@ -1481,21 +1490,29 @@ class McaPeakAnalysisDialog(QDialog):
         if spectrum is None:
             return
         folder = str(QSettings().value("analysis/spectrum_folder", "measurements"))
-        path_text, _ = QFileDialog.getSaveFileName(
+        path_text, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Export Spectrum",
             str(Path(folder) / f"{_safe_stem(spectrum.label)}.csv"),
-            "CSV files (*.csv)",
+            "CSV files (*.csv);;ANSI/IEEE N42.42 (*.n42 *.xml)",
         )
         if not path_text:
             return
         try:
-            export_spectrum_csv(Path(path_text), spectrum)
+            path = Path(path_text)
+            if selected_filter.startswith("ANSI") and path.suffix.lower() not in {".n42", ".xml"}:
+                path = path.with_suffix(".n42")
+            elif not path.suffix:
+                path = path.with_suffix(".csv")
+            if path.suffix.lower() in {".n42", ".xml"}:
+                export_n42_spectrum(path, spectrum)
+            else:
+                export_spectrum_csv(path, spectrum)
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "Spectrum Export Failed", str(exc))
             return
         QSettings().setValue("analysis/spectrum_folder", str(Path(path_text).parent))
-        self.workbench_status.setText(f"Spectrum exported to {path_text}")
+        self.workbench_status.setText(f"Spectrum exported to {path}")
 
     def _export_fit_result(self) -> None:
         result = self._fit_result
@@ -1507,23 +1524,35 @@ class McaPeakAnalysisDialog(QDialog):
             self,
             "Export Peak Fit Results",
             str(Path(folder) / f"{_safe_stem(spectrum.label)}_fit.json"),
-            "JSON (*.json);;CSV (*.csv)",
+            "JSON (*.json);;CSV (*.csv);;ANSI/IEEE N42.42 (*.n42 *.xml)",
         )
         if not path_text:
             return
         path = Path(path_text)
         try:
-            if not path.suffix:
-                path = path.with_suffix(".csv" if selected_filter.startswith("CSV") else ".json")
+            if selected_filter.startswith("ANSI") and path.suffix.lower() not in {".n42", ".xml"}:
+                path = path.with_suffix(".n42")
+            elif selected_filter.startswith("CSV") and path.suffix.lower() != ".csv":
+                path = path.with_suffix(".csv")
+            elif not path.suffix:
+                path = path.with_suffix(".json")
             if self._last_fit_spec is None:
                 raise ValueError("the fit model description is unavailable")
-            export_peak_fit_result(
-                path,
-                spectrum=spectrum,
-                spec=self._last_fit_spec,
-                result=result,
-                reference_overlay=self._reference_selection_document(),
-            )
+            if path.suffix.lower() in {".n42", ".xml"}:
+                export_n42_peak_fit(
+                    path,
+                    spectrum=spectrum,
+                    spec=self._last_fit_spec,
+                    result=result,
+                )
+            else:
+                export_peak_fit_result(
+                    path,
+                    spectrum=spectrum,
+                    spec=self._last_fit_spec,
+                    result=result,
+                    reference_overlay=self._reference_selection_document(),
+                )
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "Fit Export Failed", str(exc))
             return

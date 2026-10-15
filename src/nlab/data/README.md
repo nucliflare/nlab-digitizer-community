@@ -15,3 +15,14 @@ The generated database is committed so installed applications remain offline
 and deterministic. Do not edit it manually; update the pinned source release,
 run the builder, review known reference nuclides and row counts, and commit the
 new artifact together with its tests and documentation.
+
+## ANSI/IEEE N42.42 schemas
+
+`n42.xsd`, `N42SchemaAddin-2020.xsd`, and `n42.sch` are the official schema,
+example extension schema, and Schematron rules published by NIST for
+[ANSI/IEEE N42.42-2020](https://www.nist.gov/pml/radiation-physics/ansiieee-n4242-2020-version).
+The standard's 2020 artifact set deliberately retains the
+`http://physics.nist.gov/N42/2011/N42` namespace. They are bundled unchanged so
+validation and frozen applications remain offline and deterministic. Runtime
+validation disables external entities, external schema access, and instance
+location hints; the local add-in is loaded explicitly beside the base schema.

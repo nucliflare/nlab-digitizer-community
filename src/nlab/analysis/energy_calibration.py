@@ -27,6 +27,9 @@ class SpectrumSnapshot:
     elapsed_s: float
     live: bool
     fingerprint: dict[str, FingerprintValue]
+    live_time_s: float | None = None
+    n42_instrument: dict[str, object] | None = None
+    n42_detector: dict[str, object] | None = None
 
     @classmethod
     def create(
@@ -38,6 +41,9 @@ class SpectrumSnapshot:
         elapsed_s: float,
         live: bool,
         fingerprint: Mapping[str, FingerprintValue],
+        live_time_s: float | None = None,
+        n42_instrument: Mapping[str, object] | None = None,
+        n42_detector: Mapping[str, object] | None = None,
     ) -> SpectrumSnapshot:
         copied = np.asarray(counts, dtype=np.uint32).copy()
         copied.setflags(write=False)
@@ -50,6 +56,9 @@ class SpectrumSnapshot:
             elapsed_s=float(elapsed_s),
             live=live,
             fingerprint=dict(fingerprint),
+            live_time_s=float(live_time_s) if live_time_s is not None else None,
+            n42_instrument=dict(n42_instrument) if n42_instrument is not None else None,
+            n42_detector=dict(n42_detector) if n42_detector is not None else None,
         )
 
 

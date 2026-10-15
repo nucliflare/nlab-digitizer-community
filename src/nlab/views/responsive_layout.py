@@ -198,11 +198,8 @@ class MCAResponsiveLayout(QObject):
                 ui.btnStart,
                 ui.btnStop,
                 ui.btnDmaFile,
-                ui.lblDmaStatus,
             )
         }
-        self._dma_status_policy = QSizePolicy(ui.lblDmaStatus.sizePolicy())
-        self._dma_status_word_wrap = ui.lblDmaStatus.wordWrap()
         if watch_screen:
             view.installEventFilter(self)
 
@@ -261,14 +258,8 @@ class MCAResponsiveLayout(QObject):
             (ui.btnStart, 76),
             (ui.btnStop, 76),
             (ui.btnDmaFile, 96),
-            (ui.lblDmaStatus, 112),
         ):
             widget.setMaximumWidth(width)
-        ui.lblDmaStatus.setWordWrap(True)
-        ui.lblDmaStatus.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Preferred,
-        )
         _compact_forms(self._forms)
         self._scroll = _wrap_widget(ui.bodyRow, ui.controlPanel, "mcaControlScroll")
         self._scroll.setMinimumWidth(280)
@@ -303,8 +294,6 @@ class MCAResponsiveLayout(QObject):
         ui.layoutMeasurement.setSpacing(self._measurement_spacing)
         for widget, width in self._maximum_widths.items():
             widget.setMaximumWidth(width)
-        ui.lblDmaStatus.setWordWrap(self._dma_status_word_wrap)
-        ui.lblDmaStatus.setSizePolicy(self._dma_status_policy)
         for form, (row_wrap, field_growth) in zip(
             self._forms,
             self._form_policies,

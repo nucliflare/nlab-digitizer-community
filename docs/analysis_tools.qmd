@@ -104,7 +104,16 @@ live MCA spectra and also imports:
 - Maestro/ORTEC-style `.Spe`;
 - Tukan `.wdm`;
 - CAEN calibrated `.txt3`;
-- CAEN ROOT `Energy` histograms.
+- CAEN ROOT `Energy` histograms;
+- validated ANSI/IEEE N42.42 `.n42` or `.xml`, including every spectrum in a
+  multi-measurement document.
+
+N42 import is offline and deterministic: the application uses bundled NIST
+base and add-in schemas, disables external entities and external schema
+resolution, ignores document schema-location hints, expands `CountedZeroes`,
+and preserves instrument, detector, timing, measurement-class, and energy-
+calibration metadata. Documents without a spectrum can be valid N42 but do not
+create a workbench entry.
 
 One to three Gaussian components can be combined with none, constant, linear,
 centred exponential, error-function Compton-step, or logistic Fermi-step
@@ -127,6 +136,14 @@ After a completed fit, **Download report...** writes a non-overwriting bundle
 containing a branded two-page PDF, fit curve and components, residuals, peak and
 parameter tables, fit statistics, provenance, the exact reference overlay, and
 machine-readable CSV/JSON metadata.
+
+The selected spectrum can also be exported as N42.42, and a completed fit can
+be exported as a spectrum plus `SpectrumPeakAnalysisResults`. Export requires a
+current energy calibration and positive real/live measurement times. It will
+not invent an identity calibration or export stale calibration data. Known
+digitizer endpoint/channel identity is retained; detector category, material,
+and geometry remain `Other`/unspecified unless the source document explicitly
+provided them.
 
 ### Fitting the generated 511 keV peak
 

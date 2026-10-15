@@ -37,6 +37,7 @@ ROOT = Path(__file__).resolve().parent.parent
 ENTRY = ROOT / "src" / "nlab" / "main.py"
 ICON = ROOT / "resources" / "icons" / "ewt.ico"
 RADIONUCLIDE_CATALOG = ROOT / "src" / "nlab" / "data" / "radionuclide_lines.sqlite3"
+N42_DATA = ROOT / "src" / "nlab" / "data"
 VERSION_SOURCE = ROOT / "src" / "nlab" / "_version.py"
 DIST = ROOT / "dist"
 WORK = ROOT / "build" / "pyinstaller-reviewed"
@@ -162,6 +163,9 @@ def _preflight() -> None:
         ENTRY,
         ICON,
         RADIONUCLIDE_CATALOG,
+        N42_DATA / "n42.xsd",
+        N42_DATA / "N42SchemaAddin-2020.xsd",
+        N42_DATA / "n42.sch",
         VERSION_SOURCE,
     ]
     missing = [path for path in required_paths if not path.is_file()]
@@ -191,6 +195,9 @@ def _build_arguments(*, clean: bool, version: str) -> list[str]:
         f"--specpath={SPEC}",
         f"--add-data={ICON}{os.pathsep}resources/icons",
         f"--add-data={RADIONUCLIDE_CATALOG}{os.pathsep}nlab/data",
+        f"--add-data={N42_DATA / 'n42.xsd'}{os.pathsep}nlab/data",
+        f"--add-data={N42_DATA / 'N42SchemaAddin-2020.xsd'}{os.pathsep}nlab/data",
+        f"--add-data={N42_DATA / 'n42.sch'}{os.pathsep}nlab/data",
     ]
     if clean:
         arguments.append("--clean")

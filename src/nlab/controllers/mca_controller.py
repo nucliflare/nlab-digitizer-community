@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ from nlab.views.mca_roi_history_dialog import (
     DoubleClickableLinearRegionItem,
     McaRoiHistoryDialog,
 )
+from nlab.views.panel_status import PanelStatus
 from nlab.views.plot_viewbox import ModifierZoomViewBox
 from nlab.views.responsive_layout import configure_mca_layout
 from nlab.views.time_axis import format_duration_ns, time_axis_scale
@@ -146,6 +148,7 @@ class MCAController(QWidget):
         self._measurement_configuration = measurement_configuration
         self.ui = Ui_MCAView()
         self.ui.setupUi(self)
+        self.status = PanelStatus(self)
         self._responsive_layout = configure_mca_layout(self, self.ui)
         self._apply_control_tooltips()
 
@@ -657,7 +660,7 @@ class MCAController(QWidget):
                 actual = original
                 detail = "; hardware state unknown—reconnect"
             self.ui.spinTriggerLevel.setValue(actual)
-            self.ui.lblDmaStatus.setText(f"Threshold update failed: {exc}{detail}")
+            self.status.setText(f"Threshold update failed: {exc}{detail}")
 
     def _on_debug_pretrigger_line_changed(self) -> None:
         line = self._debug_pretrigger_line
@@ -717,7 +720,7 @@ class MCAController(QWidget):
                 actual = state.offset_ns
                 detail = "; hardware state unknown—reconnect"
             self.ui.spinPretrigger.setValue(actual)
-            self.ui.lblDmaStatus.setText(f"Window offset update failed: {exc}{detail}")
+            self.status.setText(f"Window offset update failed: {exc}{detail}")
         finally:
             self._restore_debug_offset_traces(state)
 
@@ -1075,6 +1078,17 @@ class MCAController(QWidget):
         if self._last_histogram is None or len(self._last_histogram) == 0:
             raise RuntimeError(f"MCA {self.channel_label} has no spectrum to copy")
         created = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        dead_time_s = (
+            max(float(self._latest_readback.pulse_deadtime_ms), 0.0) / 1000.0
+            if self._latest_readback is not None
+            else None
+        )
+        live_time_s = (
+            max(float(self._last_elapsed_s) - dead_time_s, 0.0)
+            if dead_time_s is not None
+            else None
+        )
+        instrument, detector = self._n42_export_identity()
         return SpectrumSnapshot.create(
             channel=self._channel,
             counts=self._last_histogram,
@@ -1082,7 +1096,50 @@ class MCAController(QWidget):
             elapsed_s=self._last_elapsed_s,
             live=self._worker is not None or self._dma_worker is not None,
             fingerprint=self.energy_calibration_fingerprint(),
+            live_time_s=live_time_s,
+            n42_instrument=instrument,
+            n42_detector=detector,
         )
+
+    def _n42_export_identity(self) -> tuple[dict[str, object], dict[str, object]]:
+        """Return known instrument identity without guessing detector construction."""
+        instrument: dict[str, object] = {
+            "manufacturer": "Eastern Wall Technologies",
+            "model": "Nuclear Lab Digitizer",
+            "identifier": self.channel_label,
+            "description": "Nuclear Lab Digitizer MCA",
+            "class": "Other",
+        }
+        detector: dict[str, object] = {
+            "name": self.channel_label,
+            "category": "Other",
+            "kind": "Other",
+            "description": "Detector material and geometry not specified",
+        }
+        if self._measurement_configuration is None:
+            return instrument, detector
+        configuration = self._measurement_configuration()
+        connection = configuration.get("connection")
+        if not isinstance(connection, dict):
+            return instrument, detector
+        board_match = re.match(r"D(?P<board>\d+):", self.channel_label)
+        digitizers = connection.get("digitizers")
+        if board_match is None or not isinstance(digitizers, list):
+            return instrument, detector
+        board_index = int(board_match.group("board")) - 1
+        if not 0 <= board_index < len(digitizers):
+            return instrument, detector
+        endpoint = digitizers[board_index]
+        if not isinstance(endpoint, dict):
+            return instrument, detector
+        host = endpoint.get("ip")
+        port = endpoint.get("port")
+        if isinstance(host, str) and host:
+            identifier = f"{self.channel_label}@{host}"
+            if isinstance(port, int):
+                identifier += f":{port}"
+            instrument["identifier"] = identifier
+        return instrument, detector
 
     def dose_calibration_snapshot(self) -> McaDoseCalibrationSnapshot | None:
         """Copy the latest MCA values needed by the dose calibration logger."""
@@ -1714,7 +1771,7 @@ class MCAController(QWidget):
 
     def _on_connection_lost(self, message: str) -> None:
         self._connection_lost = True
-        self.ui.lblDmaStatus.setText(
+        self.status.setText(
             f"Connection lost: {message}; use Connection -> Reconnect Device."
         )
 
@@ -1804,7 +1861,7 @@ class MCAController(QWidget):
     def _on_dma_file(self) -> None:
         mode = self._output_mode()
         if mode is McaDmaOutputMode.ONLINE:
-            self.ui.lblDmaStatus.setText("Online PSD mode does not create a file.")
+            self.status.setText("Online PSD mode does not create a file.")
             return
         default_dir = str(QSettings().value("dma/save_folder", "measurements"))
         filters = {
@@ -1942,7 +1999,7 @@ class MCAController(QWidget):
             )
         else:
             status = f"Arming IIO DMA ({mode.value} file)..."
-        self.ui.lblDmaStatus.setText(status)
+        self.status.setText(status)
         log.debug(
             "MCA ch%d DMA [2/6]: starting worker thread (IIO buffer arm)",
             self._channel,
@@ -2004,7 +2061,7 @@ class MCAController(QWidget):
             )
         else:
             status = f"Recording {self._active_dma_mode.value} file..."
-        self.ui.lblDmaStatus.setText(status)
+        self.status.setText(status)
         log.info("MCA ch%d: DMA + measurement started", self._channel)
         if getattr(self, "_coincidence_session", False):
             self.coincidence_ready.emit(self._channel)
@@ -2023,12 +2080,12 @@ class MCAController(QWidget):
             action = "Recording"
         elapsed = max(0.0, time.monotonic() - self._dma_started_monotonic)
         rate = f", {event_count / elapsed:,.0f} {unit}/s avg" if elapsed >= 0.5 else ""
-        self.ui.lblDmaStatus.setText(f"{action}: {event_count:,} {unit}{rate}")
+        self.status.setText(f"{action}: {event_count:,} {unit}{rate}")
 
     def _on_dma_error(self, message: str) -> None:
         log.error("MCA DMA error: %s", message)
         self._dma_error = message
-        self.ui.lblDmaStatus.setText(f"Error: {message}")
+        self.status.setText(f"Error: {message}")
         if self._psd_capture is not None:
             self._psd_capture.set_capture_error(message)
         if getattr(self, "_coincidence_session", False):
@@ -2036,7 +2093,7 @@ class MCAController(QWidget):
 
     def _on_dma_summary(self, summary: McaRunSummary) -> None:
         self._dma_summary = summary
-        self.ui.lblDmaStatus.setText(summary.status_text())
+        self.status.setText(summary.status_text())
         details = [
             f"Channel {summary.channel}; {summary.mode.value}; {summary.duration_s:.1f} s",
             f"Continuity: {summary.continuity}",
@@ -2047,7 +2104,7 @@ class MCAController(QWidget):
         )
         if summary.sidecar_path is not None and summary.metadata_error is None:
             details.append(f"Run summary: {summary.sidecar_path}")
-        self.ui.lblDmaStatus.setToolTip("\n".join(details))
+        self.status.setToolTip("\n".join(details))
 
     @Slot()
     def _on_dma_finished(self) -> None:
@@ -2072,7 +2129,7 @@ class MCAController(QWidget):
         log.info("MCA ch%d: DMA worker exited; restoring controls", self._channel)
         try:
             if self._dma_summary is None and self._dma_error is None:
-                self.ui.lblDmaStatus.setText("Stopped (run health unavailable)")
+                self.status.setText("Stopped (run health unavailable)")
             self._finish_psd_capture()
             if getattr(self, "_coincidence_session", False):
                 if not self._coincidence_stopping:
@@ -2096,7 +2153,7 @@ class MCAController(QWidget):
                 # capture cleanup so file-backed output becomes selectable.
                 MCAController.refresh_dma_output_settings(self)
                 if getattr(self, "_connection_lost", False):
-                    self.ui.lblDmaStatus.setText(
+                    self.status.setText(
                         "Connection lost; use Connection -> Reconnect Device."
                     )
             log.info("MCA ch%d: DMA worker cleanup complete", self._channel)

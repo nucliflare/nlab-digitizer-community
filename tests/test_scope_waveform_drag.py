@@ -60,7 +60,7 @@ def test_waveform_drag_previews_both_axes_and_commits_once(qtbot: QtBot) -> None
     preview_x, preview_y = curve.getData()
     np.testing.assert_allclose(preview_x, original_x + 0.016)
     assert np.all(preview_y > original_y)
-    assert "preview approximate" in controller.ui.lblRecordingStatus.text()
+    assert "preview approximate" in controller.status.text()
     scope.set_dac_value.assert_not_called()
     scope.set_pretrigger_samples.assert_not_called()
 
@@ -124,13 +124,13 @@ def test_waveform_drag_uses_measured_dac_direction_and_live_frame(
     curve.drag_started.emit()
     curve.drag_moved.emit(0.0, 64.0)
     assert controller.ui.spinDacValue.value() == 510
-    assert "approximate" not in controller.ui.lblRecordingStatus.text()
+    assert "approximate" not in controller.status.text()
     curve.drag_finished.emit(False)
 
     scope.set_dac_value.assert_called_once_with(510)
     scope.set_pretrigger_samples.assert_not_called()
     controller._request_frame.assert_called_once_with()
-    assert "preview until" in controller.ui.lblRecordingStatus.text()
+    assert "preview until" in controller.status.text()
     assert not curve.clickable
 
     controller._on_frame_received(
@@ -151,7 +151,7 @@ def test_measured_positive_slope_overrides_negative_fallback(qtbot: QtBot) -> No
     curve.drag_moved.emit(0.0, 64.0)
 
     assert controller.ui.spinDacValue.value() == 514
-    assert "approximate" not in controller.ui.lblRecordingStatus.text()
+    assert "approximate" not in controller.status.text()
     curve.drag_finished.emit(True)
 
 
@@ -170,7 +170,7 @@ def test_waveform_drag_failure_refreshes_controls_and_display(qtbot: QtBot) -> N
     assert controller._waveform_drag is None
     assert controller.ui.spinPretrigger.value() == 64
     assert controller.ui.spinDacValue.value() == 512
-    assert "DAC disconnected" in controller.ui.lblRecordingStatus.text()
+    assert "DAC disconnected" in controller.status.text()
     x, y = curve.getData()
     np.testing.assert_array_equal(x, original_x)
     np.testing.assert_array_equal(y, original_y)
@@ -291,7 +291,7 @@ def test_pretrigger_marker_write_failure_reads_back_hardware(qtbot: QtBot) -> No
     assert controller.ui.spinPretrigger.value() == 64
     assert line.value() == 0.064
     assert line.movable
-    assert "pretrigger write failed" in controller.ui.lblRecordingStatus.text()
+    assert "pretrigger write failed" in controller.status.text()
 
 
 class _DragEvent:
@@ -418,10 +418,10 @@ def test_scope_session_replay_blocks_live_acquisition_and_holds_final_frame(
         frame_count=2,
         duration_ns=1_000_000_000,
     )
-    assert "final recorded frame held" in controller.ui.lblRecordingStatus.text()
+    assert "final recorded frame held" in controller.status.text()
 
     controller.end_session_replay()
 
     assert not controller.session_replay_active
     assert controller.ui.btnStart.isEnabled()
-    assert "remains stopped" in controller.ui.lblRecordingStatus.text()
+    assert "remains stopped" in controller.status.text()

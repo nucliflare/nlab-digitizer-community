@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
     QComboBox,
-    QSizePolicy,
     QWidget,
 )
 from pytestqt.qtbot import QtBot
@@ -247,7 +246,7 @@ def test_scope_reset_defaults_restores_hardware_and_widgets(qtbot: QtBot) -> Non
     assert controller.ui.spinFrameSamples.value() == 2048
     assert controller.ui.spinFrameGap.value() == 0
     assert not controller.ui.cbDmaEnable.isChecked()
-    assert controller.ui.lblRecordingStatus.text() == "Scope defaults restored"
+    assert controller.status.text() == "Scope defaults restored"
 
 
 def test_scope_dma_selection_is_application_configuration(qtbot: QtBot) -> None:
@@ -312,7 +311,7 @@ def test_scope_dma_progress_formats_large_file_without_wrapping(qtbot: QtBot) ->
 
     controller._on_dma_progress(8 * 1024**3)
 
-    assert controller.ui.lblRecordingStatus.text() == "Recording: 8.00 GiB"
+    assert controller.status.text() == "Recording: 8.00 GiB"
     controller._dma_thread = None
 
 
@@ -421,11 +420,10 @@ def test_scope_status_message_cannot_widen_controls_panel(qtbot: QtBot) -> None:
     controller = ScopeController(_scope_model_for_controller(), scope_dma=None, channel=0)
     qtbot.addWidget(controller)
 
-    status = controller.ui.lblRecordingStatus
-    assert status.wordWrap()
-    assert status.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Ignored
-
-    status.setText(controller._viewer_limit_message())
+    status = controller.status
+    before = controller.minimumSizeHint()
+    status.setText(controller._viewer_limit_message() * 10)
+    assert controller.minimumSizeHint() == before
     assert "truncated above 4656 ns (2328 ADC samples)" in status.text()
 
 
@@ -475,8 +473,8 @@ def test_scope_allows_truncated_long_viewer_only_start(qtbot: QtBot) -> None:
     scope.start.assert_called_once_with()
     assert controller.ui.btnStart.isChecked()
     assert controller._refresh_timer.isActive()
-    assert "Live preview is truncated" in controller.ui.lblRecordingStatus.text()
-    assert "Enable Record DMA frames" in controller.ui.lblRecordingStatus.text()
+    assert "Live preview is truncated" in controller.status.text()
+    assert "Enable Record DMA frames" in controller.status.text()
     controller._on_stop()
 
 
@@ -508,7 +506,7 @@ def test_scope_accepts_long_frame_change_during_viewer_readout(qtbot: QtBot) -> 
 
     assert controller.ui.spinFrameSamples.value() == 8192
     scope.set_frame_samples.assert_called_once_with(4096)
-    assert "Live preview is truncated" in controller.ui.lblRecordingStatus.text()
+    assert "Live preview is truncated" in controller.status.text()
     controller._refresh_timer.stop()
 
 
@@ -522,7 +520,7 @@ def test_long_dma_capture_keeps_truncated_text_viewer_polling(qtbot: QtBot) -> N
     controller._on_dma_ready()
 
     assert controller._refresh_timer.isActive()
-    assert "live preview is truncated" in controller.ui.lblRecordingStatus.text()
+    assert "live preview is truncated" in controller.status.text()
     controller._on_stop()
 
 
@@ -540,8 +538,8 @@ def test_scope_displays_partial_frame_with_explicit_warning(qtbot: QtBot) -> Non
     x_data, y_data = controller._raw_curve.getData()
     np.testing.assert_allclose(x_data, [0.0, 0.008, 0.016])
     np.testing.assert_array_equal(y_data, [10, 20, 30])
-    assert "showing 3 of 1024 points" in controller.ui.lblRecordingStatus.text()
-    assert "Enable Record DMA frames" in controller.ui.lblRecordingStatus.text()
+    assert "showing 3 of 1024 points" in controller.status.text()
+    assert "Enable Record DMA frames" in controller.status.text()
 
     controller._persistence_buffer.fill(0)
     controller._rasterize_frame(np.array([10, 20, 30], dtype=np.int16))
@@ -605,7 +603,7 @@ def test_scope_timed_dma_stop_restores_controls(qtbot: QtBot, tmp_path) -> None:
     qtbot.waitUntil(lambda: controller._measurement_timer.isActive(), timeout=3000)
     qtbot.waitUntil(lambda: controller._dma_thread is None, timeout=4000)
 
-    assert controller.ui.lblRecordingStatus.text() == "Stopped"
+    assert controller.status.text() == "Stopped"
     assert controller.ui.btnStart.isEnabled()
     assert not controller.ui.btnStop.isEnabled()
     assert controller.ui.groupTrigger.isEnabled()
@@ -618,13 +616,13 @@ def test_late_viewer_frame_does_not_replace_stopped_status(qtbot: QtBot) -> None
     controller = ScopeController(_scope_model_for_controller(), scope_dma=None, channel=0)
     qtbot.addWidget(controller)
     controller._discard_inflight_frame = True
-    controller.ui.lblRecordingStatus.setText("Stopped")
+    controller.status.setText("Stopped")
 
     controller._on_viewer_frame_received(
         [np.arange(3, dtype=np.int64), np.ones(3, dtype=np.int16)]
     )
 
-    assert controller.ui.lblRecordingStatus.text() == "Stopped"
+    assert controller.status.text() == "Stopped"
 
 
 def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> None:

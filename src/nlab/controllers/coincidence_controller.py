@@ -57,6 +57,7 @@ from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
 from nlab.utils.settings_io import write_configuration
 from nlab.views.energy_axis import CalibratedEnergyAxis
 from nlab.views.image_display import transparent_sparse_bins
+from nlab.views.panel_status import PanelStatus
 from nlab.views.plot_viewbox import ModifierZoomViewBox
 from nlab.workers.coincidence_worker import CoincidenceAnalysisThread
 
@@ -172,9 +173,7 @@ class CoincidenceController(QWidget):
         self.duration.setToolTip("Common MCA acquisition limit; 0 runs until stopped.")
         run_layout.addWidget(QLabel("Duration:"))
         run_layout.addWidget(self.duration)
-        self.status = QLabel("Ready; both MCA channels must be idle.")
-        self.status.setWordWrap(True)
-        run_layout.addWidget(self.status)
+        self.status = PanelStatus(self, "Ready; both MCA channels must be idle.")
         hardware_pair = QLabel(" + ".join(self._channel_labels))
         hardware_pair.setToolTip(
             "Both coincidence channels belong to this physical digitizer. "

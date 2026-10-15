@@ -9,7 +9,7 @@ from uuid import uuid4
 import numpy as np
 
 SpectrumAxisUnit = Literal["channel", "keV"]
-SpectrumSource = Literal["mca", "csv", "spe", "wdm", "caen_text", "root", "derived"]
+SpectrumSource = Literal["mca", "csv", "spe", "wdm", "caen_text", "root", "n42", "derived"]
 NormalizationMode = Literal["area", "maximum", "elapsed"]
 
 

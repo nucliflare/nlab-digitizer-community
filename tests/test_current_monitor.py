@@ -147,7 +147,7 @@ def test_controller_renders_calibrated_latest_and_interval_values(qtbot: QtBot) 
     controller._on_worker_finished()
     qtbot.wait(60)
     assert not controller._display_timer.isActive()
-    assert controller.ui.lblStatus.text() == "Monitor stopped."
+    assert controller.status.text() == "Monitor stopped."
 
 
 def test_controller_starts_stopped_by_default(qtbot: QtBot) -> None:
@@ -161,7 +161,7 @@ def test_controller_starts_stopped_by_default(qtbot: QtBot) -> None:
     assert not controller._dma_active
     assert controller.ui.btnStart.isEnabled()
     assert not controller.ui.btnStop.isEnabled()
-    assert controller.ui.lblStatus.text() == "Monitor stopped."
+    assert controller.status.text() == "Monitor stopped."
 
 
 class _FakeScopeController(QObject):
@@ -360,9 +360,9 @@ def test_controller_scope_dma_mode_renders_accumulated_summaries(qtbot: QtBot) -
         controller.ui.lblAcquisition.text()
     )
     assert "window 16.368 us" in controller.ui.lblAcquisition.text()
-    assert "Analyzed 2/2 received frames" in controller.ui.lblStatus.text()
-    assert "iiod-batched, buffers=4, READBUF x64" in controller.ui.lblStatus.text()
-    assert "queue=0/high 0" in controller.ui.lblStatus.text()
+    assert "Analyzed 2/2 received frames" in controller.status.text()
+    assert "iiod-batched, buffers=4, READBUF x64" in controller.status.text()
+    assert "queue=0/high 0" in controller.status.text()
     assert controller.ui.labelInterval.text() == "Latest DMA fragment:"
     x_values, y_values = controller._curve.getData()
     assert x_values.size == y_values.size == 4_093
@@ -380,12 +380,12 @@ def test_controller_scope_dma_mode_renders_accumulated_summaries(qtbot: QtBot) -
     assert controller.ui.comboMode.isEnabled()
     assert controller.ui.spinDmaGap.isEnabled()
     assert controller.ui.btnResetScopeDefaults.isEnabled()
-    assert controller.ui.lblStatus.text() == "Scope DMA stopped."
+    assert controller.status.text() == "Scope DMA stopped."
 
     controller.ui.btnResetScopeDefaults.click()
     assert scope.resets == 1
     assert controller.ui.spinDmaGap.value() == pytest.approx(100.0)
-    assert controller.ui.lblStatus.text() == (
+    assert controller.status.text() == (
         "Scope defaults restored; Current DMA optimization is inactive."
     )
 

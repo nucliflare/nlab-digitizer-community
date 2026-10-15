@@ -42,6 +42,7 @@ from nlab.hardware.digitizer.scope import (
     TriggerMode,
 )
 from nlab.ui.ui_scope_view import Ui_ScopeView
+from nlab.views.panel_status import PanelStatus
 from nlab.views.plot_viewbox import DraggableScopeCurve, ModifierZoomViewBox
 from nlab.views.responsive_layout import configure_scope_layout
 from nlab.views.time_axis import format_duration_ns, time_axis_scale
@@ -144,6 +145,7 @@ class ScopeController(QWidget):
         self._channel = channel
         self.ui = Ui_ScopeView()
         self.ui.setupUi(self)
+        self.status = PanelStatus(self)
         configure_scope_layout(self, self.ui)
         self._apply_control_tooltips()
 
@@ -371,7 +373,7 @@ class ScopeController(QWidget):
         self._pretrigger_line.setVisible(False)
         self._apply_session_replay_controls()
         duration_s = duration_ns / 1_000_000_000
-        self.ui.lblRecordingStatus.setText(
+        self.status.setText(
             f"Scope replay ready: {frame_count} recorded frame(s), {duration_s:.3f} s"
         )
 
@@ -471,7 +473,7 @@ class ScopeController(QWidget):
             padding=0,
         )
         view.setYRange(self._Y_MIN, self._Y_MAX, padding=0)
-        self.ui.lblRecordingStatus.setText(
+        self.status.setText(
             "Replaying recorded Scope: "
             f"{elapsed_ns / 1_000_000_000:.3f} / "
             f"{duration_ns / 1_000_000_000:.3f} s "
@@ -482,7 +484,7 @@ class ScopeController(QWidget):
         """Hold the last replay frame and keep live acquisition isolated at EOF."""
         if not self._session_replay_active:
             return
-        self.ui.lblRecordingStatus.setText(
+        self.status.setText(
             "Scope replay complete: "
             f"{frame_count} frame(s), {duration_ns / 1_000_000_000:.3f} s; "
             "final recorded frame held"
@@ -494,7 +496,7 @@ class ScopeController(QWidget):
             return
         self._session_replay_active = False
         self._restore_controls_after_session_replay()
-        self.ui.lblRecordingStatus.setText(
+        self.status.setText(
             "Session replay unloaded; Scope acquisition remains stopped"
         )
 
@@ -581,7 +583,7 @@ class ScopeController(QWidget):
         self._update_axis_ranges()
         self._update_frame_gap_enabled()
         self._update_viewer_transport_hint()
-        self.ui.lblRecordingStatus.setText("Scope defaults restored")
+        self.status.setText("Scope defaults restored")
 
     def _viewer_frame_limit(self) -> int | None:
         return self._scope.get_viewer_frame_samples_limit()
@@ -723,7 +725,7 @@ class ScopeController(QWidget):
                 x=np.array(x, copy=True) if x is not None else None,
                 y=np.array(y, copy=True) if y is not None else None,
                 pretrigger_ns=spin.value(),
-                status_text=self.ui.lblRecordingStatus.text(),
+                status_text=self.status.text(),
             )
             self._update_waveform_drag_enabled()
         target_ns = line.value() * self._time_scale.ns_per_unit
@@ -736,7 +738,7 @@ class ScopeController(QWidget):
             if state.x is not None and state.y is not None:
                 shift = (spin.value() - state.pretrigger_ns) / self._time_scale.ns_per_unit
                 self._raw_curve.setData(state.x + shift, state.y)
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 f"Pretrigger preview: {spin.value()} ns"
             )
 
@@ -775,21 +777,21 @@ class ScopeController(QWidget):
             self._sync_pretrigger_line_from_widget()
             if state.x is not None and state.y is not None:
                 self._raw_curve.setData(state.x, state.y)
-            self.ui.lblRecordingStatus.setText(f"Pretrigger update failed: {exc}{detail}")
+            self.status.setText(f"Pretrigger update failed: {exc}{detail}")
             self._update_waveform_drag_enabled()
             return
 
         self._waveform_pending_status = state.status_text
         self._update_waveform_drag_enabled()
         if self._refresh_timer.isActive():
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 "Pretrigger applied; showing preview until the next live frame"
             )
             self._request_frame()
         else:
             if state.x is not None and state.y is not None:
                 self._raw_curve.setData(state.x, state.y)
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 "Pretrigger applied; acquire a frame to see the actual waveform"
             )
 
@@ -798,7 +800,7 @@ class ScopeController(QWidget):
         self._sync_pretrigger_line_from_widget()
         if state.x is not None and state.y is not None:
             self._raw_curve.setData(state.x, state.y)
-        self.ui.lblRecordingStatus.setText(state.status_text)
+        self.status.setText(state.status_text)
         self._update_waveform_drag_enabled()
 
     def _update_waveform_drag_enabled(self) -> None:
@@ -848,7 +850,7 @@ class ScopeController(QWidget):
             dac_value=self.ui.spinDacValue.value(),
             pretrigger_ns=self.ui.spinPretrigger.value(),
             adc_per_dac=self._dac_adc_slope or fallback_slope,
-            status_text=self.ui.lblRecordingStatus.text(),
+            status_text=self.status.text(),
         )
         self._pretrigger_line.setMovable(False)
 
@@ -872,7 +874,7 @@ class ScopeController(QWidget):
         y_shift = (dac_value - state.dac_value) * state.adc_per_dac
         self._raw_curve.setData(state.x + x_shift, state.y + y_shift)
         calibration = "" if self._dac_adc_slope is not None else " (DAC preview approximate)"
-        self.ui.lblRecordingStatus.setText(
+        self.status.setText(
             f"Drag preview: DAC {dac_value}, pretrigger {pre_ns} ns{calibration}"
         )
 
@@ -892,7 +894,7 @@ class ScopeController(QWidget):
             self.ui.spinDacValue.setValue(state.dac_value)
             self.ui.spinPretrigger.setValue(state.pretrigger_ns)
             self._raw_curve.setData(state.x, state.y)
-            self.ui.lblRecordingStatus.setText(state.status_text)
+            self.status.setText(state.status_text)
             self._update_waveform_drag_enabled()
             return
 
@@ -918,20 +920,20 @@ class ScopeController(QWidget):
                 log.exception("Scope ch%d: waveform drag readback failed", self._channel)
             self._raw_curve.setData(state.x, state.y)
             detail = "; hardware state unknown—reconnect" if readback_failed else ""
-            self.ui.lblRecordingStatus.setText(f"Waveform drag failed: {exc}{detail}")
+            self.status.setText(f"Waveform drag failed: {exc}{detail}")
             self._update_waveform_drag_enabled()
             return
 
         self._waveform_pending_status = state.status_text
         self._update_waveform_drag_enabled()
         if self._refresh_timer.isActive():
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 "DAC/pretrigger applied; showing preview until the next live frame"
             )
             self._request_frame()
         else:
             self._raw_curve.setData(state.x, state.y)
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 "DAC/pretrigger applied; acquire a frame to see the actual waveform"
             )
 
@@ -1153,7 +1155,7 @@ class ScopeController(QWidget):
             "_session_replay_active",
             False,
         ):
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 "Exit session replay before starting live Scope acquisition"
             )
             return
@@ -1193,7 +1195,7 @@ class ScopeController(QWidget):
         interval_ms = 1000 // self.ui.spinRefreshRate.value()
         self._refresh_timer.start(interval_ms)
         if self._frame_exceeds_viewer_limit():
-            self.ui.lblRecordingStatus.setText(self._viewer_limit_message())
+            self.status.setText(self._viewer_limit_message())
         self._start_measurement_timer()
         log.info("Scope ch%d: acquisition started (refresh %d ms)", self._channel, interval_ms)
 
@@ -1239,7 +1241,7 @@ class ScopeController(QWidget):
         )
 
         self._set_controls_enabled(False)
-        self.ui.lblRecordingStatus.setText("Arming IIO DMA...")
+        self.status.setText("Arming IIO DMA...")
         log.debug(
             "Scope ch%d IIO DMA [2/4]: starting worker thread", self._channel
         )
@@ -1264,12 +1266,12 @@ class ScopeController(QWidget):
         self._refresh_timer.start(interval_ms)
         self.ui.btnStop.setEnabled(True)
         if self._dma_online_current:
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 "Streaming periodic DMA frames to Current; preview uses the latest DMA frame."
             )
             self.current_dma_state_changed.emit(True, "Scope DMA is streaming.")
         else:
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 "Recording full frames; live preview is truncated."
                 if self._frame_exceeds_viewer_limit()
                 else "Recording..."
@@ -1304,7 +1306,7 @@ class ScopeController(QWidget):
             self.ui.btnAcquireFrame.setEnabled(False)
             self.ui.cbDmaEnable.setEnabled(False)
             self.ui.btnDmaFile.setEnabled(False)
-            self.ui.lblRecordingStatus.setText("Stopping...")
+            self.status.setText("Stopping...")
             log.info("Scope ch%d: DMA stop requested; waiting for teardown", self._channel)
             return
         else:
@@ -1326,23 +1328,23 @@ class ScopeController(QWidget):
 
     def _on_auto_setup(self) -> None:
         if getattr(self, "_replay_hardware_interlocked", False):
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 "Exit session replay before running Scope Auto Setup"
             )
             return
         if self._auto_setup_worker is not None:
             self._auto_setup_worker.stop()
             self.ui.btnAutoSetup.setEnabled(False)
-            self.ui.lblRecordingStatus.setText("Cancelling Auto Setup...")
+            self.status.setText("Cancelling Auto Setup...")
             return
         if self._dma_worker is not None or self._dma_thread is not None:
-            self.ui.lblRecordingStatus.setText("Stop DMA recording before Auto Setup")
+            self.status.setText("Stop DMA recording before Auto Setup")
             return
         if self._refresh_timer.isActive() or self._scope.get_enable():
-            self.ui.lblRecordingStatus.setText("Stop acquisition before Auto Setup")
+            self.status.setText("Stop acquisition before Auto Setup")
             return
         if self.ui.cbDmaEnable.isChecked():
-            self.ui.lblRecordingStatus.setText("Disable Record DMA frames before Auto Setup")
+            self.status.setText("Disable Record DMA frames before Auto Setup")
             return
 
         self._auto_setup_result = None
@@ -1354,7 +1356,7 @@ class ScopeController(QWidget):
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
-        worker.progress.connect(self.ui.lblRecordingStatus.setText)
+        worker.progress.connect(self.status.setText)
         worker.succeeded.connect(self._on_auto_setup_succeeded)
         worker.error.connect(self._on_auto_setup_error)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
@@ -1365,7 +1367,7 @@ class ScopeController(QWidget):
         )
 
         self._set_auto_setup_busy(True)
-        self.ui.lblRecordingStatus.setText("Auto Setup: connecting...")
+        self.status.setText("Auto Setup: connecting...")
         thread.start()
         log.info("Scope ch%d: Auto Setup started", self._channel)
 
@@ -1417,10 +1419,10 @@ class ScopeController(QWidget):
             self._update_axis_ranges()
         except Exception as exc:
             log.exception("Scope ch%d: failed to refresh after Auto Setup", self._channel)
-            self.ui.lblRecordingStatus.setText(f"Auto Setup refresh failed: {exc}")
+            self.status.setText(f"Auto Setup refresh failed: {exc}")
         else:
             if result is None:
-                self.ui.lblRecordingStatus.setText(
+                self.status.setText(
                     f"Auto Setup failed: {error or 'unknown error'}"
                 )
             else:
@@ -1430,7 +1432,7 @@ class ScopeController(QWidget):
                 raw_time = np.arange(len(frame)) * self._VIEWER_POINT_PERIOD_NS
                 self._on_frame_received([raw_time, frame])
                 verification = "verified" if result.verified else "set; pulse not re-observed"
-                self.ui.lblRecordingStatus.setText(
+                self.status.setText(
                     f"Auto Setup {verification}: DAC {result.dac_value}, "
                     f"{result.trigger_mode.name.lower().replace('_', ' ')} at "
                     f"{result.trigger_level}"
@@ -1548,12 +1550,12 @@ class ScopeController(QWidget):
             return
         pending_status = self._waveform_pending_status
         if pending_status is not None:
-            self.ui.lblRecordingStatus.setText(pending_status)
+            self.status.setText(pending_status)
             self._waveform_pending_status = None
         x_time, y_voltage = data
         expected = self._frame_samples_from_ui() // 4
         if len(y_voltage) < expected:
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 self._viewer_truncation_message(len(y_voltage), expected)
             )
         if self._display_mode == DisplayMode.RAW:
@@ -1582,11 +1584,11 @@ class ScopeController(QWidget):
         self._persistence_buffer = np.zeros((self._display_nx, self._display_ny), dtype=np.float32)
         self._update_axis_ranges()
         if self._frame_exceeds_viewer_limit():
-            self.ui.lblRecordingStatus.setText(self._viewer_limit_message())
+            self.status.setText(self._viewer_limit_message())
 
     def _on_acquire_frame(self) -> None:
         if getattr(self, "_replay_hardware_interlocked", False):
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 "Exit session replay before acquiring a live Scope frame"
             )
             return
@@ -1597,7 +1599,7 @@ class ScopeController(QWidget):
             raw_frame = self._scope.acquire_frame()
         except Exception as exc:
             log.exception("Scope ch%d: single-frame acquisition failed", self._channel)
-            self.ui.lblRecordingStatus.setText(f"Viewer error: {exc}")
+            self.status.setText(f"Viewer error: {exc}")
             return
         finally:
             try:
@@ -1615,7 +1617,7 @@ class ScopeController(QWidget):
             )
         expected = frame_samples // 4
         if len(frame) < expected:
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 self._viewer_truncation_message(len(frame), expected)
             )
         time_arr = (
@@ -1632,7 +1634,7 @@ class ScopeController(QWidget):
             )
         pending_status = self._waveform_pending_status
         if pending_status is not None:
-            self.ui.lblRecordingStatus.setText(pending_status)
+            self.status.setText(pending_status)
             self._waveform_pending_status = None
             self._update_waveform_drag_enabled()
 
@@ -1820,7 +1822,7 @@ class ScopeController(QWidget):
         if self._dma_stopping or self._dma_thread is None:
             return
         if self._dma_online_current:
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 f"Streaming to Current: {bytes_written / 1024**2:.1f} MiB received"
             )
             return
@@ -1830,15 +1832,15 @@ class ScopeController(QWidget):
         file_bytes = bytes_written + FILE_HEADER_STRUCT.size
         suffix = "; viewer paused" if self._frame_exceeds_viewer_limit() else ""
         if file_bytes < 1024**2:
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 f"Recording: {file_bytes / 1024:.1f} KiB{suffix}"
             )
         elif file_bytes < 1024**3:
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 f"Recording: {file_bytes / 1024**2:.1f} MiB{suffix}"
             )
         else:
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 f"Recording: {file_bytes / 1024**3:.2f} GiB{suffix}"
             )
 
@@ -1846,7 +1848,7 @@ class ScopeController(QWidget):
     def _on_dma_error(self, message: str) -> None:
         log.error("Scope DMA error: %s", message)
         self._dma_last_error = message
-        self.ui.lblRecordingStatus.setText(f"Error: {message}")
+        self.status.setText(f"Error: {message}")
 
     @Slot()
     def _on_dma_finished(self) -> None:
@@ -1919,7 +1921,7 @@ class ScopeController(QWidget):
                         self._channel,
                         exc_info=True,
                     )
-                    self.ui.lblRecordingStatus.setText(
+                    self.status.setText(
                         "DMA fault -- restart the board, then reconnect"
                     )
                     return
@@ -1927,17 +1929,17 @@ class ScopeController(QWidget):
                     "Scope ch%d: DMA fault cleared, DMA capture is usable again",
                     self._channel,
                 )
-                self.ui.lblRecordingStatus.setText("Stopped (recovered from DMA fault)")
+                self.status.setText("Stopped (recovered from DMA fault)")
                 return
 
-            self.ui.lblRecordingStatus.setText(
+            self.status.setText(
                 f"Error: {self._dma_last_error}"
                 if self._dma_last_error is not None
                 else "Stopped"
             )
         except Exception:
             log.exception("Scope ch%d: failed to restore GUI after DMA stop", self._channel)
-            self.ui.lblRecordingStatus.setText("DMA stopped; GUI refresh failed")
+            self.status.setText("DMA stopped; GUI refresh failed")
         finally:
             self._dma_worker = None
             self._dma_thread = None

@@ -9,6 +9,7 @@ from pytestqt.qtbot import QtBot
 
 from nlab.analysis.energy_calibration import CalibrationPoint, fit_energy_calibration
 from nlab.controllers.mca_controller import MCAController
+from nlab.workers.mca_worker import MCAReadback
 
 
 def _controller(qtbot: QtBot, monkeypatch: MonkeyPatch) -> tuple[MCAController, MagicMock]:
@@ -193,7 +194,7 @@ def test_threshold_marker_failed_write_restores_hardware_value(
     mca.set_trigger_level.assert_called_once_with(-400)
     assert controller.ui.spinTriggerLevel.value() == -512
     assert line.value() == -512
-    assert "busy" in controller.ui.lblDmaStatus.text()
+    assert "busy" in controller.status.text()
 
 
 def test_offset_marker_failed_write_restores_hardware_value(
@@ -211,7 +212,7 @@ def test_offset_marker_failed_write_restores_hardware_value(
     mca.set_pretrigger_samples.assert_called_once_with(30)
     assert controller.ui.spinPretrigger.value() == 24
     assert line.value() == 24
-    assert "busy" in controller.ui.lblDmaStatus.text()
+    assert "busy" in controller.status.text()
 
 
 def test_energy_calibration_snapshot_axis_and_settings_persistence(
@@ -227,6 +228,31 @@ def test_energy_calibration_snapshot_axis_and_settings_persistence(
     assert snapshot.elapsed_s == 12.5
     assert not snapshot.counts.flags.writeable
     np.testing.assert_array_equal(snapshot.counts, histogram)
+
+    controller.display_channel_label = "D1:CH0"
+    controller._measurement_configuration = lambda: {
+        "connection": {
+            "digitizers": [
+                {"id": "D1", "ip": "192.0.2.10", "port": 30431, "channels": 2}
+            ]
+        }
+    }
+    controller._latest_readback = MCAReadback(
+        histogram=histogram,
+        debug1=np.empty(0, dtype=np.int16),
+        debug2=np.empty(0, dtype=np.int16),
+        pulse_deadtime_ms=500.0,
+    )
+    n42_snapshot = controller.spectrum_snapshot()
+    assert n42_snapshot.live_time_s == 12.0
+    assert n42_snapshot.n42_instrument is not None
+    assert n42_snapshot.n42_instrument["identifier"] == "D1:CH0@192.0.2.10:30431"
+    assert n42_snapshot.n42_detector == {
+        "name": "D1:CH0",
+        "category": "Other",
+        "kind": "Other",
+        "description": "Detector material and geometry not specified",
+    }
 
     calibration = fit_energy_calibration(
         (CalibrationPoint(4.0, 100.0), CalibrationPoint(20.0, 500.0)),

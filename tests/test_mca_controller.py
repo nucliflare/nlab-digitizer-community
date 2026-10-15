@@ -74,8 +74,8 @@ def test_dma_final_status_keeps_run_health_instead_of_stopped() -> None:
         _connection_lost=False,
         _replay_hardware_interlocked=False,
         _set_controls_enabled=Mock(),
+        status=label,
         ui=SimpleNamespace(
-            lblDmaStatus=label,
             btnStart=Mock(),
             btnStop=Mock(),
             cbDmaEnable=Mock(),
@@ -206,8 +206,8 @@ def test_connection_loss_keeps_controls_interlocked_after_dma_cleanup() -> None:
         _replay_hardware_interlocked=False,
         _set_controls_enabled=Mock(),
         _finish_psd_capture=Mock(),
+        status=label,
         ui=SimpleNamespace(
-            lblDmaStatus=label,
             btnStart=Mock(),
             btnStop=Mock(),
             cbDmaEnable=Mock(),
@@ -245,8 +245,8 @@ def test_dma_finish_unlocks_file_button_after_psd_session(
         _set_controls_enabled=Mock(),
         _psd_capture=capture,
         _psd_capture_enabled=True,
+        status=Mock(),
         ui=SimpleNamespace(
-            lblDmaStatus=Mock(),
             btnStart=Mock(),
             btnStop=Mock(),
             cbDmaEnable=Mock(),
@@ -477,10 +477,10 @@ def test_dma_output_and_psd_interception_are_independent(
         _on_dma_error=Mock(),
         _on_dma_summary=Mock(),
         _on_dma_finished=Mock(),
+        status=label,
         ui=SimpleNamespace(
             cbCcEnable=SimpleNamespace(isChecked=lambda: charge_comparison_enabled),
             spinTimeLimit=SimpleNamespace(value=lambda: 30),
-            lblDmaStatus=label,
         ),
     )
     controller._prepare_psd_capture = lambda: MCAController._prepare_psd_capture(

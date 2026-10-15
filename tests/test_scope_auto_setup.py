@@ -222,7 +222,7 @@ def _auto_setup_finish_controller(
         _auto_setup_result=None,
         _auto_setup_error="test failure",
         _channel=1,
-        ui=SimpleNamespace(lblRecordingStatus=status),
+        status=status,
         _set_auto_setup_busy=lambda busy: events.append(f"busy:{busy}"),
         _load_hardware_state=lambda: events.append("load"),
         _update_frame_gap_enabled=lambda: events.append("gap"),
@@ -241,7 +241,7 @@ def test_auto_setup_finish_waits_for_thread_before_releasing_wrappers() -> None:
     assert events == ["wait:2000", "busy:False", "load", "gap", "axes", "delete"]
     assert controller._auto_setup_thread is None
     assert controller._auto_setup_worker is None
-    assert controller.ui.lblRecordingStatus.text == "Auto Setup failed: test failure"
+    assert controller.status.text == "Auto Setup failed: test failure"
 
 
 def test_auto_setup_finish_retries_without_releasing_live_thread(

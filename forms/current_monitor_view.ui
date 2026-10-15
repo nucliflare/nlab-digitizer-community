@@ -106,12 +106,6 @@
     </widget>
    </item>
    <item><widget class="NLabPlotWidget" name="plotCurrent" native="true"/></item>
-   <item>
-    <widget class="QLabel" name="lblStatus">
-     <property name="text"><string>Monitor stopped.</string></property>
-     <property name="wordWrap"><bool>true</bool></property>
-    </widget>
-   </item>
   </layout>
  </widget>
  <customwidgets>

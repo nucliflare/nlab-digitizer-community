@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-10-15
+
+### Added
+
+- The MCA Peak Analysis workbench now securely validates and imports
+  ANSI/IEEE N42.42 `.n42`/`.xml` documents, including multi-spectrum files,
+  `CountedZeroes` data, real/live timing, detector and instrument identity,
+  and coefficient or energy-boundary calibration. Validation uses bundled
+  NIST base/add-in schemas without resolving XML entities, external schemas,
+  or instance location hints. Calibrated, timed spectra can be exported as
+  non-overwriting N42 documents, and fitted results can include standard
+  `SpectrumPeakAnalysisResults` centroid, FWHM, area, and uncertainty fields.
+  Export rejects stale or missing calibration, missing timing, and negative
+  derived counts instead of manufacturing measurement metadata.
+
+### Fixed
+
+- Acquisition messages from MCA, Scope, Current, PSD, and Coincidence now use
+  the bottom status bar instead of expanding labels in the measurement panels.
+  Messages identify their panel/channel, retain full diagnostic tooltips, and
+  restore the latest panel status when switching tabs.
+
 ### Documentation
 
 - Added a goal-oriented use-cases guide and reconciled the getting-started,
@@ -715,7 +737,8 @@ Initial open-source release of the Nuclear Lab Digitizer Community Edition.
 
 ---
 
-[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.7.1...main
+[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.7.2...main
+[0.7.2]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.2
 [0.7.1]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.1
 [0.7.0]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.0
 [0.6.3]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.6.3

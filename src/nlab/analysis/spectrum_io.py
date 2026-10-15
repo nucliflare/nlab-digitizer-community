@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import numpy as np
 
+from nlab.analysis.n42 import load_n42_spectra
 from nlab.analysis.spectrum import Spectrum, SpectrumAxisUnit
 
 
@@ -28,6 +29,14 @@ def load_spectrum(path: Path) -> Spectrum:
         return load_spe_spectrum(path)
     if suffix == ".wdm":
         return load_wdm_spectrum(path)
+    if suffix in {".n42", ".xml"}:
+        spectra = load_n42_spectra(path)
+        if len(spectra) != 1:
+            raise ValueError(
+                f"N42 document contains {len(spectra)} spectra; "
+                "use load_spectra() to import all of them"
+            )
+        return spectra[0]
     if suffix == ".root":
         spectra = load_root_spectra(path)
         if len(spectra) != 1:
@@ -44,6 +53,8 @@ def load_spectra(path: Path) -> list[Spectrum]:
     path = Path(path)
     if path.suffix.lower() == ".root":
         return load_root_spectra(path)
+    if path.suffix.lower() in {".n42", ".xml"}:
+        return load_n42_spectra(path)
     return [load_spectrum(path)]
 
 

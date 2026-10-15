@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 ENTRY = ROOT / "src" / "nlab" / "main.py"
 ICON = ROOT / "resources" / "icons" / "ewt.ico"
 RADIONUCLIDE_CATALOG = ROOT / "src" / "nlab" / "data" / "radionuclide_lines.sqlite3"
+N42_DATA = ROOT / "src" / "nlab" / "data"
 DIST = ROOT / "dist"
 WORK = ROOT / "build" / "pyinstaller"
 
@@ -48,6 +49,9 @@ args = [
     # the matching note in scripts/build_nuitka.py.
     f"--add-data={ICON}{os.pathsep}resources/icons",
     f"--add-data={RADIONUCLIDE_CATALOG}{os.pathsep}nlab/data",
+    f"--add-data={N42_DATA / 'n42.xsd'}{os.pathsep}nlab/data",
+    f"--add-data={N42_DATA / 'N42SchemaAddin-2020.xsd'}{os.pathsep}nlab/data",
+    f"--add-data={N42_DATA / 'n42.sch'}{os.pathsep}nlab/data",
     str(ENTRY),
 ]
 

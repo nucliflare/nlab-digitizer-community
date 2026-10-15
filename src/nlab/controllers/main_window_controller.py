@@ -53,6 +53,7 @@ from nlab.views.dose_calibration_dialog import (
 )
 from nlab.views.energy_calibration_dialog import EnergyCalibrationDialog
 from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
+from nlab.views.panel_status import PanelStatus, PanelStatusPresenter
 from nlab.views.psd_readback_dialog import PsdReadbackDialog
 from nlab.views.waveform_analysis_dialog import WaveformAnalysisDialog
 
@@ -422,8 +423,7 @@ class MainWindowController:
         if signal is not None:
             signal.connect(slot)
 
-    @staticmethod
-    def _make_dock(obj_name: str, title: str, widget: QWidget) -> QDockWidget:
+    def _make_dock(self, obj_name: str, title: str, widget: QWidget) -> QDockWidget:
         dock = QDockWidget(title)
         dock.setObjectName(obj_name)
         dock.setWidget(widget)
@@ -431,7 +431,24 @@ class MainWindowController:
             QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
         )
+        panel_name = obj_name.split("_", 1)[0]
+        panel_name = panel_name.upper() if panel_name in {"mca", "psd"} else panel_name.title()
+        self._bind_panel_status(widget, f"{panel_name} {title}", dock)
         return dock
+
+    def _bind_panel_status(
+        self,
+        widget: QWidget,
+        source: str,
+        dock: QDockWidget | None = None,
+    ) -> None:
+        status = getattr(widget, "status", None)
+        if not isinstance(status, PanelStatus):
+            return
+        presenter = PanelStatusPresenter(widget, status, self._window.statusBar(), source)
+        if dock is not None:
+            presenter.set_active(dock.isVisible())
+            dock.visibilityChanged.connect(presenter.set_active)
 
     @staticmethod
     def _populate_dock_host(host: QMainWindow, docks: list[QDockWidget]) -> None:
@@ -802,6 +819,9 @@ class MainWindowController:
             [mca_a, mca_b],
             global_controller,
             channel_labels=[self._channel_label(index) for index in pair],
+        )
+        self._bind_panel_status(
+            controller, f"Coincidence {' + '.join(self._channel_label(index) for index in pair)}"
         )
         saved = getattr(self, "_coincidence_settings_by_digitizer", {}).get(
             digitizer
