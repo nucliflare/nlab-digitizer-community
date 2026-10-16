@@ -5,11 +5,14 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
 from nlab.analysis.psd_fom import PsdFomFit, fit_psd_fom_lm
 from nlab.analysis.waveform_psd import WaveformPsdSettings
+
+FomSearchMode = Literal["local", "exhaustive"]
 
 
 class WaveformFomOptimizationCancelledError(RuntimeError):
@@ -27,6 +30,7 @@ class WaveformFomOptimizationRequest:
     short_bounds: tuple[int, int]
     long_bounds: tuple[int, int]
     initial_step: int
+    search_mode: FomSearchMode = "local"
 
     def __post_init__(self) -> None:
         gate_start = self.settings.gate_start
@@ -45,12 +49,30 @@ class WaveformFomOptimizationRequest:
             raise ValueError("current gate endpoints must lie inside the search bounds")
         if self.initial_step <= 0:
             raise ValueError("initial gate-search step must be positive")
+        if self.search_mode not in {"local", "exhaustive"}:
+            raise ValueError("gate search mode must be local or exhaustive")
         _validate_range(self.energy_roi, "energy ROI")
         _validate_range(self.fit_roi, "fit ROI")
         first_seed, second_seed = sorted(map(float, self.centroid_seeds))
         fit_low, fit_high = sorted(map(float, self.fit_roi))
         if not fit_low < first_seed < second_seed < fit_high:
             raise ValueError("centroid seeds must be ordered inside the fit ROI")
+
+    @property
+    def total_gate_pairs(self) -> int:
+        """Count short-before-long pairs in O(1), even for very large bounds."""
+        short_low, short_high = self.short_bounds
+        long_low, long_high = self.long_bounds
+        # Short ends below long_low admit every long end. The remaining
+        # admissible short ends contribute long_high - short_end pairs each.
+        full_rows = max(0, min(short_high, long_low - 1) - short_low + 1)
+        first = max(short_low, long_low)
+        last = min(short_high, long_high - 1)
+        rows = max(0, last - first + 1)
+        return (
+            full_rows * (long_high - long_low + 1)
+            + rows * long_high - (first + last) * rows // 2
+        )
 
 
 @dataclass(frozen=True)
@@ -66,12 +88,13 @@ class WaveformGateCandidate:
 
 @dataclass(frozen=True)
 class WaveformFomOptimizationResult:
-    """Best local gate pair and search diagnostics."""
+    """Best evaluated gate pair and search diagnostics."""
 
     best: WaveformGateCandidate
     evaluated_candidates: int
     valid_candidates: int
     sampled_waveforms: int
+    search_mode: FomSearchMode = "local"
 
 
 OptimizationProgress = Callable[[int, int, WaveformGateCandidate | None], None]
@@ -84,7 +107,7 @@ def optimize_waveform_gate_ends(
     progress: OptimizationProgress | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> WaveformFomOptimizationResult:
-    """Maximize fitted FOM with a coarse-to-fine integer pattern search.
+    """Maximize fitted FOM using local pattern search or all bounded gate pairs.
 
     ``cumulative_charge[:, i]`` is the baseline-corrected integral from the
     fixed integration start through sample ``gate_start + i``. Candidate fits
@@ -102,16 +125,21 @@ def optimize_waveform_gate_ends(
     cache: dict[tuple[int, int], WaveformGateCandidate | None] = {}
     best: WaveformGateCandidate | None = None
     valid_candidates = 0
+    evaluated_candidates = 0
 
     def evaluate(short_end: int, long_end: int) -> WaveformGateCandidate | None:
-        nonlocal best, valid_candidates
+        nonlocal best, valid_candidates, evaluated_candidates
         if cancelled is not None and cancelled():
             raise WaveformFomOptimizationCancelledError
         key = (short_end, long_end)
         if key in cache:
             return cache[key]
         candidate = _evaluate_candidate(integrals, request, short_end, long_end)
-        cache[key] = candidate
+        # An exhaustive scan never revisits a pair: retain only its best fit,
+        # not one fit (and its histogram arrays) per grid point.
+        if request.search_mode == "local":
+            cache[key] = candidate
+        evaluated_candidates += 1
         if candidate is not None:
             valid_candidates += 1
             if best is None or _candidate_rank(candidate, request) > _candidate_rank(
@@ -119,34 +147,43 @@ def optimize_waveform_gate_ends(
             ):
                 best = candidate
         if progress is not None:
-            progress(len(cache), valid_candidates, best)
+            progress(evaluated_candidates, valid_candidates, best)
         return candidate
 
-    current_pair = (request.settings.short_end, request.settings.long_end)
-    current = evaluate(*current_pair)
-    step = max(1, int(request.initial_step))
-    while step >= 1:
-        moved = False
-        neighbours: list[tuple[int, int]] = []
-        for short_delta in (-step, 0, step):
-            for long_delta in (-step, 0, step):
-                if short_delta == 0 and long_delta == 0:
-                    continue
-                pair = (current_pair[0] + short_delta, current_pair[1] + long_delta)
-                if _valid_pair(pair, request):
-                    neighbours.append(pair)
-        candidates = [candidate for pair in neighbours if (candidate := evaluate(*pair))]
-        if candidates:
-            neighbour = max(candidates, key=lambda value: _candidate_rank(value, request))
-            if current is None or _candidate_rank(neighbour, request) > _candidate_rank(
-                current, request
-            ):
-                current = neighbour
-                current_pair = (neighbour.short_end, neighbour.long_end)
-                moved = True
-        if not moved:
-            step //= 2
+    if request.search_mode == "exhaustive":
+        last_short = min(request.short_bounds[1], request.long_bounds[1] - 1)
+        for short_end in range(request.short_bounds[0], last_short + 1):
+            first_long = max(request.long_bounds[0], short_end + 1)
+            for long_end in range(first_long, request.long_bounds[1] + 1):
+                evaluate(short_end, long_end)
+    else:
+        current_pair = (request.settings.short_end, request.settings.long_end)
+        current = evaluate(*current_pair)
+        step = max(1, int(request.initial_step))
+        while step >= 1:
+            moved = False
+            neighbours: list[tuple[int, int]] = []
+            for short_delta in (-step, 0, step):
+                for long_delta in (-step, 0, step):
+                    if short_delta == 0 and long_delta == 0:
+                        continue
+                    pair = (current_pair[0] + short_delta, current_pair[1] + long_delta)
+                    if _valid_pair(pair, request):
+                        neighbours.append(pair)
+            candidates = [candidate for pair in neighbours if (candidate := evaluate(*pair))]
+            if candidates:
+                neighbour = max(candidates, key=lambda value: _candidate_rank(value, request))
+                if current is None or _candidate_rank(neighbour, request) > _candidate_rank(
+                    current, request
+                ):
+                    current = neighbour
+                    current_pair = (neighbour.short_end, neighbour.long_end)
+                    moved = True
+            if not moved:
+                step //= 2
 
+    if cancelled is not None and cancelled():
+        raise WaveformFomOptimizationCancelledError
     if best is None:
         raise ValueError(
             "No gate pair produced a trustworthy double-Gaussian FOM fit; "
@@ -154,9 +191,10 @@ def optimize_waveform_gate_ends(
         )
     return WaveformFomOptimizationResult(
         best=best,
-        evaluated_candidates=len(cache),
+        evaluated_candidates=evaluated_candidates,
         valid_candidates=valid_candidates,
         sampled_waveforms=len(integrals),
+        search_mode=request.search_mode,
     )
 
 

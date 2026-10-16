@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Waveform FOM optimization offers an optional exhaustive search over every
+  valid integer short/long gate pair within the selected search radius. A
+  slow-search warning and confirmation show the candidate count before starting;
+  progress, cancellation, fit-quality checks, and full-data confirmation remain
+  available. The existing local search remains the default.
+
 ## [0.7.4] — 2026-10-16
 
 ### Fixed

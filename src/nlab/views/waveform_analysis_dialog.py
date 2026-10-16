@@ -94,6 +94,7 @@ class WaveformAnalysisDialog(QDialog):
         self._analysis_worker: WaveformPsdWorker | None = None
         self._optimization_thread: QThread | None = None
         self._optimization_worker: WaveformFomOptimizationWorker | None = None
+        self._optimization_total_pairs: int | None = None
         self._active_analysis_kind: AnalysisKind | None = None
         self._pending_analysis_kind: AnalysisKind | None = None
         self._active_optimization_context: _FomOptimizationContext | None = None
@@ -328,6 +329,15 @@ class WaveformAnalysisDialog(QDialog):
         self.optimization_radius.setToolTip(
             "Search this many samples on either side of both current gate endpoints."
         )
+        self.exhaustive_search = QCheckBox("Exhaustive (all gate pairs)", self)
+        self.exhaustive_search.setToolTip(
+            "Test every valid short/long endpoint pair within the search radius at "
+            "one-sample steps. Much slower than the default local search."
+        )
+        self.exhaustive_warning = QLabel("Exhaustive search can take a long time.", self)
+        self.exhaustive_warning.setWordWrap(True)
+        self.exhaustive_warning.setVisible(False)
+        self.exhaustive_search.toggled.connect(self.exhaustive_warning.setVisible)
         form.addRow("Energy bins:", self.energy_bins)
         form.addRow("Energy maximum:", self.energy_max)
         form.addRow("Ratio bins:", self.ratio_bins)
@@ -337,6 +347,8 @@ class WaveformAnalysisDialog(QDialog):
         form.addRow("Maximum events:", self.maximum_events)
         form.addRow("Optimization events:", self.optimization_events)
         form.addRow("Gate search radius:", self.optimization_radius)
+        form.addRow("Search mode:", self.exhaustive_search)
+        form.addRow(self.exhaustive_warning)
         layout.addLayout(form)
         self.auto_recalculate = QCheckBox(
             "Auto-recalculate while dragging (every 20th event)",
@@ -727,7 +739,23 @@ class WaveformAnalysisDialog(QDialog):
                 short_bounds=short_bounds,
                 long_bounds=long_bounds,
                 initial_step=initial_step,
+                search_mode="exhaustive" if self.exhaustive_search.isChecked() else "local",
             )
+            if request.search_mode == "exhaustive":
+                answer = QMessageBox.warning(
+                    self,
+                    "Exhaustive FOM Gate Search",
+                    f"This will test all {request.total_gate_pairs:,} valid short/long "
+                    f"gate pairs within the ±{radius}-sample search radius, at one-sample "
+                    f"steps, using up to {self.optimization_events.value():,} waveforms.\n\n"
+                    "A double-Gaussian fit is attempted for each pair. This can take "
+                    "a long time, especially with a large radius or waveform sample. "
+                    "You can cancel between candidate fits.\n\nContinue?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
             worker = WaveformFomOptimizationWorker(
                 index,
                 source_index=self.source_combo.currentIndex(),
@@ -755,6 +783,9 @@ class WaveformAnalysisDialog(QDialog):
             Qt.ConnectionType.QueuedConnection,
         )
         self._optimization_worker = worker
+        self._optimization_total_pairs = (
+            request.total_gate_pairs if request.search_mode == "exhaustive" else None
+        )
         self._optimization_thread = thread
         self._active_optimization_context = _FomOptimizationContext(
             fit_roi=request.fit_roi,
@@ -777,14 +808,20 @@ class WaveformAnalysisDialog(QDialog):
         short_end: int | None,
         long_end: int | None,
     ) -> None:
+        total = self._optimization_total_pairs
+        if total is not None:
+            self.progress.setRange(0, 1000)
+            self.progress.setValue(min(1000, evaluated * 1000 // total))
+        search_label = "Exhaustive FOM gate search" if total is not None else "FOM gate search"
+        evaluated_text = f"{evaluated:,}/{total:,}" if total is not None else str(evaluated)
         if best_fom is None:
             self.status.setText(
-                f"FOM gate search: {evaluated} candidates evaluated; "
+                f"{search_label}: {evaluated_text} candidates evaluated; "
                 "no trustworthy fit yet."
             )
             return
         self.status.setText(
-            f"FOM gate search: {evaluated} evaluated, {valid} valid; "
+            f"{search_label}: {evaluated_text} evaluated, {valid} valid; "
             f"best FOM {best_fom:.5g} at short={short_end}, "
             f"long={long_end} samples."
         )
@@ -814,6 +851,7 @@ class WaveformAnalysisDialog(QDialog):
         completed = self._completed_optimization
         self._optimization_worker = None
         self._optimization_thread = None
+        self._optimization_total_pairs = None
         self._active_optimization_context = None
         self._completed_optimization = None
         self.progress.setRange(0, 1000)
@@ -1064,6 +1102,7 @@ class WaveformAnalysisDialog(QDialog):
             self.maximum_events,
             self.optimization_events,
             self.optimization_radius,
+            self.exhaustive_search,
             self.auto_recalculate,
         ):
             control.setEnabled(not busy)
@@ -1172,6 +1211,7 @@ class WaveformAnalysisDialog(QDialog):
             optimization = context.optimization
             processing_settings.update(
                 {
+                    "optimization search mode": optimization.search_mode,
                     "optimization sampled FOM": optimization.best.fom,
                     "optimization sampled waveforms": optimization.sampled_waveforms,
                     "optimization candidates evaluated": optimization.evaluated_candidates,

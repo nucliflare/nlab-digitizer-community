@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 import numpy as np
 from PySide6.QtCore import Signal
@@ -120,14 +121,25 @@ class WaveformFomOptimizationWorker(BaseWorker):
             if not len(cumulative_charge):
                 raise ValueError("selected waveforms do not reach the gate search range")
             self.status.emit(
-                f"Searching gate endpoints with {len(cumulative_charge):,} complete waveforms..."
+                f"Searching gate endpoints ({request.search_mode}) with "
+                f"{len(cumulative_charge):,} complete waveforms..."
             )
+            last_report_time = 0.0
 
             def report_progress(
                 evaluated: int,
                 valid: int,
                 best: WaveformGateCandidate | None,
             ) -> None:
+                nonlocal last_report_time
+                now = time.monotonic()
+                if (
+                    request.search_mode == "exhaustive"
+                    and evaluated not in (1, request.total_gate_pairs)
+                    and now - last_report_time < 0.1
+                ):
+                    return
+                last_report_time = now
                 if best is None:
                     self.progress.emit(evaluated, valid, None, None, None)
                     return

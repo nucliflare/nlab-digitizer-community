@@ -1005,6 +1005,16 @@ while variable-length CoMPASS records are copied into a dynamically sized batch.
 When a CoMPASS event also stores gate sums, the
 result reports a computed-versus-stored long-gate scale as a format/setting
 cross-check. These operations never alter Scope DMA files or live PSD settings.
+For **Optimize FOM gates**, the default is a fast local coarse-to-fine search.
+Enable **Exhaustive (all gate pairs)** to test every valid short/long endpoint
+pair within the selected **Gate search radius**, at one-sample steps. This is
+exhaustive over that bounded region, not over the entire waveform or all fit
+parameters. The warning dialog shows the exact pair count and defaults to
+Cancel because fitting every pair can take a long time. Both modes use the
+same bounded waveform sample, fixed baseline/integration start, energy and fit
+ROIs, centroid seeds, and trustworthy-fit checks. Exhaustive mode shows
+evaluated/total progress; Cancel is checked between fits. Its best sampled
+gates are applied and confirmed with the normal full-data reconstruction.
 With **Auto-recalculate while dragging** enabled, moving any baseline or gate
 marker produces a debounced preview from every twentieth selected event. Releasing
 the marker cancels any stale preview and queues a full calculation using the
