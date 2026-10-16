@@ -1148,6 +1148,24 @@ python scripts/build_pyinstaller_reviewed.py --clean
 The release executable is written to `dist/nlab.exe` on Windows or `dist/nlab`
 on Linux.
 
+Both PyInstaller build scripts use the hooks in `scripts/pyinstaller_hooks`
+to include the Awkward native kernels and Uproot's dynamic ROOT behaviors.
+The reviewed build also runs the executable's ROOT conversion check before
+accepting the artifact. This opens the conversion dialogs offscreen, converts
+synthetic list-mode and waveform captures, and reads back their ROOT TTrees;
+it does not connect to or modify hardware. The check can be repeated manually:
+
+```bash
+dist/nlab.exe --check-root-conversion -platform offscreen
+```
+
+Use `dist/nlab` instead on Linux. Missing conversion dependencies are reported
+as errors rather than silently ignoring the File-menu action. Existing
+executables must be rebuilt to receive the packaging fix.
+ROOT conversion errors appear in the **System Log** at `ERROR` level with the
+file paths and traceback; debug mode is not required. The log also records
+when a conversion starts, completes, or is cancelled.
+
 Nuitka remains available as an optional standalone-directory build:
 
 ```bash

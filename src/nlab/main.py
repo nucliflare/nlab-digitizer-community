@@ -128,6 +128,10 @@ def _parse_arguments(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--config", type=Path, help="YAML settings file to apply after connecting")
     parser.add_argument("--ip", help="Initial device address in the connection dialog")
     parser.add_argument("--port", type=int, help="Initial device port")
+    parser.add_argument(
+        "--check-root-conversion", action="store_true",
+        help="Check ROOT conversion with synthetic data and exit (no hardware)",
+    )
     # Preserve Qt's own switches (for example -platform) for QApplication.
     return parser.parse_known_args(argv)
 
@@ -154,6 +158,18 @@ def main() -> None:
     app.setApplicationVersion(__version__)
     app.setOrganizationName("EWT")
     app.setOrganizationDomain("ewt.local")  # scopes QSettings on all platforms
+
+    if args.check_root_conversion:
+        from nlab.utils.root_conversion_check import check_root_conversion
+
+        app.setQuitOnLastWindowClosed(False)
+        try:
+            check_root_conversion()
+        except Exception:
+            log.exception("ROOT conversion executable check failed")
+            sys.exit(1)
+        log.info("ROOT conversion executable check passed (synthetic data; no hardware)")
+        sys.exit(0)
 
     try:
         _verify_libiio_runtime()

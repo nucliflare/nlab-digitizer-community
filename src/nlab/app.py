@@ -1052,7 +1052,18 @@ class MainAppWindow(QMainWindow):
             QMessageBox.critical(self, "Conversion Failed", str(e))
 
     def _on_convert_to_root(self) -> None:
-        from nlab.views.root_conversion_dialog import RootConversionDialog
+        logging.getLogger(__name__).info("ROOT conversion requested from File menu")
+        try:
+            from nlab.views.root_conversion_dialog import RootConversionDialog
+        except Exception as exc:
+            logging.getLogger(__name__).exception("ROOT conversion dialog could not be loaded")
+            QMessageBox.critical(
+                self, "ROOT Conversion Unavailable",
+                "ROOT conversion could not be loaded. If you are using the standalone "
+                "application, install a rebuilt package with its ROOT dependencies."
+                f"\n\n{type(exc).__name__}: {exc}",
+            )
+            return
 
         src, _ = QFileDialog.getOpenFileName(
             self, "Select Binary DMA File", "", "Binary files (*.bin);;All files (*)",
@@ -1068,10 +1079,22 @@ class MainAppWindow(QMainWindow):
         destination = Path(dst)
         if not destination.suffix:
             destination = destination.with_suffix(".root")
-        dialog = RootConversionDialog(Path(src), destination, self)
+        try:
+            dialog = RootConversionDialog(Path(src), destination, self)
+        except Exception as exc:
+            logging.getLogger(__name__).exception(
+                "ROOT conversion dialog initialization failed: %s -> %s", src, destination,
+            )
+            QMessageBox.critical(
+                self, "ROOT Conversion Failed", f"{type(exc).__name__}: {exc}",
+            )
+            return
         dialog.exec()
         if dialog.error:
-            QMessageBox.critical(self, "Conversion Failed", dialog.error)
+            QMessageBox.critical(
+                self, "Conversion Failed",
+                f"{dialog.error}\n\nSee System Log for the full traceback.",
+            )
         elif (result := dialog.conversion_result) is not None:
             QMessageBox.information(
                 self, "Conversion Complete",

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4] — 2026-10-16
+
+### Fixed
+
+- PyInstaller builds now bundle Awkward's ctypes-loaded native kernels and
+  dynamically imported Uproot behaviors, fixing the ROOT conversion menu failing
+  before the file picker opens. ROOT loads on the conversion worker and failures
+  are reported visibly. Reviewed builds verify list-mode and waveform conversion
+  inside the actual executable using synthetic captures before accepting it.
+- ROOT conversion failures now emit System Log `ERROR` records containing
+  the source/destination paths, exception type, and traceback even when debug
+  mode is off. Start, completion, and cancellation are logged at `INFO`.
+
 ## [0.7.3] — 2026-10-16
 
 ### Added
@@ -751,7 +764,8 @@ Initial open-source release of the Nuclear Lab Digitizer Community Edition.
 
 ---
 
-[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.7.3...main
+[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.7.4...main
+[0.7.4]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.4
 [0.7.3]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.3
 [0.7.2]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.2
 [0.7.1]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.1

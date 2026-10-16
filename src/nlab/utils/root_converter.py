@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import uproot
 
 from nlab.hardware.digitizer.dma import (
     _EVENT_DTYPE,
@@ -55,6 +54,11 @@ def convert_binary_to_root(
     NDMA v1 does not encode sampling/decimation settings. Optional IIO JSON
     metadata is authenticated exactly as in the existing HDF5 converter.
     """
+    # Load the native ROOT dependency stack on the conversion worker, not while
+    # importing the File-menu dialog. Missing frozen dependencies are then
+    # reported through its normal error path instead of losing the menu click.
+    import uproot
+
     src, dst = Path(src), Path(dst)
     if src.resolve() == dst.resolve() or (dst.exists() and src.samefile(dst)):
         raise ValueError("Source and destination must be different files")

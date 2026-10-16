@@ -44,6 +44,7 @@ args = [
     f"--distpath={DIST}",
     f"--workpath={WORK}",
     f"--specpath={ROOT / 'build' / 'pyinstaller'}",
+    f"--additional-hooks-dir={ROOT / 'scripts' / 'pyinstaller_hooks'}",
     # nlab.utils.windows_icon's native taskbar-icon override needs a real
     # on-disk .ico at runtime (relative to the onefile extraction dir) — see
     # the matching note in scripts/build_nuitka.py.

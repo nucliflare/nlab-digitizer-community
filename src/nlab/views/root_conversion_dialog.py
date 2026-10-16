@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import threading
+import traceback
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
@@ -22,6 +24,8 @@ from nlab.utils.root_converter import (
     convert_binary_to_root,
 )
 
+log = logging.getLogger(__name__)
+
 
 class _ConversionThread(QThread):
     progress = Signal(int)
@@ -34,15 +38,24 @@ class _ConversionThread(QThread):
         self.error = ""
 
     def run(self) -> None:
+        log.info("ROOT conversion started: %s -> %s", self.src, self.dst)
         try:
             self.result = convert_binary_to_root(
                 self.src, self.dst, progress=self.progress.emit, cancelled=self.stop.is_set,
             )
         except ConversionCancelledError:
-            pass
+            log.info("ROOT conversion cancelled: %s -> %s", self.src, self.dst)
         except Exception as exc:
-            # Store scalar text only, never a traceback retaining file handles.
-            self.error = str(exc)
+            self.error = f"{type(exc).__name__}: {exc}"
+            # Format the traceback here. Log handlers (including queued GUI and
+            # session handlers) must not retain exception objects/file handles.
+            detail = traceback.format_exc()
+            log.error("ROOT conversion failed: %s -> %s\n%s", self.src, self.dst, detail)
+        else:
+            log.info(
+                "ROOT conversion completed: %s -> %s (%s %s)",
+                self.src, self.dst, self.result.count, self.result.kind,
+            )
 
 
 class RootConversionDialog(QDialog):

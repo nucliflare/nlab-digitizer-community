@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
+import logging
 import threading
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import Mock
 
 import numpy as np
@@ -25,6 +27,7 @@ from nlab.ui.ui_main_window import Ui_MainWindow
 from nlab.utils import root_converter
 from nlab.utils.root_converter import ConversionCancelledError, convert_binary_to_root
 from nlab.views import root_conversion_dialog
+from nlab.views.log_panel import LogConsole
 from nlab.views.root_conversion_dialog import RootConversionDialog
 
 
@@ -335,3 +338,119 @@ def test_cancelling_dialog_before_worker_starts_is_safe(
     assert dialog.error == ""
     assert dialog.conversion_result is None
     assert not dst.exists()
+
+
+def test_missing_root_dependency_is_reported_by_worker(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    original_import = builtins.__import__
+
+    def missing_uproot(name: str, *args: Any, **kwargs: Any) -> object:
+        if name == "uproot":
+            raise OSError("awkward-cpu-kernels.dll is missing")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing_uproot)
+    caplog.set_level(logging.INFO)
+    destination = tmp_path / "never-created.root"
+    dialog = RootConversionDialog(tmp_path / "source.bin", destination)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitUntil(lambda: not dialog._running)
+    assert "awkward-cpu-kernels.dll" in dialog.error
+    assert dialog.conversion_result is None
+    assert not destination.exists()
+    errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert "OSError: awkward-cpu-kernels.dll is missing" in errors[0].getMessage()
+    assert str(destination) in errors[0].getMessage()
+    assert "Traceback" in errors[0].getMessage()
+    assert errors[0].exc_info is None
+    assert "ROOT conversion completed" not in caplog.text
+
+
+def test_menu_reports_dialog_import_failure_instead_of_ignoring_click(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    original_import = builtins.__import__
+
+    def missing_dialog(name: str, *args: Any, **kwargs: Any) -> object:
+        if name == "nlab.views.root_conversion_dialog":
+            raise ImportError("a bundled dependency is missing")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing_dialog)
+    window = QMainWindow()
+    qtbot.addWidget(window)
+    critical, open_dialog = Mock(), Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", open_dialog)
+    MainAppWindow._on_convert_to_root(cast(MainAppWindow, window))
+    critical.assert_called_once()
+    assert "a bundled dependency is missing" in critical.call_args.args[2]
+    open_dialog.assert_not_called()
+    assert "ROOT conversion dialog could not be loaded" in caplog.text
+
+
+@pytest.mark.parametrize("outcome", ["success", "cancelled"])
+def test_worker_logs_normal_outcome_without_error(
+    qtbot: QtBot, tmp_path: Path, caplog: pytest.LogCaptureFixture, outcome: str,
+) -> None:
+    caplog.set_level(logging.INFO)
+    src, dst = tmp_path / "events.bin", tmp_path / "events.root"
+    _capture(src, _events(1, 2).tobytes())
+    dialog = RootConversionDialog(src, dst)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    if outcome == "cancelled":
+        dialog.reject()
+    qtbot.waitUntil(lambda: not dialog._running)
+    assert "ROOT conversion started" in caplog.text
+    assert f"ROOT conversion {'completed' if outcome == 'success' else 'cancelled'}" in caplog.text
+    assert not any(record.levelno >= logging.WARNING for record in caplog.records)
+
+
+def test_worker_failure_reaches_system_log_without_console_or_debug_mode(
+    qtbot: QtBot, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    console = LogConsole()
+    qtbot.addWidget(console)
+    src, dst = tmp_path / "invalid.bin", tmp_path / "output.root"
+    src.write_bytes(b"invalid capture")
+    dialog = RootConversionDialog(src, dst)
+    qtbot.addWidget(dialog)
+    try:
+        dialog.show()
+        qtbot.waitUntil(lambda: not dialog._running)
+        qtbot.waitUntil(lambda: "ROOT conversion failed" in console.toPlainText())
+        text = console.toPlainText()
+        assert "ERROR" in text
+        assert "ValueError: File too short for header" in text
+        assert str(src) in text and str(dst) in text
+        assert "Traceback" in text
+    finally:
+        logging.getLogger().removeHandler(console.handler)
+
+
+def test_dialog_initialization_failure_is_logged_and_reported(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    window = QMainWindow()
+    qtbot.addWidget(window)
+    src, dst = tmp_path / "source.bin", tmp_path / "output.root"
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (str(src), ""))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(dst), ""))
+    monkeypatch.setattr(
+        root_conversion_dialog, "RootConversionDialog",
+        Mock(side_effect=RuntimeError("Qt dialog initialization failed")),
+    )
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+    MainAppWindow._on_convert_to_root(cast(MainAppWindow, window))
+    critical.assert_called_once()
+    assert "ROOT conversion dialog initialization failed" in caplog.text
+    assert "RuntimeError: Qt dialog initialization failed" in caplog.text
+    assert str(src) in caplog.text and str(dst) in caplog.text

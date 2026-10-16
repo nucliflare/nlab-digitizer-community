@@ -42,6 +42,7 @@ VERSION_SOURCE = ROOT / "src" / "nlab" / "_version.py"
 DIST = ROOT / "dist"
 WORK = ROOT / "build" / "pyinstaller-reviewed"
 SPEC = WORK / "spec"
+HOOKS = ROOT / "scripts" / "pyinstaller_hooks"
 OUTPUT_NAME = "nlab"
 
 # These packages are installed by the development extra, or are optional
@@ -167,6 +168,8 @@ def _preflight() -> None:
         N42_DATA / "N42SchemaAddin-2020.xsd",
         N42_DATA / "n42.sch",
         VERSION_SOURCE,
+        HOOKS / "hook-awkward_cpp.py",
+        HOOKS / "hook-uproot.py",
     ]
     missing = [path for path in required_paths if not path.is_file()]
     if missing:
@@ -193,6 +196,7 @@ def _build_arguments(*, clean: bool, version: str) -> list[str]:
         f"--distpath={DIST}",
         f"--workpath={WORK}",
         f"--specpath={SPEC}",
+        f"--additional-hooks-dir={HOOKS}",
         f"--add-data={ICON}{os.pathsep}resources/icons",
         f"--add-data={RADIONUCLIDE_CATALOG}{os.pathsep}nlab/data",
         f"--add-data={N42_DATA / 'n42.xsd'}{os.pathsep}nlab/data",
@@ -243,6 +247,17 @@ def main() -> None:
     executable = DIST / (f"{OUTPUT_NAME}.exe" if sys.platform == "win32" else OUTPUT_NAME)
     if not executable.is_file():
         raise RuntimeError(f"PyInstaller completed but did not create {executable}")
+
+    # Python tests do not exercise the frozen import graph or ctypes libraries.
+    # Check the real windowed executable before a release artifact is accepted.
+    print("Checking frozen ROOT conversion (synthetic captures, no hardware)...", flush=True)
+    subprocess.run(
+        [str(executable), "--check-root-conversion", "-platform", "offscreen"],
+        check=True,
+        timeout=120,
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+    )
+    print("Frozen ROOT conversion passed.", flush=True)
 
     print("\nBuild complete.")
     print(f"Output:  {executable}")
