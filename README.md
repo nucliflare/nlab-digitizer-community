@@ -168,6 +168,21 @@ uv run python examples/measure_current.py
   while channels and instrument views are initialized
 - Save and restore hardware plus application settings in YAML
 - Convert Scope and MCA binary captures to HDF5 from the File menu
+- **File → Convert Binary to ROOT...** converts native NDMA Scope waveforms
+  (v1) or MCA list-mode captures (legacy v1 and IIO v2) to ROOT TTrees without
+  connecting to hardware. Conversion runs in the background with progress and
+  cancellation; choose a new output filename (existing files are never overwritten).
+  The `events` tree retains all raw list-mode fields and their integer types;
+  the `waveforms` tree stores one `uint64` timestamp and a fixed-length `int16`
+  `samples` array per frame. No records, including all-zero padding, are filtered.
+  `metadata_json` stores the source SHA-256, channel, recording time, format
+  version, geometry, and units. Available configuration YAML and authenticated
+  IIO JSON capture metadata (including continuity diagnostics) are embedded too.
+  Waveform samples use integer sample indices: NDMA v1 does not store sampling
+  period/decimation, so conversion does not invent a physical sample-time axis.
+  Incomplete records/frames, unsupported versions, mismatched IIO sidecars, and
+  source files changed during conversion are rejected; cancelled/failed exports
+  remove their incomplete output. Stop a recording before converting it.
 - Remote board reboot and shutdown controls
 - A dedicated **Connection** menu for connecting an offline workspace, adding
   digitizers as extra channels, reconnecting all live endpoints, and running

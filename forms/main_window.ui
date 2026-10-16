@@ -147,6 +147,7 @@
     <addaction name="actionExitReplay"/>
     <addaction name="separator"/>
     <addaction name="actionConvertToHdf5"/>
+    <addaction name="actionConvertToRoot"/>
     <addaction name="separator"/>
     <addaction name="actionExit"/>
    </widget>
@@ -230,6 +231,10 @@
   </action>
   <action name="actionConvertToHdf5">
    <property name="text"><string>Convert Binary to HDF5...</string></property>
+  </action>
+  <action name="actionConvertToRoot">
+   <property name="text"><string>Convert Binary to ROOT...</string></property>
+   <property name="toolTip"><string>Convert native NDMA list-mode events or Scope waveforms to a ROOT TTree</string></property>
   </action>
   <action name="actionStartSessionRecording">
    <property name="text"><string>Start Session Recording...</string></property>

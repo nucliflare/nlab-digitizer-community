@@ -217,6 +217,7 @@ class MainAppWindow(QMainWindow):
         self.ui.actionMcaPeakAnalysis.triggered.connect(self._on_mca_peak_analysis)
         self.ui.actionValidateTiming.triggered.connect(self._on_validate_timing)
         self.ui.actionConvertToHdf5.triggered.connect(self._on_convert_to_hdf5)
+        self.ui.actionConvertToRoot.triggered.connect(self._on_convert_to_root)
         self.ui.actionConnectDevice.triggered.connect(self._on_connect_device)
         self.ui.actionDisconnectDevice.triggered.connect(self._on_disconnect_device)
         self.ui.actionReconnectDevice.triggered.connect(self._on_reconnect_device)
@@ -1049,6 +1050,34 @@ class MainAppWindow(QMainWindow):
         except Exception as e:
             logging.getLogger(__name__).exception("HDF5 conversion failed")
             QMessageBox.critical(self, "Conversion Failed", str(e))
+
+    def _on_convert_to_root(self) -> None:
+        from nlab.views.root_conversion_dialog import RootConversionDialog
+
+        src, _ = QFileDialog.getOpenFileName(
+            self, "Select Binary DMA File", "", "Binary files (*.bin);;All files (*)",
+        )
+        if not src:
+            return
+        dst, _ = QFileDialog.getSaveFileName(
+            self, "Save ROOT File", str(Path(src).with_suffix(".root")),
+            "ROOT files (*.root);;All files (*)",
+        )
+        if not dst:
+            return
+        destination = Path(dst)
+        if not destination.suffix:
+            destination = destination.with_suffix(".root")
+        dialog = RootConversionDialog(Path(src), destination, self)
+        dialog.exec()
+        if dialog.error:
+            QMessageBox.critical(self, "Conversion Failed", dialog.error)
+        elif (result := dialog.conversion_result) is not None:
+            QMessageBox.information(
+                self, "Conversion Complete",
+                f"Converted {result.count:,} {result.kind} to:\n{result.destination}",
+            )
+        dialog.deleteLater()
 
     def _on_save_settings(self) -> None:
         path, _ = QFileDialog.getSaveFileName(

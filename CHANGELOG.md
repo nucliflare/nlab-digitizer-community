@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-10-16
+
 ### Added
+
+- **File → Convert Binary to ROOT...** exports native Scope NDMA v1 and MCA
+  list-mode NDMA v1/v2 to bounded-memory ROOT TTrees with background progress,
+  cancellation, raw integer fields, configuration and verified capture metadata.
+  Incomplete or changing captures are rejected and existing files are protected.
 
 - **Help → About → Check for Updates** checks GitHub's latest published stable
   release without blocking the GUI, compares versions numerically, and offers
@@ -744,7 +751,8 @@ Initial open-source release of the Nuclear Lab Digitizer Community Edition.
 
 ---
 
-[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.7.2...main
+[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.7.3...main
+[0.7.3]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.3
 [0.7.2]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.2
 [0.7.1]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.1
 [0.7.0]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.0
