@@ -22,6 +22,7 @@ from nlab import __version__
 from nlab.controllers.main_window_controller import MainWindowController
 from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode
 from nlab.hardware.modbus_devices import ExternalDeviceScan
+from nlab.help.controller import HelpController
 from nlab.session.replay import SessionReplay
 from nlab.ui.ui_main_window import Ui_MainWindow
 from nlab.utils.github_releases import GITHUB_REPOSITORY_URL
@@ -158,6 +159,9 @@ class MainAppWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self._closing = True
+        help_controller = getattr(self, "_help_controller", None)
+        if help_controller is not None:
+            help_controller.dispose()
         application = getattr(self, "_application", None)
         if application is not None:
             application.removeEventFilter(self)
@@ -289,6 +293,11 @@ class MainAppWindow(QMainWindow):
         self._sync_connection_actions()
 
         self._restore_developer_settings()
+
+        self._help_controller = HelpController(self)
+        self.ui.menuHelp.insertAction(self.ui.actionAbout, self._help_controller.guide_action)
+        self.ui.menuHelp.insertAction(self.ui.actionAbout, self._help_controller.context_action)
+        self.ui.menuHelp.insertSeparator(self.ui.actionAbout)
 
     def _sync_connection_actions(self) -> None:
         """Reflect whether this window owns an offline or live controller set."""

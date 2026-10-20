@@ -75,14 +75,15 @@ class PsdFomWidget(QGroupBox):
         )
         self._fit_curve = ratio_plot.plot(pen=pg.mkPen("#2a9d8f", width=2.5))
 
-        self.guides_checkbox = QCheckBox("Show draggable fit guides", self)
+        self.guides_checkbox = QCheckBox("Fit guides", self)
         self.guides_checkbox.setChecked(True)
         self.guides_checkbox.setToolTip(
             "Show or hide the two centroid seeds and the ratio fit-ROI band."
         )
-        self.fit_button = QPushButton("Fit double Gaussian", self)
+        self.fit_button = QPushButton("Fit", self)
         self.fit_button.setToolTip(
-            "Run a bounded Levenberg-Marquardt fit on the current projected PSD counts."
+            "Fit two Gaussians plus constant background to the current projected PSD counts "
+            "using bounded Levenberg-Marquardt optimization."
         )
         self.copy_button = QPushButton("Copy table", self)
         self.copy_button.setEnabled(False)
@@ -97,13 +98,19 @@ class PsdFomWidget(QGroupBox):
 
         self.first_label = QLabel("—", self)
         self.second_label = QLabel("—", self)
+        self.first_label.setToolTip(
+            "Population 1: fitted centroid μ / full width at half maximum."
+        )
+        self.second_label.setToolTip(
+            "Population 2: fitted centroid μ / full width at half maximum."
+        )
         self.fom_label = QLabel("—", self)
         self.deviance_label = QLabel("—", self)
         self.chi_square_label = self.deviance_label
         results = QFormLayout()
         results.setContentsMargins(0, 0, 0, 0)
-        results.addRow("Population 1 μ / FWHM:", self.first_label)
-        results.addRow("Population 2 μ / FWHM:", self.second_label)
+        results.addRow("μ₁ / FWHM₁:", self.first_label)
+        results.addRow("μ₂ / FWHM₂:", self.second_label)
         results.addRow("FOM:", self.fom_label)
         results.addRow("Reduced deviance:", self.deviance_label)
 
@@ -111,8 +118,11 @@ class PsdFomWidget(QGroupBox):
         copy_row.addStretch(1)
         copy_row.addWidget(self.copy_button)
 
-        self.status_label = QLabel(
-            "Drag the ROI and μ markers, then press Fit double Gaussian.", self
+        self.status_label = QLabel("No fit yet.", self)
+        self.status_label.setToolTip(
+            "Drag the ratio fit ROI and μ centroid markers, then press Fit. "
+            "A fit is a snapshot of the selected projection, not a continuous live result. "
+            "Press F1 for fit-quality guidance."
         )
         self.status_label.setWordWrap(True)
 
@@ -179,7 +189,7 @@ class PsdFomWidget(QGroupBox):
         self.deviance_label.setText("—")
         self.copy_button.setEnabled(False)
         self.status_label.setStyleSheet("")
-        self.status_label.setText("Drag the ROI and μ markers, then press Fit double Gaussian.")
+        self.status_label.setText("No fit yet.")
         self.fit_changed.emit(None)
 
     def fit_current_projection(self) -> PsdFomFit | None:
@@ -220,7 +230,7 @@ class PsdFomWidget(QGroupBox):
         else:
             self.status_label.setStyleSheet("color: #067647;")
             self.status_label.setText(
-                f"LM fit converged in {fit.evaluations} evaluations; result is a snapshot."
+                f"Fit converged ({fit.evaluations} evaluations)."
             )
         self.fit_completed.emit(fit)
         self.fit_changed.emit(fit)

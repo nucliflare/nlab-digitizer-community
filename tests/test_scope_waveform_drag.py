@@ -47,6 +47,7 @@ def _raw_controller(qtbot: QtBot) -> tuple[ScopeController, MagicMock]:
 def test_waveform_drag_previews_both_axes_and_commits_once(qtbot: QtBot) -> None:
     controller, scope = _raw_controller(qtbot)
     curve = controller._raw_curve
+    assert curve.opts["stepMode"] == "right"
     original_x, original_y = curve.getData()
     original_x = original_x.copy()
     original_y = original_y.copy()

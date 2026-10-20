@@ -46,7 +46,7 @@ from nlab.analysis.waveform_psd import (
     integrate_waveform,
 )
 from nlab.views.offline_psd_plot import OfflinePsdPlot
-from nlab.views.plot_viewbox import ModifierZoomViewBox, style_plot_widget
+from nlab.views.plot_viewbox import WAVEFORM_STEP_MODE, ModifierZoomViewBox, style_plot_widget
 from nlab.workers.waveform_file_worker import WaveformFileIndexWorker
 from nlab.workers.waveform_fom_optimization_worker import WaveformFomOptimizationWorker
 from nlab.workers.waveform_psd_worker import WaveformPsdWorker
@@ -126,14 +126,11 @@ class WaveformAnalysisDialog(QDialog):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        note = QLabel(
+        self.setToolTip(
             "Waveforms are read without changing live Scope or PSD acquisition. Drag the "
             "baseline region and the three gate markers, inspect individual events, then "
-            "integrate the selected source in a background worker.",
-            self,
+            "integrate the selected source in a background worker. Press F1 for parameter help."
         )
-        note.setWordWrap(True)
-        root.addWidget(note)
 
         toolbar = QHBoxLayout()
         self.load_button = QPushButton("Load waveform file...", self)
@@ -189,12 +186,20 @@ class WaveformAnalysisDialog(QDialog):
         self.waveform_plot.showGrid(x=True, y=True, alpha=0.2)
         self.waveform_plot.setLabel("bottom", "Time", units="ns")
         self.waveform_plot.setLabel("left", "ADC amplitude", units="raw")
-        self.waveform_plot.addLegend(offset=(10, 10))
+        # A negative X offset anchors to the right, and follows plot resizing.
+        self.waveform_plot.addLegend(offset=(-10, 10))
+        self.waveform_widget.setToolTip(
+            "Blue region: baseline. Green: integration start. Yellow: short-gate end. "
+            "Red: long-gate end. Gate positions are stored as sample indices. "
+            "Press F1 and click this plot for gate help."
+        )
         self.raw_curve = self.waveform_plot.plot(
-            pen=pg.mkPen("#1597d4", width=1.2), name="Stored waveform"
+            pen=pg.mkPen("#1597d4", width=1.2), name="Stored waveform",
+            stepMode=WAVEFORM_STEP_MODE,
         )
         self.oriented_curve = self.waveform_plot.plot(
-            pen=pg.mkPen("#f28e2b", width=1.2), name="Polarity-normalized"
+            pen=pg.mkPen("#f28e2b", width=1.2), name="Polarity-normalized",
+            stepMode=WAVEFORM_STEP_MODE,
         )
         self.baseline_region = pg.LinearRegionItem(
             values=(0.0, 1.0),
@@ -275,13 +280,6 @@ class WaveformAnalysisDialog(QDialog):
         form.addRow("Baseline estimator:", self.baseline_method)
         form.addRow("Pulse polarity:", self.polarity_combo)
         layout.addLayout(form)
-        help_label = QLabel(
-            "Blue region: baseline. Green: integration start. Yellow: short-gate end. "
-            "Red: long-gate end. Gate positions are stored as sample indices.",
-            self,
-        )
-        help_label.setWordWrap(True)
-        layout.addWidget(help_label)
         self.preview_status = QLabel("No frame loaded.", self)
         self.preview_status.setWordWrap(True)
         self.preview_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -329,15 +327,12 @@ class WaveformAnalysisDialog(QDialog):
         self.optimization_radius.setToolTip(
             "Search this many samples on either side of both current gate endpoints."
         )
-        self.exhaustive_search = QCheckBox("Exhaustive (all gate pairs)", self)
+        self.exhaustive_search = QCheckBox("Exhaustive search", self)
         self.exhaustive_search.setToolTip(
             "Test every valid short/long endpoint pair within the search radius at "
-            "one-sample steps. Much slower than the default local search."
+            "one-sample steps. This can take a long time; confirmation is required "
+            "before starting. Leave unchecked for the faster local search."
         )
-        self.exhaustive_warning = QLabel("Exhaustive search can take a long time.", self)
-        self.exhaustive_warning.setWordWrap(True)
-        self.exhaustive_warning.setVisible(False)
-        self.exhaustive_search.toggled.connect(self.exhaustive_warning.setVisible)
         form.addRow("Energy bins:", self.energy_bins)
         form.addRow("Energy maximum:", self.energy_max)
         form.addRow("Ratio bins:", self.ratio_bins)
@@ -348,15 +343,12 @@ class WaveformAnalysisDialog(QDialog):
         form.addRow("Optimization events:", self.optimization_events)
         form.addRow("Gate search radius:", self.optimization_radius)
         form.addRow("Search mode:", self.exhaustive_search)
-        form.addRow(self.exhaustive_warning)
         layout.addLayout(form)
-        self.auto_recalculate = QCheckBox(
-            "Auto-recalculate while dragging (every 20th event)",
-            self,
-        )
+        self.auto_recalculate = QCheckBox("Auto preview", self)
         self.auto_recalculate.setChecked(True)
         self.auto_recalculate.setToolTip(
-            "Gate motion is debounced and recalculated sparsely. Releasing a marker "
+            "While dragging, gate motion is debounced and recalculated using every "
+            "20th selected event. Releasing a marker "
             "queues a full calculation using the configured event stride."
         )
         layout.addWidget(self.auto_recalculate)

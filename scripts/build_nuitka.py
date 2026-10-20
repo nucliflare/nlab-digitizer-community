@@ -65,6 +65,7 @@ args = [
         "nlab/data/N42SchemaAddin-2020.xsd"
     ),
     f"--include-data-files={N42_DATA / 'n42.sch'}=nlab/data/n42.sch",
+    f"--include-data-dir={N42_DATA / 'help'}=nlab/data/help",
 ]
 
 if sys.platform == "win32":

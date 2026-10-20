@@ -53,13 +53,10 @@ class PsdReadbackDialog(QDialog):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        note = QLabel(
+        self.setToolTip(
             "Read stored long/short-gate events without changing live acquisition. "
-            "The PSD ratio is (Qlong - Qshort) / Qlong.",
-            self,
+            "The PSD ratio is (Qlong - Qshort) / Qlong. Press F1 for parameter help."
         )
-        note.setWordWrap(True)
-        root.addWidget(note)
 
         settings = QGroupBox("File and histogram settings", self)
         settings.setSizePolicy(
@@ -90,16 +87,17 @@ class PsdReadbackDialog(QDialog):
         self.ratio_max.setRange(-10.0, 10.0)
         self.ratio_max.setDecimals(4)
         self.ratio_max.setValue(1.0)
-        grid.addWidget(QLabel("Energy bins:", self), 0, 2)
-        grid.addWidget(self.energy_bins, 0, 3)
-        grid.addWidget(QLabel("Ratio bins:", self), 0, 4)
-        grid.addWidget(self.ratio_bins, 0, 5)
-        grid.addWidget(QLabel("Energy right shift:", self), 0, 6)
-        grid.addWidget(self.energy_shift, 0, 7)
-        grid.addWidget(QLabel("Ratio minimum:", self), 1, 2)
-        grid.addWidget(self.ratio_min, 1, 3)
-        grid.addWidget(QLabel("Ratio maximum:", self), 1, 4)
-        grid.addWidget(self.ratio_max, 1, 5)
+        for text, field, row, column in (
+            ("Energy bins:", self.energy_bins, 0, 2),
+            ("Ratio bins:", self.ratio_bins, 0, 4),
+            ("Energy shift (bits):", self.energy_shift, 0, 6),
+            ("Ratio minimum:", self.ratio_min, 1, 2),
+            ("Ratio maximum:", self.ratio_max, 1, 4),
+        ):
+            label = QLabel(text, self)
+            label.setBuddy(field)
+            grid.addWidget(label, row, column)
+            grid.addWidget(field, row, column + 1)
         self.current_file_label = QLabel("Current file: No file loaded", self)
         self.current_file_label.setTextFormat(Qt.TextFormat.PlainText)
         self.current_file_label.setTextInteractionFlags(

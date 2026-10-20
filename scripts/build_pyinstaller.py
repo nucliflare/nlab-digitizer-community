@@ -53,6 +53,7 @@ args = [
     f"--add-data={N42_DATA / 'n42.xsd'}{os.pathsep}nlab/data",
     f"--add-data={N42_DATA / 'N42SchemaAddin-2020.xsd'}{os.pathsep}nlab/data",
     f"--add-data={N42_DATA / 'n42.sch'}{os.pathsep}nlab/data",
+    f"--add-data={N42_DATA / 'help'}{os.pathsep}nlab/data/help",
     str(ENTRY),
 ]
 

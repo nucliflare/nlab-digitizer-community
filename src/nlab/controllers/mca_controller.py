@@ -31,7 +31,7 @@ from nlab.views.mca_roi_history_dialog import (
     McaRoiHistoryDialog,
 )
 from nlab.views.panel_status import PanelStatus
-from nlab.views.plot_viewbox import ModifierZoomViewBox
+from nlab.views.plot_viewbox import WAVEFORM_STEP_MODE, ModifierZoomViewBox
 from nlab.views.responsive_layout import configure_mca_layout
 from nlab.views.time_axis import format_duration_ns, time_axis_scale
 from nlab.workers.dma_workers import IIOMcaDmaWorker
@@ -569,10 +569,12 @@ class MCAController(QWidget):
         self._debug1_curve = self._debug_plot.plot(
             pen=pg.mkPen("#00bfff", width=1),
             name="Debug 1",
+            stepMode=WAVEFORM_STEP_MODE,
         )
         self._debug2_curve = self._debug_plot.plot(
             pen=pg.mkPen("#ff8c00", width=1),
             name="Debug 2",
+            stepMode=WAVEFORM_STEP_MODE,
         )
         self._setup_debug_markers()
         self._update_debug_time_axis()

@@ -28,6 +28,8 @@ def test_debug_markers_match_hardware_ranges_widgets_and_colors(
     qtbot: QtBot, monkeypatch: MonkeyPatch
 ) -> None:
     controller, mca = _controller(qtbot, monkeypatch)
+    assert controller._debug1_curve.opts["stepMode"] == "right"
+    assert controller._debug2_curve.opts["stepMode"] == "right"
     threshold = controller._debug_threshold_line
     offset = controller._debug_pretrigger_line
 

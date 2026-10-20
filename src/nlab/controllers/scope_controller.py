@@ -1640,27 +1640,24 @@ class ScopeController(QWidget):
 
     def _rasterize_frame(self, frame: np.ndarray) -> None:
         self._persistence_buffer *= self.persistence
-        n_samples = len(frame)
+        n_samples = min(len(frame), self._display_nx)
+        if not n_samples:
+            return
         # A legacy text viewer can return only the prefix that fits in one
         # sysfs page. Keep that prefix at its real time coordinates instead
         # of stretching it across the full configured frame.
-        x_float = np.arange(n_samples, dtype=np.float32)
         y_float = (
-            (frame.astype(np.float32) - self._Y_MIN)
+            (frame[:n_samples].astype(np.float32) - self._Y_MIN)
             / (self._Y_MAX - self._Y_MIN)
             * (self._display_ny - 1)
         )
-        y_float = np.clip(y_float, 0, self._display_ny - 1)
-
-        for i in range(n_samples - 1):
-            x0, y0 = x_float[i], y_float[i]
-            x1, y1 = x_float[i + 1], y_float[i + 1]
-            n_pts = max(int(max(abs(x1 - x0), abs(y1 - y0))), 1) + 1
-            xs = np.linspace(x0, x1, n_pts).astype(int)
-            ys = np.linspace(y0, y1, n_pts).astype(int)
-            np.clip(xs, 0, self._display_nx - 1, out=xs)
-            np.clip(ys, 0, self._display_ny - 1, out=ys)
-            self._persistence_buffer[xs, ys] = 1.0
+        y_pixels = np.clip(y_float, 0, self._display_ny - 1).astype(np.intp)
+        self._persistence_buffer[0, y_pixels[0]] = 1.0
+        # Match the raw trace's sample hold: transition at the *next* sample's
+        # column rather than interpolating amplitude between sample times.
+        for i in range(1, n_samples):
+            low, high = sorted((y_pixels[i - 1], y_pixels[i]))
+            self._persistence_buffer[i, low:high + 1] = 1.0
 
     # ------------------------------------------------------------------
     # Graph setup

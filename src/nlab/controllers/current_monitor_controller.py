@@ -20,6 +20,7 @@ from nlab.hardware.digitizer.mca import MultiChannelAnalyzer
 from nlab.hardware.digitizer.scope import SCOPE_DATAPATH_CLOCK_PERIOD_NS
 from nlab.ui.ui_current_monitor_view import Ui_CurrentMonitorView
 from nlab.views.panel_status import PanelStatus
+from nlab.views.plot_viewbox import WAVEFORM_STEP_MODE
 from nlab.workers.current_monitor_worker import (
     CurrentMonitorWorker,
     CurrentSample,
@@ -726,7 +727,7 @@ class CurrentMonitorController(QWidget):
                 cursor += 1
         x_values /= 1_000_000_000
         self._last_dma_plot_points = sample_points
-        self._curve.setData(x_values, y_values)
+        self._curve.setData(x_values, y_values, stepMode=WAVEFORM_STEP_MODE, connect="finite")
 
     def _render_values(self, now_ns: int) -> None:
         latest = self._latest
@@ -794,7 +795,9 @@ class CurrentMonitorController(QWidget):
                 for sample in self._history
             ]
             y = [self._convert(sample.raw_code, zero, scale) for sample in self._history]
-            self._curve.setData(x, y)
+            # The same item is reused after switching back from raw DMA pulses
+            # to the host-timed scalar IIR trend; restore ordinary line drawing.
+            self._curve.setData(x, y, stepMode=None, connect="auto")
 
     def reset_zoom(self) -> None:
         self._plot.enableAutoRange()

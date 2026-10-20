@@ -13,6 +13,7 @@ The final legacy gRPC/ZMQ version is archived on the `grpc-final` branch.
 | Goal | Guide |
 |---|---|
 | Choose the right workflow for a measurement goal | [Use Cases](use_cases) |
+| Explain a control or parameter using F1 | [Application Parameter Reference](context_help) |
 | Install the application and connect a board | [Getting Started](getting_started) |
 | Understand Scope, MCA, PSD, and ownership | [Acquisition Workflows](acquisition_workflows) |
 | Monitor detector current | [Live Current Monitoring](current_monitor) |

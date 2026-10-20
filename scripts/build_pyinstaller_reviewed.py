@@ -167,6 +167,7 @@ def _preflight() -> None:
         N42_DATA / "n42.xsd",
         N42_DATA / "N42SchemaAddin-2020.xsd",
         N42_DATA / "n42.sch",
+        N42_DATA / "help" / "parameters.md",
         VERSION_SOURCE,
         HOOKS / "hook-awkward_cpp.py",
         HOOKS / "hook-uproot.py",
@@ -202,6 +203,7 @@ def _build_arguments(*, clean: bool, version: str) -> list[str]:
         f"--add-data={N42_DATA / 'n42.xsd'}{os.pathsep}nlab/data",
         f"--add-data={N42_DATA / 'N42SchemaAddin-2020.xsd'}{os.pathsep}nlab/data",
         f"--add-data={N42_DATA / 'n42.sch'}{os.pathsep}nlab/data",
+        f"--add-data={N42_DATA / 'help'}{os.pathsep}nlab/data/help",
     ]
     if clean:
         arguments.append("--clean")

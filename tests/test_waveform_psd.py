@@ -299,13 +299,15 @@ def test_waveform_workbench_indexes_and_reconstructs_ndma(
     assert dialog.current_file_label.toolTip() == str(path)
     assert dialog.windowTitle().endswith(f"— {path.name}")
     assert "Qlong" in dialog.preview_status.text()
+    assert dialog.raw_curve.opts["stepMode"] == "right"
+    assert dialog.oriented_curve.opts["stepMode"] == "right"
     assert dialog.waveform_widget.minimumHeight() >= 200
     assert dialog.psd_plot.minimumHeight() >= 360
     assert dialog.psd_plot.fom_widget.copy_button.text() == "Copy table"
     assert dialog.report_button.text() == "Download report..."
     assert not dialog.report_button.isEnabled()
     assert dialog.ratio_min.value() == -1.0
-    assert "20th" in dialog.auto_recalculate.text()
+    assert "20th" in dialog.auto_recalculate.toolTip()
     assert isinstance(dialog.waveform_widget.getViewBox(), ModifierZoomViewBox)
 
     dialog._start_analysis()

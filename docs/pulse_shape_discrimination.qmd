@@ -120,7 +120,7 @@ instead of copying `0.5344` to another channel or setup.
 ## FOM fitting and gate optimization
 
 The live and offline ratio projections provide a shaded fit ROI and two
-draggable centroid seeds. **Fit double Gaussian** performs a bounded
+draggable centroid seeds. **Fit** performs a bounded double-Gaussian
 constant-background fit with Poisson-deviance residuals and reports both
 centroids and FWHMs, reduced deviance, and
 `FOM = |mu2 - mu1| / (FWHM1 + FWHM2)`. Inspect convergence, covariance,

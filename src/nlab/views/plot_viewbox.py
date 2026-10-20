@@ -9,6 +9,11 @@ from PySide6.QtWidgets import QWidget
 
 _PLOT_AREA_BACKGROUND = "#f8f9fa"
 
+# pyqtgraph's "right" path holds y[i] from x[i] to x[i+1], then
+# transitions vertically at the next timestamp. Keep x/y arrays unexpanded so
+# cursor/drag calculations still use the original samples (covered by tests).
+WAVEFORM_STEP_MODE = "right"
+
 
 def style_plot_widget(widget: PlotWidget) -> None:
     """Match the plot surround to Qt while retaining a light data canvas."""
@@ -53,6 +58,7 @@ class DraggableScopeCurve(PlotCurveItem):  # type: ignore[misc]
     drag_finished = Signal(bool)  # True when cancelled.
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("stepMode", WAVEFORM_STEP_MODE)
         super().__init__(*args, **kwargs)
         self.setClickable(True, width=14)
         self._drag_enabled = True

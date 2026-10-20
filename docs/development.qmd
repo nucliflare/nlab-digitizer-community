@@ -59,6 +59,17 @@ Do not hand-edit generated analysis output in place. Update the corresponding
 `.qmd`, render it, inspect both repository diffs, and keep wiki navigation in
 `Home.md` and `_Sidebar.md` synchronized with the source set.
 
+The offline F1 reference is authored in `src/nlab/data/help/parameters.md` and
+included by `docs/context_help.qmd`, so packaged help and the wiki share text.
+Give each topic a stable `## Title {#topic-id}` heading. Bind Designer controls
+by scoped names or programmatic widgets by attributes in `src/nlab/help/context.py`;
+custom widgets can set the `nlabHelpTopic` property. Form labels follow their
+field's binding. Add focused mapping and safe-input tests in
+`tests/test_context_help.py`; unknown items must retain the explicit workspace
+fallback rather than infer hardware behavior from a label.
+The page-local `context_help_anchors.lua` filter preserves topic IDs when GFM
+rendering drops custom heading identifiers, keeping related-topic links valid.
+
 Refresh the versioned GUI screenshots after a documented widget changes:
 
 ```bash

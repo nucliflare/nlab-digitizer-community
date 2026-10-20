@@ -57,7 +57,7 @@ nlab = "nlab.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-nlab = ["py.typed", "data/*.sqlite3", "data/*.xsd", "data/*.sch"]
+nlab = ["py.typed", "data/*.sqlite3", "data/*.xsd", "data/*.sch", "data/help/*.md"]
 
 [tool.ruff]
 line-length = 100

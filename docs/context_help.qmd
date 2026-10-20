@@ -1,0 +1,13 @@
+---
+title: "Application Parameter Reference and F1 Help"
+format: gfm
+filters:
+  - context_help_anchors.lua
+---
+
+This reference is shared with the application's bundled offline help. Edit
+`src/nlab/data/help/parameters.md` to update both versions. In-app context bindings
+live in `src/nlab/help/context.py`; unmapped controls explicitly fall back to a
+workspace guide rather than claiming a dedicated explanation.
+
+{{< include ../src/nlab/data/help/parameters.md >}}

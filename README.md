@@ -23,6 +23,40 @@ acquisition ownership, current and coincidence workflows, capture integrity,
 offline analysis, troubleshooting, architecture, and development. These Quarto
 sources are also rendered into the project wiki.
 
+### In-app help
+
+Press **F1**, then click a label or control to open its offline explanation.
+The question-mark cursor indicates selection mode; **Esc**, F1 again, or a
+right-click cancels. Selection clicks, wheel changes, and keyboard edits are
+consumed rather than operating acquisition controls. Acquisition itself continues.
+Help also works in owned settings and analysis dialogs, including disabled
+controls. **Help → User Guide…** opens the searchable reference directly, with
+Back/Forward navigation and related-topic links. Unmapped items explicitly open
+their workspace guide; not every advanced control has an individual article yet.
+
+The parameter reference is bundled with the app (including packaged builds),
+so it needs no internet connection or Qt WebEngine. Its Markdown source in
+`src/nlab/data/help/parameters.md` is also included in the
+[wiki parameter reference](docs/context_help.qmd). Existing wiki workflow guides
+remain available through an explicit external link; opening help itself does
+not contact the network.
+
+PSD and waveform tools keep instructions in tooltips and F1 topics instead of
+permanent explanatory banners. Parameter names, numeric results, progress, and
+fit-quality warnings remain visible. **Auto preview** still uses every twentieth
+selected event while dragging and queues the normal reconstruction on release;
+the exhaustive-search confirmation remains mandatory. The waveform signal-preview
+legend defaults to the top-right and stays anchored there when resized.
+
+Waveform displays use sample-hold steps: each level extends to the next sample
+timestamp, with a vertical transition there instead of diagonal interpolation.
+This applies to Scope raw/DMA/replay views and persistence, MCA debug signals,
+both offline waveform traces, and Current's raw DMA fragments. Sample coordinates,
+stored values, integration, and trigger/gate positions are unchanged. DMA fragment
+gaps remain disconnected; scalar IIR/telemetry trends and fitted models remain
+lines. Steps show the resolution of the displayed samples, not a reconstruction
+of the analogue input; averaged/decimated previews retain their existing resolution.
+
 ## Choose a workflow
 
 The [use-cases guide](docs/use_cases.qmd) maps measurement goals to entry
@@ -932,7 +966,7 @@ projections from NDMA, CAEN CoMPASS, legacy `caen.py`, HDF5, or ROOT events in
 a standalone workbench. Saved-event analysis no longer replaces or pauses a
 live PSD measurement.
 The live and readback ratio projections include a shaded draggable fit ROI and
-two draggable centroid estimates. **Fit double Gaussian** runs a bounded
+two draggable centroid estimates. **Fit** runs a bounded double-Gaussian
 Levenberg-Marquardt fit with a constant background and Poisson-deviance
 residuals on the current projection snapshot. It reports both centroids, both
 FWHMs, reduced Poisson deviance, and
@@ -1006,7 +1040,7 @@ When a CoMPASS event also stores gate sums, the
 result reports a computed-versus-stored long-gate scale as a format/setting
 cross-check. These operations never alter Scope DMA files or live PSD settings.
 For **Optimize FOM gates**, the default is a fast local coarse-to-fine search.
-Enable **Exhaustive (all gate pairs)** to test every valid short/long endpoint
+Enable **Exhaustive search** to test every valid short/long endpoint
 pair within the selected **Gate search radius**, at one-sample steps. This is
 exhaustive over that bounded region, not over the entire waveform or all fit
 parameters. The warning dialog shows the exact pair count and defaults to
@@ -1015,7 +1049,7 @@ same bounded waveform sample, fixed baseline/integration start, energy and fit
 ROIs, centroid seeds, and trustworthy-fit checks. Exhaustive mode shows
 evaluated/total progress; Cancel is checked between fits. Its best sampled
 gates are applied and confirmed with the normal full-data reconstruction.
-With **Auto-recalculate while dragging** enabled, moving any baseline or gate
+With **Auto preview** enabled, moving any baseline or gate
 marker produces a debounced preview from every twentieth selected event. Releasing
 the marker cancels any stale preview and queues a full calculation using the
 configured event stride and maximum-event limit. The initial PSD ratio view spans

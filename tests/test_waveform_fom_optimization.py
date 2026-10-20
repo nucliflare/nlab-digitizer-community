@@ -312,7 +312,7 @@ def test_waveform_workbench_applies_and_confirms_optimized_gates(
 
     assert not dialog.exhaustive_search.isChecked()
     dialog.exhaustive_search.setChecked(mode != "local")
-    assert dialog.exhaustive_warning.isHidden() == (mode == "local")
+    assert "long time" in dialog.exhaustive_search.toolTip()
     warnings: list[tuple[str, tuple[QMessageBox.StandardButton, ...]]] = []
 
     def confirm(

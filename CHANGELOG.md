@@ -11,6 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Searchable offline parameter reference under Help → User Guide, shared with
+  the wiki and bundled in wheel, PyInstaller, and Nuitka distributions. F1 enters
+  click-to-explain mode for labels and controls in the workspace and owned dialogs;
+  selection clicks do not operate acquisition controls. Esc/F1/right-click cancel,
+  related topics and Back/Forward aid browsing, and unmapped controls explicitly
+  fall back to their workspace guide.
+- PSD and waveform workbenches use compact control labels and tooltip/F1
+  instructions instead of permanent explanatory banners, retaining visible
+  fit diagnostics and exhaustive-search confirmation. The waveform signal-preview
+  legend defaults to the top-right and follows plot resizing.
+- Waveform and pulse displays now use sample-hold steps in Scope raw/DMA/replay
+  and persistence, MCA debug traces, the offline waveform workbench, and Current
+  DMA. Sample values/timestamps and analysis are unchanged; DMA gaps remain
+  disconnected, and scalar trends and fitted curves retain line rendering.
 - Waveform FOM optimization offers an optional exhaustive search over every
   valid integer short/long gate pair within the selected search radius. A
   slow-search warning and confirmation show the candidate count before starting;
