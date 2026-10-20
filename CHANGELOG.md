@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.5] — 2026-10-20
+
 ### Fixed
 
 - Offline session replay no longer monopolizes the GUI thread with per-batch
