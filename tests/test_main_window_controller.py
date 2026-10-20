@@ -13,7 +13,6 @@ from nlab.controllers.main_window_controller import MainWindowController
 from nlab.session.replay import (
     CurrentReplaySample,
     McaReplayBatch,
-    McaReplayReadback,
     ReplayStreamSummary,
     ScopeReplayFrame,
     TelemetryReplayEvent,
@@ -1226,9 +1225,19 @@ def test_second_digitizer_global_telemetry_replays_to_its_own_panel(
     globals_[1].finish_session_replay.assert_called_once_with()
 
 
-def test_analysis_replay_feeds_recorded_events_to_psd_and_coincidence() -> None:
+def test_analysis_replay_feeds_recorded_events_to_psd_and_coincidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     controller = _bare_controller()
-    psd = SimpleNamespace(channel=0, begin_session_replay=Mock())
+    worker = Mock()
+    factory = Mock(return_value=worker)
+    monkeypatch.setattr(main_window_module, "SessionAnalysisReplayThread", factory)
+    controller._session_analysis_replay_timer = SimpleNamespace(start=Mock())
+    psd = SimpleNamespace(
+        channel=0, begin_session_replay=Mock(),
+        session_replay_accumulator=Mock(return_value=object()),
+        use_session_replay_worker=Mock(),
+    )
     mca0 = SimpleNamespace(channel=0)
     mca1 = SimpleNamespace(channel=1)
     coincidence = SimpleNamespace(begin_session_replay=Mock())
@@ -1264,60 +1273,47 @@ def test_analysis_replay_feeds_recorded_events_to_psd_and_coincidence() -> None:
     passed_settings, passed_display = coincidence.begin_session_replay.call_args.args
     assert passed_settings is settings
     assert passed_display == {"operator": "AND"}
+    assert factory.call_args.kwargs["coincidence_settings"] is settings
+    assert factory.call_args.kwargs["coincidence_channels"] == {0: 0, 1: 1}
+    worker.start.assert_called_once_with()
+    controller._session_analysis_replay_timer.start.assert_called_once_with(100)
 
 
-def test_progressive_analysis_replay_updates_live_views_at_recorded_times(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_analysis_replay_only_presents_latest_worker_snapshot() -> None:
     controller = _bare_controller()
     controller._session_replay = object()
+    controller._session_analysis_replay_complete = False
+    controller._session_analysis_replay_readback_sequences = {}
     controller._session_analysis_replay_timer = SimpleNamespace(start=Mock(), stop=Mock())
     mca = SimpleNamespace(
-        channel=0,
-        display_session_replay_readback=Mock(),
-        finish_session_replay=Mock(),
+        channel=0, display_session_replay_readback=Mock(), finish_session_replay=Mock(),
     )
-    psd = SimpleNamespace(
-        channel=0,
-        display_session_replay_events=Mock(),
-        finish_session_replay=Mock(),
-    )
-    coincidence = SimpleNamespace(
-        display_session_replay_events=Mock(),
-        finish_session_replay=Mock(),
-    )
+    psd = SimpleNamespace(channel=0, display_session_replay_snapshot=Mock())
+    coincidence = SimpleNamespace(display_session_replay_snapshot=Mock())
     controller._mca_controllers = [mca]
     controller._psd_controllers = [psd]
     controller._coincidence_controller = coincidence
-    controller._session_replay_psd_channels = {0}
-    controller._session_replay_coincidence_active = True
-    controller._session_analysis_replay_coincidence_channels = {0: 0}
     controller._session_analysis_replay_mca_channels = {0}
-    batch = McaReplayBatch(0, 0, 200, np.array([1, 2], dtype=np.int16))
-    readback_value = SimpleNamespace(histogram=np.array([3, 4]))
-    readback = McaReplayReadback(0, 0, 300, readback_value)  # type: ignore[arg-type]
-    controller._session_analysis_replay_events = [batch, readback]
-    controller._session_analysis_replay_index = 0
-    controller._session_analysis_replay_origin_ns = 100
-    controller._session_analysis_replay_started_ns = 1_000
-    monkeypatch.setattr(
-        main_window_module,
-        "monotonic_ns",
-        Mock(side_effect=[1_100, 1_200]),
+    readback = SimpleNamespace()
+    accumulator, result, fit = object(), object(), object()
+    snapshot = SimpleNamespace(
+        readbacks={0: SimpleNamespace(readback=readback, sequence=1)},
+        psd={0: accumulator}, coincidence=result, timing_fit=fit,
+        complete=True, processed=3664, error=None,
+    )
+    controller._session_analysis_replay_worker = SimpleNamespace(
+        take_snapshot=Mock(side_effect=[snapshot, None]),
     )
 
     controller._advance_session_analysis_replay()
-
-    psd.display_session_replay_events.assert_called_once()
-    coincidence.display_session_replay_events.assert_called_once_with(0, batch.events)
-    mca.display_session_replay_readback.assert_not_called()
-
     controller._advance_session_analysis_replay()
 
-    mca.display_session_replay_readback.assert_called_once_with(readback_value)
+    assert controller._session_analysis_replay_index == 3664
+    mca.display_session_replay_readback.assert_called_once_with(readback)
     mca.finish_session_replay.assert_called_once_with()
-    psd.finish_session_replay.assert_called_once_with()
-    coincidence.finish_session_replay.assert_called_once_with()
+    psd.display_session_replay_snapshot.assert_called_once_with(accumulator, True)
+    coincidence.display_session_replay_snapshot.assert_called_once_with(result, fit, True)
+    assert controller._session_analysis_replay_timer.start.call_args_list == [call(100), call(100)]
 
 
 def test_replay_hardware_interlock_reaches_every_hardware_controller() -> None:
@@ -1353,6 +1349,49 @@ def test_replay_hardware_interlock_reaches_every_hardware_controller() -> None:
                 call(True),
                 call(False),
             ]
+
+
+def test_replay_exit_joins_worker_before_restoring_views() -> None:
+    controller = _bare_controller()
+    sequence = Mock()
+    worker = SimpleNamespace(request_stop=sequence.stop, join=sequence.join)
+    controller._session_analysis_replay_worker = worker
+    controller._session_replay_psd_channels = {0}
+    controller._psd_controllers = [
+        SimpleNamespace(channel=0, end_session_replay=sequence.restore),
+    ]
+    controller.clear_session_replay()
+
+    assert sequence.mock_calls == [call.stop(), call.join(), call.restore()]
+    assert controller._session_analysis_replay_worker is None
+
+
+def test_worker_replay_failure_is_logged_and_displayed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    controller = _bare_controller()
+    controller._session_replay = object()
+    controller._session_replay_coincidence_active = True
+    controller._session_replay_psd_channels = set()
+    controller._session_analysis_replay_timer = SimpleNamespace(start=Mock())
+    status = SimpleNamespace(setText=Mock())
+    controller._coincidence_controller = SimpleNamespace(status=status)
+    bar = SimpleNamespace(showMessage=Mock())
+    controller._window = SimpleNamespace(statusBar=lambda: bar)
+    snapshot = SimpleNamespace(
+        processed=0, readbacks={}, psd={}, coincidence=None,
+        error="OSError: corrupt recording", complete=False,
+    )
+    controller._session_analysis_replay_worker = SimpleNamespace(
+        take_snapshot=lambda: snapshot,
+    )
+
+    controller._advance_session_analysis_replay()
+
+    assert "Session analysis replay failed: OSError: corrupt recording" in caplog.text
+    status.setText.assert_called_once()
+    bar.showMessage.assert_called_once_with(status.setText.call_args.args[0])
+    controller._session_analysis_replay_timer.start.assert_not_called()
 
 
 def test_general_settings_read_first_channel_and_apply_to_every_channel() -> None:

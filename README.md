@@ -284,6 +284,15 @@ store explicit list-mode batch timing; older bundles fall back to complete DMA
 frame boundaries and hardware timestamps. Replay never rearms MCA DMA or the
 shared trigger.
 
+MCA/list-mode replay reads and analyzes batches in a background thread. Every
+recorded batch is processed in order; only display snapshots are coalesced (at
+most 10 updates per second), so changing tabs remains responsive. Hidden PSD and
+coincidence plots redraw the latest state when shown. PSD bin/range edits also
+recompute in the background, including after EOF; replay retains the PSD event
+batches needed for that re-analysis until it is unloaded. Exiting replay or
+loading another session cancels and joins the analysis worker before restoring
+the views. Read/analysis errors are logged and shown in the bottom status bar.
+
 Recorded Scope frames, IIR Current samples, and timestamped PSU/global/external-
 module telemetry play once at their captured host timing from one shared replay
 clock. The exact Scope viewer stream is preferred, with complete DMA frames used
@@ -296,9 +305,10 @@ displayed. Playback never loops or silently falls back to live data, and exiting
 replay leaves acquisition stopped while restarting background monitoring only
 when it was active before replay.
 
-Large numerical streams are consumed lazily from HDF5, so replay retains only
-the current Scope frame, MCA batch/readback, or Current sample window instead of
-materializing the complete capture in memory. External-module register schemas
+Large numerical streams are consumed lazily from HDF5 rather than materializing
+the complete capture up front. Scope, MCA polling, and Current retain only their
+current frame/readback or sample window; PSD retains processed batches for
+re-binning as described above. External-module register schemas
 (units, scaling, ranges, and register types) are saved with new sessions, and a
 configured module still appears in offline replay even if it produced no
 telemetry. Older bundles remain supported through value-based schema inference.

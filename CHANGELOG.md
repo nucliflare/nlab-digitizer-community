@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Offline session replay no longer monopolizes the GUI thread with per-batch
+  HDF5 reads, coincidence/PSD accumulation, Gaussian timing fits, and redraws.
+  An interruptible background worker processes every batch in recorded order;
+  a bounded latest-state mailbox throttles display updates to 10 Hz, and hidden
+  PSD/coincidence plots paint only when shown. PSD re-binning remains available
+  asynchronously during replay and at EOF. Replay exit/replacement joins the
+  worker before restoring views; analysis failures are logged and displayed.
+
 ### Added
 
 - Searchable offline parameter reference under Help → User Guide, shared with

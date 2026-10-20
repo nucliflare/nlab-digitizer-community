@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QKeyEvent, QShowEvent
 from PySide6.QtWidgets import QApplication, QWidget
 
 from nlab.analysis.dose_calibration import PsdDoseCalibrationSnapshot
@@ -50,6 +51,8 @@ class PSDController(QWidget):
         self._session_replay_batches: list[np.ndarray] | None = None
         self._session_replay_previous_settings: dict[str, object] | None = None
         self._session_replay_timer_was_active = False
+        self._session_replay_reconfigure: Callable[[PsdAccumulator], None] | None = None
+        self._session_replay_render_pending = False
 
         self.ui = Ui_PSDView()
         self.ui.setupUi(self)  # type: ignore[no-untyped-call]
@@ -285,7 +288,9 @@ class PSDController(QWidget):
         self._energy_roi.setBounds(self._accumulator.energy_range)
         self._energy_roi.setRegion((0.0, self._accumulator.energy_range[1] / 4.0))
         self._fom_widget.set_ratio_range(self._accumulator.ratio_range)
-        if self._session_replay_batches is not None:
+        if self._session_replay_reconfigure is not None:
+            self._session_replay_reconfigure(self._make_accumulator())
+        elif self._session_replay_batches is not None:
             try:
                 for events in self._session_replay_batches:
                     self._accumulator.add_events(events)
@@ -338,12 +343,48 @@ class PSDController(QWidget):
         self._capture_note = "Session replay complete; final PSD is held."
         self._update_status()
 
+    def session_replay_accumulator(self) -> PsdAccumulator:
+        """Return a fresh configured accumulator for exclusive worker ownership."""
+        return self._make_accumulator()
+
+    def use_session_replay_worker(self, reconfigure: Callable[[PsdAccumulator], None]) -> None:
+        self._session_replay_reconfigure = reconfigure
+
+    def display_session_replay_snapshot(
+        self, accumulator: PsdAccumulator, complete: bool,
+    ) -> None:
+        if self._session_replay_batches is None:
+            return
+        # A settings edit can race an already-published snapshot. Do not restore
+        # the old bins/ranges while the worker re-analyzes the retained batches.
+        if not accumulator.same_configuration(self._accumulator):
+            return
+        self._accumulator = accumulator
+        self._capture_note = (
+            "Session replay complete; final PSD is held."
+            if complete else "Session replay in progress."
+        )
+        self._session_replay_render_pending = True
+        if self.isVisible():
+            self._render()
+            self._session_replay_render_pending = False
+        else:
+            self._update_status()
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        if self._session_replay_render_pending:
+            self._render()
+            self._session_replay_render_pending = False
+
     def end_session_replay(self) -> None:
         """Remove replay products and restore the pre-replay analysis controls."""
         if self._session_replay_batches is None:
             return
         previous = self._session_replay_previous_settings
         restart_timer = self._session_replay_timer_was_active
+        self._session_replay_reconfigure = None
+        self._session_replay_render_pending = False
         self._session_replay_batches = None
         self._session_replay_previous_settings = None
         self._session_replay_timer_was_active = False

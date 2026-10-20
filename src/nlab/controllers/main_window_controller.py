@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import heapq
 import logging
 import socket
 from collections.abc import Callable, Iterator, Sequence
@@ -56,6 +55,7 @@ from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
 from nlab.views.panel_status import PanelStatus, PanelStatusPresenter
 from nlab.views.psd_readback_dialog import PsdReadbackDialog
 from nlab.views.waveform_analysis_dialog import WaveformAnalysisDialog
+from nlab.workers.session_replay_worker import SessionAnalysisReplayThread
 
 if TYPE_CHECKING:
     from nlab_modbus.core.base_modbus_device import BaseModbusDevice
@@ -64,7 +64,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_REPLAY_ANALYSIS_EVENTS_PER_TICK = 64
 _REPLAY_SCOPE_FRAMES_PER_TICK = 64
 _REPLAY_CURRENT_SAMPLES_PER_TICK = 4096
 _REPLAY_TELEMETRY_EVENTS_PER_TICK = 1024
@@ -220,14 +219,9 @@ class MainWindowController:
         self._session_replay_started_ns = 0
         self._session_replay_psd_channels: set[int] = set()
         self._session_replay_coincidence_active = False
-        self._session_analysis_replay_events: list[McaReplayBatch | McaReplayReadback] = []
-        self._session_analysis_replay_iterator: Iterator[
-            McaReplayBatch | McaReplayReadback
-        ] | None = None
-        self._session_analysis_replay_next: McaReplayBatch | McaReplayReadback | None = None
         self._session_analysis_replay_index = 0
-        self._session_analysis_replay_origin_ns = 0
-        self._session_analysis_replay_started_ns = 0
+        self._session_analysis_replay_worker: SessionAnalysisReplayThread | None = None
+        self._session_analysis_replay_complete = False
         self._session_analysis_replay_mca_channels: set[int] = set()
         self._session_analysis_replay_coincidence_channels: dict[int, int] = {}
         self._session_analysis_replay_coincidence_intervals: list[
@@ -1689,6 +1683,7 @@ class MainWindowController:
         self._session_replay_psd_channels = replayed_psd
 
         coincidence_channels: dict[int, int] = {}
+        settings = None
         interval_reader = getattr(replay, "coincidence_intervals", None)
         coincidence_intervals = interval_reader() if interval_reader is not None else []
         explicit_timing_reader = getattr(replay, "has_explicit_mca_batch_timing", None)
@@ -1745,137 +1740,76 @@ class MainWindowController:
             batch_iterator = iter(
                 item for item in legacy_batches if item.channel in used_batch_channels
             )
-        def replay_key(
-            item: McaReplayBatch | McaReplayReadback,
-        ) -> tuple[int, int, int, int]:
-            return (
-                item.host_monotonic_ns,
-                0 if isinstance(item, McaReplayBatch) else 1,
-                item.channel,
-                item.sequence,
-            )
-
-        iterator = heapq.merge(readback_iterator, batch_iterator, key=replay_key)
-        first = next(iterator, None)
-        if first is None:
-            return
         origin, started = self._ensure_session_replay_clock(
-            replay,
-            first.host_monotonic_ns,
+            replay, replay.manifest.get("started_monotonic_ns", 0),
         )
-        self._session_analysis_replay_events = []
-        self._session_analysis_replay_iterator = iterator
-        self._session_analysis_replay_next = first
-        self._session_analysis_replay_index = 0
-        self._session_analysis_replay_origin_ns = origin
-        self._session_analysis_replay_started_ns = started
-        self._advance_session_analysis_replay()
+        worker = SessionAnalysisReplayThread(
+            (readback_iterator, batch_iterator),
+            origin_ns=origin,
+            started_ns=started,
+            psd={
+                controller.channel: controller.session_replay_accumulator()
+                for controller in psd_controllers
+                if controller.channel in replayed_psd
+            },
+            coincidence_settings=settings if coincidence_channels else None,
+            coincidence_channels=coincidence_channels,
+            coincidence_intervals=self._session_analysis_replay_coincidence_intervals,
+        )
+        for controller in psd_controllers:
+            if controller.channel in replayed_psd:
+                controller.use_session_replay_worker(
+                    partial(worker.request_psd_configuration, controller.channel)
+                )
+        self._session_analysis_replay_worker = worker
+        self._session_analysis_replay_complete = False
+        self._session_analysis_replay_readback_sequences: dict[int, int] = {}
+        worker.start()
+        self._session_analysis_replay_timer.start(100)
 
     def _advance_session_analysis_replay(self) -> None:
-        event = getattr(self, "_session_analysis_replay_next", None)
-        iterator = getattr(self, "_session_analysis_replay_iterator", None)
-        if event is None:
-            legacy_events = getattr(self, "_session_analysis_replay_events", [])
-            legacy_index = getattr(self, "_session_analysis_replay_index", 0)
-            if legacy_index < len(legacy_events):
-                event = legacy_events[legacy_index]
-                iterator = iter(legacy_events[legacy_index + 1 :])
-                self._session_analysis_replay_iterator = iterator
-        if getattr(self, "_session_replay", None) is None or event is None:
+        """Paint a coalesced snapshot; never read or analyze a batch on Qt."""
+        worker = getattr(self, "_session_analysis_replay_worker", None)
+        if worker is None or getattr(self, "_session_replay", None) is None:
             return
-        elapsed_ns = max(0, monotonic_ns() - self._session_analysis_replay_started_ns)
-        mca_controllers = {
-            controller.channel: controller
-            for controller in getattr(self, "_mca_controllers", [])
-        }
-        psd_controllers = {
-            controller.channel: controller
-            for controller in getattr(self, "_psd_controllers", [])
-            if controller.channel in self._session_replay_psd_channels
-        }
-        coincidence = getattr(self, "_coincidence_controller", None)
-        latest_readback: dict[int, McaReplayReadback] = {}
-        processed = 0
-        while event is not None and processed < _REPLAY_ANALYSIS_EVENTS_PER_TICK:
-            recorded_elapsed_ns = max(
-                0,
-                event.host_monotonic_ns - self._session_analysis_replay_origin_ns,
-            )
-            if recorded_elapsed_ns > elapsed_ns:
-                break
-            if isinstance(event, McaReplayReadback):
-                latest_readback[event.channel] = event
-            else:
-                psd = psd_controllers.get(event.channel)
-                if psd is not None:
-                    try:
-                        psd.display_session_replay_events(event.events)
-                    except Exception:
-                        log.exception("PSD replay batch failed for channel %d", event.channel)
-                coincidence_channel = self._session_analysis_replay_coincidence_channels.get(
-                    event.channel
+        snapshot = worker.take_snapshot()
+        if snapshot is not None:
+            self._session_analysis_replay_index = snapshot.processed
+            for controller in getattr(self, "_mca_controllers", []):
+                readback = snapshot.readbacks.get(controller.channel)
+                if readback is not None:
+                    sequences = self._session_analysis_replay_readback_sequences
+                    if sequences.get(controller.channel) == readback.sequence:
+                        continue
+                    sequences[controller.channel] = readback.sequence
+                    controller.display_session_replay_readback(readback.readback)
+            for controller in getattr(self, "_psd_controllers", []):
+                accumulator = snapshot.psd.get(controller.channel)
+                if accumulator is not None:
+                    controller.display_session_replay_snapshot(accumulator, snapshot.complete)
+            coincidence = getattr(self, "_coincidence_controller", None)
+            if coincidence is not None and snapshot.coincidence is not None:
+                coincidence.display_session_replay_snapshot(
+                    snapshot.coincidence, snapshot.timing_fit, snapshot.complete,
                 )
-                intervals = getattr(
-                    self,
-                    "_session_analysis_replay_coincidence_intervals",
-                    None,
-                )
-                inside_coincidence = intervals is None or any(
-                    start <= event.host_monotonic_ns
-                    and (end is None or event.host_monotonic_ns <= end)
-                    for start, end in intervals
-                )
-                if (
-                    coincidence is not None
-                    and coincidence_channel is not None
-                    and inside_coincidence
-                ):
-                    try:
-                        coincidence.display_session_replay_events(
-                            coincidence_channel,
-                            event.events,
-                        )
-                    except Exception as exc:
-                        log.warning(
-                            "Progressive coincidence replay failed: %s",
-                            exc,
-                            exc_info=True,
-                        )
-                        self._session_analysis_replay_coincidence_channels = {}
-                        status = getattr(coincidence, "status", None)
-                        if status is not None:
-                            status.setText(f"Session coincidence replay unavailable: {exc}")
-            self._session_analysis_replay_index += 1
-            processed += 1
-            event = next(iterator, None) if iterator is not None else None
-        self._session_analysis_replay_next = event
-        for channel, readback in latest_readback.items():
-            controller = mca_controllers.get(channel)
-            if controller is not None:
-                controller.display_session_replay_readback(readback.readback)
-
-        if event is None:
-            for channel in self._session_analysis_replay_mca_channels:
-                controller = mca_controllers.get(channel)
-                if controller is not None:
-                    controller.finish_session_replay()
-            for controller in psd_controllers.values():
-                controller.finish_session_replay()
-            if coincidence is not None and self._session_replay_coincidence_active:
-                try:
-                    coincidence.finish_session_replay()
-                except Exception as exc:
-                    log.warning("Finalizing coincidence replay failed: %s", exc, exc_info=True)
-            log.info("MCA/PSD/coincidence session replay reached EOF; final views are held")
-            return
-
-        next_elapsed_ns = max(
-            0,
-            event.host_monotonic_ns - self._session_analysis_replay_origin_ns,
-        )
-        remaining_ns = max(0, next_elapsed_ns - elapsed_ns)
-        delay_ms = max(1, (remaining_ns + 999_999) // 1_000_000)
-        self._session_analysis_replay_timer.start(min(delay_ms, 2_147_000_000))
+            if snapshot.error is not None:
+                message = f"Session analysis replay failed: {snapshot.error}"
+                log.error(message)
+                self._window.statusBar().showMessage(message)
+                if coincidence is not None and self._session_replay_coincidence_active:
+                    coincidence.status.setText(message)
+                for controller in getattr(self, "_psd_controllers", []):
+                    if controller.channel in self._session_replay_psd_channels:
+                        controller.status.setText(message)
+                return
+            if snapshot.complete and not self._session_analysis_replay_complete:
+                self._session_analysis_replay_complete = True
+                for controller in getattr(self, "_mca_controllers", []):
+                    if controller.channel in self._session_analysis_replay_mca_channels:
+                        controller.finish_session_replay()
+                log.info("MCA/PSD/coincidence replay reached EOF; final views are held")
+        # Continue polling at EOF to service asynchronous PSD re-binning.
+        self._session_analysis_replay_timer.start(100)
 
     def _start_session_scope_replay(
         self,
@@ -2275,6 +2209,11 @@ class MainWindowController:
         analysis_timer = getattr(self, "_session_analysis_replay_timer", None)
         if analysis_timer is not None:
             analysis_timer.stop()
+        analysis_worker = getattr(self, "_session_analysis_replay_worker", None)
+        if analysis_worker is not None:
+            analysis_worker.request_stop()
+            analysis_worker.join()
+            self._session_analysis_replay_worker = None
         telemetry_timer = getattr(self, "_session_telemetry_replay_timer", None)
         if telemetry_timer is not None:
             telemetry_timer.stop()
@@ -2282,7 +2221,6 @@ class MainWindowController:
         if current_timer is not None:
             current_timer.stop()
         for iterator_name in (
-            "_session_analysis_replay_iterator",
             "_session_scope_replay_iterator",
             "_session_current_replay_iterator",
             "_session_telemetry_replay_iterator",
@@ -2385,12 +2323,9 @@ class MainWindowController:
         self._session_replay_started_ns = 0
         self._session_replay_psd_channels = set()
         self._session_replay_coincidence_active = False
-        self._session_analysis_replay_events = []
-        self._session_analysis_replay_iterator = None
-        self._session_analysis_replay_next = None
         self._session_analysis_replay_index = 0
-        self._session_analysis_replay_origin_ns = 0
-        self._session_analysis_replay_started_ns = 0
+        self._session_analysis_replay_complete = False
+        self._session_analysis_replay_readback_sequences = {}
         self._session_analysis_replay_mca_channels = set()
         self._session_analysis_replay_coincidence_channels = {}
         self._session_analysis_replay_coincidence_intervals = None

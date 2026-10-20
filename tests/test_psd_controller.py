@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 import numpy as np
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QKeyEvent
@@ -122,4 +124,42 @@ def test_session_replay_rebuilds_psd_and_restores_live_processing(qtbot: QtBot) 
 
     assert controller._timer.isActive()
     assert controller.ui.spinEnergyBins.value() == original_bins
+    controller.stop_processing()
+
+
+def test_worker_replay_defers_hidden_psd_and_rebins_asynchronously(qtbot: QtBot) -> None:
+    controller = PSDController(McaEventBuffer(), channel=0)
+    qtbot.addWidget(controller)
+    controller.begin_session_replay(settings={"energy_bins": 64, "ratio_bins": 32})
+    callback = Mock()
+    controller.use_session_replay_worker(callback)
+    accumulator = controller.session_replay_accumulator()
+    events = np.zeros(2, dtype=_LM_EVENT_DTYPE)
+    events["trapezoid_energy"] = [1000, 2000]
+    events["charge_energy"] = [500, 1000]
+    accumulator.add_events(events)
+    render = Mock(wraps=controller._render)
+    controller._render = render
+
+    controller.display_session_replay_snapshot(accumulator.snapshot(), True)
+
+    render.assert_not_called()
+    assert controller._accumulator.statistics.received == 2
+    controller.show()
+    assert render.call_count == 1
+    controller.hide()
+    controller.ui.spinEnergyBins.setValue(128)
+    controller._on_analysis_settings_changed()
+    callback.assert_called_once()
+    requested = callback.call_args.args[0]
+    assert requested.energy_bins == 128
+    assert requested.statistics.received == 0
+    # Reject the old configuration while worker re-binning is pending.
+    controller.display_session_replay_snapshot(accumulator.snapshot(), True)
+    assert controller._accumulator.energy_bins == 128
+    requested.add_events(events)
+    controller.display_session_replay_snapshot(requested.snapshot(), True)
+    assert controller._accumulator.statistics.received == 2
+    controller.end_session_replay()
+    assert controller._session_replay_reconfigure is None
     controller.stop_processing()

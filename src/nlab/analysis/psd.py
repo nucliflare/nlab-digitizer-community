@@ -16,6 +16,7 @@ the two populations "below cut" and "above cut", not neutron/gamma.
 
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass
 from typing import cast
 
@@ -81,6 +82,21 @@ class PsdAccumulator:
     def reset(self) -> None:
         self.matrix = np.zeros((self.energy_bins, self.ratio_bins), dtype=np.uint64)
         self.statistics = PsdStatistics()
+
+    def snapshot(self) -> PsdAccumulator:
+        """Detach a read-only matrix for presentation on another thread."""
+        result = copy(self)
+        result.matrix = self.matrix.copy()
+        result.matrix.setflags(write=False)
+        return result
+
+    def same_configuration(self, other: PsdAccumulator) -> bool:
+        return (
+            self.energy_bins == other.energy_bins
+            and self.ratio_bins == other.ratio_bins
+            and self.energy_right_shift == other.energy_right_shift
+            and self.ratio_range == other.ratio_range
+        )
 
     @staticmethod
     def _energy_fields(events: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

@@ -337,6 +337,29 @@ def test_session_replay_rebuilds_coincidence_products(
     assert controller._display_timer.isActive()
 
 
+def test_worker_snapshot_waits_for_visibility_without_gui_refitting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _make_controller(monkeypatch)
+    settings = CoincidenceSettings()
+    controller.begin_session_replay(settings)
+    fit = Mock()
+    monkeypatch.setattr(coincidence_module, "fit_coincidence_peak", fit)
+    render = Mock(wraps=controller._render_session_snapshot)
+    monkeypatch.setattr(controller, "_render_session_snapshot", render)
+    snapshot = CoincidenceAnalyzer(settings).snapshot()
+
+    controller.display_session_replay_snapshot(snapshot, None, True)
+
+    render.assert_not_called()
+    assert controller._last_rendered_snapshot is snapshot
+    controller.show()
+    render.assert_called_once_with(snapshot, settings, calculate_fit=False, timing_fit=None)
+    fit.assert_not_called()
+    controller.hide()
+    controller.end_session_replay()
+
+
 def test_all_coincidence_plots_use_independent_axis_modifier_zoom(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

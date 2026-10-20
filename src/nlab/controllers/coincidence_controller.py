@@ -14,6 +14,7 @@ from uuid import uuid4
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QRectF, QSettings, Qt, QTimer, Signal
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -121,6 +122,9 @@ class CoincidenceController(QWidget):
         self._session_replay_previous_settings: dict[str, object] | None = None
         self._session_replay_timer_was_active = False
         self._session_replay_analyzer: CoincidenceAnalyzer | None = None
+        self._session_replay_pending: tuple[
+            CoincidenceSnapshot, CoincidencePeakFit | None,
+        ] | None = None
         self._analysis_epochs: list[dict[str, object]] = []
         self._firmware_identity_snapshot: list[dict[str, object]] = []
         self._matrix_exports: list[str] = []
@@ -1228,6 +1232,9 @@ class CoincidenceController(QWidget):
         self,
         snapshot: CoincidenceSnapshot,
         settings: CoincidenceSettings,
+        *,
+        calculate_fit: bool = True,
+        timing_fit: CoincidencePeakFit | None = None,
     ) -> None:
         pair_mode = settings.operator == "AND" and not (settings.not_ch0 or settings.not_ch1)
         if pair_mode:
@@ -1236,7 +1243,10 @@ class CoincidenceController(QWidget):
                 + np.arange(len(snapshot.delay_counts) + 1) * settings.bin_width_ns,
                 snapshot.delay_counts,
             )
-            self._render_timing_fit(snapshot, settings)
+            if calculate_fit:
+                self._render_timing_fit(snapshot, settings)
+            else:
+                self._display_timing_fit(timing_fit, settings)
         else:
             self.delay_fit_curve.setData([], [])
             self._timing_fit = None
@@ -1296,6 +1306,34 @@ class CoincidenceController(QWidget):
         self._render_session_snapshot(analyzer.snapshot(), self._current_settings)
         self.status.setText("Session coincidence replay complete; recorded result is held.")
 
+    def display_session_replay_snapshot(
+        self, snapshot: CoincidenceSnapshot, timing_fit: CoincidencePeakFit | None,
+        complete: bool,
+    ) -> None:
+        """Hold the worker's latest state; hidden plots need no painting or fit."""
+        if self._session_replay_analyzer is None:
+            return
+        self._last_rendered_snapshot = snapshot
+        self._session_replay_pending = (snapshot, timing_fit)
+        if self.isVisible():
+            self._paint_pending_replay_snapshot()
+        self.status.setText(
+            "Session coincidence replay complete; recorded result is held."
+            if complete else "Session coincidence replay in progress."
+        )
+
+    def _paint_pending_replay_snapshot(self) -> None:
+        pending, self._session_replay_pending = self._session_replay_pending, None
+        if pending is not None and self._session_replay_analyzer is not None:
+            self._render_session_snapshot(
+                pending[0], self._session_replay_analyzer.settings,
+                calculate_fit=False, timing_fit=pending[1],
+            )
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        self._paint_pending_replay_snapshot()
+
     def end_session_replay(self) -> None:
         """Restore the pre-replay coincidence controls and live renderer."""
         previous = self._session_replay_previous_settings
@@ -1303,6 +1341,7 @@ class CoincidenceController(QWidget):
             return
         restart_timer = self._session_replay_timer_was_active
         self._session_replay_analyzer = None
+        self._session_replay_pending = None
         self._session_replay_previous_settings = None
         self._session_replay_timer_was_active = False
         self.apply_configuration_settings(previous)
@@ -1316,6 +1355,11 @@ class CoincidenceController(QWidget):
         settings: CoincidenceSettings,
     ) -> None:
         fit = fit_coincidence_peak(snapshot.delay_counts, settings)
+        self._display_timing_fit(fit, settings)
+
+    def _display_timing_fit(
+        self, fit: CoincidencePeakFit | None, settings: CoincidenceSettings,
+    ) -> None:
         self._timing_fit = fit
         if fit is None:
             self.delay_fit_curve.setData([], [])
