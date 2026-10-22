@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 
+import numpy as np
 from PySide6.QtCore import Signal
 
 from nlab.analysis.waveform_file import MappedWaveformFile, WaveformFileIndex
@@ -86,6 +87,7 @@ class WaveformPsdWorker(BaseWorker):
                     complete=batch.complete,
                     stored_long=batch.long_gate,
                     stored_short=batch.short_gate,
+                    frame_indices=(processed + np.arange(count, dtype=np.int64)) * self._stride,
                 )
                 # NDMA batches can be zero-copy mmap views. Release the final
                 # view before ``reader.close()`` invalidates the mapping.

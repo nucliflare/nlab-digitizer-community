@@ -5,21 +5,24 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QThread
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread
+from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QApplication,
+    QBoxLayout,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
-    QGridLayout,
+    QFormLayout,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
+    QMenu,
+    QMenuBar,
     QMessageBox,
-    QPushButton,
     QSizePolicy,
     QSpinBox,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -28,7 +31,10 @@ from nlab.analysis.capture_metadata import capture_digitizer_info
 from nlab.analysis.psd import PsdAccumulator
 from nlab.analysis.psd_file import PsdEventFileInfo, inspect_psd_event_file
 from nlab.analysis.psd_report import PsdReportRequest, export_psd_report
+from nlab.help.context import HelpContext
+from nlab.views.help_dialog import HelpDialog
 from nlab.views.offline_psd_plot import OfflinePsdPlot
+from nlab.views.tooltips import wrap_tooltip, wrap_widget_tooltips
 from nlab.workers.psd_file_worker import PsdFileWorker
 
 log = logging.getLogger(__name__)
@@ -40,7 +46,7 @@ class PsdReadbackDialog(QDialog):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle(_WINDOW_TITLE)
+        self._set_current_file(None)
         self.setModal(False)
         self.resize(1180, 760)
         self._thread: QThread | None = None
@@ -49,6 +55,8 @@ class PsdReadbackDialog(QDialog):
         self._source_info: PsdEventFileInfo | None = None
         self._last_accumulator: PsdAccumulator | None = None
         self._processed_events = 0
+        self._menu_control_actions: dict[QAbstractButton, QAction] = {}
+        self._help_dialog: HelpDialog | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -58,18 +66,20 @@ class PsdReadbackDialog(QDialog):
             "The PSD ratio is (Qlong - Qshort) / Qlong. Press F1 for parameter help."
         )
 
-        settings = QGroupBox("File and histogram settings", self)
+        self.plot_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.settings_panel = QWidget(self)
+        self.settings_panel.setMinimumWidth(210)
+        self.settings_panel.setMaximumWidth(300)
+        sidebar = QVBoxLayout(self.settings_panel)
+        sidebar.setContentsMargins(0, 0, 0, 0)
+        self.histogram_settings = settings = QGroupBox("Histogram settings", self.settings_panel)
         settings.setSizePolicy(
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Fixed,
         )
-        grid = QGridLayout(settings)
-        grid.setContentsMargins(8, 6, 8, 6)
-        self.load_button = QPushButton("Load event file...", self)
-        self.cancel_button = QPushButton("Cancel", self)
-        self.cancel_button.setEnabled(False)
-        grid.addWidget(self.load_button, 0, 0)
-        grid.addWidget(self.cancel_button, 0, 1)
+        form = QFormLayout(settings)
+        form.setContentsMargins(8, 8, 8, 8)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
         self.energy_bins = QSpinBox(self)
         self.energy_bins.setRange(16, 8192)
@@ -87,49 +97,122 @@ class PsdReadbackDialog(QDialog):
         self.ratio_max.setRange(-10.0, 10.0)
         self.ratio_max.setDecimals(4)
         self.ratio_max.setValue(1.0)
-        for text, field, row, column in (
-            ("Energy bins:", self.energy_bins, 0, 2),
-            ("Ratio bins:", self.ratio_bins, 0, 4),
-            ("Energy shift (bits):", self.energy_shift, 0, 6),
-            ("Ratio minimum:", self.ratio_min, 1, 2),
-            ("Ratio maximum:", self.ratio_max, 1, 4),
+        for text, field in (
+            ("Energy bins:", self.energy_bins),
+            ("Ratio bins:", self.ratio_bins),
+            ("Energy shift (bits):", self.energy_shift),
+            ("Ratio minimum:", self.ratio_min),
+            ("Ratio maximum:", self.ratio_max),
         ):
             label = QLabel(text, self)
             label.setBuddy(field)
-            grid.addWidget(label, row, column)
-            grid.addWidget(field, row, column + 1)
-        self.current_file_label = QLabel("Current file: No file loaded", self)
-        self.current_file_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.current_file_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self.current_file_label.setWordWrap(True)
-        grid.addWidget(self.current_file_label, 2, 0, 1, 9)
-        grid.setColumnStretch(8, 1)
-        root.addWidget(settings)
+            form.addRow(label, field)
+        sidebar.addWidget(settings)
 
         self.plot = OfflinePsdPlot(self)
-        root.addWidget(self.plot, 1)
-        bottom = QHBoxLayout()
+        self.display_settings = QGroupBox("Display", self.settings_panel)
+        self.display_settings.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        display = QVBoxLayout(self.display_settings)
+        plot_layout = self.plot.layout()
+        assert plot_layout is not None
+        plot_layout.removeWidget(self.plot.controls_widget)
+        self.plot.controls_layout.setDirection(QBoxLayout.Direction.TopToBottom)
+        display.addWidget(self.plot.controls_widget)
+        self.plot.controls_widget.show()
+        sidebar.addWidget(self.display_settings)
+        sidebar.addStretch(1)
+        self.plot_splitter.addWidget(self.settings_panel)
+        self.plot_splitter.addWidget(self.plot)
+        self.plot_splitter.setCollapsible(0, False)
+        self.plot_splitter.setCollapsible(1, False)
+        self.plot_splitter.setStretchFactor(0, 0)
+        self.plot_splitter.setStretchFactor(1, 1)
+        self.plot_splitter.setSizes([240, 920])
+        root.addWidget(self.plot_splitter, 1)
         self.status = QLabel("Select an event file to begin.", self)
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.status.setWordWrap(True)
-        bottom.addWidget(self.status, 1)
-        self.report_button = QPushButton("Download report...", self)
-        self.report_button.setEnabled(False)
-        self.report_button.setToolTip(
-            "Save a PDF report and the plotted PSD/FOM data as CSV files."
-        )
-        bottom.addWidget(self.report_button)
-        self.close_button = QPushButton("Close", self)
-        bottom.addWidget(self.close_button)
-        root.addLayout(bottom)
+        root.addWidget(self.status)
 
-        self.load_button.clicked.connect(self._choose_file)
-        self.cancel_button.clicked.connect(self._cancel)
-        self.report_button.clicked.connect(self._download_report)
+        self._build_menu_bar(root)
         self.plot.fom_widget.fit_changed.connect(self._fit_changed)
-        self.close_button.clicked.connect(self.reject)
+        wrap_widget_tooltips(self)
+
+    def _build_menu_bar(self, root: QVBoxLayout) -> None:
+        self.menu_bar = QMenuBar(self)
+        self.menu_bar.setNativeMenuBar(False)
+        root.setMenuBar(self.menu_bar)
+        self.file_menu = self.menu_bar.addMenu("&File")
+        self.load_action = self.file_menu.addAction("Load event file...")
+        self.load_action.setShortcut(QKeySequence("Ctrl+O"))
+        self.load_action.triggered.connect(self._choose_file)
+        self.cancel_action = self.file_menu.addAction("Cancel loading")
+        self.cancel_action.setEnabled(False)
+        self.cancel_action.triggered.connect(self._cancel)
+        self.file_menu.addSeparator()
+        self.report_action = self.file_menu.addAction("Download report...")
+        self.report_action.setShortcut(QKeySequence("Ctrl+S"))
+        self.report_action.setEnabled(False)
+        self.report_action.setToolTip(wrap_tooltip(
+            "Save a PDF report and the plotted PSD/FOM data as CSV files."
+        ))
+        self.report_action.triggered.connect(self._download_report)
+        self.file_menu.addSeparator()
+        self.close_action = self.file_menu.addAction("Close workbench")
+        self.close_action.setShortcut(QKeySequence("Ctrl+W"))
+        self.close_action.triggered.connect(self.reject)
+        for action in (self.load_action, self.report_action, self.close_action):
+            action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+
+        self.analysis_menu = self.menu_bar.addMenu("&Analysis")
+        self.fit_action = self._menu_control(
+            self.analysis_menu, "Fit double Gaussian", self.plot.fom_widget.fit_button,
+        )
+        self.copy_action = self._menu_control(
+            self.analysis_menu, "Copy fit table", self.plot.fom_widget.copy_button,
+        )
+        self.view_menu = self.menu_bar.addMenu("&View")
+        self.roi_action = self._menu_control(self.view_menu, "Show PSD ROI", self.plot.roi_checkbox)
+        self.guides_action = self._menu_control(
+            self.view_menu, "FOM fit guides", self.plot.fom_widget.guides_checkbox,
+        )
+        self.help_menu = self.menu_bar.addMenu("&Help")
+        self.guide_action = self.help_menu.addAction("PSD readback guide...")
+        self.guide_action.triggered.connect(self._show_readback_help)
+        # Retain header-action wrappers as well as menus for PySide ownership.
+        self._menu_headers = self.menu_bar.actions()
+
+    def _menu_control(self, menu: QMenu, text: str, control: QAbstractButton) -> QAction:
+        action = menu.addAction(text)
+        action.setEnabled(control.isEnabled())
+        action.setCheckable(control.isCheckable())
+        action.setChecked(control.isChecked())
+        action.setToolTip(control.toolTip())
+        action.triggered.connect(control.click)
+        control.toggled.connect(action.setChecked)
+        self._menu_control_actions[control] = action
+        control.installEventFilter(self)
+        return action
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt API
+        if isinstance(watched, QAbstractButton) and event.type() == QEvent.Type.EnabledChange:
+            action = self._menu_control_actions.get(watched)
+            if action is not None:
+                action.setEnabled(watched.isEnabled())
+        return super().eventFilter(watched, event)
+
+    def _show_readback_help(self) -> None:
+        try:
+            if self._help_dialog is None:
+                self._help_dialog = HelpDialog(self)
+            self._help_dialog.show_topic(HelpContext("psd-readback"))
+            self._help_dialog.show()
+            self._help_dialog.raise_()
+            self._help_dialog.activateWindow()
+        except Exception:
+            log.exception("Could not open PSD event readback help")
+            QMessageBox.warning(self, "Help unavailable", "The bundled help could not be loaded. "
+                                "See System Log for details.")
 
     def _choose_file(self) -> None:
         folder = str(QSettings().value("analysis/psd_event_folder", "measurements"))
@@ -235,8 +318,8 @@ class PsdReadbackDialog(QDialog):
             thread.deleteLater()
 
     def _set_busy(self, busy: bool) -> None:
-        self.load_button.setEnabled(not busy)
-        self.cancel_button.setEnabled(busy)
+        self.load_action.setEnabled(not busy)
+        self.cancel_action.setEnabled(busy)
         for control in (
             self.energy_bins,
             self.ratio_bins,
@@ -245,24 +328,18 @@ class PsdReadbackDialog(QDialog):
             self.ratio_max,
         ):
             control.setEnabled(not busy)
-        self._update_report_button()
+        self._update_report_action()
 
     def _set_current_file(self, path: Path | None) -> None:
-        if path is None:
-            self.current_file_label.setText("Current file: No file loaded")
-            self.current_file_label.setToolTip("")
-            self.setWindowTitle(_WINDOW_TITLE)
-            return
-        path_text = str(path)
-        self.current_file_label.setText(f"Current file: {path_text}")
-        self.current_file_label.setToolTip(path_text)
-        self.setWindowTitle(f"{_WINDOW_TITLE} — {path.name}")
+        self.setWindowFilePath(str(path) if path is not None else "")
+        filename = path.name if path is not None else "No file loaded"
+        self.setWindowTitle(f"{_WINDOW_TITLE} — {filename}")
 
     def _fit_changed(self, _fit: object) -> None:
-        self._update_report_button()
+        self._update_report_action()
 
-    def _update_report_button(self) -> None:
-        self.report_button.setEnabled(
+    def _update_report_action(self) -> None:
+        self.report_action.setEnabled(
             self._thread is None
             and self._source_info is not None
             and self._last_accumulator is not None

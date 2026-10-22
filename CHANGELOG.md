@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Waveform workbench source/frame/sample-period controls grouped in a scrollable
+  left sidebar; redundant Load/Close file buttons and the top control row removed.
+  File-menu commands retain their shortcuts and busy-state guards.
+- PSD Event Readback and Waveform Analysis Workbench current filename/no-file
+  state in the window title instead
+  of a separate label row, reclaiming vertical space for plots.
+- PSD Event Readback left-hand settings sidebar for histogram spinners and
+  matrix-scale/PSD-cut/ROI controls, freeing plot height while retaining menu/F1
+  synchronization and a resizable horizontal split.
+- Energy Calibration and MCA Peak Analysis menu bars replacing command-button
+  rows. Includes File/Analysis/View/Help commands, peak-reference management,
+  synchronized peak counts-scale/panel choices, local shortcuts and bundled help,
+  while preserving calibration guards and asynchronous fit/cancellation behavior.
+- PSD Event Readback File/Analysis/View/Help menu bar for file operations,
+  Gaussian fitting, fit-table copy, synchronized ROI/guide visibility, and bundled
+  help. Window-local shortcuts replace the separate file-action toolbar while
+  preserving existing action availability and the compact histogram settings.
+- Green main-window status-bar badge listing channels with active Scope/MCA
+  measurements, including DMA/PSD/coincidence. Tracks start/ready/stop/completion
+  without extra hardware polling, deduplicates channels, qualifies multiple boards,
+  and remains separate from offline analysis/replay and transient status messages.
+- Wrapped waveform/PSD tooltips, including long file paths and menu hints, to
+  readable multiline text while preserving complete explanations and F1 help.
+- File-menu selected waveform-cluster export to native Scope NDMA binary (with
+  JSON provenance), ROOT TTree, or HDF5, retaining original samples/timestamps,
+  source-frame indices and PSD coordinates/settings. Includes bounded sample
+  batches, background progress/cancellation, exclusive output creation, cleanup,
+  and variable-length CAEN waveform support in ROOT/HDF5.
+- Waveform Analysis Workbench menu bar with File, Analysis, Selection, View, and
+  bundled Help actions; window-local file/reconstruction shortcuts and menu state
+  synchronized with the existing controls and operation availability.
+- Toggleable selected-cluster average waveform overlay with cancellable background
+  reading, per-event baseline removal and reconstruction polarity, preserving
+  sample timing/amplitude and using the shared prefix for variable-length records.
+- Independent visibility switches for offline PSD ROI/cut overlays and waveform
+  cluster-selection controls/overlays. Hiding them preserves cuts, filters, and
+  match position. Rectangle/polygon outlines and handles are black, including
+  on hover, for improved map contrast.
+- Waveform PSD workbench rectangle/polygon cluster selection with exact event-
+  coordinate cuts, original source-frame tracking, matching-event navigation,
+  current-event map marker, and clear/empty/stale-selection handling. Only compact
+  per-event coordinates are retained; waveforms remain file-backed. Manual
+  regions are not automatic particle-identification labels.
+- Raw-waveform negative-PSD diagnostic script with signed integrations, mean/
+  median baseline comparison, explicit offline gates, pulse and cumulative-charge
+  plots, and reproducible numerical summaries; source captures remain read-only.
+- Thin Jupyter/VS Code cell script `notebooks/explore_mca_psd.py` for browsing
+  ROOT list-mode branches, configuration/schema metadata, energy spectra, PSD
+  maps, and ratio projections with user-selected ranges. Starts with a bounded
+  preview and preserves raw integer data and the source file.
+
 ## [0.7.5] — 2026-10-20
 
 ### Fixed

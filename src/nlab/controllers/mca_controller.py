@@ -129,6 +129,7 @@ class MCAController(QWidget):
     coincidence_stop_requested = Signal()
     energy_calibration_changed = Signal(int, object)
     session_readback = Signal(int, object)
+    measurement_active_changed = Signal(bool)
 
     def __init__(
         self,
@@ -160,6 +161,7 @@ class MCAController(QWidget):
         self._dma_filepath: Path | None = None
         self._dma_counter = 0
         self._connection_lost = False
+        self._measurement_active = False
         self._event_buffer = event_buffer or McaEventBuffer()
         self._session_capture_enabled = False
         self._replay_hardware_interlocked = False
@@ -205,6 +207,18 @@ class MCAController(QWidget):
     @property
     def channel(self) -> int:
         return self._channel
+
+    @property
+    def measurement_active(self) -> bool:
+        """Last lifecycle-confirmed live acquisition state, not a hardware query."""
+        return bool(getattr(self, "_measurement_active", False))
+
+    def _set_measurement_active(self, active: bool) -> None:
+        if getattr(self, "_measurement_active", False) != active:
+            self._measurement_active = active
+            signal = getattr(self, "measurement_active_changed", None)
+            if signal is not None:
+                signal.emit(active)
 
     @property
     def channel_label(self) -> str:
@@ -1601,6 +1615,7 @@ class MCAController(QWidget):
             # driver accepts enable=0 even when a configuration write has
             # just failed with EBUSY.
             log.exception("MCA ch%d: measurement start failed", self._channel)
+            MCAController._set_measurement_active(self, False)
             self._stop_worker()
             try:
                 self._mca.stop()
@@ -1627,6 +1642,7 @@ class MCAController(QWidget):
         self._mca.stop()
         self._mca.set_time_limit(self.ui.spinTimeLimit.value())
         self._mca.start()
+        MCAController._set_measurement_active(self, True)
         self.ui.btnStop.setEnabled(True)
         self._start_worker()
         log.info(
@@ -1657,6 +1673,7 @@ class MCAController(QWidget):
             self._stop_worker()
             self._mca.stop()
 
+        MCAController._set_measurement_active(self, False)
         self.ui.btnStart.setChecked(False)
         self.ui.btnStart.setEnabled(self._dma_worker is None)
         self.ui.btnStop.setEnabled(False)
@@ -1673,6 +1690,7 @@ class MCAController(QWidget):
         explicitly before making Start available again.
         """
         log.info("MCA ch%d: measurement completed by hardware (time limit)", self._channel)
+        MCAController._set_measurement_active(self, False)
         if getattr(self, "_coincidence_session", False) and not self._coincidence_stopping:
             self.coincidence_stop_requested.emit()
             return
@@ -1773,6 +1791,7 @@ class MCAController(QWidget):
 
     def _on_connection_lost(self, message: str) -> None:
         self._connection_lost = True
+        MCAController._set_measurement_active(self, False)
         self.status.setText(
             f"Connection lost: {message}; use Connection -> Reconnect Device."
         )
@@ -2040,6 +2059,7 @@ class MCAController(QWidget):
         # The backend emits ready only after it has armed all eight kernel
         # blocks, entered the first blocking refill and written enable=1. A
         # GUI-thread mca.start() here would duplicate backend ownership.
+        MCAController._set_measurement_active(self, True)
         log.debug(
             "MCA ch%d IIO DMA: buffer armed, reader active, measurement started",
             self._channel,
@@ -2128,6 +2148,7 @@ class MCAController(QWidget):
         worker = self._dma_worker
         self._dma_worker = None
         self._dma_thread = None
+        MCAController._set_measurement_active(self, False)
         log.info("MCA ch%d: DMA worker exited; restoring controls", self._channel)
         try:
             if self._dma_summary is None and self._dma_error is None:
@@ -2216,6 +2237,8 @@ class MCAController(QWidget):
             self._mca.stop()
         except Exception:
             log.warning("MCA ch%d: failed to disarm during shutdown", self._channel, exc_info=True)
+        else:
+            MCAController._set_measurement_active(self, False)
 
     # ------------------------------------------------------------------
     # Readback handling

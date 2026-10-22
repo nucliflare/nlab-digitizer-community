@@ -390,6 +390,33 @@ class MainWindowController:
             if controller.energy_calibration is not None
         )
 
+    def measuring_channel_labels(self) -> tuple[str, ...]:
+        """Summarize controller run states without IIO reads or extra timers.
+
+        Scope and MCA on one channel count once. Keep board-qualified names
+        when multiple digitizers are connected so CH0 cannot be ambiguous.
+        Replay/analysis does not start these live lifecycle flags.
+        """
+        if getattr(self, "_offline", False):
+            return ()
+        channels = sorted({
+            controller.channel
+            for controller in (
+                *getattr(self, "_scope_controllers", []),
+                *getattr(self, "_mca_controllers", []),
+            )
+            if controller.measurement_active
+        })
+        labels = tuple(self._channel_label(channel) for channel in channels)
+        if len(getattr(self, "_endpoints", ())) <= 1:
+            return tuple(label.split(":", 1)[-1] for label in labels)
+        return labels
+
+    def _measurement_state_changed(self, *_args: object) -> None:
+        refresh = getattr(self._window, "refresh_measurement_indicator", None)
+        if callable(refresh):
+            refresh()
+
     # ------------------------------------------------------------------
     # Dock construction
     # ------------------------------------------------------------------
@@ -511,6 +538,9 @@ class MainWindowController:
             )
             self._scope_frame_buffers[ch] = scope_frame_buffer
             self._scope_controllers.append(scope_ctrl)
+            self._connect_optional_signal(
+                scope_ctrl, "measurement_active_changed", self._measurement_state_changed,
+            )
             scope_docks.append(self._make_dock(f"scope_ch{ch}", ch_label, scope_ctrl))
 
             if device.capabilities.mca:
@@ -552,6 +582,9 @@ class MainWindowController:
                 )
                 self._set_controller_channel_label(mca_ctrl, ch_label)
                 self._mca_controllers.append(mca_ctrl)
+                self._connect_optional_signal(
+                    mca_ctrl, "measurement_active_changed", self._measurement_state_changed,
+                )
                 calibration_indicator_slot = getattr(
                     self._window,
                     "refresh_energy_calibration_indicator",
@@ -3214,6 +3247,7 @@ class MainWindowController:
         self._external_controllers.clear()
         self._mca_event_buffers.clear()
         self._scope_frame_buffers.clear()
+        self._measurement_state_changed()
 
     def _teardown_connection_runtime(self) -> None:
         """Stop and detach endpoint-bound views while leaving transports owned."""

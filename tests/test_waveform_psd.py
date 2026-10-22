@@ -295,8 +295,8 @@ def test_waveform_workbench_indexes_and_reconstructs_ndma(
 
     assert dialog._reader is not None
     assert dialog.frame_spin.maximum() == 0
-    assert dialog.current_file_label.text() == f"Current file: {path}"
-    assert dialog.current_file_label.toolTip() == str(path)
+    assert dialog.close_file_action.isEnabled()
+    assert dialog.windowFilePath() == str(path)
     assert dialog.windowTitle().endswith(f"— {path.name}")
     assert "Qlong" in dialog.preview_status.text()
     assert dialog.raw_curve.opts["stepMode"] == "right"
@@ -357,10 +357,10 @@ def test_waveform_workbench_indexes_and_reconstructs_ndma(
     assert dialog.optimize_button.isEnabled()
     assert "short- and long-gate endpoints" in dialog.optimize_button.toolTip()
 
-    dialog.close_file()
-    assert dialog.current_file_label.text() == "Current file: No file loaded"
-    assert dialog.current_file_label.toolTip() == ""
-    assert dialog.windowTitle() == "Waveform Analysis Workbench"
+    dialog.close_file_action.trigger()
+    assert dialog.windowFilePath() == ""
+    assert dialog.windowTitle() == "Waveform Analysis Workbench — No file loaded"
+    assert not dialog.close_file_action.isEnabled()
     assert not dialog.optimize_button.isEnabled()
 
 

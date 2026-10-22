@@ -142,6 +142,7 @@ class MainAppWindow(QMainWindow):
             offline=self._offline,
         )
         self.refresh_energy_calibration_indicator()
+        self.refresh_measurement_indicator()
         self._application = QApplication.instance()
         if self._application is not None:
             self._application.installEventFilter(self)
@@ -268,6 +269,17 @@ class MainAppWindow(QMainWindow):
         self._offline_indicator.setVisible(self._offline)
         self.statusBar().addPermanentWidget(self._offline_indicator)
 
+        self._measurement_indicator = QLabel(self)
+        self._measurement_indicator.setObjectName("measurementActiveIndicator")
+        self._measurement_indicator.setStyleSheet(
+            "QLabel { background: #2e7d32; color: white; border-radius: 3px; "
+            "font-weight: 600; padding: 2px 8px; }"
+        )
+        self._measurement_indicator.setAccessibleName("Active measurement channels")
+        self._measurement_indicator.setTextFormat(Qt.TextFormat.PlainText)
+        self._measurement_indicator.hide()
+        self.statusBar().addPermanentWidget(self._measurement_indicator)
+
         self._energy_calibration_indicator = _EnergyCalibrationIndicator(
             "ENERGY CALIBRATED",
             self,
@@ -364,7 +376,28 @@ class MainAppWindow(QMainWindow):
         self.setWindowTitle(self._base_window_title)
         self._offline_indicator.setVisible(self._offline)
         self.refresh_energy_calibration_indicator()
+        self.refresh_measurement_indicator()
         self._sync_connection_actions()
+
+    def refresh_measurement_indicator(self, *_args: object) -> None:
+        """Show a permanent green badge for controller-confirmed live runs."""
+        indicator = getattr(self, "_measurement_indicator", None)
+        controller = getattr(self, "_controller", None)
+        if indicator is None or controller is None:
+            return
+        getter = getattr(controller, "measuring_channel_labels", None)
+        labels = getter() if callable(getter) else ()
+        if (not isinstance(labels, tuple) or self._offline
+                or getattr(self, "_closing", False)):
+            labels = ()
+        indicator.setVisible(bool(labels))
+        indicator.setText(f"Measuring: {', '.join(labels)}" if labels else "")
+        indicator.setToolTip(
+            "Live Scope/MCA acquisition reported by this application.\n"
+            "A channel is listed once even if both cores are active.\n"
+            "Offline analysis and session replay are not measurements."
+            if labels else "No active live measurement."
+        )
 
     def refresh_energy_calibration_indicator(self, *_args: object) -> None:
         """Mirror the applied MCA energy-calibration state in the status bar."""

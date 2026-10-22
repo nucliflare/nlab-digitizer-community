@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from nlab.analysis.psd_fom import PsdFomFit, fit_psd_fom_lm
+from nlab.views.tooltips import wrap_widget_tooltips
 
 
 class PsdFomWidget(QGroupBox):
@@ -139,6 +140,7 @@ class PsdFomWidget(QGroupBox):
         self.fit_region.sigRegionChangeFinished.connect(self.clear_fit)
         for line in self.centroid_lines:
             line.sigPositionChangeFinished.connect(self.clear_fit)
+        wrap_widget_tooltips(self)
 
     def set_projection(self, ratio: np.ndarray, counts: np.ndarray) -> None:
         """Store the currently displayed ratio projection for the next button press."""

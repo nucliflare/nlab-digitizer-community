@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal, cast
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QSettings, Qt, QThread
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QActionGroup, QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
-    QPushButton,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -67,6 +66,8 @@ from nlab.analysis.spectrum import (
 )
 from nlab.analysis.spectrum_io import export_spectrum_csv, load_spectra
 from nlab.views.plot_viewbox import ModifierZoomViewBox
+from nlab.views.tooltips import wrap_tooltip, wrap_widget_tooltips
+from nlab.views.workbench_menu import WorkbenchMenuBar
 from nlab.workers.peak_fit_worker import PeakFitWorker
 
 if TYPE_CHECKING:
@@ -180,6 +181,13 @@ class McaPeakAnalysisDialog(QDialog):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
+        self.menu_bar = WorkbenchMenuBar(self)
+        root.setMenuBar(self.menu_bar)
+        self.file_menu = self.menu_bar.menu("&File")
+        self.analysis_menu = self.menu_bar.menu("&Analysis")
+        self.reference_menu = self.menu_bar.menu("&References")
+        self.view_menu = self.menu_bar.menu("&View")
+        self.menu_bar.add_guide("peak-analysis")
         instructions = QLabel(
             "Live MCA data are copied as frozen snapshots. File and derived spectra use the "
             "same fitting pipeline; acquisition is never reconfigured by this workbench.",
@@ -188,27 +196,29 @@ class McaPeakAnalysisDialog(QDialog):
         instructions.setWordWrap(True)
         root.addWidget(instructions)
 
-        toolbar = QHBoxLayout()
-        self.load_button = QPushButton("Load spectrum files...", self)
-        self.refresh_selected_button = QPushButton("Refresh selected MCA", self)
-        self.refresh_all_button = QPushButton("Refresh all MCA spectra", self)
-        self.remove_button = QPushButton("Remove selected", self)
-        self.export_spectrum_button = QPushButton("Export spectrum...", self)
-        for button in (
-            self.load_button,
-            self.refresh_selected_button,
-            self.refresh_all_button,
-            self.remove_button,
-            self.export_spectrum_button,
-        ):
-            toolbar.addWidget(button)
-        toolbar.addStretch(1)
-        toolbar.addWidget(QLabel("Counts:", self))
+        counts_row = QHBoxLayout()
+        self.load_action = self.menu_bar.command(
+            self.file_menu, "Load spectrum files...", shortcut="Ctrl+O",
+        )
+        self.export_spectrum_action = self.menu_bar.command(
+            self.file_menu, "Export spectrum...", enabled=False,
+        )
+        self.file_menu.addSeparator()
+        self.refresh_selected_action = self.menu_bar.command(
+            self.analysis_menu, "Refresh selected MCA",
+        )
+        self.refresh_all_action = self.menu_bar.command(
+            self.analysis_menu, "Refresh all MCA spectra",
+        )
+        self.remove_action = self.menu_bar.command(self.analysis_menu, "Remove selected spectrum")
+        self.analysis_menu.addSeparator()
+        counts_row.addWidget(QLabel("Counts:", self))
         self.scale_combo = QComboBox(self)
         self.scale_combo.addItem("Linear", "linear")
         self.scale_combo.addItem("Logarithmic", "log")
-        toolbar.addWidget(self.scale_combo)
-        root.addLayout(toolbar)
+        counts_row.addWidget(self.scale_combo)
+        counts_row.addStretch(1)
+        root.addLayout(counts_row)
 
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         sources_panel = QWidget(self)
@@ -269,14 +279,52 @@ class McaPeakAnalysisDialog(QDialog):
         splitter.setSizes([290, 800, 420])
         root.addWidget(splitter, 1)
 
-        close_row = QHBoxLayout()
         self.workbench_status = QLabel("Ready.", self)
         self.workbench_status.setWordWrap(True)
         self.workbench_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        close_row.addWidget(self.workbench_status, 1)
-        self.close_button = QPushButton("Close", self)
-        close_row.addWidget(self.close_button)
-        root.addLayout(close_row)
+        root.addWidget(self.workbench_status)
+        self.file_menu.addSeparator()
+        self.close_action = self.menu_bar.command(
+            self.file_menu, "Close workspace", shortcut="Ctrl+W",
+        )
+        self._build_view_menu()
+        wrap_widget_tooltips(self)
+
+    def _build_view_menu(self) -> None:
+        self._scale_action_group = QActionGroup(self)
+        self.linear_action = self.menu_bar.command(self.view_menu, "Linear counts")
+        self.log_action = self.menu_bar.command(self.view_menu, "Logarithmic counts")
+        for index, action in enumerate((self.linear_action, self.log_action)):
+            action.setCheckable(True)
+            self._scale_action_group.addAction(action)
+            action.triggered.connect(lambda _checked, index=index:
+                                     self.scale_combo.setCurrentIndex(index))
+        self.scale_combo.currentIndexChanged.connect(self._sync_view_menu)
+        self.view_menu.addSeparator()
+        self._tab_action_group = QActionGroup(self)
+        self.tab_actions = []
+        for index in range(self.side_tabs.count()):
+            action = self.menu_bar.command(self.view_menu, self.side_tabs.tabText(index))
+            action.setCheckable(True)
+            self._tab_action_group.addAction(action)
+            action.triggered.connect(lambda _checked, index=index:
+                                     self.side_tabs.setCurrentIndex(index))
+            self.tab_actions.append(action)
+        self.side_tabs.currentChanged.connect(self._sync_view_menu)
+        self.view_menu.addSeparator()
+        self.reset_zoom_action = self.menu_bar.command(self.view_menu, "Reset plot zoom")
+        self.reset_zoom_action.triggered.connect(self._reset_plot_zoom)
+        self._sync_view_menu()
+
+    def _sync_view_menu(self, *_args: object) -> None:
+        self.linear_action.setChecked(self.scale_combo.currentIndex() == 0)
+        self.log_action.setChecked(self.scale_combo.currentIndex() == 1)
+        for index, action in enumerate(self.tab_actions):
+            action.setChecked(self.side_tabs.currentIndex() == index)
+
+    def _reset_plot_zoom(self) -> None:
+        self.spectrum_plot.autoRange()
+        self.residual_plot.autoRange()
 
     def _build_fit_tab(self) -> QWidget:
         tab = QWidget(self)
@@ -302,15 +350,14 @@ class McaPeakAnalysisDialog(QDialog):
         form.addRow("Statistic:", self.statistic_combo)
         layout.addLayout(form)
 
-        marker_row = QHBoxLayout()
-        self.suggest_button = QPushButton("Suggest peak positions", self)
-        self.fit_button = QPushButton("Fit selected spectrum", self)
-        self.cancel_fit_button = QPushButton("Cancel", self)
-        self.cancel_fit_button.setEnabled(False)
-        marker_row.addWidget(self.suggest_button)
-        marker_row.addWidget(self.fit_button)
-        marker_row.addWidget(self.cancel_fit_button)
-        layout.addLayout(marker_row)
+        self.suggest_action = self.menu_bar.command(self.analysis_menu, "Suggest peak positions")
+        self.fit_action = self.menu_bar.command(
+            self.analysis_menu, "Fit selected spectrum", enabled=False,
+        )
+        self.cancel_fit_action = self.menu_bar.command(
+            self.analysis_menu, "Cancel fit", enabled=False,
+        )
+        self.analysis_menu.addSeparator()
         help_label = QLabel(
             "Drag the shaded fit range and dashed peak markers. Marker positions provide "
             "bounded initial centres; the source spectrum remains unchanged.",
@@ -349,24 +396,22 @@ class McaPeakAnalysisDialog(QDialog):
             summary.nuclide: summary for summary in BUILTIN_RADIONUCLIDE_CATALOG.summaries()
         }
         self._reference_favourites = self._load_reference_favourites()
-        self.reference_favourite_button = QPushButton("Add to favourites", self)
-        self.reference_favourite_button.setEnabled(False)
-        self.reference_favourite_button.setToolTip(
+        self.reference_favourite_action = self.menu_bar.command(
+            self.reference_menu, "Add to favourites", enabled=False,
+        )
+        self.reference_favourite_action.setToolTip(
             "Pin the highlighted nuclide above the rest of the current list."
         )
-        self.restore_reference_favourites_button = QPushButton("Restore common defaults", self)
-        self.restore_reference_favourites_button.setToolTip(
+        self.restore_reference_favourites_action = self.menu_bar.command(
+            self.reference_menu, "Restore common defaults",
+        )
+        self.restore_reference_favourites_action.setToolTip(
             "Restore the built-in common laboratory source favourites."
         )
         self._populate_reference_nuclides(
             self._ordered_reference_nuclides(tuple(self._reference_summaries))
         )
         layout.addWidget(self.reference_nuclide_list)
-        favourite_row = QHBoxLayout()
-        favourite_row.addWidget(self.reference_favourite_button)
-        favourite_row.addWidget(self.restore_reference_favourites_button)
-        favourite_row.addStretch(1)
-        layout.addLayout(favourite_row)
 
         controls = QFormLayout()
         self.reference_probability = QDoubleSpinBox(self)
@@ -386,11 +431,8 @@ class McaPeakAnalysisDialog(QDialog):
         self.reference_filter_status.setWordWrap(True)
         layout.addWidget(self.reference_filter_status)
 
-        clear_row = QHBoxLayout()
-        self.clear_reference_button = QPushButton("Clear selection", self)
-        clear_row.addWidget(self.clear_reference_button)
-        clear_row.addStretch(1)
-        layout.addLayout(clear_row)
+        self.reference_menu.addSeparator()
+        self.clear_reference_action = self.menu_bar.command(self.reference_menu, "Clear selection")
 
         self.reference_table = QTableWidget(0, 4, self)
         self.reference_table.setHorizontalHeaderLabels(
@@ -462,8 +504,9 @@ class McaPeakAnalysisDialog(QDialog):
         form.addRow("Rebin factor:", self.rebin_factor)
         form.addRow("Background scaling:", self.auto_time_scale)
         layout.addLayout(form)
-        self.apply_operation_button = QPushButton("Create derived spectrum", self)
-        layout.addWidget(self.apply_operation_button)
+        self.apply_operation_action = self.menu_bar.command(
+            self.analysis_menu, "Create derived spectrum", enabled=False,
+        )
         self.operation_status = QLabel("", self)
         self.operation_status.setWordWrap(True)
         self.operation_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -523,48 +566,48 @@ class McaPeakAnalysisDialog(QDialog):
         self.fit_summary.setWordWrap(True)
         self.fit_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.fit_summary)
-        self.export_fit_button = QPushButton("Export fit results...", self)
-        self.export_fit_button.setEnabled(False)
-        layout.addWidget(self.export_fit_button)
-        self.report_fit_button = QPushButton("Download report...", self)
-        self.report_fit_button.setEnabled(False)
-        self.report_fit_button.setToolTip(
-            "Save a PDF report and complete fitted spectrum, peak, and parameter data."
+        self.export_fit_action = self.menu_bar.command(
+            self.file_menu, "Export fit results...", enabled=False,
         )
-        layout.addWidget(self.report_fit_button)
+        self.report_fit_action = self.menu_bar.command(
+            self.file_menu, "Download report...", enabled=False, shortcut="Ctrl+S",
+        )
+        self.report_fit_action.setToolTip(wrap_tooltip(
+            "Save a PDF report and complete fitted spectrum, peak, and parameter data."
+        ))
         return tab
 
     def _connect_signals(self) -> None:
-        self.load_button.clicked.connect(self._load_files)
-        self.refresh_selected_button.clicked.connect(self._refresh_selected)
-        self.refresh_all_button.clicked.connect(self._refresh_all)
-        self.remove_button.clicked.connect(self._remove_selected)
-        self.export_spectrum_button.clicked.connect(self._export_selected_spectrum)
+        self.load_action.triggered.connect(self._load_files)
+        self.refresh_selected_action.triggered.connect(self._refresh_selected)
+        self.refresh_all_action.triggered.connect(self._refresh_all)
+        self.remove_action.triggered.connect(self._remove_selected)
+        self.export_spectrum_action.triggered.connect(self._export_selected_spectrum)
         self.scale_combo.currentIndexChanged.connect(self._render)
         self.source_list.currentItemChanged.connect(self._selection_changed)
         self.source_list.itemChanged.connect(self._visibility_changed)
         self.peak_count.valueChanged.connect(self._suggest_peaks)
-        self.suggest_button.clicked.connect(self._suggest_peaks)
-        self.fit_button.clicked.connect(self._start_fit)
-        self.cancel_fit_button.clicked.connect(self._cancel_fit)
+        self.suggest_action.triggered.connect(self._suggest_peaks)
+        self.fit_action.triggered.connect(self._start_fit)
+        self.cancel_fit_action.triggered.connect(self._cancel_fit)
         self.reference_search.textChanged.connect(self._filter_reference_nuclides)
         self.reference_nuclide_list.itemChanged.connect(self._reference_selection_changed)
         self.reference_nuclide_list.currentItemChanged.connect(
             self._reference_current_item_changed
         )
-        self.reference_favourite_button.clicked.connect(self._toggle_reference_favourite)
-        self.restore_reference_favourites_button.clicked.connect(
+        self.reference_favourite_action.triggered.connect(self._toggle_reference_favourite)
+        self.restore_reference_favourites_action.triggered.connect(
             self._restore_reference_favourites
         )
         self.reference_probability.valueChanged.connect(self._reference_probability_changed)
         self.reference_roi_filter.toggled.connect(self._reference_roi_filter_changed)
         self.fit_region.sigRegionChangeFinished.connect(self._reference_roi_changed)
-        self.clear_reference_button.clicked.connect(self._clear_reference_selection)
+        self.clear_reference_action.triggered.connect(self._clear_reference_selection)
         self.operation_combo.currentIndexChanged.connect(self._update_operation_controls)
-        self.apply_operation_button.clicked.connect(self._apply_operation)
-        self.export_fit_button.clicked.connect(self._export_fit_result)
-        self.report_fit_button.clicked.connect(self._download_fit_report)
-        self.close_button.clicked.connect(self.reject)
+        self.apply_operation_action.triggered.connect(self._apply_operation)
+        self.export_fit_action.triggered.connect(self._export_fit_result)
+        self.report_fit_action.triggered.connect(self._download_fit_report)
+        self.close_action.triggered.connect(self.reject)
 
     def _load_reference_favourites(self) -> list[str]:
         settings = QSettings()
@@ -648,23 +691,23 @@ class McaPeakAnalysisDialog(QDialog):
                 self.reference_nuclide_list.setCurrentItem(restored_current)
         finally:
             self._updating_reference_items = False
-        self._update_reference_favourite_button()
+        self._update_reference_favourite_action()
 
     def _reference_current_item_changed(self, *_args: object) -> None:
-        self._update_reference_favourite_button()
+        self._update_reference_favourite_action()
 
-    def _update_reference_favourite_button(self) -> None:
+    def _update_reference_favourite_action(self) -> None:
         item = self.reference_nuclide_list.currentItem()
         if item is None:
-            self.reference_favourite_button.setText("Add to favourites")
-            self.reference_favourite_button.setEnabled(False)
+            self.reference_favourite_action.setText("Add to favourites")
+            self.reference_favourite_action.setEnabled(False)
             return
         nuclide = str(item.data(Qt.ItemDataRole.UserRole))
         is_favourite = nuclide in self._reference_favourites
-        self.reference_favourite_button.setText(
+        self.reference_favourite_action.setText(
             "Remove from favourites" if is_favourite else "Add to favourites"
         )
-        self.reference_favourite_button.setEnabled(True)
+        self.reference_favourite_action.setEnabled(True)
 
     def _toggle_reference_favourite(self) -> None:
         item = self.reference_nuclide_list.currentItem()
@@ -863,7 +906,7 @@ class McaPeakAnalysisDialog(QDialog):
         if self._fit_spectrum_id in spectrum_ids:
             self._fit_result = None
             self._fit_spectrum_id = None
-            self.export_fit_button.setEnabled(False)
+            self.export_fit_action.setEnabled(False)
         self._rebuild_source_list()
         self._render()
 
@@ -897,18 +940,18 @@ class McaPeakAnalysisDialog(QDialog):
     def _selection_changed(self, *_args: object) -> None:
         spectrum = self._current_spectrum()
         if spectrum is None:
-            self.fit_button.setEnabled(False)
-            self.export_spectrum_button.setEnabled(False)
+            self.fit_action.setEnabled(False)
+            self.export_spectrum_action.setEnabled(False)
             self._update_reference_candidate_filter()
             self._render()
             return
-        self.fit_button.setEnabled(self._fit_thread is None)
-        self.export_spectrum_button.setEnabled(True)
+        self.fit_action.setEnabled(self._fit_thread is None)
+        self.export_spectrum_action.setEnabled(True)
         self.fit_region.setRegion((float(spectrum.x[0]), float(spectrum.x[-1])))
         self._fit_result = None
         self._fit_spectrum_id = None
-        self.export_fit_button.setEnabled(False)
-        self.report_fit_button.setEnabled(False)
+        self.export_fit_action.setEnabled(False)
+        self.report_fit_action.setEnabled(False)
         self._suggest_peaks()
         self._update_other_spectra()
         self._update_source_status()
@@ -1340,9 +1383,9 @@ class McaPeakAnalysisDialog(QDialog):
         self._fit_worker = worker
         self._fit_spectrum_id = spectrum.spectrum_id
         self._last_fit_spec = spec
-        self.fit_button.setEnabled(False)
-        self.cancel_fit_button.setEnabled(True)
-        self.report_fit_button.setEnabled(False)
+        self.fit_action.setEnabled(False)
+        self.cancel_fit_action.setEnabled(True)
+        self.report_fit_action.setEnabled(False)
         self.fit_status.setText("Fitting...")
         thread.start()
 
@@ -1356,8 +1399,8 @@ class McaPeakAnalysisDialog(QDialog):
             else f"Fit stopped without convergence: {result.message}"
         )
         self._populate_results(result)
-        self.export_fit_button.setEnabled(True)
-        self.report_fit_button.setEnabled(True)
+        self.export_fit_action.setEnabled(True)
+        self.report_fit_action.setEnabled(True)
         self._render()
 
     def _fit_failed(self, message: str) -> None:
@@ -1368,13 +1411,13 @@ class McaPeakAnalysisDialog(QDialog):
     def _fit_thread_finished(self) -> None:
         self._fit_thread = None
         self._fit_worker = None
-        self.fit_button.setEnabled(self._current_spectrum() is not None)
-        self.cancel_fit_button.setEnabled(False)
+        self.fit_action.setEnabled(self._current_spectrum() is not None)
+        self.cancel_fit_action.setEnabled(False)
 
     def _cancel_fit(self) -> None:
         if self._fit_worker is not None:
             self._fit_worker.stop()
-            self.cancel_fit_button.setEnabled(False)
+            self.cancel_fit_action.setEnabled(False)
             self.fit_status.setText("Cancelling fit...")
 
     def _populate_results(self, result: PeakFitResult) -> None:
@@ -1434,7 +1477,7 @@ class McaPeakAnalysisDialog(QDialog):
         self.operation_factor.setEnabled(operation in {"scale", "add", "subtract", "background"})
         self.rebin_factor.setEnabled(operation == "rebin")
         self.auto_time_scale.setEnabled(operation == "background")
-        self.apply_operation_button.setEnabled(
+        self.apply_operation_action.setEnabled(
             self._current_spectrum() is not None
             and (not needs_other or self.other_spectrum_combo.count() > 0)
         )

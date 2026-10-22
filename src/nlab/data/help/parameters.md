@@ -25,6 +25,14 @@ Opening that link requires a browser and network access; this reference does not
 
 ## Connection — endpoints and offline mode {#connection}
 
+The main window's green **Measuring: CH0, CH1** status-bar badge lists channels
+with active live Scope/MCA runs, including DMA used by PSD and coincidence. It
+remains visible across tabs and counts each channel once even when both cores
+are running. Multiple connected digitizers use unambiguous **D1:CH0** labels.
+The badge follows application start/ready/stop/completion notifications, not
+extra hardware polling or external acquisition changes. Idle, offline analysis,
+and recorded replay do not activate it.
+
 Choose the digitizer address, IIO port (normally 30431), and requested channels.
 **Rescan** refreshes discovery; it does not establish a measurement. Verify the
 channel identity after a firmware or device-tree change.
@@ -489,6 +497,22 @@ Changing the ROI until a warning disappears is not independent validation.
 
 ## Waveforms — offline reconstruction {#waveform}
 
+The workbench's **File**, **Analysis**, **Selection**, **View**, and **Help** menus
+provide the same actions as its visible controls, with synchronized enabled and
+checked states. Selection menu actions also work when the cluster toolbar is
+hidden. Window-local shortcuts: **Ctrl+O** opens a waveform file, **Ctrl+R**
+reconstructs PSD, **Ctrl+S** downloads the report, **Ctrl+Shift+W** closes the
+file, and **Ctrl+W** closes the workbench. **Help → Workbench guide** opens this
+bundled offline reference. Existing F1 click-to-explain mode remains unchanged.
+The source filename (or "No file loaded") appears in the window title instead of
+a separate label row, leaving more height for plots. Closing the file resets the
+title. The full source path is retained as window file metadata.
+Open/close file commands are in the File menu without duplicate buttons. Source,
+Frame, and Sample period occupy the Waveform source group at the top of the left
+sidebar. Scroll the sidebar to reach lower settings on smaller windows.
+Long waveform/PSD tooltips wrap to multiple short lines. Full
+explanations are retained in plain text for both hover hints and F1 help.
+
 Open a saved waveform capture, select its source, inspect baseline and polarity,
 then set integration start, short-gate end, and long-gate end. **Reconstruct PSD**
 integrates the configured event selection in a background worker.
@@ -497,6 +521,75 @@ The operation reads the capture without changing the file or live digitizer
 settings. Cancel requests worker termination; wait for completion before starting
 another job. Use the frame preview to check representative pulses, not just one
 especially clean event.
+
+## Waveforms — selecting clusters {#waveform-clusters}
+
+After **Reconstruct PSD**, add a **Rectangle** or **Polygon** over the reconstructed
+matrix. Move/resize the rectangle or drag polygon vertices; click a polygon edge
+to insert another vertex. **Apply selection** selects the exact event coordinates
+inside the region, including its boundary—not whole histogram bins.
+
+The rectangle/polygon outline and handles are black, including on hover.
+**Show PSD ROI** toggles the matrix's energy ROI and PSD cut line without changing
+their values or projections. **Waveform selection tools** shows/hides the cluster
+controls, black region, and current-event marker; the active filter and selected
+match number are preserved. Show the tools again to resume filtered navigation.
+FOM **Fit guides** retain their independent visibility switch.
+
+**Previous**, **Next**, and the selected-event number browse only matching
+waveforms. **Frame** still shows the original, zero-based source frame index and
+is read-only while filtering. A white point marks that event on the PSD map.
+**Clear selection** restores ordinary frame browsing. An empty selection clears
+the signal preview rather than leaving an unrelated waveform on screen.
+
+Selection includes only events represented in that reconstruction: its source,
+stride, maximum-event limit, and energy/ratio display ranges still apply. A sparse
+preview therefore cannot select every event in the file. Reconstruction retains
+three scalar columns per plotted event (frame, charge, PSD); waveform samples
+remain file-backed. Settings/source changes and new reconstructions clear the
+selection to prevent stale frame associations. Auto polarity is held at the
+reconstruction's resolved polarity while browsing a selected cluster.
+
+**Show average waveform** overlays the entire selected cluster's arithmetic mean
+on the current waveform plot. Each waveform's chosen mean/median baseline is
+removed before averaging and the reconstruction polarity is applied. For visual
+comparison, the mean is placed at the displayed individual pulse's baseline.
+There is no peak alignment or amplitude scaling: sample indices and amplitude
+differences are preserved, so timing jitter can broaden the average. For varying
+record lengths only the shortest shared prefix is shown, with every selected
+event contributing to every sample. Calculation runs in the background with
+bounded memory. Click the button again to cancel/hide; browsing matching events
+keeps the overlay, while changing/clearing the selection or reconstruction
+settings removes it. Averaging does not alter the PSD, FOM, or source file.
+
+**File → Export selected cluster...** saves every selected original waveform,
+not the average or just the current match. It is available only for a nonempty,
+current applied selection. Source, reconstruction stride/limit and display cuts
+still apply. The samples are full stored ADC arrays with original uint64
+timestamps; no baseline/polarity processing, alignment, or gate cropping is
+applied. Export uses a cancellable background task and never overwrites files.
+Failure/cancellation removes only the incomplete files created by that export.
+
+- **nlab binary (.bin)**: standard Scope NDMA v1, reopenable in the workbench.
+  Keep the accompanying **.cluster.json** file: it records original frame IDs,
+  energy/PSD coordinates, selection vertices, gates and analysis/source metadata.
+- **ROOT (.root)**: `waveforms` TTree with `samples`, `timestamp`, `source_frame`,
+  reconstructed `energy` (long charge), and `psd`; provenance is in `metadata_json`
+  and the field description is in `waveform_schema`.
+- **HDF5 (.h5/.hdf5)**: `waveforms`, `timestamps`, `source_frame`, `energy`, and
+  `psd` datasets, with a `metadata_json` file attribute.
+
+CAEN sources support ROOT/HDF5, retaining variable-length samples and unconverted
+source timestamps, plus available stored gates, flags and waveform codes with
+validity columns. Scope NDMA cannot losslessly represent CAEN record geometry
+and timestamp semantics, so nlab binary export is available only for NDMA input.
+The saved sample period is the workbench's analysis value; NDMA v1 does not encode
+the actual sampling rate. ROOT/HDF5 are analysis outputs; reopen the native binary
+subset for further workbench browsing.
+
+These regions are exploratory geometric cuts, not automatic neutron, gamma,
+alpha, or purity labels. Identifying populations requires suitable calibration
+and independent source/reference measurements.
 
 ## Waveforms — source, frame, and sample period {#waveform-source}
 
@@ -723,6 +816,15 @@ Recorded replay modules are read-only and do not represent a live connection.
 
 ## Analysis — energy calibration {#energy-calibration}
 
+Commands are in **File**, **Analysis**, **View**, and **Help** menus rather than
+button rows. **File** replaces/overlays the current spectrum, downloads reports
+(**Ctrl+S**), and closes (**Ctrl+W**). **Analysis** adds/removes/clears reference
+points and applies or clears calibration. Model/width controls and the table
+remain beside the plots; point edits still refit automatically. **View** resets
+plot zoom. **Help → Workspace guide...** opens this bundled reference. Closing
+still asks before discarding unapplied edits, and Apply/Report retain fit-validity
+and settings-compatibility checks.
+
 Load a spectrum snapshot, identify reference peaks, enter known energies, and
 fit the selected calibration model. Inspect residuals and enabled calibration
 points before applying the result. Reference lines aid identification but do
@@ -746,6 +848,16 @@ or hardware range. Exported reports preserve context for review.
 
 ## Analysis — MCA peak fitting {#peak-analysis}
 
+The **File** menu loads spectra (**Ctrl+O**), exports spectra/fit results, downloads
+reports (**Ctrl+S**), and closes the workspace (**Ctrl+W**). **Analysis** refreshes
+or removes spectra, suggests/fits peaks, cancels fits, and creates derived spectra
+using the visible Operations settings. **References** adds/removes the highlighted
+nuclide from favourites, restores defaults, or clears selected reference lines.
+**View** controls linear/log counts, selects a side-panel tab, and resets zoom;
+the corresponding visible controls stay synchronized. **Help** opens this guide.
+Command-button rows have been removed; parameter controls remain beside plots.
+Fit/export availability and background fit cancellation behave as before.
+
 Select a spectrum and region, choose the peak/background model, fit, and inspect
 residuals, uncertainty, and convergence. Net area, centroid, and width depend on
 background and overlapping peaks; a visually plausible fit can still be biased.
@@ -755,6 +867,19 @@ identification aids, not automatic proof of an isotope. Export the fit snapshot
 and diagnostics when reporting peak measurements.
 
 ## Analysis — PSD event readback {#psd-readback}
+
+The **File** menu contains **Load event file...**, **Cancel loading**,
+**Download report...**, and **Close workbench**. **Analysis** provides Gaussian
+fitting and fit-table copy. **View** toggles PSD ROI and FOM guides, synchronized
+with the plot controls; **Help** opens this bundled guide. Window-local shortcuts
+are **Ctrl+O** (load), **Ctrl+S** (report), and **Ctrl+W** (close).
+The current filename (or "No file loaded") is shown in the window title, with no
+separate file-label row. Histogram spinners and matrix
+scale/PSD-cut/ROI controls are in a compact left sidebar beside the full-height
+plots; drag the divider to resize it. There is no separate file-action toolbar.
+Progress/errors stay at the
+bottom. Loading disables the load/settings controls and enables Cancel loading;
+report download remains available only after loading and a completed FOM fit.
 
 Readback reconstructs energy-versus-ratio distributions from recorded MCA event
 fields. Select the file/source, histogram ranges, and event limits, then inspect

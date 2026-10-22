@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMessageBox,
-    QPushButton,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -45,6 +44,8 @@ from nlab.analysis.mca_report import (
     export_energy_calibration_report,
 )
 from nlab.views.plot_viewbox import ModifierZoomViewBox
+from nlab.views.tooltips import wrap_widget_tooltips
+from nlab.views.workbench_menu import WorkbenchMenuBar
 
 if TYPE_CHECKING:
     from nlab.controllers.mca_controller import MCAController
@@ -121,6 +122,12 @@ class EnergyCalibrationDialog(QDialog):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
+        self.menu_bar = WorkbenchMenuBar(self)
+        root.setMenuBar(self.menu_bar)
+        self.file_menu = self.menu_bar.menu("&File")
+        self.analysis_menu = self.menu_bar.menu("&Analysis")
+        self.view_menu = self.menu_bar.menu("&View")
+        self.menu_bar.add_guide("energy-calibration")
         instructions = QLabel(
             "Copy one or more spectra measured with the same MCA energy settings. "
             "Double-click a peak to add a draggable reference line, then enter its "
@@ -135,10 +142,9 @@ class EnergyCalibrationDialog(QDialog):
         source_row.addWidget(QLabel("Calibrate:", self))
         self.channel_combo = QComboBox(self)
         source_row.addWidget(self.channel_combo)
-        self.replace_button = QPushButton("Replace with current spectrum", self)
-        self.overlay_button = QPushButton("Add current as overlay", self)
-        source_row.addWidget(self.replace_button)
-        source_row.addWidget(self.overlay_button)
+        self.replace_action = self.menu_bar.command(self.file_menu, "Replace with current spectrum")
+        self.overlay_action = self.menu_bar.command(self.file_menu, "Add current as overlay")
+        self.file_menu.addSeparator()
         source_row.addStretch(1)
         root.addLayout(source_row)
 
@@ -223,14 +229,10 @@ class EnergyCalibrationDialog(QDialog):
         self.table.setColumnWidth(_COL_ENABLED, 28)
         side_layout.addWidget(self.table, 1)
 
-        point_row = QHBoxLayout()
-        self.add_button = QPushButton("Add point", self)
-        self.remove_button = QPushButton("Remove selected", self)
-        self.clear_points_button = QPushButton("Clear points", self)
-        point_row.addWidget(self.add_button)
-        point_row.addWidget(self.remove_button)
-        point_row.addWidget(self.clear_points_button)
-        side_layout.addLayout(point_row)
+        self.add_action = self.menu_bar.command(self.analysis_menu, "Add point")
+        self.remove_action = self.menu_bar.command(self.analysis_menu, "Remove selected points")
+        self.clear_points_action = self.menu_bar.command(self.analysis_menu, "Clear points")
+        self.analysis_menu.addSeparator()
 
         self.fit_status = QLabel("Add at least two calibration points.", self)
         self.fit_status.setWordWrap(True)
@@ -244,37 +246,44 @@ class EnergyCalibrationDialog(QDialog):
         splitter.setSizes([820, 470])
         root.addWidget(splitter, 1)
 
-        action_row = QHBoxLayout()
         self.snapshot_status = QLabel("No spectrum copied.", self)
         self.snapshot_status.setWordWrap(True)
-        action_row.addWidget(self.snapshot_status, 1)
-        self.clear_calibration_button = QPushButton("Clear applied calibration", self)
-        self.report_button = QPushButton("Download report...", self)
-        self.report_button.setEnabled(False)
-        self.apply_button = QPushButton("Apply calibration", self)
-        self.apply_button.setEnabled(False)
-        close_button = QPushButton("Close", self)
-        action_row.addWidget(self.clear_calibration_button)
-        action_row.addWidget(self.report_button)
-        action_row.addWidget(self.apply_button)
-        action_row.addWidget(close_button)
-        root.addLayout(action_row)
-        self._close_button = close_button
+        root.addWidget(self.snapshot_status)
+        self.apply_action = self.menu_bar.command(
+            self.analysis_menu, "Apply calibration", enabled=False,
+        )
+        self.clear_calibration_action = self.menu_bar.command(
+            self.analysis_menu, "Clear applied calibration",
+        )
+        self.report_action = self.menu_bar.command(
+            self.file_menu, "Download report...", enabled=False, shortcut="Ctrl+S",
+        )
+        self.file_menu.addSeparator()
+        self.close_action = self.menu_bar.command(
+            self.file_menu, "Close workspace", shortcut="Ctrl+W",
+        )
+        self.reset_zoom_action = self.menu_bar.command(self.view_menu, "Reset plot zoom")
+        self.reset_zoom_action.triggered.connect(self._reset_plot_zoom)
+        wrap_widget_tooltips(self)
+
+    def _reset_plot_zoom(self) -> None:
+        self.plot.autoRange()
+        self.residual_plot.autoRange()
 
     def _connect_signals(self) -> None:
         self.channel_combo.currentIndexChanged.connect(self._show_channel)
-        self.replace_button.clicked.connect(lambda: self._load_current(replace=True))
-        self.overlay_button.clicked.connect(lambda: self._load_current(replace=False))
+        self.replace_action.triggered.connect(lambda: self._load_current(replace=True))
+        self.overlay_action.triggered.connect(lambda: self._load_current(replace=False))
         self.model_combo.currentIndexChanged.connect(self._model_changed)
         self.centroid_half_width.valueChanged.connect(self._centroid_width_changed)
-        self.add_button.clicked.connect(lambda: self._add_point())
-        self.remove_button.clicked.connect(self._remove_selected)
-        self.clear_points_button.clicked.connect(self._clear_points)
+        self.add_action.triggered.connect(lambda: self._add_point())
+        self.remove_action.triggered.connect(self._remove_selected)
+        self.clear_points_action.triggered.connect(self._clear_points)
         self.table.cellChanged.connect(self._table_changed)
-        self.apply_button.clicked.connect(self._apply)
-        self.clear_calibration_button.clicked.connect(self._clear_applied)
-        self.report_button.clicked.connect(self._download_report)
-        self._close_button.clicked.connect(self.reject)
+        self.apply_action.triggered.connect(self._apply)
+        self.clear_calibration_action.triggered.connect(self._clear_applied)
+        self.report_action.triggered.connect(self._download_report)
+        self.close_action.triggered.connect(self.reject)
         self.plot.scene().sigMouseClicked.connect(self._plot_clicked)
 
     def _workspace_from_applied(self, calibration: EnergyCalibration | None) -> _Workspace:
@@ -310,8 +319,8 @@ class EnergyCalibrationDialog(QDialog):
     def _show_channel(self, *_args: object) -> None:
         workspace = self._workspace()
         enabled = workspace is not None
-        for button in (self.replace_button, self.overlay_button, self.add_button):
-            button.setEnabled(enabled)
+        for action in (self.replace_action, self.overlay_action, self.add_action):
+            action.setEnabled(enabled)
         if workspace is None:
             self.plot.clear()
             self._reset_residual_plot()
@@ -627,16 +636,16 @@ class EnergyCalibrationDialog(QDialog):
         workspace = self._workspace()
         controller = self._controller()
         if workspace is None or controller is None:
-            self.apply_button.setEnabled(False)
-            self.report_button.setEnabled(False)
+            self.apply_action.setEnabled(False)
+            self.report_action.setEnabled(False)
             return
         centroid_errors = self._fit_centroids(workspace)
         self._update_centroid_display(workspace)
         if centroid_errors:
             workspace.fit = None
             self.fit_status.setText(" ".join(centroid_errors))
-            self.apply_button.setEnabled(False)
-            self.report_button.setEnabled(False)
+            self.apply_action.setEnabled(False)
+            self.report_action.setEnabled(False)
             self._update_residuals()
             return
         complete_enabled = [
@@ -645,8 +654,8 @@ class EnergyCalibrationDialog(QDialog):
         if any(point.enabled and point.energy_kev is None for point in workspace.points):
             workspace.fit = None
             self.fit_status.setText("Enter an expected energy for every enabled reference point.")
-            self.apply_button.setEnabled(False)
-            self.report_button.setEnabled(False)
+            self.apply_action.setEnabled(False)
+            self.report_action.setEnabled(False)
             self._update_residuals()
             return
         fingerprints = {tuple(sorted(point.fingerprint.items())) for point in complete_enabled}
@@ -656,8 +665,8 @@ class EnergyCalibrationDialog(QDialog):
                 "Enabled points came from incompatible MCA settings; remove or disable "
                 "points from one configuration."
             )
-            self.apply_button.setEnabled(False)
-            self.report_button.setEnabled(False)
+            self.apply_action.setEnabled(False)
+            self.report_action.setEnabled(False)
             self._update_residuals()
             return
         fingerprint = dict(complete_enabled[0].fingerprint) if complete_enabled else {}
@@ -670,8 +679,8 @@ class EnergyCalibrationDialog(QDialog):
         except ValueError as exc:
             workspace.fit = None
             self.fit_status.setText(str(exc))
-            self.apply_button.setEnabled(False)
-            self.report_button.setEnabled(False)
+            self.apply_action.setEnabled(False)
+            self.report_action.setEnabled(False)
             self._update_residuals()
             return
         calibration = workspace.fit
@@ -686,8 +695,8 @@ class EnergyCalibrationDialog(QDialog):
             f"RMS residual {calibration.rms_residual_kev:.4g} keV; maximum "
             f"{calibration.max_residual_kev:.4g} keV.{warning}"
         )
-        self.apply_button.setEnabled(not stale)
-        self.report_button.setEnabled(True)
+        self.apply_action.setEnabled(not stale)
+        self.report_action.setEnabled(True)
         self._update_residuals()
 
     def _fit_centroids(self, workspace: _Workspace) -> list[str]:

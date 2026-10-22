@@ -143,7 +143,7 @@ def test_workbench_runs_peak_fit_off_the_gui_thread(qtbot: QtBot) -> None:
         line.zValue() > dialog.fit_region.zValue() for line in dialog._peak_lines
     )
 
-    dialog._start_fit()
+    dialog.fit_action.trigger()
     assert dialog._fit_thread is not None
     qtbot.waitUntil(lambda: dialog._fit_thread is None, timeout=10_000)
 
@@ -153,8 +153,8 @@ def test_workbench_runs_peak_fit_off_the_gui_thread(qtbot: QtBot) -> None:
     assert result.peaks[0].center == pytest.approx(180, abs=0.2)
     assert result.statistic == "poisson"
     assert dialog.peak_table.rowCount() == 1
-    assert dialog.export_fit_button.isEnabled()
-    assert dialog.report_fit_button.isEnabled()
+    assert dialog.export_fit_action.isEnabled()
+    assert dialog.report_fit_action.isEnabled()
     dialog.close_without_prompt()
 
 
@@ -304,8 +304,8 @@ def test_reference_favourites_are_pinned_editable_and_persistent(
         if dialog.reference_nuclide_list.item(row).data(Qt.ItemDataRole.UserRole) == "Co-60"
     )
     dialog.reference_nuclide_list.setCurrentItem(co60)
-    assert dialog.reference_favourite_button.text() == "Add to favourites"
-    dialog.reference_favourite_button.click()
+    assert dialog.reference_favourite_action.text() == "Add to favourites"
+    dialog.reference_favourite_action.trigger()
 
     assert dialog._reference_favourites == expected_defaults + ["Co-60"]
     assert stored_settings["analysis/radionuclide_reference_favourites"] == (
@@ -326,8 +326,8 @@ def test_reference_favourites_are_pinned_editable_and_persistent(
         if reopened.reference_nuclide_list.item(row).data(Qt.ItemDataRole.UserRole) == "Cs-137"
     )
     reopened.reference_nuclide_list.setCurrentItem(cs137)
-    assert reopened.reference_favourite_button.text() == "Remove from favourites"
-    reopened.reference_favourite_button.click()
+    assert reopened.reference_favourite_action.text() == "Remove from favourites"
+    reopened.reference_favourite_action.trigger()
 
     assert "Cs-137" not in reopened._reference_favourites
     assert reopened.reference_nuclide_list.item(0).data(Qt.ItemDataRole.UserRole) == "Na-22"

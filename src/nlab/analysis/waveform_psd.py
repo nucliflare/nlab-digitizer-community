@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import numpy as np
@@ -70,6 +70,9 @@ class WaveformPsdResult:
     stored_long: np.ndarray
     calculated_short: np.ndarray
     stored_short: np.ndarray
+    event_frames: np.ndarray = field(default_factory=lambda: _readonly(np.empty(0, dtype=np.int64)))
+    event_energy: np.ndarray = field(default_factory=lambda: _readonly(np.empty(0)))
+    event_ratio: np.ndarray = field(default_factory=lambda: _readonly(np.empty(0)))
 
     @property
     def energy_edges(self) -> np.ndarray:
@@ -158,6 +161,11 @@ class WaveformPsdAccumulator:
         self._stored_long: list[float] = []
         self._calculated_short: list[float] = []
         self._stored_short: list[float] = []
+        # Only indexed reconstructions retain these three scalar columns, never
+        # waveform samples. FOM/histogram-only callers remain bounded-memory.
+        self._event_frames: list[np.ndarray] = []
+        self._event_energy: list[np.ndarray] = []
+        self._event_ratio: list[np.ndarray] = []
 
     def add_waveform(
         self,
@@ -165,6 +173,7 @@ class WaveformPsdAccumulator:
         *,
         stored_long: int | None = None,
         stored_short: int | None = None,
+        frame_index: int | None = None,
     ) -> WaveformCharge | None:
         self._received += 1
         if len(samples) < self.settings.long_end:
@@ -186,6 +195,10 @@ class WaveformPsdAccumulator:
             self._outside_range += 1
             return charge
         self._accepted += 1
+        if frame_index is not None:
+            self._event_frames.append(np.asarray([frame_index], dtype=np.int64))
+            self._event_energy.append(np.asarray([charge.long_charge]))
+            self._event_ratio.append(np.asarray([charge.ratio]))
         self._energies.append(charge.long_charge)
         self._ratios.append(min(charge.ratio, np.nextafter(ratio_high, ratio_low)))
         if (
@@ -208,6 +221,7 @@ class WaveformPsdAccumulator:
         complete: np.ndarray | None = None,
         stored_long: np.ndarray | None = None,
         stored_short: np.ndarray | None = None,
+        frame_indices: np.ndarray | None = None,
     ) -> None:
         """Integrate and histogram a rectangular waveform batch.
 
@@ -219,6 +233,11 @@ class WaveformPsdAccumulator:
         if values.ndim != 2:
             raise ValueError("waveform batch must be a two-dimensional array")
         received = len(values)
+        if frame_indices is not None:
+            frame_indices = np.asarray(frame_indices)
+            if (frame_indices.shape != (received,) or frame_indices.dtype.kind not in "iu"
+                    or np.any(frame_indices < 0)):
+                raise ValueError("frame indices must be nonnegative integers, one per waveform")
         self._received += received
         if complete is None:
             usable = np.full(received, values.shape[1] >= self.settings.long_end)
@@ -285,6 +304,12 @@ class WaveformPsdAccumulator:
         if not accepted_count:
             return
 
+        if frame_indices is not None:
+            selected_frames = frame_indices if all_usable else frame_indices[usable]
+            self._event_frames.append(selected_frames[accepted].astype(np.int64, copy=True))
+            self._event_energy.append(long_charge[accepted].copy())
+            self._event_ratio.append(ratio[accepted].copy())
+
         self._flush()
         accepted_ratio = np.minimum(
             ratio[accepted],
@@ -335,6 +360,12 @@ class WaveformPsdAccumulator:
             stored_long=_readonly(np.asarray(self._stored_long)),
             calculated_short=_readonly(np.asarray(self._calculated_short)),
             stored_short=_readonly(np.asarray(self._stored_short)),
+            event_frames=_readonly(np.concatenate(self._event_frames))
+            if self._event_frames else _readonly(np.empty(0, dtype=np.int64)),
+            event_energy=_readonly(np.concatenate(self._event_energy))
+            if self._event_energy else _readonly(np.empty(0)),
+            event_ratio=_readonly(np.concatenate(self._event_ratio))
+            if self._event_ratio else _readonly(np.empty(0)),
         )
 
     def _flush(self) -> None:

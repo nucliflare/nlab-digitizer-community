@@ -133,11 +133,11 @@ def test_dialog_uses_gaussian_centroids_for_energy_fit(qtbot: QtBot) -> None:
     assert [point.channel for point in workspace.points] == pytest.approx(centers, abs=0.1)
     assert workspace.fit is not None
     assert [point.channel for point in workspace.fit.points] == pytest.approx(centers, abs=0.1)
-    assert dialog.report_button.isEnabled()
+    assert dialog.report_action.isEnabled()
     assert all(point.centroid_line is not None for point in workspace.points)
 
     original_seeds = [point.seed_channel for point in workspace.points]
-    dialog._apply()
+    dialog.apply_action.trigger()
 
     assert controller.energy_calibration is workspace.fit
     assert workspace.show_peak_fits
@@ -226,7 +226,7 @@ def test_dialog_keeps_points_when_a_new_source_spectrum_is_overlaid(qtbot: QtBot
     workspace.points[1].energy_kev = 1_332.492
     dialog._rebuild_table()
     dialog._refit()
-    assert dialog.apply_button.isEnabled()
+    assert dialog.apply_action.isEnabled()
     assert len(workspace.points) == 2
     dialog._apply()
     assert controller.energy_calibration is not None

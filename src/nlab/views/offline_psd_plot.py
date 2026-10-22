@@ -11,6 +11,7 @@ from PySide6.QtCore import QEvent, QObject, QRectF, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QGridLayout,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
 from nlab.views.image_display import transparent_sparse_bins
 from nlab.views.plot_viewbox import NLabPlotWidget, style_plot_widget
 from nlab.views.psd_fom_widget import PsdFomWidget
+from nlab.views.tooltips import wrap_widget_tooltips
 
 _MATRIX_COLUMN_LEFT_AXIS_WIDTH = 84
 _MATRIX_COLUMN_RIGHT_AXIS_WIDTH = 66
@@ -55,19 +57,40 @@ class OfflinePsdPlot(QWidget):
         self._energy_log_y = False
 
         root = QVBoxLayout(self)
-        controls = QHBoxLayout()
-        controls.addWidget(QLabel("Matrix scale:", self))
+        # Keep display controls together so a host can place them in a sidebar
+        # without duplicating controls or changing their plotting connections.
+        self.controls_widget = QWidget(self)
+        controls = QHBoxLayout(self.controls_widget)
+        controls.setContentsMargins(0, 0, 0, 0)
+        self.controls_layout = controls
+        scale_label = QLabel("Matrix scale:", self)
+        scale_label.setProperty("nlabHelpTopic", "display")
+        controls.addWidget(scale_label)
         self.scale_combo = QComboBox(self)
+        self.scale_combo.setProperty("nlabHelpTopic", "display")
+        scale_label.setBuddy(self.scale_combo)
         self.scale_combo.addItem("Logarithmic", "log")
         self.scale_combo.addItem("Linear", "linear")
         controls.addWidget(self.scale_combo)
-        controls.addWidget(QLabel("PSD cut:", self))
+        cut_label = QLabel("PSD cut:", self)
+        cut_label.setProperty("nlabHelpTopic", "psd-cut")
+        controls.addWidget(cut_label)
         self.cut_spin = QDoubleSpinBox(self)
+        self.cut_spin.setProperty("nlabHelpTopic", "psd-cut")
+        cut_label.setBuddy(self.cut_spin)
         self.cut_spin.setDecimals(4)
         self.cut_spin.setSingleStep(0.01)
         controls.addWidget(self.cut_spin)
+        self.roi_checkbox = QCheckBox("Show PSD ROI", self)
+        self.roi_checkbox.setChecked(True)
+        self.roi_checkbox.setProperty("nlabHelpTopic", "psd-roi")
+        self.roi_checkbox.setToolTip(
+            "Show/hide the energy ROI and PSD cut line on the matrix without changing "
+            "their values or projections. FOM fit guides have their own visibility switch."
+        )
+        controls.addWidget(self.roi_checkbox)
         controls.addStretch(1)
-        root.addLayout(controls)
+        root.addWidget(self.controls_widget)
 
         plots_widget = QWidget(self)
         plots = QGridLayout(plots_widget)
@@ -155,9 +178,15 @@ class OfflinePsdPlot(QWidget):
         self.cut_spin.valueChanged.connect(self._cut_spin_changed)
         self.cut_line.sigPositionChanged.connect(self._cut_line_changed)
         self.energy_region.sigRegionChangeFinished.connect(self._render_projections)
+        self.roi_checkbox.toggled.connect(self._set_roi_visible)
         self._application = QApplication.instance()
         if self._application is not None:
             self._application.installEventFilter(self)
+        wrap_widget_tooltips(self)
+
+    def _set_roi_visible(self, visible: bool) -> None:
+        self.energy_region.setVisible(visible)
+        self.cut_line.setVisible(visible)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
         """Toggle energy-projection log scale only while that plot is hovered."""

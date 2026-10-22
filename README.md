@@ -671,6 +671,14 @@ incrementally through a bounded queue rather than accumulated in RAM.
 
 ### MCA energy calibration
 
+The workspace's **File**, **Analysis**, **View**, and **Help** menus replace the
+command buttons. **File** copies/replaces or overlays the current MCA spectrum,
+downloads reports (**Ctrl+S**), and closes the workspace (**Ctrl+W**).
+**Analysis** adds/removes/clears points and applies or clears calibration; the
+existing automatic refitting, validity checks, and unapplied-edit confirmation
+are unchanged. **View** resets plot zoom and **Help** opens the bundled guide.
+Channel/model/width controls and the calibration table stay beside the plots.
+
 Open **Tools → MCA Energy Calibration...**, choose an MCA channel, and copy its
 current spectrum into the calibration workspace. Double-click a known peak to
 add a draggable reference line, then enter its expected energy in keV. The
@@ -747,6 +755,17 @@ Closing the tool, disconnecting a digitizer, or rebuilding the workspace closes
 the file cleanly.
 
 ### MCA peak-analysis workbench
+
+The workbench has **File**, **Analysis**, **References**, **View**, and **Help**
+menus in place of command-button rows. **File** handles spectrum loading/exports,
+fit exports, reports, and closing; **Analysis** refreshes/removes snapshots,
+suggests/fits peaks, cancels fits, and creates derived spectra using the visible
+operation settings. **References** manages favourites/defaults and clears selected
+reference lines. **View** selects linear/log counts, selects the side-panel tab,
+and resets plot zoom; counts scale and tab selections remain synchronized with
+their visible controls. **Help** opens the bundled peak-analysis guide.
+Window-local shortcuts: **Ctrl+O** loads files, **Ctrl+S** downloads the report,
+and **Ctrl+W** closes the workspace. Parameter fields remain next to the plots.
 
 Open **Tools -> MCA Peak Analysis Workbench...** to copy the latest presented
 spectrum from every available MCA channel. These are frozen analysis snapshots:
@@ -958,6 +977,14 @@ sample. Existing capture files remain readable.
 
 Every recorded MCA run also writes a same-stem `.run.json` with channel,
 format, start/end time, record count, average rate, and continuity status.
+The bottom status bar includes a green **Measuring: CH0, CH1** badge listing
+channels with active live Scope or MCA acquisitions, including DMA-backed PSD
+and coincidence runs. It stays visible across tabs, counts each channel only
+once, and disappears when no runs remain. Multiple digitizers use board-qualified
+labels such as **D1:CH0, D2:CH0**. The badge follows application acquisition
+lifecycle notifications without extra hardware polling; offline analysis and
+recorded replay do not activate it.
+
 The bottom status bar shows acquisition progress, errors, and the final run
 outcome for the visible MCA, Scope, Current, PSD, or Coincidence panel, with
 panel/channel identification. Returning to a panel restores its latest message.
@@ -975,6 +1002,16 @@ Use **Tools → PSD Event Readback...** to reconstruct the PSD matrix and both
 projections from NDMA, CAEN CoMPASS, legacy `caen.py`, HDF5, or ROOT events in
 a standalone workbench. Saved-event analysis no longer replaces or pauses a
 live PSD measurement.
+The readback window has **File**, **Analysis**, **View**, and **Help** menus.
+**File** provides loading, cancellation, report download, and closing; **Analysis**
+provides the Gaussian fit and fit-table copy; **View** toggles PSD ROI and fit
+guides, synchronized with the plot controls. **Help** opens the bundled readback
+guide. Window-local shortcuts are **Ctrl+O** (load), **Ctrl+S** (report), and
+**Ctrl+W** (close). The filename (or "No file loaded") appears in the window title
+instead of a separate label row. Histogram parameters
+and matrix scale/PSD-cut/ROI controls occupy a compact, resizable sidebar to the
+left of the full-height plots; progress remains at the bottom. Loading,
+cancellation, and report availability are unchanged; there is no separate toolbar.
 The live and readback ratio projections include a shaded draggable fit ROI and
 two draggable centroid estimates. **Fit** runs a bounded double-Gaussian
 Levenberg-Marquardt fit with a constant background and Poisson-deviance
@@ -1002,9 +1039,10 @@ files preserve the complete matrix, both separated spectra, the full FOM
 projection and every fitted component; settings are also written as CSV and
 machine-readable JSON. Source formats that do not embed a device identity are
 marked explicitly instead of being inferred.
-Both analysis workbenches keep the full current source path visible and show
-the source filename in the window title, so subsequent status and report
-messages do not obscure which file is being analyzed.
+Both analysis workbenches show the source filename (or "No file loaded") in the
+window title instead of a separate file-label row, so subsequent status and report
+messages do not obscure which file is being analyzed. The full source path is
+retained as window file metadata.
 The ratio and energy projections share the map's aligned data boundaries. Hover
 over the bottom energy projection and press **L** to switch its count axis
 between linear and logarithmic scale; this shortcut is available in both live
@@ -1038,6 +1076,70 @@ not store the ADC sample period; the tool starts at 2 ns for the common DT5730,
 but the operator must set the correct value for the originating digitizer.
 
 The same workbench reconstructs PSD directly from waveforms. It supports a
+menu bar with **File**, **Analysis**, **Selection**, **View**, and **Help** menus
+alongside the existing controls. Open files with **Ctrl+O**, reconstruct PSD with
+**Ctrl+R**, download a report with **Ctrl+S**, close the file with **Ctrl+Shift+W**,
+or close the workbench with **Ctrl+W** (shortcuts are local to this window).
+Opening and closing files use the File menu only; there are no duplicate buttons.
+Source, Frame, and Sample period are grouped at the top of the left settings
+sidebar, which scrolls when space is limited, leaving plots free of a top control row.
+Menu actions follow the same availability and checked states as their controls;
+selection actions remain accessible when the selection toolbar is hidden.
+Waveform/PSD tooltips wrap to multiple short lines,
+while retaining their complete explanations and plain-text F1 help.
+**Help → Workbench guide** opens the bundled offline waveform documentation.
+The workbench also supports a
+rectangle/polygon cluster browser: after reconstructing, add and edit a region on
+the PSD map, **Apply selection**, and browse its matching waveforms with
+**Previous/Next** or the selected-event number. The original **Frame** index is
+preserved and a white point marks the current event. Polygon vertices are
+draggable and clicking an edge adds a vertex. **Clear selection** restores all
+frames; empty selections clear the preview. Region outlines/handles are black
+for contrast. **Show PSD ROI** hides/shows
+the energy ROI and PSD cut line; **Waveform selection tools** toggles the cluster
+controls and overlays while preserving the active filter and match position.
+FOM fit guides remain independently controlled. Cuts use exact coordinates,
+including boundaries, and are limited to the events in the current reconstruction
+(source, stride, limit, and display ranges). Settings/source changes invalidate
+the selection. Only three scalar columns per plotted event are retained for
+this index—about 24 bytes/event, plus temporary array copies—not waveform samples.
+Selections do not assign physical particle identities or change live acquisition.
+
+**Show average waveform** overlays the mean of all selected events on the current
+waveform plot; click again to hide it or cancel calculation. Averaging runs in the
+background, subtracts each event's selected mean/median baseline, and applies the
+reconstruction polarity. The overlay sits at the displayed pulse's baseline for
+comparison with the polarity-normalized curve. Samples are averaged at their
+original indices, without peak alignment or amplitude scaling; timing jitter can
+therefore broaden the mean. Variable-length records use the shortest shared
+prefix so every sample represents the whole cluster. Browsing preserves the
+overlay; editing/clearing the selection or changing reconstruction settings
+removes it. Source files and the PSD/FOM are unchanged.
+
+Use **File → Export selected cluster...** after applying a nonempty region to save
+all matching original waveforms (not just the displayed frame or the average).
+The export follows that reconstruction's source, stride, maximum-event limit,
+and display ranges; it does not rescan excluded events. Full recorded sample
+arrays and integer timestamps are preserved without baseline subtraction,
+polarity inversion, alignment, or gate cropping. Output formats are:
+
+| Format | Waveform data | Selection provenance |
+| --- | --- | --- |
+| nlab binary (`.bin`) | Standard Scope NDMA v1 header and complete original frames; can be reopened in the workbench | Adjacent `.cluster.json` with original frame indices, energy, PSD, gates, region vertices, and source/analysis metadata |
+| ROOT (`.root`) | `waveforms` TTree with `timestamp` (uint64) and `samples` (int16 array) | `source_frame`, reconstructed `energy` (long charge), and `psd` branches; `metadata_json` and `waveform_schema` objects |
+| HDF5 (`.h5`, `.hdf5`) | `waveforms` (int16) and `timestamps` (uint64) datasets | `source_frame`, `energy`, `psd` datasets and a `metadata_json` file attribute |
+
+CAEN input supports ROOT/HDF5 with full variable-length waveforms, unconverted
+native timestamps, and available stored charges/flags/waveform codes (with
+validity columns). It is not exported as Scope NDMA because that ABI cannot
+preserve CAEN's record geometry and timestamp semantics. NDMA ROOT/HDF5 samples
+are fixed-width arrays; CAEN samples are jagged/vlen arrays. Sampling period is
+saved from the workbench analysis setting, not inferred from an NDMA header.
+Exports run in a cancellable background task, refuse existing destinations or
+binary metadata sidecars, and remove their own incomplete outputs on failure or
+cancellation. Keep the binary and its sidecar together for provenance.
+
+Waveform preprocessing supports a
 draggable baseline region with median or mean offset removal, automatic or
 explicit pulse polarity, and draggable integration-start, short-end, and
 long-end markers. Each event produces `Qshort`, `Qlong`, and
@@ -1094,6 +1196,27 @@ files. Quarto examples are provided in:
 
 - [`docs/analyze_scope.qmd`](docs/analyze_scope.qmd)
 - [`docs/analyze_listmode.qmd`](docs/analyze_listmode.qmd)
+
+For a lightweight ROOT PSD exploration in Jupyter, run
+`%run notebooks/explore_mca_psd.py` from a notebook at the repository root (or
+`%run explore_mca_psd.py` from `notebooks/`). Edit `FILENAME` in the script to
+select the file. Raw branch arrays remain available as `events`, with derived
+`energy` and `psd` arrays and embedded settings/schema in `metadata`. Call
+`plot_psd(energy, psd, energy_range=(1000, 10000), psd_range=(0, 0.3))` to explore
+an ROI. All three plots use the same selection. The default preview loads only
+the first million entries; call `load_psd(entry_stop=None)` to read the full run
+into memory. No calibration or MCA binning shift is applied; zero-energy entries
+remain in the raw arrays but are excluded from plots. The script opens the file
+read-only and also supports VS Code `# %%` cells.
+
+To inspect negative PSD directly in raw waveforms, run
+`%run notebooks/inspect_negative_waveform_psd.py`. It reconstructs signed gate
+integrals from all complete frames using explicit sample-domain gates, compares
+median and mean pretrigger baselines at the same pulse onset, and displays
+negative examples alongside cumulative-charge curves. Figures and numerical
+summaries are saved under the ignored `audit/negative_waveform_psd/` directory.
+These are offline diagnostic gates, not a claim to reproduce hardware gate
+settings or match events from a different list-mode capture.
 
 Hardware walkthrough notebooks are available in
 [`notebooks/`](notebooks/). Their saved outputs come from real-board execution

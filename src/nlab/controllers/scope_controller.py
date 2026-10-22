@@ -126,6 +126,7 @@ class ScopeController(QWidget):
     _PRETRIGGER_MARKER_COLOR = "#648b71"
     current_dma_state_changed = Signal(bool, str)
     session_viewer_frame = Signal(int, object, int)
+    measurement_active_changed = Signal(bool)
 
     def __init__(
         self,
@@ -150,6 +151,8 @@ class ScopeController(QWidget):
         self._apply_control_tooltips()
 
         self._acquiring = False
+        # _acquiring describes one in-flight viewer request, not the run.
+        self._measurement_active = False
         self._discard_inflight_frame = False
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._request_frame)
@@ -193,6 +196,18 @@ class ScopeController(QWidget):
     @property
     def channel(self) -> int:
         return self._channel
+
+    @property
+    def measurement_active(self) -> bool:
+        """Last lifecycle-confirmed continuous run; excludes single-frame reads."""
+        return bool(getattr(self, "_measurement_active", False))
+
+    def _set_measurement_active(self, active: bool) -> None:
+        if getattr(self, "_measurement_active", False) != active:
+            self._measurement_active = active
+            signal = getattr(self, "measurement_active_changed", None)
+            if signal is not None:
+                signal.emit(active)
 
     # ------------------------------------------------------------------
     # Spec application
@@ -1191,6 +1206,7 @@ class ScopeController(QWidget):
 
     def _start_polling_only(self) -> None:
         self._scope.start()
+        ScopeController._set_measurement_active(self, True)
         self.ui.btnStop.setEnabled(True)
         interval_ms = 1000 // self.ui.spinRefreshRate.value()
         self._refresh_timer.start(interval_ms)
@@ -1255,6 +1271,7 @@ class ScopeController(QWidget):
     def _on_dma_ready(self) -> None:
         if self._dma_stopping:
             return
+        ScopeController._set_measurement_active(self, True)
         # The backend's first read starts the blocking refill and then writes
         # enable=1 in that order. The queued ready signal is only a UI
         # transition; a second start write here would race it.
@@ -1298,6 +1315,7 @@ class ScopeController(QWidget):
             # is armed. Stop new triggers first, then have the worker cancel
             # any blocked refill and close the buffer.
             self._scope.stop()
+            ScopeController._set_measurement_active(self, False)
             self._dma_worker.stop()
             self._acquiring = False
             self.ui.btnStart.setChecked(False)
@@ -1312,6 +1330,7 @@ class ScopeController(QWidget):
         else:
             self._scope.stop()
 
+        ScopeController._set_measurement_active(self, False)
         self._acquiring = False
         self.ui.btnStart.setChecked(False)
         self.ui.btnStart.setEnabled(True)
@@ -1895,6 +1914,7 @@ class ScopeController(QWidget):
                 runtime.queue_high_watermark if runtime is not None else 0,
             )
         log.info("Scope DMA: worker finished; restoring controls")
+        ScopeController._set_measurement_active(self, False)
         try:
             if getattr(self, "_session_replay_active", False):
                 self._apply_session_replay_controls()
@@ -2018,6 +2038,7 @@ class ScopeController(QWidget):
             try:
                 if self._scope.get_enable():
                     self._scope.stop()
+                ScopeController._set_measurement_active(self, False)
                 return
             except OSError as e:
                 if getattr(e, "errno", None) != 16 or attempt == 9:

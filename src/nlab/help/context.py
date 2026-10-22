@@ -154,7 +154,6 @@ CLASS_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
     "PsdReadbackDialog": ("psd-readback", {
         "energy_bins": "psd-bins", "ratio_bins": "psd-bins",
         "energy_shift": "psd-shift", "ratio_min": "psd-range", "ratio_max": "psd-range",
-        "report_button": "export",
     }),
     "RootConversionDialog": ("conversion", {}),
     "TimingValidationDialog": ("timing-validation", {}),
