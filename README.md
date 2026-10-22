@@ -46,7 +46,12 @@ permanent explanatory banners. Parameter names, numeric results, progress, and
 fit-quality warnings remain visible. **Auto preview** still uses every twentieth
 selected event while dragging and queues the normal reconstruction on release;
 the exhaustive-search confirmation remains mandatory. The waveform signal-preview
-legend defaults to the top-right and stays anchored there when resized.
+legend defaults to the bottom-right and stays anchored there when resized,
+as does the MCA debug legend.
+
+The waveform workbench time axes use ns, µs, ms or s according to the visible
+time span, with matching top/bottom ticks. This replaces stacked prefixes such
+as "kns"; waveform coordinates, sample periods and gate calculations stay in ns.
 
 Waveform displays use sample-hold steps: each level extends to the next sample
 timestamp, with a vertical transition there instead of diagonal interpolation.
@@ -78,6 +83,10 @@ points, outputs, and interpretation limits. Common paths are:
 ### Scope
 
 - Live waveform viewer with level, edge, and periodic trigger modes
+- An elapsed-time indicator in Acquisition for continuous viewer/DMA runs, using
+  a monotonic host clock from start/DMA-ready. It freezes on stop and resets on
+  the next run; excludes arming, single-frame reads and replay, and is not
+  hardware live time or the duration represented by recorded samples.
 - A draggable dashed trigger-threshold line on the Scope plot, synchronized
   with the threshold slider and spin box; the hardware value is committed
   when the line is released
@@ -133,6 +142,25 @@ uv run python examples/measure_current.py
 
 ### MCA and PSD
 
+- **Record list-mode DMA** is grouped with the measurement controls, directly
+  above **DMA File...**, in both regular and compact layouts.
+- Enabling charge comparison adds a dashed black step guide to the MCA waveform
+  plot: the inverted lower level covers the signal/frame beginning (0) to CC time,
+  including pretrigger and clipped to the window. The upper level marks the
+  remaining diagnostic window. Moving pretrigger does not shift this guide.
+  Click its legend sample to hide/show it; that view preference survives live
+  refreshes, zoom, timing edits and CC off/on changes while the view remains open.
+  Hiding the guide does not disable hardware charge comparison.
+  Heights are schematic and do not change waveform auto-range. This visualizes
+  configured timing, not a measured FPGA gate or a qualified long-charge integral.
+- MCA Statistics includes dead time in milliseconds and percent of elapsed time:
+  `100 * dead_time_ms / (1000 * elapsed_s)`. The percentage is unavailable until
+  elapsed time is positive and updates from the same readback as the counters.
+- MCA elapsed status uses the pulse processor's 0.1-second counter ticks,
+  independently of the programmed-duration scale. This keeps elapsed display,
+  ROI CPS and analysis snapshots consistent (999 ticks = 99.9 s, not 134.1 s).
+  Qualification used a read-only CH0 snapshot on hw101/sw103023 and the
+  operator's watch-timed 100 s run; the fix does not change acquisition duration.
 - The MCA debug viewer has draggable, dashed trigger-threshold and pretrigger-
   offset markers. Their muted red/green labels match the corresponding controls;
   the offset marker previews a horizontal shift of both debug traces, and
@@ -160,6 +188,9 @@ uv run python examples/measure_current.py
 - Debug waveform-bank readout
 - Synchronized stop/write/restart when changing MCA settings during acquisition
 - List-mode IIO DMA using fixed 1,024-record frames
+- The live PSD map offers **Matrix scale: Logarithmic / Linear**, matching the
+  waveform workbench. Changes only density colors, keeps sparse bins transparent,
+  and preserves events, projections, ROIs and FOM fits. Saved with PSD settings.
 - Live PSD classification from charge-comparison and energy measurements,
   including interactive double-Gaussian projection fitting and conventional
   centroid/FWHM figure-of-merit reporting. Live and Tools/readback PSD maps,
@@ -1088,6 +1119,29 @@ selection actions remain accessible when the selection toolbar is hidden.
 Waveform/PSD tooltips wrap to multiple short lines,
 while retaining their complete explanations and plain-text F1 help.
 **Help → Workbench guide** opens the bundled offline waveform documentation.
+**File → Transfer gates to MCA...** previews a candidate starting preset for an
+explicitly selected connected MCA channel. Pretrigger is the gap from the **end
+of the baseline region** to the **green integration-start line**:
+`integration start − baseline end`; window length is `long end − start`; charge-
+comparison time is `short end − start`, converted from samples to nanoseconds.
+The current driver permits 2 ns steps: each duration rounds **up**, with invalid
+ranges rejected rather than clipped. A current/requested/rounded table and dashed
+waveform markers show the proposed changes without moving analysis gates or
+recalculating FOM. The dialog includes an explicit charge-comparison enable choice.
+Rounded timings can also be previewed while disconnected; applying them requires
+a live target.
+No manual trigger position is required. The preview is anchored at baseline end,
+with the rounded pretrigger gap placing the candidate green boundary.
+Apply requires final confirmation; it never starts or
+stops acquisition. Busy/draining/DMA targets, active Scope on that channel,
+offline/replay mode, and stale targets after reconnect are rejected. Sequential
+write failures attempt restoration and report incomplete rollback explicitly.
+Baseline, polarity, trigger, filters and other algorithm settings are not copied.
+These panel timings are **not a qualified equivalence to FPGA integration gates**;
+offline baseline processing, sample spacing, and hardware energy estimators can
+differ. The preview does not fabricate sub-sample charge integrals or a new FOM.
+Timing ranges/encoding follow PetaLinux `167e90f`; validation is source-derived
+and unit-tested, not live-hardware-qualified.
 The workbench also supports a
 rectangle/polygon cluster browser: after reconstructing, add and edit a region on
 the PSD map, **Apply selection**, and browse its matching waveforms with

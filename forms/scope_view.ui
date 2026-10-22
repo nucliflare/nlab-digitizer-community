@@ -272,6 +272,16 @@
          </layout>
         </item>
         <item>
+         <widget class="QLabel" name="labelElapsedTime">
+          <property name="toolTip">
+           <string>Host-clock elapsed time for the current continuous Scope run, starting when acquisition starts (DMA ready for recording). Excludes arming and single-frame reads; retains the final value after stopping. Not hardware live time or recorded waveform duration.</string>
+          </property>
+          <property name="text">
+           <string>Elapsed: 0.0 s</string>
+          </property>
+         </widget>
+        </item>
+        <item>
          <layout class="QHBoxLayout" name="btnLayout">
           <item>
            <widget class="QPushButton" name="btnStart">

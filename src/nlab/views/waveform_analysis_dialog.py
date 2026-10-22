@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -43,6 +44,7 @@ from nlab.analysis.waveform_fom_optimization import (
     WaveformFomOptimizationRequest,
     WaveformFomOptimizationResult,
 )
+from nlab.analysis.waveform_mca_gates import GateTimingProposal, WaveformGateSource
 from nlab.analysis.waveform_psd import (
     BaselineMethod,
     WaveformPsdResult,
@@ -54,12 +56,14 @@ from nlab.help.context import HelpContext
 from nlab.views.help_dialog import HelpDialog
 from nlab.views.offline_psd_plot import OfflinePsdPlot
 from nlab.views.plot_viewbox import WAVEFORM_STEP_MODE, ModifierZoomViewBox, style_plot_widget
+from nlab.views.time_axis import time_axis_scale
 from nlab.views.tooltips import wrap_widget_tooltips
 from nlab.views.waveform_cluster_export_dialog import (
     ClusterExportRequest,
     WaveformClusterExportDialog,
 )
 from nlab.views.waveform_cluster_selection import WaveformClusterSelection
+from nlab.views.waveform_mca_transfer_dialog import McaGateTransferTarget, WaveformMcaTransferDialog
 from nlab.workers.waveform_average_worker import WaveformAverage, WaveformAverageWorker
 from nlab.workers.waveform_file_worker import WaveformFileIndexWorker
 from nlab.workers.waveform_fom_optimization_worker import WaveformFomOptimizationWorker
@@ -94,8 +98,10 @@ class _FomOptimizationContext:
 class WaveformAnalysisDialog(QDialog):
     """Browse saved waveforms and reconstruct short/long-gate PSD offline."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *,
+                 gate_targets: Callable[[], Sequence[McaGateTransferTarget]] | None = None) -> None:
         super().__init__(parent)
+        self._gate_targets = gate_targets
         self._set_current_file(None)
         self.setModal(False)
         self.resize(1420, 900)
@@ -204,9 +210,13 @@ class WaveformAnalysisDialog(QDialog):
         self.waveform_plot.showAxis("right")
         self.waveform_plot.showGrid(x=True, y=True, alpha=0.2)
         self.waveform_plot.setLabel("bottom", "Time", units="ns")
+        for side in ("bottom", "top"):
+            self.waveform_plot.getAxis(side).enableAutoSIPrefix(False)
+        self.waveform_plot.getViewBox().sigXRangeChanged.connect(self._update_waveform_time_axis)
+        self._update_waveform_time_axis()
         self.waveform_plot.setLabel("left", "ADC amplitude", units="raw")
-        # A negative X offset anchors to the right, and follows plot resizing.
-        self.waveform_plot.addLegend(offset=(-10, 10))
+        # Negative offsets anchor to the bottom-right and follow plot resizing.
+        self.waveform_plot.addLegend(offset=(-10, -10))
         self.waveform_widget.setToolTip(
             "Blue region: baseline. Green: integration start. Yellow: short-gate end. "
             "Red: long-gate end. Gate positions are stored as sample indices. "
@@ -309,6 +319,18 @@ class WaveformAnalysisDialog(QDialog):
         wrap_widget_tooltips(self)
         self._build_menu_bar(root)
 
+    def _update_waveform_time_axis(self, *_args: object) -> None:
+        """Keep plot/gate coordinates in ns; scale only the displayed ticks."""
+        low, high = self.waveform_plot.viewRange()[0]
+        scale = time_axis_scale(high - low)
+        # Applying an SI prefix to an already-prefixed "ns" produced "kns".
+        # Select physical time units explicitly, identically on both axes.
+        bottom = self.waveform_plot.getAxis("bottom")
+        if bottom.labelUnits != scale.unit:
+            bottom.setLabel("Time", units=scale.unit)
+        for side in ("bottom", "top"):
+            self.waveform_plot.getAxis(side).setScale(1.0 / scale.ns_per_unit)
+
     def _build_menu_bar(self, root: QVBoxLayout) -> None:
         self.menu_bar = QMenuBar(self)
         self.menu_bar.setNativeMenuBar(False)
@@ -326,6 +348,9 @@ class WaveformAnalysisDialog(QDialog):
         self.export_cluster_action = file_menu.addAction("&Export selected cluster...")
         self.export_cluster_action.setEnabled(False)
         self.export_cluster_action.triggered.connect(self._export_selected_cluster)
+        self.transfer_gates_action = file_menu.addAction("Transfer &gates to MCA...")
+        self.transfer_gates_action.setEnabled(False)
+        self.transfer_gates_action.triggered.connect(self._transfer_gates_to_mca)
         self._menu_button(file_menu, "Download &report...", self.report_button, "Ctrl+S")
         file_menu.addSeparator()
         self._menu_button(file_menu, "&Close workbench", self.close_button, "Ctrl+W")
@@ -394,6 +419,7 @@ class WaveformAnalysisDialog(QDialog):
         return super().eventFilter(watched, event)
 
     def _update_export_action(self) -> None:
+        self._update_gate_transfer_action()
         action = getattr(self, "export_cluster_action", None)
         if action is not None:
             frames = self._selected_frame_indices
@@ -403,6 +429,51 @@ class WaveformAnalysisDialog(QDialog):
                 and self._analysis_thread is None and self._optimization_thread is None
                 and self._index_thread is None and self._cluster_export_dialog is None
             )
+
+    def _transfer_gates_to_mca(self) -> None:
+        if (self._index is None or self._frame is None or self._index_thread is not None
+                or self._analysis_thread is not None or self._optimization_thread is not None
+                or self._cluster_export_dialog is not None
+                or self._pending_analysis_kind is not None):
+            return
+        markers: list[pg.InfiniteLine] = []
+        try:
+            self._auto_preview_timer.stop()
+            baseline_start, baseline_end, start, short, end = self._gate_indices()
+            if not 0 <= baseline_start < baseline_end <= start < short <= end <= len(
+                self._frame.samples,
+            ):
+                raise ValueError("Baseline and gates must be ordered inside the displayed waveform")
+            source = WaveformGateSource(baseline_end, start, short, end, self.sample_period.value())
+            targets = self._gate_targets() if self._gate_targets is not None else ()
+            dialog = WaveformMcaTransferDialog(source, targets, self)
+            for color in ("#2a9d8f", "#e9c46a", "#e76f51"):
+                line = pg.InfiniteLine(
+                    movable=False, pen=pg.mkPen(color, width=3, style=Qt.PenStyle.DashLine),
+                )
+                line.setZValue(40)
+                self.waveform_plot.addItem(line, ignoreBounds=True)
+                markers.append(line)
+
+            def preview(value: object) -> None:
+                for index, marker in enumerate(markers):
+                    marker.setVisible(isinstance(value, GateTimingProposal))
+                    if isinstance(value, GateTimingProposal):
+                        marker.setPos(value.boundaries_ns[index])
+
+            dialog.preview_changed.connect(preview)
+            dialog.refresh()
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.status.setText(
+                    "Candidate gate settings transferred to MCA; acquisition remains stopped."
+                )
+            dialog.deleteLater()
+        except Exception as exc:
+            log.exception("Could not open waveform-to-MCA gate transfer")
+            QMessageBox.warning(self, "MCA gate transfer unavailable", str(exc))
+        finally:
+            for marker in markers:
+                self.waveform_plot.removeItem(marker)
 
     def _export_selected_cluster(self) -> None:
         self._update_export_action()
@@ -709,6 +780,7 @@ class WaveformAnalysisDialog(QDialog):
         if indexing:
             self.close_file_action.setEnabled(False)
         self._update_optimize_button()
+        self._update_gate_transfer_action()
 
     def _source_changed(self) -> None:
         if self._index is None or self.source_combo.currentIndex() < 0:
@@ -965,6 +1037,7 @@ class WaveformAnalysisDialog(QDialog):
     def _preview(self) -> None:
         if self._updating_gates:
             return
+        self._update_gate_transfer_action()
         self._invalidate_cluster_if_stale()
         if self._frame is None:
             return
@@ -1497,7 +1570,16 @@ class WaveformAnalysisDialog(QDialog):
             and not fit.poor_convergence
         )
 
+    def _update_gate_transfer_action(self) -> None:
+        self.transfer_gates_action.setEnabled(
+            self._index is not None and self._frame is not None
+            and self._analysis_thread is None and self._optimization_thread is None
+            and self._index_thread is None and self._cluster_export_dialog is None
+            and self._pending_analysis_kind is None
+        )
+
     def _update_report_button(self) -> None:
+        self._update_gate_transfer_action()
         self.report_button.setEnabled(
             self._analysis_thread is None
             and self._optimization_thread is None

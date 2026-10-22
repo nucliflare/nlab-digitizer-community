@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
+from time import monotonic
 
 import numpy as np
 import pyqtgraph as pg
@@ -179,6 +180,10 @@ class ScopeController(QWidget):
         self._measurement_timer = QTimer(self)
         self._measurement_timer.setSingleShot(True)
         self._measurement_timer.timeout.connect(self._on_measurement_timeout)
+        self._elapsed_started_at: float | None = None
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.setInterval(250)
+        self._elapsed_timer.timeout.connect(self._update_elapsed_time)
         self._session_replay_active = False
         self._session_replay_display_mode: int | None = None
         self._replay_hardware_interlocked = False
@@ -205,9 +210,27 @@ class ScopeController(QWidget):
     def _set_measurement_active(self, active: bool) -> None:
         if getattr(self, "_measurement_active", False) != active:
             self._measurement_active = active
+            # Share the run lifecycle used by the measurement badge, not the
+            # per-frame viewer refresh. No hardware counter or polling required.
+            elapsed_timer = getattr(self, "_elapsed_timer", None)
+            if elapsed_timer is not None:
+                if active:
+                    self._elapsed_started_at = monotonic()
+                    self.ui.labelElapsedTime.setText("Elapsed: 0.0 s")
+                    elapsed_timer.start()
+                else:
+                    self._update_elapsed_time()
+                    elapsed_timer.stop()
+                    self._elapsed_started_at = None
             signal = getattr(self, "measurement_active_changed", None)
             if signal is not None:
                 signal.emit(active)
+
+    def _update_elapsed_time(self) -> None:
+        """Display host run duration; neither hardware live time nor sample time."""
+        if self._elapsed_started_at is not None:
+            seconds = max(0.0, monotonic() - self._elapsed_started_at)
+            self.ui.labelElapsedTime.setText(f"Elapsed: {seconds:.1f} s")
 
     # ------------------------------------------------------------------
     # Spec application

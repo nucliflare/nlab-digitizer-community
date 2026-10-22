@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import Mock
 
 import numpy as np
+import pytest
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QKeyEvent
 from pytestqt.qtbot import QtBot
@@ -47,6 +48,105 @@ def test_live_psd_matrix_makes_zero_and_one_count_bins_transparent(
     assert np.isnan(image[0, 0])
     assert np.isnan(image[2, 1])
     assert image[4, 3] == np.log1p(2)
+    controller.stop_processing()
+
+
+def test_matrix_scale_switch_changes_colors_only_and_preserves_pending_events(
+    qtbot: QtBot,
+) -> None:
+    event_buffer = McaEventBuffer()
+    controller = PSDController(event_buffer, channel=0)
+    qtbot.addWidget(controller)
+    controller._timer.stop()
+    accumulator = controller._accumulator
+    accumulator.matrix[1, 2] = 1
+    accumulator.matrix[3, 4] = 2
+    accumulator.matrix[5, 6] = 100
+    controller._render()
+    matrix = accumulator.matrix.copy()
+    controller._psd_plot.setRange(xRange=(100, 2000), yRange=(-0.2, 0.8), padding=0)
+    view_range = controller._psd_plot.viewRange()
+    roi = controller._energy_roi.getRegion()
+    cut = controller.ui.spinCut.value()
+    controller._render_projections = Mock(wraps=controller._render_projections)
+    controller._fom_widget.set_projection = Mock(wraps=controller._fom_widget.set_projection)
+    controller._fom_widget.clear_fit = Mock(wraps=controller._fom_widget.clear_fit)
+    events = np.zeros(2, dtype=_LM_EVENT_DTYPE)
+    events["trapezoid_energy"] = 1000
+    events["charge_energy"] = 500
+    event_buffer.append(events)
+
+    for scale in ("linear", "log", "linear"):
+        controller.ui.comboMatrixScale.setCurrentIndex(
+            controller.ui.comboMatrixScale.findData(scale)
+        )
+        image = np.asarray(controller._psd_image.image)
+        assert np.isnan(image[0, 0]) and np.isnan(image[2, 1])
+        transform = np.log1p if scale == "log" else float
+        assert image[4, 3] == transform(2)
+        assert image[6, 5] == transform(100)
+        np.testing.assert_allclose(controller._psd_image.getLevels(), (0, transform(100)))
+        assert controller._accumulator is accumulator
+        np.testing.assert_array_equal(accumulator.matrix, matrix)
+        np.testing.assert_allclose(controller._psd_plot.viewRange(), view_range)
+        assert controller._energy_roi.getRegion() == roi
+        assert controller.ui.spinCut.value() == cut
+        assert not controller._energy_log_y
+    controller._render_projections.assert_not_called()
+    controller._fom_widget.set_projection.assert_not_called()
+    controller._fom_widget.clear_fit.assert_not_called()
+    # Switching scale did not clear the as-yet unprocessed DMA batch.
+    controller.process_pending_events()
+    assert accumulator.statistics.accepted == 2
+    assert accumulator.matrix.sum() == matrix.sum() + 2
+    controller.stop_processing()
+
+
+@pytest.mark.parametrize("settings", [{}, {"matrix_scale": "log"}, {"matrix_scale": "bad"}])
+def test_matrix_scale_defaults_and_older_settings_stay_logarithmic(
+    qtbot: QtBot, settings: dict[str, object],
+) -> None:
+    controller = PSDController(McaEventBuffer(), channel=0)
+    qtbot.addWidget(controller)
+    assert controller.ui.comboMatrixScale.currentData() == "log"
+    controller.ui.comboMatrixScale.setCurrentIndex(1)
+    controller.apply_configuration_settings(settings)
+    assert controller.ui.comboMatrixScale.currentData() == "log"
+    assert controller.configuration_settings()["matrix_scale"] == "log"
+    # Both empty images have valid levels, with transparent empty bins.
+    for index in (0, 1):
+        controller.ui.comboMatrixScale.setCurrentIndex(index)
+        assert np.isnan(controller._psd_image.image).all()
+        np.testing.assert_array_equal(controller._psd_image.getLevels(), (0.0, 1.0))
+    controller.stop_processing()
+
+
+def test_matrix_scale_settings_round_trip_and_replay_restores_previous_scale(qtbot: QtBot) -> None:
+    controller = PSDController(McaEventBuffer(), channel=0)
+    qtbot.addWidget(controller)
+    controller.ui.comboMatrixScale.setCurrentIndex(1)
+    controller.set_energy_log_y(True)
+    saved = controller.configuration_settings()
+    assert saved["matrix_scale"] == "linear"
+    controller.ui.comboMatrixScale.setCurrentIndex(0)
+    controller.apply_configuration_settings(saved)
+    assert controller.ui.comboMatrixScale.currentData() == "linear"
+    assert controller._energy_log_y
+
+    controller.begin_session_replay(settings={"matrix_scale": "log"})
+    reconfigure = Mock()
+    controller.use_session_replay_worker(reconfigure)
+    accumulator = controller.session_replay_accumulator()
+    accumulator.matrix[3, 4] = 10
+    controller.display_session_replay_snapshot(accumulator, True)
+    controller.ui.comboMatrixScale.setCurrentIndex(1)
+    assert controller._psd_image.image[4, 3] == 10
+    reconfigure.assert_not_called()  # No replay/rebin job for a color change.
+    controller.ui.comboMatrixScale.setCurrentIndex(0)
+    assert controller._psd_image.image[4, 3] == np.log1p(10)
+    controller.end_session_replay()
+    assert controller.ui.comboMatrixScale.currentData() == "linear"
+    assert controller._energy_log_y
     controller.stop_processing()
 
 

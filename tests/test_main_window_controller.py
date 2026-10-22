@@ -797,7 +797,9 @@ def test_waveform_file_opens_standalone_workbench(
     controller.load_waveform_file(path)
     controller.show_waveform_analysis()
 
-    factory.assert_called_once_with(parent=controller._window)
+    factory.assert_called_once_with(
+        parent=controller._window, gate_targets=controller._waveform_mca_targets,
+    )
     assert dialog.show_workspace.call_count == 2
     dialog.open_path.assert_called_once_with(path)
 

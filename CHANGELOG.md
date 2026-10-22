@@ -9,8 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Waveform workbench time axes now display ns/µs/ms/s instead of stacked prefixes
+  such as "kns", with synchronized top/bottom tick scaling when zooming. Sample
+  coordinates, gate calculations and exported timings are unchanged.
+- Hiding the MCA CC guide through its legend now persists across measurement
+  refreshes, zoom and timing/availability changes. The user visibility choice
+  is separate from CC enable, and showing it again restores the current timing.
+- MCA CC timing guide now starts at the signal/frame beginning and includes
+  pretrigger, ending at CC time rather than pretrigger + CC time. Moving the
+  pretrigger marker no longer shifts or hides the short-window guide.
+- MCA elapsed time no longer reuses the programmed-duration register's scale.
+  The raw elapsed status already reports deciseconds; 999 ticks now displays
+  99.9 s rather than 134.1 s. Corrects elapsed-normalized ROI rates and analysis/
+  dose snapshots without changing measurement-duration programming. Includes
+  raw-counter boundary and snapshot/UI regressions; diagnosis was read-only on
+  PP hw101/sw103023, with no new acquisition commanded.
+
 ### Added
 
+- Live PSD map logarithmic/linear density-scale selector, matching the waveform
+  workbench. Display-only changes preserve accumulation, projections and FOM fits;
+  the selected scale is saved with PSD settings and restored around session replay.
+- MCA Statistics dead-time percentage alongside the existing millisecond value,
+  calculated with consistent time units and shown as unavailable at zero elapsed time.
+- Scope Acquisition elapsed-time indicator for continuous viewer and DMA runs,
+  using a monotonic host clock without extra hardware polling. Retains the final
+  time on stop and resets on the next run; excludes arming, single reads and replay.
+- MCA **Record list-mode DMA** moved into Measurement above **DMA File...**,
+  preserving its position through compact/regular reflow and acquisition locks.
+- Dashed black, stepped MCA charge-comparison timing guide, shown only while
+  CC is enabled; inverted lower/upper levels show the configured short window and the
+  remaining diagnostic window without influencing auto-range. MCA debug and
+  Waveform Analysis signal legends now default to bottom-right. The guide is
+  schematic, not measured FPGA integration data.
+- Waveform-workbench **Transfer gates to MCA...** with explicit target selection,
+  pretrigger derived from baseline-region end to the green integration-start
+  line (no manual trigger reference), sample-to-ns duration mapping, upward step rounding,
+  current/requested/rounded preview, temporary waveform overlays, and a charge-
+  comparison enable choice. Idle-only application rechecks replay/reconnect/DMA
+  guards, suppresses duplicate widget writes, attempts rollback on partial write
+  failure, and never starts acquisition. Includes bundled help and focused
+  simulated tests; FPGA integration equivalence is not live-qualified.
 - Waveform workbench source/frame/sample-period controls grouped in a scrollable
   left sidebar; redundant Load/Close file buttons and the top control row removed.
   File-menu commands retain their shortcuts and busy-state guards.

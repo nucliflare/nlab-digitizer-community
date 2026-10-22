@@ -11,6 +11,8 @@ from PySide6.QtWidgets import QBoxLayout, QScrollArea, QWidget
 from pytestqt.qtbot import QtBot
 
 from nlab.app import MainAppWindow
+from nlab.controllers.mca_controller import MCAController
+from nlab.hardware.digitizer.offline import create_offline_digitizer
 from nlab.ui.ui_external_device_view import Ui_ExternalDeviceView
 from nlab.ui.ui_global_view import Ui_GlobalView
 from nlab.ui.ui_mca_view import Ui_MCAView
@@ -266,7 +268,7 @@ def test_mca_restores_original_layout_after_returning_to_1080p(qtbot: QtBot) -> 
     responsive.apply_screen_height(1080)
 
     assert ui.layoutMca.direction() == QBoxLayout.Direction.LeftToRight
-    assert ui.layoutMca.count() == 8
+    assert ui.layoutMca.count() == 7
     assert ui.layoutMeasurement.direction() == QBoxLayout.Direction.LeftToRight
     assert ui.layoutMeasurement.count() == 4
     assert ui.mainLayout.itemAt(0).layout() is ui.topRow
@@ -278,6 +280,50 @@ def test_mca_restores_original_layout_after_returning_to_1080p(qtbot: QtBot) -> 
     assert ui.controlLayout.indexOf(ui.groupMca) == 0
     assert ui.controlLayout.indexOf(ui.groupMeasurement) == 1
     assert view.findChild(QScrollArea, "mcaControlScroll") is not None
+
+
+def test_mca_dma_checkbox_stays_above_file_button_across_layout_changes(qtbot: QtBot) -> None:
+    view = QWidget()
+    qtbot.addWidget(view)
+    ui = Ui_MCAView()
+    ui.setupUi(view)
+    responsive = configure_mca_layout(view, ui, screen_height=1080)
+    checkbox = ui.cbDmaEnable
+    checkbox.setChecked(True)
+    view.show()
+    for height in (1080, 720, 1080, 720):
+        responsive.apply_screen_height(height)
+        view.resize(1180, 650)
+        assert view.layout() is not None
+        view.layout().activate()
+        qtbot.wait(10)
+        assert ui.cbDmaEnable is checkbox and checkbox.isChecked()
+        assert ui.groupMeasurement.isAncestorOf(checkbox)
+        assert not ui.groupMca.isAncestorOf(checkbox)
+        assert ui.vDmaFile.indexOf(checkbox) == 0
+        assert ui.vDmaFile.indexOf(ui.btnDmaFile) == 1
+        assert checkbox.geometry().bottom() < ui.btnDmaFile.geometry().top()
+
+
+def test_mca_relocated_dma_checkbox_retains_configuration_and_interlocks(qtbot: QtBot) -> None:
+    view = MCAController(create_offline_digitizer(0).mca)
+    qtbot.addWidget(view)
+    view.ui.cbDmaEnable.setChecked(True)
+    assert view.configuration_settings()["dma_enabled"] is True
+    view._set_controls_enabled(False)
+    assert view.ui.groupMeasurement.isEnabled()
+    assert not view.ui.cbDmaEnable.isEnabled()
+    view._set_controls_enabled(True)
+    assert view.ui.cbDmaEnable.isEnabled()
+    view._coincidence_session = True
+    view._set_controls_enabled(True)
+    assert not view.ui.cbDmaEnable.isEnabled()
+    view._coincidence_session = False
+    view.set_replay_hardware_interlock(True)
+    assert not view.ui.cbDmaEnable.isEnabled()
+    view.set_replay_hardware_interlock(False)
+    assert view.ui.cbDmaEnable.isEnabled()
+    assert view.ui.cbDmaEnable.isChecked()
 
 
 def test_psd_controls_reflow_without_changing_widgets(
@@ -293,3 +339,7 @@ def test_psd_controls_reflow_without_changing_widgets(
     cut_index = ui.controlsLayout.indexOf(ui.spinCut)
     assert ui.controlsLayout.getItemPosition(ratio_max_index)[:2] == (2, 1)
     assert ui.controlsLayout.getItemPosition(cut_index)[:2] == (2, 3)
+    scale_index = ui.controlsLayout.indexOf(ui.comboMatrixScale)
+    assert ui.controlsLayout.getItemPosition(scale_index)[:2] == (1, 4)
+    clear_index = ui.controlsLayout.indexOf(ui.btnClear)
+    assert ui.controlsLayout.getItemPosition(clear_index) == (0, 5, 3, 1)

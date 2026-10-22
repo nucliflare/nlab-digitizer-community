@@ -140,6 +140,12 @@ The [duration](#duration) and **Record DMA frames** selection affect acquisition
 Scope viewing can use the preview supplied by its DMA owner rather than opening
 a second competing buffer.
 
+**Elapsed** reports monotonic host-clock seconds since continuous acquisition
+started (since DMA ready for recording), independent of viewer refresh or trigger
+rate. It retains the final value after stopping and resets on the next run.
+Arming, single-frame reads and session replay do not advance this indicator.
+It is not hardware live time or the duration represented by recorded samples.
+
 ## Scope — Auto Setup {#scope-auto}
 
 Auto Setup performs a bounded survey of baseline, pulse polarity, threshold,
@@ -192,7 +198,11 @@ how much monitoring data remains visible.
 Linear/logarithmic scaling changes presentation, not raw recorded values or
 calibration. Sparse zero bins may be transparent on logarithmic images. In MCA,
 the View menu controls logarithmic Y; hovering its plot and pressing L also
-toggles it. In offline PSD, the matrix and energy plots have separate display state.
+toggles it. Live and offline PSD have a **Matrix scale** selector for logarithmic
+(`log1p` counts) or linear count-density colors. The default is logarithmic;
+zero/one-count bins remain transparent in either mode. Changing matrix scale
+does not change accumulation, projections, ROI selections or FOM fits. Matrix
+scale and the energy histogram's logarithmic Y axis have separate display state.
 
 ## MCA — spectrum and DSP overview {#mca}
 
@@ -263,6 +273,8 @@ processing latency. The debug view is not a continuous Scope recording.
 
 Both debug traces use sample-hold steps. This changes drawing only, not sample
 timestamps, filter latency, or the hardware trigger decision.
+The MCA debug legend and offline waveform-preview legend default to bottom-right
+and remain anchored there when resized.
 
 ## MCA — hardware pile-up window {#mca-pileup}
 
@@ -334,6 +346,22 @@ or verify calibration after material changes.
 in nanoseconds. In the current live PSD workflow, this supplies `charge_energy`,
 used as the short-charge estimate against `trapezoid_energy`.
 
+While enabled, a dashed black stepped timing guide appears on the MCA waveform
+plot. The inverted lower step starts at the signal/frame beginning (0) and ends at CC time,
+including pretrigger and clipped to Window length. The pretrigger/threshold marker
+is not the short-window origin; moving it does not shift the guide. The upper
+step marks the remaining diagnostic window.
+It tracks timing edits, unit changes and zoom without changing waveform auto-range
+or ADC data, and disappears when CC is disabled or the window length is zero.
+Its vertical heights are schematic, not ADC amplitudes. It is not a
+measured FPGA gate signal, and the remainder is not a qualified long-charge
+integration interval; select the actual charge-comparison debug source to
+inspect firmware-produced signals. The legend describes the two step levels.
+Click the guide's legend sample to hide or show it without disabling hardware
+CC. Your choice is retained across measurement refreshes, zoom, timing edits,
+gate transfer, and CC off/on changes for the lifetime of that channel view.
+The legend entry remains available while CC is enabled so you can show it again.
+
 Live PSD uses `(Qlong - Qshort) / Qlong`; the exact producer quantities must be
 validated for the setup. Enabling charge comparison is required for this live
 ratio path. It is not the same function as [PSD zero crossing](#mca-zerocross),
@@ -390,6 +418,11 @@ Count rate, elapsed time, pile-up, overrange, energy-estimation, and throughput
 indicators describe different aspects of acquisition. A zero in one counter
 does not establish zero loss everywhere. An unavailable value is not a measured
 zero and must not be replaced with an unrelated counter.
+
+Dead time is shown in milliseconds and as a percentage of elapsed acquisition
+time: `100 * dead_time_ms / (1000 * elapsed_s)`. The percentage uses the same
+readback as the counters and shows **N/A** until elapsed time is positive.
+Values above 100% are not clipped, so inconsistent counter snapshots remain visible.
 
 For DMA, read the final summary and driver counters after Stop. Plot subscribers
 can drop display batches without changing a separately recorded raw stream;
@@ -521,6 +554,46 @@ The operation reads the capture without changing the file or live digitizer
 settings. Cancel requests worker termination; wait for completion before starting
 another job. Use the frame preview to check representative pulses, not just one
 especially clean event.
+
+## Waveforms — transfer candidate gates to MCA {#waveform-mca-transfer}
+
+After exploring a representative Scope capture, choose **File → Transfer gates
+to MCA...**. Select the target channel explicitly. This is a starting preset to
+reduce repeated measurements, not a promise of the same online PSD/FOM.
+
+Pretrigger is derived automatically from the **right edge of the baseline region
+to the green integration-start line**: `(integration start − baseline end) ×
+sample period`. The baseline end is the region's end boundary (exclusive), not
+the final included sample or the width of the baseline region. A baseline end
+coincident with integration start gives zero pretrigger. No manual trigger
+position or trigger-reference confirmation is needed. Source sample indices are
+converted using the workbench's sample period, never copied directly as hardware
+register counts.
+
+The proposed mapping is pretrigger = integration start minus baseline end;
+window length = long-gate end minus integration start; charge-comparison time =
+short-gate end minus integration start. All three round upward to the supported
+step (currently 2 ns). Out-of-range values and invalid baseline/gate ordering
+are rejected. Inspect current/requested/rounded values and
+the dashed green/yellow/red candidate boundaries on the waveform. The underlying
+offline gates and analysis are unchanged. The preview anchors at baseline end,
+then adds the rounded pretrigger gap to place the candidate green boundary;
+short/long durations remain relative to that candidate integration start.
+No FOM is recalculated for boundaries
+that may lie between recorded samples. Choose whether charge comparison should
+be enabled; no baseline/polarity/trigger/filter settings are transferred.
+Disconnected/offline use still permits a rounded candidate preview, with Apply
+disabled and current hardware values shown as unavailable.
+
+**Apply** asks for final confirmation and requires an idle connected target.
+It does not start/stop acquisition. Stop Scope on that channel and stop/drain/
+close MCA DMA first. Offline/replay mode and targets invalidated by reconnect
+cannot be written. Failed sequential writes attempt to restore prior timings;
+warnings report failure and incomplete rollback, if any. Current configuration
+values are driver shadows, not independent FPGA readback. Window/integration
+equivalence remains unqualified; baseline handling and hardware energy selection
+can differ. Timing encoding/ranges are source-derived from PetaLinux `167e90f`;
+local tests use simulated backends, not live hardware validation.
 
 ## Waveforms — selecting clusters {#waveform-clusters}
 

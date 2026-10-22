@@ -32,6 +32,7 @@ from nlab.controllers.scope_controller import ScopeController
 from nlab.hardware.digitizer.current_monitor import ScopeCurrentAccumulator
 from nlab.hardware.digitizer.digitizer import Digitizer
 from nlab.hardware.digitizer.dma import McaEventBuffer, ScopeFrameBuffer
+from nlab.hardware.digitizer.mca import McaGateTiming
 from nlab.hardware.digitizer.offline import (
     create_offline_digitizer,
     create_offline_external_device,
@@ -55,6 +56,7 @@ from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
 from nlab.views.panel_status import PanelStatus, PanelStatusPresenter
 from nlab.views.psd_readback_dialog import PsdReadbackDialog
 from nlab.views.waveform_analysis_dialog import WaveformAnalysisDialog
+from nlab.views.waveform_mca_transfer_dialog import McaGateTransferTarget
 from nlab.workers.session_replay_worker import SessionAnalysisReplayThread
 
 if TYPE_CHECKING:
@@ -2490,10 +2492,36 @@ class MainWindowController:
     def show_waveform_analysis(self, path: Path | None = None) -> None:
         """Open the waveform browser and offline PSD reconstruction workbench."""
         if self._waveform_analysis_dialog is None:
-            self._waveform_analysis_dialog = WaveformAnalysisDialog(parent=self._window)
+            self._waveform_analysis_dialog = WaveformAnalysisDialog(
+                parent=self._window, gate_targets=self._waveform_mca_targets,
+            )
         self._waveform_analysis_dialog.show_workspace()
         if path is not None:
             self._waveform_analysis_dialog.open_path(path)
+
+    def _check_waveform_mca_target(self, target: MCAController) -> None:
+        if (self._offline or self._replay_hardware_interlocked
+                or target not in self._mca_controllers):
+            raise RuntimeError("MCA target is offline, replay-interlocked, or no longer connected")
+        if any(scope.channel == target.channel and scope.measurement_active
+               for scope in self._scope_controllers):
+            raise RuntimeError("Stop Scope acquisition on the target channel before transfer")
+
+    def _waveform_mca_targets(self) -> list[McaGateTransferTarget]:
+        if self._offline or self._replay_hardware_interlocked:
+            return []
+
+        def read(target: MCAController) -> McaGateTiming:
+            self._check_waveform_mca_target(target)
+            return target.gate_transfer_current()
+
+        def apply(target: MCAController, timing: McaGateTiming) -> None:
+            self._check_waveform_mca_target(target)
+            target.apply_gate_timing(timing)
+
+        return [McaGateTransferTarget(target.channel_label, partial(read, target),
+                                      partial(apply, target))
+                for target in self._mca_controllers]
 
     def load_psd_events(self, path: Path) -> None:
         """Compatibility wrapper opening the standalone PSD readback tool."""

@@ -41,7 +41,7 @@ FORM_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
         "DacValue": "scope-dac", "Dac": "scope-dac",
         "Pretrigger": "scope-pretrigger", "FrameSamples": "scope-frame",
         "FrameGap": "scope-gap", "DmaEnable": "scope-dma",
-        "DmaFile": "scope-dma", "Time": "duration",
+        "DmaFile": "scope-dma", "Time": "duration", "ElapsedTime": "scope-run",
         "Start": "scope-run", "Stop": "scope-run", "AcquireFrame": "scope-run",
         "AutoSetup": "scope-auto", "DisplayMode": "display",
         "Persistence": "display", "PersistenceValue": "display", "RefreshRate": "refresh",
@@ -76,6 +76,7 @@ FORM_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
         "EnergyShift": "psd-shift", "RatioMin": "psd-range", "RatioMax": "psd-range",
         "Cut": "psd-cut", "Clear": "psd", "plotPsd": "psd-roi",
         "plotRatio": "fom", "plotEnergy": "psd-cut",
+        "MatrixScale": "display",
     }),
     "CurrentMonitorView": ("current", {
         "Mode": "current-mode", "DmaGap": "current-mode",
@@ -108,6 +109,10 @@ FORM_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
 # Attributes, rather than object names, identify programmatically created controls.
 # Include future optional controls without requiring a feature-branch merge.
 CLASS_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
+    "WaveformMcaTransferDialog": ("waveform-mca-transfer", {
+        "target_combo": "waveform-mca-transfer", "enable_cc": "waveform-mca-transfer",
+        "table": "waveform-mca-transfer", "apply_button": "waveform-mca-transfer",
+    }),
     "WaveformAnalysisDialog": ("waveform", {
         "source_combo": "waveform-source", "frame_spin": "waveform-source",
         "sample_period": "waveform-source", "baseline_method": "waveform-baseline",

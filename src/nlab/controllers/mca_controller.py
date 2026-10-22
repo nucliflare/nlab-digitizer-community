@@ -4,6 +4,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Protocol
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QSettings, QSignalBlocker, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QDoubleSpinBox, QFileDialog, QSlider, QSpinBox, QWidget
 
 from nlab.analysis.dose_calibration import McaDoseCalibrationSnapshot
@@ -21,7 +22,12 @@ from nlab.analysis.energy_calibration import (
     SpectrumSnapshot,
 )
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer, McaEventBuffer
-from nlab.hardware.digitizer.mca import MCA_PARAMETER_SPECS, MCAParam, MultiChannelAnalyzer
+from nlab.hardware.digitizer.mca import (
+    MCA_PARAMETER_SPECS,
+    McaGateTiming,
+    MCAParam,
+    MultiChannelAnalyzer,
+)
 from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode, McaRunSummary
 from nlab.hardware.digitizer.scope import RangeSpec
 from nlab.ui.ui_mca_view import Ui_MCAView
@@ -534,6 +540,11 @@ class MCAController(QWidget):
         if not enabled:
             self._cancel_debug_marker_drags()
         self.ui.groupMca.setEnabled(enabled)
+        # DMA selection now belongs to Measurement rather than groupMca;
+        # preserve its acquisition/replay and coincidence interlocks explicitly.
+        self.ui.cbDmaEnable.setEnabled(
+            enabled and not getattr(self, "_coincidence_session", False)
+        )
         self.ui.groupSignal.setEnabled(enabled)
         self.ui.tabFilters.setEnabled(enabled)
         self.ui.spinTimeLimit.setEnabled(enabled)
@@ -576,7 +587,7 @@ class MCAController(QWidget):
         self._debug_plot.showAxis("right")
         self._debug_plot.showAxis("top")
         self._debug_plot.showGrid(x=True, y=True, alpha=0.2)
-        self._debug_plot.addLegend(offset=(10, 10))
+        self._debug_plot.addLegend(offset=(-10, -10))
         layout.nextRow()
         self._debug_time_axis_label = layout.addLabel("Time [ns]", col=1)
 
@@ -590,8 +601,70 @@ class MCAController(QWidget):
             name="Debug 2",
             stepMode=WAVEFORM_STEP_MODE,
         )
+        self._debug_cc_guide = pg.PlotDataItem(
+            pen=pg.mkPen("#000000", width=1.5, style=Qt.PenStyle.DashLine),
+            stepMode=WAVEFORM_STEP_MODE,
+        )
+        self._debug_cc_guide.setZValue(5)
+        self._debug_plot.addItem(self._debug_cc_guide, ignoreBounds=True)
+        self._debug_cc_guide.hide()
+        self._debug_cc_legend_visible = False
+        self._debug_cc_user_visible = True
+        self._debug_plot.legend.sigSampleClicked.connect(self._on_debug_legend_sample_clicked)
+        self._debug_plot.getViewBox().sigYRangeChanged.connect(self._update_cc_integration_guide)
         self._setup_debug_markers()
         self._update_debug_time_axis()
+
+    def _on_debug_legend_sample_clicked(self, item: object) -> None:
+        if item is self._debug_cc_guide:
+            # pyqtgraph toggles the item before emitting sigSampleClicked.
+            # Remember that explicit choice independently of CC availability.
+            self._debug_cc_user_visible = self._debug_cc_guide.isVisible()
+            self._update_cc_integration_guide()
+
+    def _update_cc_integration_guide(self, *_args: object) -> None:
+        """UI-only configured timing guide, not a measured FPGA gate trace.
+
+        Its heights are fractions of the visible Y range, and ignoreBounds
+        keeps this schematic from changing waveform auto-range. The short
+        window starts at the signal/frame beginning, including pretrigger;
+        the pretrigger marker is not its integration origin. The upper
+        step is the remainder of the diagnostic window, not a claim that the
+        hardware energy estimator integrates that exact interval.
+        """
+        curve = self._debug_cc_guide
+        end = self.ui.spinFrameSamples.value()
+        visible = self.ui.cbCcEnable.isChecked() and end > 0
+        legend = self._debug_plot.legend
+        if visible != self._debug_cc_legend_visible:
+            if visible:
+                legend.addItem(curve, "CC timing (lower: short; upper: remainder)")
+            else:
+                legend.removeItem(curve)
+            self._debug_cc_legend_visible = visible
+        # Availability controls the legend entry; a hidden guide must retain
+        # that entry so the user can show it again. Polling, zoom and timing
+        # edits must not override the legend's eye/visibility toggle.
+        curve.setVisible(visible and self._debug_cc_user_visible)
+        if not visible:
+            curve.clear()
+            return
+        split = min(self.ui.spinCcTime.value(), end)
+        low, high = self._debug_plot.getViewBox().viewRange()[1]
+        span = high - low
+        # Negative-going schematic: the short gate drops low, then steps up
+        # for the remainder. Heights stay independent of raw pulse amplitude.
+        levels = low + np.array([0.96, 0.04, 0.86, 0.96]) * span
+        curve.setData(
+            np.array([0, 0, split, end], dtype=float) / self._debug_time_scale.ns_per_unit,
+            levels,
+        )
+        curve.setToolTip(
+            f"Configured short-window guide: 0–{split} ns (pretrigger included).\n"
+            f"Upper step: remaining diagnostic window, {split}–{end} ns.\n"
+            "Heights are schematic, not ADC amplitude or a measured FPGA gate.\n"
+            "The short window is clipped to the displayed window length."
+        )
 
     def _setup_debug_markers(self) -> None:
         threshold_spec = MCA_PARAMETER_SPECS[MCAParam.TRIGGER_LEVEL]
@@ -640,6 +713,7 @@ class MCAController(QWidget):
         finally:
             line.blockSignals(False)
         line.label.setFormat(f"Pretrigger offset {spin.value()} ns")
+        self._update_cc_integration_guide()
 
     def _on_debug_threshold_line_changed(self) -> None:
         line = self._debug_threshold_line
@@ -1183,6 +1257,53 @@ class MCAController(QWidget):
             calibration.rms_residual_kev,
         )
 
+    def _check_gate_transfer_idle(self) -> None:
+        if (self._connection_lost or self._replay_hardware_interlocked
+                or self._session_replay_active or self._worker is not None
+                or self._dma_worker is not None or self._worker_thread is not None
+                or self._dma_thread is not None or self._coincidence_session
+                or self._coincidence_stopping or self.measurement_active):
+            raise RuntimeError("Target MCA is busy, disconnected, or replay-interlocked")
+
+    def gate_transfer_current(self) -> McaGateTiming:
+        self._check_gate_transfer_idle()
+        return self._mca.gate_timing()
+
+    def apply_gate_timing(self, timing: McaGateTiming) -> None:
+        """Explicit idle-only transfer; suppress widget-triggered duplicate writes."""
+        self._check_gate_transfer_idle()
+        try:
+            self._mca.apply_gate_timing(timing)
+        except Exception:
+            try:
+                self._refresh_gate_timing()
+            except Exception:
+                log.exception("MCA gate-transfer panel refresh failed")
+            raise
+        try:
+            self._refresh_gate_timing()
+        except Exception as exc:
+            raise RuntimeError(
+                "MCA timings written, but panel refresh failed; inspect settings"
+            ) from exc
+        log.info("MCA %s: applied candidate waveform timings %s", self.channel_label, timing)
+
+    def _refresh_gate_timing(self) -> None:
+        current = self._mca.gate_timing()
+        widgets = (self.ui.spinPretrigger, self.ui.sliderPretrigger,
+                   self.ui.spinFrameSamples, self.ui.sliderFrameSamples,
+                   self.ui.spinCcTime, self.ui.cbCcEnable)
+        with ExitStack() as stack:
+            for widget in widgets:
+                stack.enter_context(QSignalBlocker(widget))
+            self.ui.spinPretrigger.setValue(current.pretrigger_ns)
+            self.ui.sliderPretrigger.setValue(current.pretrigger_ns)
+            self.ui.spinFrameSamples.setValue(current.frame_ns)
+            self.ui.sliderFrameSamples.setValue(current.frame_ns)
+            self.ui.spinCcTime.setValue(current.cc_time_ns)
+            self.ui.cbCcEnable.setChecked(current.cc_enabled)
+        self._update_debug_time_axis()
+
     def clear_energy_calibration(self) -> None:
         self._energy_calibration = None
         self._refresh_energy_axis()
@@ -1528,6 +1649,8 @@ class MCAController(QWidget):
                 lambda: self._mca.filters.charge_comparison.set_enable(value)
             )
         )
+        self.ui.cbCcEnable.toggled.connect(self._update_cc_integration_guide)
+        self.ui.spinCcTime.valueChanged.connect(self._update_cc_integration_guide)
         self.ui.spinCcTime.editingFinished.connect(
             lambda: self._apply_hardware_setting(
                 lambda: self._mca.filters.charge_comparison.set_time(self.ui.spinCcTime.value())
@@ -2292,6 +2415,7 @@ class MCAController(QWidget):
             self.ui.lblThroughputErr,
         ):
             label.setText("0")
+        self.ui.lblDeadTimePercent.setText("N/A")
 
     def display_session_replay_readback(self, readback: MCAReadback) -> None:
         """Render a captured poll without treating it as a new live sample."""
@@ -2416,6 +2540,14 @@ class MCAController(QWidget):
         self._last_elapsed_s = rb.elapsed_time / 10.0
         self.ui.lblCountRate.setText(str(rb.count_rate))
         self.ui.lblDeadTime.setText(f"{rb.pulse_deadtime_ms:.6f}")
+        # Readback dead time is milliseconds; elapsed status is deciseconds.
+        # Convert both to seconds before taking their ratio. Do not clamp an
+        # inconsistent snapshot to 100% and hide a counter/unit problem.
+        self.ui.lblDeadTimePercent.setText(
+            f"{100.0 * (rb.pulse_deadtime_ms / 1000.0) / self._last_elapsed_s:.2f}"
+            if self._last_elapsed_s > 0.0
+            else "N/A"
+        )
         self.ui.lblElapsedTime.setText(f"{rb.elapsed_time / 10:.1f}")
         self.ui.lblEventsLost.setText("N/A" if rb.events_lost is None else str(rb.events_lost))
         self.ui.lblPulsePileup.setText(str(rb.pulse_pileup))

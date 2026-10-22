@@ -164,7 +164,6 @@ class MCAResponsiveLayout(QObject):
             ui.vPileups,
             ui.vBinning,
             ui.cbExtTrigger,
-            ui.cbDmaEnable,
         )
         self._measurement_entries: tuple[QLayout | QWidget, ...] = (
             ui.vTime,
@@ -349,13 +348,15 @@ def configure_psd_layout(view: QWidget, ui: Ui_PSDView) -> None:
         (ui.spinRatioMax, 2, 1),
         (ui.labelCut, 2, 2),
         (ui.spinCut, 2, 3),
-        (ui.btnClear, 0, 4),
+        (ui.labelMatrixScale, 0, 4),
+        (ui.comboMatrixScale, 1, 4),
+        (ui.btnClear, 0, 5),
     )
     for widget, row, column in placements:
         ui.controlsLayout.removeWidget(widget)
         row_span = 3 if widget is ui.btnClear else 1
         ui.controlsLayout.addWidget(widget, row, column, row_span, 1)
-    ui.controlsLayout.setColumnStretch(5, 1)
+    ui.controlsLayout.setColumnStretch(6, 1)
 
 
 def configure_psu_layout(view: QWidget, ui: Ui_PSUView) -> QScrollArea:

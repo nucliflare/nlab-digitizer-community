@@ -22,8 +22,12 @@
      <item row="1" column="3"><widget class="QDoubleSpinBox" name="spinRatioMax"><property name="decimals"><number>3</number></property><property name="minimum"><double>-10.000000000000000</double></property><property name="maximum"><double>10.000000000000000</double></property><property name="singleStep"><double>0.050000000000000</double></property><property name="value"><double>1.000000000000000</double></property></widget></item>
      <item row="1" column="4"><widget class="QLabel" name="labelCut"><property name="text"><string>PSD cut</string></property></widget></item>
      <item row="1" column="5"><widget class="QDoubleSpinBox" name="spinCut"><property name="decimals"><number>4</number></property><property name="minimum"><double>-1.000000000000000</double></property><property name="maximum"><double>1.000000000000000</double></property><property name="singleStep"><double>0.005000000000000</double></property></widget></item>
-     <item row="0" column="6" rowspan="2"><widget class="QPushButton" name="btnClear"><property name="text"><string>Clear</string></property></widget></item>
-     <item row="0" column="7" rowspan="2"><spacer name="horizontalSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>20</height></size></property></spacer></item>
+     <item row="0" column="6"><widget class="QLabel" name="labelMatrixScale"><property name="text"><string>Matrix scale</string></property><property name="buddy"><cstring>comboMatrixScale</cstring></property></widget></item>
+     <item row="1" column="6"><widget class="QComboBox" name="comboMatrixScale"><property name="toolTip"><string>Changes the PSD map count-density colors only.
+Logarithmic highlights weaker populations; Linear shows raw bin counts.
+Does not change events, projections, gates or FOM fits.</string></property><item><property name="text"><string>Logarithmic</string></property></item><item><property name="text"><string>Linear</string></property></item></widget></item>
+     <item row="0" column="7" rowspan="2"><widget class="QPushButton" name="btnClear"><property name="text"><string>Clear</string></property></widget></item>
+     <item row="0" column="8" rowspan="2"><spacer name="horizontalSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>20</height></size></property></spacer></item>
     </layout>
    </item>
    <item>

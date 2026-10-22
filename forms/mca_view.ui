@@ -124,12 +124,6 @@
          </widget>
         </item>
 
-        <item>
-         <widget class="QCheckBox" name="cbDmaEnable">
-          <property name="text"><string>Record list-mode DMA</string></property>
-         </widget>
-        </item>
-
        </layout>
       </widget>
      </item>
@@ -202,6 +196,11 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
         </item>
         <item>
          <layout class="QVBoxLayout" name="vDmaFile">
+          <item>
+           <widget class="QCheckBox" name="cbDmaEnable">
+            <property name="text"><string>Record list-mode DMA</string></property>
+           </widget>
+          </item>
           <item>
            <widget class="QPushButton" name="btnDmaFile">
             <property name="text"><string>DMA File...</string></property>
@@ -753,71 +752,83 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
             </widget>
            </item>
            <item row="2" column="0">
+            <widget class="QLabel" name="labelDeadTimePercentKey">
+             <property name="text"><string>Dead time (%):</string></property>
+            </widget>
+           </item>
+           <item row="2" column="1">
+            <widget class="QLabel" name="lblDeadTimePercent">
+             <property name="toolTip"><string>100 × dead time (ms) / (1000 × elapsed time (s)).
+Unavailable until elapsed time is positive.</string></property>
+             <property name="text"><string>N/A</string></property>
+            </widget>
+           </item>
+           <item row="3" column="0">
             <widget class="QLabel" name="labelElapsedKey">
              <property name="text"><string>Elapsed (s):</string></property>
             </widget>
            </item>
-           <item row="2" column="1">
+           <item row="3" column="1">
             <widget class="QLabel" name="lblElapsedTime">
              <property name="text"><string></string></property>
             </widget>
            </item>
-           <item row="3" column="0">
+           <item row="4" column="0">
             <widget class="QLabel" name="labelEventsLostKey">
              <property name="text"><string>Events lost:</string></property>
             </widget>
            </item>
-           <item row="3" column="1">
+           <item row="4" column="1">
             <widget class="QLabel" name="lblEventsLost">
              <property name="text"><string></string></property>
             </widget>
            </item>
-           <item row="4" column="0">
+           <item row="5" column="0">
             <widget class="QLabel" name="labelPulsePileupKey">
              <property name="text"><string>Pulse pileup:</string></property>
             </widget>
            </item>
-           <item row="4" column="1">
+           <item row="5" column="1">
             <widget class="QLabel" name="lblPulsePileup">
              <property name="text"><string></string></property>
             </widget>
            </item>
-           <item row="5" column="0">
+           <item row="6" column="0">
             <widget class="QLabel" name="labelPulseOverrangeKey">
              <property name="text"><string>Pulse overrange:</string></property>
             </widget>
            </item>
-           <item row="5" column="1">
+           <item row="6" column="1">
             <widget class="QLabel" name="lblPulseOverrange">
              <property name="text"><string></string></property>
             </widget>
            </item>
-           <item row="6" column="0">
+           <item row="7" column="0">
             <widget class="QLabel" name="labelEnergyOverrangeKey">
              <property name="text"><string>Energy overrange:</string></property>
             </widget>
            </item>
-           <item row="6" column="1">
+           <item row="7" column="1">
             <widget class="QLabel" name="lblEnergyOverrange">
              <property name="text"><string></string></property>
             </widget>
            </item>
-           <item row="7" column="0">
+           <item row="8" column="0">
             <widget class="QLabel" name="labelEnergyEstErrKey">
              <property name="text"><string>Energy est. err:</string></property>
             </widget>
            </item>
-           <item row="7" column="1">
+           <item row="8" column="1">
             <widget class="QLabel" name="lblEnergyEstErr">
              <property name="text"><string></string></property>
             </widget>
            </item>
-           <item row="8" column="0">
+           <item row="9" column="0">
             <widget class="QLabel" name="labelThroughputErrKey">
              <property name="text"><string>Throughput err:</string></property>
             </widget>
            </item>
-           <item row="8" column="1">
+           <item row="9" column="1">
             <widget class="QLabel" name="lblThroughputErr">
              <property name="text"><string></string></property>
             </widget>

@@ -2795,20 +2795,20 @@ class IIODigitizerBackend(DigitizerBackend):
         return int(self._mca_pp_attr_get("count_rate_raw"))
 
     def get_elapsed_time(self) -> int:
-        """Deciseconds (0.1 s ticks) -- matches mca.py's MCAStatistics.
-        get_elapsed_time() docstring ("Return elapsed time in 0.1s ticks.
-        Divide by 10 for seconds."), which MCAController's readback
-        display already relies on (`elapsed_time / 10`). enable_time_raw's
-        native tick period is measurement_time_scale (0.134217728 s, the
-        same clock as the measurement_time_raw/SET_ENABLE_TIME time-limit
-        register it counts against) -- converted to real seconds and then
-        re-quantized to deciseconds here so this backend numerically
-        matches that pre-existing contract despite the hardware's tick
-        period not itself being 0.1 s.
+        """Return the elapsed register unchanged in deciseconds (0.1 s).
+
+        PetaLinux 167e90f vdpp-pulse-processor.c exposes PP_REG_ENABLE_TIME
+        unscaled via PP_STATUS_SHOW. Do not reuse measurement_time_scale:
+        it describes the separate programmed-duration register, not elapsed
+        status. Read-only qualification on PP hw101/sw103023 (2026-10-22)
+        found enable_time_raw=999 after a watch-timed 100 s run, while the
+        duration setting was 745 * 0.134217728 = 99.992 s. Scaling elapsed
+        with that duration scale incorrectly displayed 134.1 s.
+
+        This preserves MCAStatistics' existing decisecond API; the GUI and
+        elapsed-normalized consumers divide by ten exactly once.
         """
-        raw = int(self._mca_pp_attr_get("enable_time_raw"))
-        scale = float(self._mca_pp_attr_get("measurement_time_scale"))
-        return round(raw * scale * 10)
+        return int(self._mca_pp_attr_get("enable_time_raw"))
 
     def get_pulse_overrange_counter(self) -> int:
         return int(self._mca_pp_attr_get("pulse_overrange_counter"))

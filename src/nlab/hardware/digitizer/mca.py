@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from enum import IntEnum
 from typing import TypedDict
 
@@ -440,6 +441,30 @@ class SyncTrigger:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class McaGateTiming:
+    """Candidate panel timings in physical ns, not encoded register counts."""
+
+    pretrigger_ns: int
+    frame_ns: int
+    cc_time_ns: int
+    cc_enabled: bool
+
+    def validate(self) -> None:
+        for param, value in ((MCAParam.PRETRIGGER_SAMPLES, self.pretrigger_ns),
+                             (MCAParam.FRAME_SAMPLES, self.frame_ns),
+                             (MCAParam.CC_TIME, self.cc_time_ns)):
+            if type(value) is not int:
+                raise ValueError(f"{param.name} must be an integer number of ns")
+            MCA_PARAMETER_SPECS[param].validate(value, param.name)
+        if type(self.cc_enabled) is not bool:
+            raise ValueError("Charge-comparison enable must be boolean")
+        if not 0 <= self.pretrigger_ns < self.frame_ns:
+            raise ValueError("Pretrigger must be shorter than the window length")
+        if not 0 < self.cc_time_ns <= self.frame_ns:
+            raise ValueError("Short gate must be positive and no longer than the window")
+
+
 class MultiChannelAnalyzer:
     """High-level MCA / DPP interface."""
 
@@ -530,6 +555,52 @@ class MultiChannelAnalyzer:
     def dma_active(self) -> bool:
         """Whether the driver currently owns an armed MCA list buffer."""
         return self._b.mca_dma_active()
+
+    def gate_timing(self) -> McaGateTiming:
+        with self._configuration_lock:
+            return McaGateTiming(
+                self.get_pretrigger_samples(), self.get_frame_samples(),
+                self.filters.charge_comparison.get_time(),
+                self.filters.charge_comparison.get_enable(),
+            )
+
+    def apply_gate_timing(self, timing: McaGateTiming) -> None:
+        """Apply an idle-only candidate preset; never stop/restart acquisition.
+
+        PetaLinux 167e90f, vdpp-pulse-processor.c pp_fields/pp_field_store:
+        these three public fields are physical ns in steps of 2, already encoded
+        by the driver. This does NOT establish equivalence to offline integrals.
+        Configuration reads are driver shadows, not independent FPGA readback.
+        Writes are sequential, not atomic; attempt full restoration on failure.
+        """
+        timing.validate()
+        with self._configuration_lock:
+            if (self.get_global_enable() or self.get_measurement_in_progress()
+                    or self.dma_active()):
+                raise RuntimeError("Stop MCA acquisition and close list-mode DMA before transfer")
+            previous = self.gate_timing()
+
+            def operations(value: McaGateTiming) -> tuple[Callable[[], None], ...]:
+                return (
+                    lambda: self.set_pretrigger_samples(value.pretrigger_ns),
+                    lambda: self.set_frame_samples(value.frame_ns),
+                    lambda: self.filters.charge_comparison.set_time(value.cc_time_ns),
+                    lambda: self.filters.charge_comparison.set_enable(value.cc_enabled),
+                )
+
+            try:
+                for write in operations(timing):
+                    write()
+            except Exception as exc:
+                failures = []
+                for write in operations(previous):
+                    try:
+                        write()
+                    except Exception as rollback_error:
+                        failures.append(str(rollback_error))
+                state = ("rollback incomplete; inspect MCA settings: " + "; ".join(failures)
+                         if failures else "previous settings restored")
+                raise RuntimeError(f"Gate transfer failed ({state}): {exc}") from exc
 
     def get_time_limit(self) -> int:
         """Return time limit in seconds. 0 = no limit."""

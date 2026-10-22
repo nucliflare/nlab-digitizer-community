@@ -82,7 +82,7 @@ def test_waveform_source_controls_live_in_scrollable_left_sidebar(qtbot: QtBot) 
         dialog.settings_scroll.verticalScrollBar().setValue(0)
 
 
-def test_waveform_legend_stays_at_top_right_after_resizing(qtbot: QtBot) -> None:
+def test_waveform_legend_stays_at_bottom_right_after_resizing(qtbot: QtBot) -> None:
     dialog = WaveformAnalysisDialog()
     qtbot.addWidget(dialog)
     dialog.show()
@@ -100,11 +100,51 @@ def test_waveform_legend_stays_at_top_right_after_resizing(qtbot: QtBot) -> None
             parent = legend.parentItem().boundingRect()
             return bool(
                 abs(parent.right() - rect.right() - 10) < 1
-                and abs(rect.top() - parent.top() - 10) < 1
+                and abs(parent.bottom() - rect.bottom() - 10) < 1
             )
 
         qtbot.waitUntil(anchored)
-        assert legend.opts["offset"] == (-10, 10)
+        assert legend.opts["offset"] == (-10, -10)
+
+
+@pytest.mark.parametrize(("span_ns", "unit", "ns_per_unit"), [
+    (500.0, "ns", 1.0),
+    (16_000.0, "\N{MICRO SIGN}s", 1_000.0),
+    (2_000_000.0, "ms", 1_000_000.0),
+    (2_000_000_000.0, "s", 1_000_000_000.0),
+])
+def test_waveform_axes_use_readable_time_units_without_changing_samples_or_gates(
+    qtbot: QtBot, span_ns: float, unit: str, ns_per_unit: float,
+) -> None:
+    dialog = WaveformAnalysisDialog()
+    qtbot.addWidget(dialog)
+    dialog.sample_period.setValue(8.0)
+    dialog._updating_gates = True
+    dialog.baseline_region.setRegion((0, 512))
+    dialog.gate_start_line.setPos(528)
+    dialog.short_end_line.setPos(1328)
+    dialog.long_end_line.setPos(4608)
+    dialog._updating_gates = False
+    times_ns = np.arange(2048, dtype=np.float64) * 8.0
+    samples = np.zeros(2048)
+    dialog.raw_curve.setData(times_ns, samples)
+    before = dialog._gate_indices()
+    for span, expected_unit, factor in ((span_ns, unit, ns_per_unit),
+                                        (100.0, "ns", 1.0),
+                                        (span_ns, unit, ns_per_unit)):
+        dialog.waveform_plot.setXRange(0, span, padding=0)
+        bottom = dialog.waveform_plot.getAxis("bottom")
+        assert bottom.labelUnits == expected_unit
+        assert bottom.label.toPlainText() == f"Time ({expected_unit})"
+        for side in ("top", "bottom"):
+            axis = dialog.waveform_plot.getAxis(side)
+            assert not axis.autoSIPrefix
+            assert axis.scale == pytest.approx(1 / factor)
+            assert axis.tickStrings([0, 2 * factor], axis.scale, factor) == ["0", "2"]
+        x, y = dialog.raw_curve.getData()
+        np.testing.assert_array_equal(x, times_ns)
+        np.testing.assert_array_equal(y, samples)
+        assert dialog._gate_indices() == before == (0, 64, 66, 166, 576)
 
 
 def test_readback_grid_labels_open_their_parameter_topics(qtbot: QtBot) -> None:

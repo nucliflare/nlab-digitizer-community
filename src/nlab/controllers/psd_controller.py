@@ -56,6 +56,8 @@ class PSDController(QWidget):
 
         self.ui = Ui_PSDView()
         self.ui.setupUi(self)  # type: ignore[no-untyped-call]
+        self.ui.comboMatrixScale.setItemData(0, "log")
+        self.ui.comboMatrixScale.setItemData(1, "linear")
         self.status = PanelStatus(self, self._capture_note)
         configure_psd_layout(self, self.ui)
         self._accumulator = self._make_accumulator()
@@ -166,6 +168,7 @@ class PSDController(QWidget):
             spinbox.editingFinished.connect(self._on_analysis_settings_changed)
         self.ui.spinCut.valueChanged.connect(self._on_cut_spin_changed)
         self.ui.btnClear.clicked.connect(self.clear)
+        self.ui.comboMatrixScale.currentIndexChanged.connect(self._render_image)
         self._cut_line.sigPositionChanged.connect(self._on_cut_line_changed)
         self._energy_roi.sigRegionChangeFinished.connect(self._render_projections)
 
@@ -410,8 +413,16 @@ class PSDController(QWidget):
         self.ui.spinCut.setValue(value)
 
     def _render(self) -> None:
+        self._render_image()
+        self._render_projections()
+        self._update_status()
+
+    def _render_image(self) -> None:
+        """Change density colors without rebinning or touching projections/fits."""
         matrix = self._accumulator.matrix.T
-        image = np.log1p(matrix.astype(np.float64))
+        image = matrix.astype(np.float64)
+        if self.ui.comboMatrixScale.currentData() == "log":
+            image = np.log1p(image)
         high = max(1.0, float(image.max(initial=0.0)))
         displayed = transparent_sparse_bins(image, matrix)
         self._psd_image.setImage(displayed, autoLevels=False, levels=(0.0, high))
@@ -420,8 +431,6 @@ class PSDController(QWidget):
         self._psd_image.setRect(
             QRectF(energy_low, ratio_low, energy_high - energy_low, ratio_high - ratio_low)
         )
-        self._render_projections()
-        self._update_status()
 
     def _render_projections(self) -> None:
         cut = self.ui.spinCut.value()
@@ -474,6 +483,7 @@ class PSDController(QWidget):
             "ratio_cut": self.ui.spinCut.value(),
             "energy_roi": [float(value) for value in self._energy_roi.getRegion()],
             "energy_log_y": self._energy_log_y,
+            "matrix_scale": self.ui.comboMatrixScale.currentData(),
             "fom_fit_roi": [float(value) for value in self._fom_widget.fit_region.getRegion()],
             "fom_centroid_seeds": [float(line.value()) for line in self._fom_widget.centroid_lines],
             "fom_guides_visible": self._fom_widget.guides_checkbox.isChecked(),
@@ -489,6 +499,7 @@ class PSDController(QWidget):
             self.ui.spinRatioMin,
             self.ui.spinRatioMax,
             self.ui.spinCut,
+            self.ui.comboMatrixScale,
         )
         for control in controls:
             control.blockSignals(True)
@@ -501,6 +512,8 @@ class PSDController(QWidget):
                 self.ui.spinRatioMin.setValue(float(ratio_range[0]))
                 self.ui.spinRatioMax.setValue(float(ratio_range[1]))
             self.ui.spinCut.setValue(float(settings.get("ratio_cut", 0.0)))
+            scale_index = self.ui.comboMatrixScale.findData(settings.get("matrix_scale", "log"))
+            self.ui.comboMatrixScale.setCurrentIndex(max(0, scale_index))
         finally:
             for control in controls:
                 control.blockSignals(False)
