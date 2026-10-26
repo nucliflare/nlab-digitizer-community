@@ -210,6 +210,8 @@ uv run python examples/measure_current.py
 
 - Per-channel high-voltage output, feedback, and temperature monitoring when the
   IDS IIO devices are present
+- Power Supply HV setpoints use a 100–1250 V range. Entering zero selects 100 V
+  when the edit is committed with Enter or by moving focus to another control.
 - Shared trigger control and board-wide diagnostic readings
 - Startup and on-demand RS-485 device discovery through the board's ser2net
   bridges; **Connection → Refresh Modbus Devices** updates the External

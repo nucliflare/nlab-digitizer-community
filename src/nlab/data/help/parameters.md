@@ -862,6 +862,10 @@ The SiPM and HV voltage settings control their respective discovered supplies;
 the SiPM enable control switches its supported bias path. Distinguish a requested
 setpoint from measured voltage and current telemetry.
 
+The HV setpoint range is **100–1250 V**. Entering zero selects **100 V** when
+you press Enter or move focus to another control.
+The ADC voltage continues to show the measured output independently.
+
 Use the displayed units and hardware limits, plus the detector's own rating.
 Changing bias changes detector gain and can invalidate energy/PSD calibration.
 Never infer a safe voltage from an example configuration or an offline replay.

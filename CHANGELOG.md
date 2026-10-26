@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.7] — 2026-10-26
+
+### Fixed
+
+- Entering zero in the Power Supply HV control now selects the existing 100 V
+  minimum on Enter or focus loss instead of restoring the previous
+  setpoint. The voltage tooltip explains the 100–1250 V range and zero-entry
+  behavior. ADC readback and the separate safe-shutdown path are unchanged.
+
 ## [0.7.6] — 2026-10-22
 
 ### Fixed
