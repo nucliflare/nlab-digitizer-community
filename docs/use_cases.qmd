@@ -7,6 +7,11 @@ This page maps measurement goals to the application's live and offline
 workflows. Start with the goal, then follow the linked specialist guide for
 configuration details and interpretation limits.
 
+For a complete measurement example with downloadable inputs, use the
+[Na-22 coincidence showcase](showcase_na22_coincidence). The
+[showcase collection](showcases) links published sessions to setup photographs,
+recorded settings, and offline walkthroughs.
+
 ## Choose a workflow
 
 | Goal | Start here | Primary result | Important limit |

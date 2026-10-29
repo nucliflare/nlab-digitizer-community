@@ -19,11 +19,20 @@ The final legacy gRPC/ZMQ version is archived on the `grpc-final` branch.
 | Monitor detector current | [Live Current Monitoring](current_monitor) |
 | Separate live pulse-shape populations | [Pulse-Shape Discrimination](pulse_shape_discrimination) |
 | Configure two-channel timing and coincidence | [Coincidence Measurement](coincidence) |
+| Replay a published measurement with reference figures | [Measurement Showcases](showcases) |
 | Choose a capture format or validate a run | [Capture Files and Integrity](data_formats) |
 | Use calibration and offline workbenches | [Analysis Tools](analysis_tools) |
 | Investigate a connection or DMA failure | [Troubleshooting](troubleshooting) |
 | Understand threads, contexts, and DMA lifecycle | [Architecture](architecture) |
 | Build, test, or contribute | [Development Guide](development) |
+
+## Measurement showcases
+
+The [showcase collection](showcases) connects published datasets to illustrated
+walkthroughs. Start with [Na-22 511 keV coincidence using LBC detectors](showcase_na22_coincidence):
+inspect the two experimental arrangements, energy gates, CFD timing fits, and
+energy matrices, then replay the [Zenodo sessions](https://zenodo.org/records/23667120)
+without hardware.
 
 ## Analysis recipes
 

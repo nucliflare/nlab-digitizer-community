@@ -1,0 +1,193 @@
+---
+title: "Showcase: Na-22 511 keV Coincidence with LBC Detectors"
+format: gfm
+---
+
+Follow a completed two-detector measurement from the physical arrangement and
+511 keV energy selection to CFD timing and coincidence energy matrices. Both
+sessions can be replayed without a connected digitizer.
+
+**Dataset:** [Na-22 511 keV coincidence measurements with LBC scintillators:
+CFD timing and replayable EWT Digitizer sessions](https://zenodo.org/records/23667120).
+**Version DOI:** [10.5281/zenodo.23667120](https://doi.org/10.5281/zenodo.23667120).
+The measurements were recorded on **26 October 2026** with **nlab 0.7.7**.
+
+## 1. Understand the experiment
+
+Two cylindrical **25C25-LBC scintillators**, each nominally **1 inch in diameter
+and 1 inch long**, were coupled to **R13089 PMTs**. Their signals were connected
+to CH0 and CH1 of one Digitizer 4.0. Both PMT high-voltage settings were
+**1000 V**. The active PMT divider is shown in the photograph below.
+
+![Active PMT divider used with the R13089 PMT. Original experiment
+photograph.](images/showcase-na22-divider.jpg){width=420}
+
+The **POLATOM Na-22 source** has a reference activity of **330 kBq on
+26 June 2023**. That date belongs to the activity specification; the measurements
+were made in October 2026.
+
+| Arrangement | Physical placement | Dataset label |
+|---|---|---|
+| Close | Detector housings placed as close together as practical | `0cm` / `close` |
+| Offset source | Source 15 cm from the left detector and 5 cm from the right detector | `15cm` |
+
+The `15cm` label describes the source placement in the second arrangement. Use
+both source-to-detector distances when describing this geometry.
+
+![Close arrangement: the two detector housings face each other with the smallest
+practical gap. Original experiment photograph.](images/showcase-na22-setup-close.jpg)
+
+![Offset-source arrangement: the source is 15 cm from the left detector and 5 cm
+from the right detector. Original experiment photograph.](images/showcase-na22-setup-offset.jpg)
+
+## 2. Recognize the photopeak selection and timing settings
+
+The coincidence measurement selected an energy region around the **511 keV
+annihilation photopeak on each channel**. In the MCA workspace, the shaded ROI
+shows the selected pulse-height region. Its coordinates are raw MCA channels;
+different detector gains put the same photon energy at different positions.
+
+![Recorded MCA view of the close arrangement, showing the CH1 photopeak ROI,
+CFD controls, and diagnostic waveforms. The horizontal spectrum axis is raw MCA
+channel.](images/showcase-na22-mca.png)
+
+The acquisition-start records retain these applied energy bounds:
+
+| Arrangement | CH0 ROI, MCA channels | CH1 ROI, MCA channels |
+|---|---|---|
+| Close | 1035–1196 | 1697–1888 |
+| Offset source | 1054–1214 | 1772–1964 |
+
+These bounds describe this dataset's gain and processing settings. For a new
+measurement, locate the photopeak independently on each detector.
+
+| Coincidence setting | Recorded value |
+|---|---|
+| Logic | CH0 AND CH1 |
+| Energy gates | Both channel ROIs enabled |
+| Timing | CFD fine |
+| CFD fraction and delay | Approximately 0.40; 16 ns |
+| Accepted time difference | −48 ns to +48 ns |
+| Difference convention | CH1 event time minus CH0 event time |
+| Applied channel-delay correction | 0 ns |
+| Timing-histogram bin width | 62.5 ps |
+| Delayed-random sidebands | Enabled |
+
+The bin width specifies histogram sampling. The measured peak width describes
+the full detector and electronics setup under these conditions. See
+[Coincidence Measurement](coincidence) for timing conventions, pair counting,
+and the Gaussian-core fit.
+
+## 3. Download and replay the close arrangement
+
+The Zenodo record provides a flat file list. The numerical sessions are stored
+in two `.7z` archives; photographs, screenshots, a settings snapshot, and the
+dataset README can also be downloaded individually.
+
+| Arrangement | Download | Session directory after extraction |
+|---|---|---|
+| Close | [2026_10_26_PMT_LBC_close.7z](https://zenodo.org/records/23667120/files/2026_10_26_PMT_LBC_close.7z?download=1) | `2026_10_26_PMT_LBC_close/session_20261026_125809.nlab-session/` |
+| Offset source | [2026_10_26_PMT_LBC_15cm.7z](https://zenodo.org/records/23667120/files/2026_10_26_PMT_LBC_15cm.7z?download=1) | `2026_10_26_PMT_LBC_15cm/session_20261026_134341.nlab-session/` |
+
+1. Install **nlab 0.7.7** or a later release compatible with these sessions.
+   The application requires the platform-appropriate drivers and native runtime
+   from [Analog Devices libiio v0.26](https://github.com/analogdevicesinc/libiio/releases/tag/v0.26).
+   On Windows, the release provides `libiio-0.26.ga0eca0d2-setup.exe`.
+   Follow [Getting Started](getting_started) for application installation.
+2. Download the close-arrangement archive and extract it with a 7z-compatible
+   tool. Preserve all five files inside the `.nlab-session` directory.
+3. Launch the application, select **two channels**, and choose
+   **Offline / Replay Mode** in the startup dialog.
+4. Choose **File -> Replay Session...** and select the extracted close session
+   directory shown above. The application validates the finalized capture.
+5. Open **MCA** to follow recorded histogram and diagnostic checkpoints. Open
+   **Coincidence -> Timing and spectra** to follow the reconstructed timing
+   histogram and participating-event spectra.
+6. Let playback finish. The close bundle spans approximately **296.55 s**, with
+   about **243.1 s** between the coincidence start and finish events. Watch the
+   replay completion status; the final plots remain on screen.
+
+The window identifies offline/replay operation and hardware acquisition remains
+disabled. Session playback uses recorded host timing, including the intervals
+before and after coincidence acquisition. The recorded setup photographs and
+screenshots illustrate acquisition; their historical connection titles describe
+the original measurement workstation.
+
+## 4. Read the timing result and compare the second arrangement
+
+The top plot shows the signed CH1-minus-CH0 time difference. The lower spectra
+show the energy distributions of participating events. Read the applied ROI
+bounds, pair counters, fit-quality message, and fitted curve together.
+
+![Archived close-arrangement timing screenshot after drain. Both 511 keV ROIs
+are enabled. The footer reports a non-Gaussian/poor-fit warning.](images/showcase-na22-timing-close.png)
+
+Choose **File -> Exit Replay Mode**, then load the offset-source session from
+the second archive. This bundle spans approximately **886.48 s**, including
+about **881.6 s** of coincidence acquisition. Wait for the same completion
+status before comparing the final views.
+
+![Archived offset-source timing screenshot after drain, with both 511 keV ROIs
+enabled and the Gaussian-core fit displayed.](images/showcase-na22-timing-offset.png)
+
+The supplied screenshots report:
+
+| Arrangement | Fitted centre | Gaussian-core FWHM | Reduced chi-square | Displayed fit quality |
+|---|---|---|---|---|
+| Close | +0.069 ns | 393 ± 1 ps | 60.98 | Non-Gaussian / poor fit |
+| Offset source | +0.421 ns | 442 ± 3 ps | 2.21 | Gaussian-core fit |
+
+These numbers are transcribed from the archived screenshots. In particular, the
+close run's small formal width uncertainty accompanies a poor-fit warning; it
+does not include the effect of that model mismatch. Inspect the peak shape and
+fit message before comparing widths. A channel-delay correction of zero also
+means the fitted centres retain the setup's relative timing offsets.
+
+The two acquisition intervals differ substantially. Compare widths and shapes
+under the documented selections; total pair counts alone do not compare
+coincidence efficiency between the arrangements. The intervals above are host
+elapsed times, without a dead-time correction.
+
+## 5. Explore the energy matrix
+
+Open **Coincidence -> Energy matrix**. CH0 energy is on the horizontal axis and
+CH1 energy is on the vertical axis. The projections show energy populations
+within the movable display gates. Raw MCA channels remain the coordinate system
+unless a valid energy calibration supplies energy labels.
+
+Use the display's **Prompt**, **Delayed random**, and **Prompt - scaled random**
+selections to inspect the corresponding matrices. The random estimate uses the
+two recorded sidebands, scaled by 0.5 before subtraction. Linear/logarithmic
+scales and projection gates change the matrix presentation.
+
+![Archived close-arrangement prompt energy matrix and projections. Both MCA ROI
+gate options are unchecked in this screenshot, showing a broader energy
+selection.](images/showcase-na22-energy-matrix.png)
+
+This supplied matrix screenshot shows both energy gates off. The sessions'
+recorded coincidence settings enable the 511 keV ROIs, so their replayed matrix
+has the stored energy selection. Keep that selection difference in mind when
+comparing the archived figure with replay. Details of matrix axes, projection
+gates, and random subtraction are in [Coincidence Measurement](coincidence).
+
+## Dataset provenance and reuse
+
+The measurement documentation credits **Kamil Brylew**
+([ORCID 0000-0002-8833-6152](https://orcid.org/0000-0002-8833-6152)) and
+**Stefan Korolczuk**, **Eastern Wall Technologies Sp. z o.o.**
+Use the [published Zenodo record](https://zenodo.org/records/23667120) for its
+formal citation and cite the version DOI for these files.
+
+The dataset and the experiment images reproduced here are available under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The local image assets
+are unchanged copies of the corresponding published photographs and screenshots.
+The [dataset README](https://zenodo.org/records/23667120/files/README.md?download=1)
+documents the file inventory, capture hashes, and original validation scope.
+
+This walkthrough was checked against the published file list, session metadata,
+and archived figures. The numerical fits above were not independently refitted
+while preparing the guide. Replay reconstructs recorded analysis inputs; a
+different hardware acquisition setting requires a new measurement.
+
+Return to [Measurement Showcases](showcases) or continue with
+[Capture Files and Integrity](data_formats) and [Use Cases](use_cases).

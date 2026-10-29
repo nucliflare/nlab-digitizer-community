@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Measurement Showcases wiki section with an illustrated Na-22 511 keV
+  LBC-detector coincidence walkthrough, published Zenodo session downloads,
+  offline replay instructions, and timing-fit and energy-selection context.
+
 ## [0.7.7] — 2026-10-26
 
 ### Fixed

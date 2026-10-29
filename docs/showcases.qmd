@@ -1,0 +1,33 @@
+---
+title: "Measurement Showcases"
+format: gfm
+---
+
+Explore published measurements with the same workspaces used during acquisition.
+Each showcase connects the physical setup, recorded settings, reference figures,
+and downloadable inputs to an offline walkthrough.
+
+## Available showcases
+
+| Measurement | What to explore | Walkthrough | Dataset |
+|---|---|---|---|
+| Na-22 511 keV coincidences with two LBC scintillators | Photopeak selection, CFD timing, coincidence energy matrices, and two source/detector arrangements | [Na-22 Coincidence Walkthrough](showcase_na22_coincidence) | [Zenodo record 23667120](https://zenodo.org/records/23667120) |
+
+## Start without hardware
+
+1. Download a session archive from the showcase's Zenodo record and extract it.
+2. Install the application and its required native libiio runtime using
+   [Getting Started](getting_started).
+3. Select the documented channel count and **Offline / Replay Mode** at startup.
+4. Choose **File -> Replay Session...** and open the extracted `.nlab-session`
+   directory.
+5. Follow the showcase's measurement-specific steps and interpretation notes.
+
+Session replay reconstructs analysis from recorded inputs. It follows the
+recorded timeline, so wait for the completion status before comparing final
+plots. The final recorded views remain visible after playback finishes.
+
+The experiment photographs and measurement plots on these pages come from the
+identified dataset. Captions distinguish the recorded acquisition views from
+the offline workflow. See [Use Cases](use_cases) for other workflows and
+[Capture Files and Integrity](data_formats) for session validation.

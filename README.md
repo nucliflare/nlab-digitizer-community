@@ -78,6 +78,15 @@ points, outputs, and interpretation limits. Common paths are:
 | Review a run without hardware | Session recording/replay or standalone offline workbenches |
 | Monitor independent boards together | Add Digitizer with per-board global controls |
 
+## Measurement showcases
+
+The [showcase collection](docs/showcases.qmd) provides illustrated walkthroughs
+and downloadable measurement sessions. The first example follows
+[Na-22 511 keV coincidences with two LBC detectors](docs/showcase_na22_coincidence.qmd)
+through setup, energy selection, CFD timing, energy matrices, and offline replay.
+The complete sessions and reference figures are published on
+[Zenodo](https://zenodo.org/records/23667120).
+
 ## Main features
 
 ### Scope

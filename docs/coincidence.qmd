@@ -8,6 +8,11 @@ MCA list-mode streams. It requires two compatible list-mode channels and the
 shared software-start core. The workspace owns both DMA streams for the whole
 session.
 
+For a completed radioactive-source experiment and downloadable replay sessions,
+follow the [Na-22 511 keV LBC-detector showcase](showcase_na22_coincidence).
+It documents the physical arrangements, photopeak gates, archived timing fits,
+and energy matrix with links to the published Zenodo dataset.
+
 ## Before starting
 
 When several digitizers are connected, first select the intended board in the
