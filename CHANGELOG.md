@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.8] — 2026-11-04
+
 ### Added
 
 - Scope sliders beside the pretrigger, frame length, and periodic-gap spin
@@ -16,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timing changes snap to supported steps and apply once on release; periodic
   mode and replay/acquisition interlocks apply to the sliders too. Verified
   with offscreen Qt tests using simulated devices; no live hardware writes.
+
+- Measurement Showcases wiki section with an illustrated Na-22 511 keV
+  LBC-detector coincidence walkthrough, published Zenodo session downloads,
+  offline replay instructions, and timing-fit and energy-selection context.
 
 ### Fixed
 
@@ -36,12 +42,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   including a previously selected Power Supply tab on a board without a
   usable PSU. An unavailable saved tab keeps the current available workspace
   or falls back to the first available tab. Includes offscreen Qt regressions.
-
-### Added
-
-- Measurement Showcases wiki section with an illustrated Na-22 511 keV
-  LBC-detector coincidence walkthrough, published Zenodo session downloads,
-  offline replay instructions, and timing-fit and energy-selection context.
 
 ## [0.7.7] — 2026-10-26
 
