@@ -112,6 +112,10 @@ The complete sessions and reference figures are published on
   performs a bounded provisional-trigger search when its initial forced-frame
   survey contains only baseline.
 - Configurable frame length, pretrigger position, frame gap, and analogue offset
+- Paired sliders for pretrigger, frame length, and periodic gap. Sliders
+  follow the spin boxes' units and limits; hardware timings snap
+  to supported steps and apply on release. The periodic-gap slider is enabled
+  only in Periodic trigger mode on supported hardware.
 - Persistence and raw display modes
 - Full-resolution IIO DMA recording with capability-gated queued buffers,
   batched remote reads, bounded stop, tail drain, and recovery
@@ -196,6 +200,14 @@ uv run python examples/measure_current.py
   spectra
 - Debug waveform-bank readout
 - Synchronized stop/write/restart when changing MCA settings during acquisition
+- Numeric input widgets across the application, including dialogs, clamp
+  out-of-range edits to the nearest boundary on Enter or focus loss. Discrete
+  MCA/Scope hardware settings, external-device registers, and the Current DMA
+  gap also snap to the nearest supported step; halfway values round up
+  (e.g. a 409 ns MCA window becomes 410 ns). Corrected values appear before
+  settings are written, with paired sliders kept in sync. Continuous float
+  settings retain their precision; their arrow increment is not a validity
+  constraint. Direct hardware API validation remains strict.
 - List-mode IIO DMA using fixed 1,024-record frames
 - The live PSD map offers **Matrix scale: Logarithmic / Linear**, matching the
   waveform workbench. Changes only density colors, keeps sparse bins transparent,
@@ -409,6 +421,20 @@ that exposes the relevant devices through `iiod`.
 Scope remains available if MCA or IDS devices are absent. The GUI disables the
 workspaces that the detected firmware cannot support instead of failing the
 whole connection.
+
+Restoring saved settings selects the remembered tab only when it is enabled
+and visible. Otherwise the current available tab is retained, or the first
+available tab is selected if the current one is also unavailable.
+
+Connecting also performs read-only HV ADC/DAC checks before initializing PSU
+controls. If a required readback reports `EINVAL`, `EIO`, `ENODEV`, or `ENXIO`,
+the affected channel's PSU is disabled and a warning retains the original
+error. This also supports boards without a supply module whose IIO devices
+are still exported. The unavailable PSU receives no default/shutdown writes
+or periodic polling; Scope/MCA remain available. These read errors indicate
+an unusable HV path, not a definitive module-presence check. Network and
+permission errors remain connection errors. Reconnect after correcting the
+hardware or firmware to check PSU availability again.
 
 The standard project configuration uses:
 
@@ -651,7 +677,8 @@ finally:
 
 Pass `with_ids=False` to `Digitizer.from_iio()` when only Scope/MCA access is
 needed. If required IDS devices are missing, construction logs a warning and
-continues with `digitizer.hv` set to `None`.
+continues with `digitizer.hv` set to `None`. The same fallback applies when
+the initial HV ADC/DAC readback reports one of the device errors listed above.
 
 `digitizer.capabilities` is the immutable feature snapshot discovered at
 connection time. It reports Scope DMA, MCA, MCA list-mode DMA, and IDS/HV

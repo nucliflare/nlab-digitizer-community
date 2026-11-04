@@ -170,6 +170,57 @@ def test_app_applies_general_settings_to_controllers_and_global_options(
     save_preferences.assert_called_once_with()
 
 
+@pytest.mark.parametrize(
+    ("saved_tab", "availability", "current_tab", "expected_tab"),
+    [
+        (tab, "disabled", "tabScope", "tabScope")
+        for tab in (
+            "tabCurrent", "tabMCA", "tabPSD", "tabCoincidence", "tabPSU", "tabExternal"
+        )
+    ]
+    + [
+        ("tabPSU", "enabled", "tabScope", "tabPSU"),
+        ("tabSystemLog", "hidden", "tabMCA", "tabMCA"),
+        ("tabPSU", "disabled", "tabPSU", "tabScope"),
+        (-1, "enabled", "tabMCA", "tabMCA"),
+        (999, "enabled", "tabMCA", "tabMCA"),
+    ],
+)
+def test_restoring_active_tab_selects_only_available_workspaces(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    saved_tab: str | int,
+    availability: str,
+    current_tab: str,
+    expected_tab: str,
+) -> None:
+    owner = QMainWindow()
+    qtbot.addWidget(owner)
+    ui = Ui_MainWindow()
+    ui.setupUi(owner)
+    tabs = ui.mainTabs
+    saved_index = tabs.indexOf(getattr(ui, saved_tab)) if isinstance(saved_tab, str) else saved_tab
+    if availability == "disabled":
+        tabs.setTabEnabled(saved_index, False)
+    elif availability == "hidden":
+        tabs.setTabVisible(saved_index, False)
+    # Programmatic Qt selection can even leave a disabled tab current.
+    tabs.setCurrentWidget(getattr(ui, current_tab))
+    window = SimpleNamespace(
+        ui=ui,
+        _controller=SimpleNamespace(refresh_dma_output_settings=Mock()),
+        _save_developer_settings=Mock(),
+        _apply_view_state=Mock(),
+    )
+    monkeypatch.setattr(app_module, "QSettings", Mock())
+
+    MainAppWindow.apply_configuration_settings(window, {"active_tab": saved_index})
+
+    assert tabs.currentWidget() is getattr(ui, expected_tab)
+    assert tabs.isTabEnabled(tabs.currentIndex())
+    assert tabs.isTabVisible(tabs.currentIndex())
+
+
 def test_l_toggles_mca_log_action_only_while_histogram_is_hovered(
     qtbot: QtBot,
 ) -> None:

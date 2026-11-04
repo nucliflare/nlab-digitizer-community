@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QSplashScreen
 
 from nlab import __version__
 from nlab.utils.windows_icon import apply_taskbar_icon
+from nlab.views.numeric_controls import install_numeric_input_policy
 
 if TYPE_CHECKING:
     from nlab.app import MainAppWindow as _MainAppWindow
@@ -149,6 +150,7 @@ def main() -> None:
     args, qt_args = _parse_arguments(sys.argv[1:])
     _set_windows_app_user_model_id()
     app = QApplication([sys.argv[0], *qt_args])
+    install_numeric_input_policy()
     _icon = QIcon(":/icons/ewt.ico")
     log.info(
         "App icon from qrc resource: isNull=%s sizes=%s", _icon.isNull(), _icon.availableSizes()

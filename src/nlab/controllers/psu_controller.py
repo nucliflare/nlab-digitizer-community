@@ -13,6 +13,7 @@ from nlab.analysis.dose_calibration import PsuDoseCalibrationSnapshot
 from nlab.hardware.digitizer.hv import HV_PARAMETER_SPECS, HVParam, HVSupply
 from nlab.hardware.digitizer.scope import RangeSpec
 from nlab.ui.ui_psu_view import Ui_PSUView
+from nlab.views.numeric_controls import bind_numeric_control
 from nlab.views.responsive_layout import configure_psu_layout
 from nlab.workers.psu_worker import PSUReadback, PSUWorker
 
@@ -105,6 +106,8 @@ class PSUController(QWidget):
         spinbox.setMaximum(spec.max_val)
         spinbox.setSingleStep(spec.step)
         spinbox.setValue(spec.default)
+        # These software/physical float settings accept intermediate values.
+        bind_numeric_control(spinbox)
 
     # ------------------------------------------------------------------
     # Write defaults to hardware, then read back

@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from nlab.ui.ui_external_device_view import Ui_ExternalDeviceView
+from nlab.views.numeric_controls import bind_numeric_control
 from nlab.views.responsive_layout import configure_external_layout
 from nlab.workers.external_device_worker import ExternalDeviceWorker
 
@@ -324,6 +325,7 @@ class ExternalDeviceController(QWidget):
             double_editor.setDecimals(4)
             double_editor.setRange(spec.min * spec.scale, spec.max * spec.scale)
             double_editor.setSingleStep(spec.scale)
+            bind_numeric_control(double_editor, snap_to_step=True)
             double_editor.editingFinished.connect(
                 lambda n=name, e=double_editor: self._on_setting_changed(n, e.value())
             )
@@ -331,6 +333,7 @@ class ExternalDeviceController(QWidget):
         else:
             int_editor = QSpinBox()
             int_editor.setRange(spec.min, spec.max)
+            bind_numeric_control(int_editor, snap_to_step=True)
             int_editor.editingFinished.connect(
                 lambda n=name, e=int_editor: self._on_setting_changed(n, e.value())
             )

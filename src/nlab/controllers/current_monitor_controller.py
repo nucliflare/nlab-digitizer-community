@@ -19,6 +19,7 @@ from nlab.hardware.digitizer.current_monitor import (
 from nlab.hardware.digitizer.mca import MultiChannelAnalyzer
 from nlab.hardware.digitizer.scope import SCOPE_DATAPATH_CLOCK_PERIOD_NS
 from nlab.ui.ui_current_monitor_view import Ui_CurrentMonitorView
+from nlab.views.numeric_controls import bind_numeric_control, nearest_step_value
 from nlab.views.panel_status import PanelStatus
 from nlab.views.plot_viewbox import WAVEFORM_STEP_MODE
 from nlab.workers.current_monitor_worker import (
@@ -90,6 +91,7 @@ class CurrentMonitorController(QWidget):
         self.ui = Ui_CurrentMonitorView()
         self.ui.setupUi(self)  # type: ignore[no-untyped-call]
         self.status = PanelStatus(self, "Monitor stopped.")
+        bind_numeric_control(self.ui.spinDmaGap, snap_to_step=True)
         self._setup_plot()
         self._connect_signals()
         if self._scope_controller is not None:
@@ -216,13 +218,13 @@ class CurrentMonitorController(QWidget):
         )
 
     def _dma_gap_cycles(self) -> int:
-        return max(
+        gap_us = nearest_step_value(
+            self.ui.spinDmaGap.value(),
             0,
-            min(
-                _DMA_GAP_MAX_CYCLES,
-                round(self.ui.spinDmaGap.value() * 1000 / _DMA_GAP_CYCLE_NS),
-            ),
+            _DMA_GAP_MAX_CYCLES * _DMA_GAP_CYCLE_NS / 1000,
+            _DMA_GAP_CYCLE_NS / 1000,
         )
+        return round(gap_us * 1000 / _DMA_GAP_CYCLE_NS)
 
     def _set_dma_gap_cycles(self, cycles: int) -> None:
         if not 0 <= cycles <= _DMA_GAP_MAX_CYCLES:

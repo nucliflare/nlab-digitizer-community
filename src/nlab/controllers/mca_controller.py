@@ -36,6 +36,7 @@ from nlab.views.mca_roi_history_dialog import (
     DoubleClickableLinearRegionItem,
     McaRoiHistoryDialog,
 )
+from nlab.views.numeric_controls import bind_numeric_control, normalize_numeric_control
 from nlab.views.panel_status import PanelStatus
 from nlab.views.plot_viewbox import WAVEFORM_STEP_MODE, ModifierZoomViewBox
 from nlab.views.responsive_layout import configure_mca_layout
@@ -386,6 +387,7 @@ class MCAController(QWidget):
         spinbox.setRange(int(spec.min_val), int(spec.max_val))
         spinbox.setSingleStep(int(spec.step) or 1)
         spinbox.setValue(int(spec.default))
+        bind_numeric_control(spinbox, snap_to_step=True)
 
     @staticmethod
     def _apply_range_to_slider(slider: QSlider, spec: RangeSpec) -> None:
@@ -399,6 +401,17 @@ class MCAController(QWidget):
         spinbox.setRange(float(spec.min_val), float(spec.max_val))
         spinbox.setSingleStep(float(spec.step) or 1.0)
         spinbox.setValue(float(spec.default))
+        # Integer timings use a hardware grid; floating-point coefficients
+        # retain valid intermediate values and their existing backend encoding.
+        bind_numeric_control(spinbox, snap_to_step=isinstance(spec.step, int))
+
+    @staticmethod
+    def _snap_integer_control(
+        spinbox: QSpinBox | QDoubleSpinBox,
+        value: int | float | None = None,
+    ) -> None:
+        """Select the nearest supported integer hardware setting."""
+        normalize_numeric_control(spinbox, value, snap_to_step=True)
 
     # ------------------------------------------------------------------
     # Write defaults to hardware, then read back
@@ -767,9 +780,7 @@ class MCAController(QWidget):
                 traces=tuple(traces), offset_ns=spin.value()
             )
         target_ns = line.value() * self._debug_time_scale.ns_per_unit
-        step = spin.singleStep()
-        value = spin.minimum() + round((target_ns - spin.minimum()) / step) * step
-        spin.setValue(max(spin.minimum(), min(spin.maximum(), value)))
+        MCAController._snap_integer_control(spin, target_ns)
         self._sync_debug_pretrigger_line()
         state = self._pretrigger_line_drag
         if state is not None:
@@ -1689,16 +1700,17 @@ class MCAController(QWidget):
             slider.blockSignals(False)
 
         spinbox.valueChanged.connect(on_spin_changed)
-        spinbox.editingFinished.connect(
-            lambda: self._apply_hardware_setting(
+
+        def commit() -> None:
+            # Slider dragging can also land between hardware steps. Let the
+            # valueChanged connection synchronize the corrected value to it.
+            MCAController._snap_integer_control(spinbox)
+            self._apply_hardware_setting(
                 lambda: set_fn(spinbox.value())  # type: ignore[operator]
             )
-        )
-        slider.sliderReleased.connect(
-            lambda: self._apply_hardware_setting(
-                lambda: set_fn(spinbox.value())  # type: ignore[operator]
-            )
-        )
+
+        spinbox.editingFinished.connect(commit)
+        slider.sliderReleased.connect(commit)
 
     # ------------------------------------------------------------------
     # Measurement Start / Stop / Clear

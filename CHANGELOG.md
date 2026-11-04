@@ -11,6 +11,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Scope sliders beside the pretrigger, frame length, and periodic-gap spin
+  boxes, with synchronized values and ranges. Hardware
+  timing changes snap to supported steps and apply once on release; periodic
+  mode and replay/acquisition interlocks apply to the sliders too. Verified
+  with offscreen Qt tests using simulated devices; no live hardware writes.
+
+### Fixed
+
+- Numeric input widgets throughout the application now clamp out-of-range
+  edits to the nearest boundary on Enter or focus loss. Discrete MCA and Scope
+  hardware settings, external-device registers, and the Current DMA gap also
+  snap to their supported steps before applying settings; halfway values round
+  up and paired sliders stay synchronized. Valid continuous float settings
+  retain their precision. Hardware API validation remains strict; covered by
+  offscreen Qt tests, without live writes.
+- Boards with exported IDS IIO devices but unusable HV ADC/DAC readbacks now
+  disable the affected PSU at connection time, retaining the device error in
+  a warning while keeping Scope/MCA available. Read-only startup checks catch
+  EINVAL/EIO/ENODEV/ENXIO before PSU defaults, polling, or shutdown writes;
+  transport and permission errors still propagate. Includes simulated
+  regressions for both channels and converters; live hardware is unverified.
+- Restoring saved settings no longer opens disabled or hidden workspaces,
+  including a previously selected Power Supply tab on a board without a
+  usable PSU. An unavailable saved tab keeps the current available workspace
+  or falls back to the first available tab. Includes offscreen Qt regressions.
+
+### Added
+
 - Measurement Showcases wiki section with an illustrated Na-22 511 keV
   LBC-detector coincidence walkthrough, published Zenodo session downloads,
   offline replay instructions, and timing-fit and energy-selection context.

@@ -103,9 +103,11 @@ class Digitizer:
 
         The HV module is accessed through its AD5686R, MCP3564(R), TMP117,
         and ADS5407 IIO devices; pass ``with_ids=False`` to leave ``d.hv``
-        as ``None``. If a required IDS device is absent, construction logs a
-        warning and also leaves ``d.hv`` as ``None`` so scope/MCA operation
-        remains available. The removed SiPM controls are reported unavailable.
+        as ``None``. If a required IDS device is absent or its initial HV
+        ADC/DAC readback reports EINVAL, EIO, ENODEV or ENXIO, construction
+        logs a warning and also leaves ``d.hv`` as ``None`` so scope/MCA
+        operation remains available. Transport errors still propagate.
+        The removed SiPM controls are reported unavailable.
         When a channel exposes
         both vdpp_pulse_processor and vdpp_lm_frame, d.mca_dma is an
         IIOMcaDmaStreamer implementing the fixed 1024-record lifecycle in
@@ -131,7 +133,7 @@ class Digitizer:
                 ids = IIOIDSBackend(channel, uri)
             except IIOIDSUnavailableError as exc:
                 # Scope and MCA are independent IIO cores. A firmware image
-                # may legitimately omit one of the IDS converters/sensors;
+                # may omit an IDS converter or expose an unusable HV readback;
                 # keep the acquired DPP backend and disable only this
                 # channel's PSU functionality.
                 log.warning(

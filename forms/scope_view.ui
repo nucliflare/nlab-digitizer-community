@@ -155,23 +155,52 @@
          </widget>
         </item>
         <item row="0" column="1">
-         <widget class="QSpinBox" name="spinPretrigger">
-          <property name="minimum">
-           <number>0</number>
-          </property>
-          <property name="maximum">
-           <number>2040</number>
-          </property>
-          <property name="singleStep">
-           <number>8</number>
-          </property>
-          <property name="value">
-           <number>64</number>
-          </property>
-          <property name="suffix">
-           <string> ns</string>
-          </property>
-         </widget>
+         <layout class="QHBoxLayout" name="layoutPretrigger" stretch="0,1">
+          <item>
+           <widget class="QSpinBox" name="spinPretrigger">
+            <property name="minimum">
+             <number>0</number>
+            </property>
+            <property name="maximum">
+             <number>2040</number>
+            </property>
+            <property name="singleStep">
+             <number>8</number>
+            </property>
+            <property name="value">
+             <number>64</number>
+            </property>
+            <property name="suffix">
+             <string> ns</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QSlider" name="sliderPretrigger">
+            <property name="minimum">
+             <number>0</number>
+            </property>
+            <property name="maximum">
+             <number>2040</number>
+            </property>
+            <property name="singleStep">
+             <number>8</number>
+            </property>
+            <property name="value">
+             <number>64</number>
+            </property>
+            <property name="minimumSize">
+             <size>
+              <width>80</width>
+              <height>0</height>
+             </size>
+            </property>
+            <property name="orientation">
+             <enum>Qt::Orientation::Horizontal</enum>
+            </property>
+           </widget>
+          </item>
+         </layout>
         </item>
         <item row="1" column="0">
          <widget class="QLabel" name="labelFrameSamples">
@@ -181,23 +210,52 @@
          </widget>
         </item>
         <item row="1" column="1">
-         <widget class="QSpinBox" name="spinFrameSamples">
-          <property name="minimum">
-           <number>8</number>
-          </property>
-          <property name="maximum">
-           <number>16376</number>
-          </property>
-          <property name="singleStep">
-           <number>8</number>
-          </property>
-          <property name="value">
-           <number>2048</number>
-          </property>
-          <property name="suffix">
-           <string> ns</string>
-          </property>
-         </widget>
+         <layout class="QHBoxLayout" name="layoutFrameSamples" stretch="0,1">
+          <item>
+           <widget class="QSpinBox" name="spinFrameSamples">
+            <property name="minimum">
+             <number>8</number>
+            </property>
+            <property name="maximum">
+             <number>16376</number>
+            </property>
+            <property name="singleStep">
+             <number>8</number>
+            </property>
+            <property name="value">
+             <number>2048</number>
+            </property>
+            <property name="suffix">
+             <string> ns</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QSlider" name="sliderFrameSamples">
+            <property name="minimum">
+             <number>8</number>
+            </property>
+            <property name="maximum">
+             <number>16376</number>
+            </property>
+            <property name="singleStep">
+             <number>8</number>
+            </property>
+            <property name="value">
+             <number>2048</number>
+            </property>
+            <property name="minimumSize">
+             <size>
+              <width>80</width>
+              <height>0</height>
+             </size>
+            </property>
+            <property name="orientation">
+             <enum>Qt::Orientation::Horizontal</enum>
+            </property>
+           </widget>
+          </item>
+         </layout>
         </item>
         <item row="2" column="0">
          <widget class="QLabel" name="labelFrameGap">
@@ -213,29 +271,61 @@
          </widget>
         </item>
         <item row="2" column="1">
-         <widget class="QSpinBox" name="spinFrameGap">
-          <property name="enabled">
-           <bool>false</bool>
-          </property>
-          <property name="toolTip">
-           <string>Gap after each frame, in nanoseconds.</string>
-          </property>
-          <property name="minimum">
-           <number>0</number>
-          </property>
-          <property name="maximum">
-           <number>524280</number>
-          </property>
-          <property name="singleStep">
-           <number>8</number>
-          </property>
-          <property name="value">
-           <number>0</number>
-          </property>
-          <property name="suffix">
-           <string> ns</string>
-          </property>
-         </widget>
+         <layout class="QHBoxLayout" name="layoutFrameGap" stretch="0,1">
+          <item>
+           <widget class="QSpinBox" name="spinFrameGap">
+            <property name="enabled">
+             <bool>false</bool>
+            </property>
+            <property name="toolTip">
+             <string>Gap after each frame, in nanoseconds.</string>
+            </property>
+            <property name="minimum">
+             <number>0</number>
+            </property>
+            <property name="maximum">
+             <number>524280</number>
+            </property>
+            <property name="singleStep">
+             <number>8</number>
+            </property>
+            <property name="value">
+             <number>0</number>
+            </property>
+            <property name="suffix">
+             <string> ns</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QSlider" name="sliderFrameGap">
+            <property name="enabled">
+             <bool>false</bool>
+            </property>
+            <property name="minimum">
+             <number>0</number>
+            </property>
+            <property name="maximum">
+             <number>524280</number>
+            </property>
+            <property name="singleStep">
+             <number>8</number>
+            </property>
+            <property name="value">
+             <number>0</number>
+            </property>
+            <property name="minimumSize">
+             <size>
+              <width>80</width>
+              <height>0</height>
+             </size>
+            </property>
+            <property name="orientation">
+             <enum>Qt::Orientation::Horizontal</enum>
+            </property>
+           </widget>
+          </item>
+         </layout>
         </item>
        </layout>
       </widget>

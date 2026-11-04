@@ -25,6 +25,7 @@ during implementation.
 
 from __future__ import annotations
 
+import errno
 import logging
 import threading
 from dataclasses import dataclass
@@ -74,7 +75,7 @@ _COMPENSATION_MODE_UNSUPPORTED = (
 
 
 class IIOIDSUnavailableError(RuntimeError):
-    """Required IIO devices for one channel's IDS/PSU panel are absent."""
+    """Required IIO devices or HV readbacks for one channel are unavailable."""
 
 
 def _find_device(context: iio.Context, *names: str) -> iio.Device | None:
@@ -276,6 +277,23 @@ class IIOIDSBackend(IDSBackend):
         self._devices = _discover_devices(
             self._ctx, channel, selected_dac_channel,
         )
+        # Discovery confirms the exported IIO topology, not working hardware.
+        # Probe the required ADC/DAC paths before GUI defaults or shutdown can
+        # write to the supply. A failed read means PSU unavailable, not proof
+        # that the module is physically absent. This fallback is unit-tested;
+        # EINVAL handling is based on the reported startup failure, not a
+        # driver-defined module-presence flag. Transport errors still propagate.
+        try:
+            self._read_hv_feedback(self._devices)
+            self._nominal_hv_voltage = self._read_dac_voltage(self._devices)
+        except OSError as exc:
+            if exc.errno not in {errno.EINVAL, errno.EIO, errno.ENODEV, errno.ENXIO}:
+                raise
+            raise IIOIDSUnavailableError(
+                f"IIO IDS backend ch{channel}: required HV ADC/DAC readback "
+                f"unavailable: {exc}"
+            ) from None
+
         self._monitor_ctx = iio.Context(uri)
         self._monitor_devices = _discover_devices(
             self._monitor_ctx, channel, selected_dac_channel,
@@ -297,7 +315,6 @@ class IIOIDSBackend(IDSBackend):
         self._hv_compens_tref = 20.0
         self._hv_compens_mode = 0
         self._temp_digital_mode = 0
-        self._nominal_hv_voltage = self._read_dac_voltage(self._devices)
         self._compensated_hv_voltage = self._nominal_hv_voltage
 
         digital_temp_label = self._devices.digital_temp_label

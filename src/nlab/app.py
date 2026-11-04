@@ -45,6 +45,7 @@ from nlab.views.general_settings_dialog import (
     set_auto_configuration_enabled,
 )
 from nlab.views.license_dialog import LicenseDialog
+from nlab.views.numeric_controls import install_numeric_input_policy
 from nlab.views.timing_validation_dialog import TimingValidationDialog
 
 _ABOUT_TEXT = f"""\
@@ -206,6 +207,7 @@ class MainAppWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _setup_ui(self) -> None:
+        install_numeric_input_policy()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
         self._resize_for_available_screen()
@@ -592,8 +594,16 @@ class MainAppWindow(QMainWindow):
                 )
         if "active_tab" in settings:
             index = int(settings["active_tab"])
-            if 0 <= index < self.ui.mainTabs.count():
-                self.ui.mainTabs.setCurrentIndex(index)
+            tabs = self.ui.mainTabs
+            # Qt permits programmatic selection of a disabled/hidden tab.
+            # Saved configurations may refer to hardware that is now absent.
+            available = [
+                i for i in range(tabs.count()) if tabs.isTabEnabled(i) and tabs.isTabVisible(i)
+            ]
+            if index in available:
+                tabs.setCurrentIndex(index)
+            elif available and tabs.currentIndex() not in available:
+                tabs.setCurrentIndex(available[0])
         self._save_developer_settings()
         self._apply_view_state()
         self._controller.refresh_dma_output_settings()

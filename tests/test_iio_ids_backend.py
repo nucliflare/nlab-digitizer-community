@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import errno
 import math
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import Mock
 
 import iio
 import pytest
@@ -19,6 +21,17 @@ from nlab.hardware.digitizer.hv import HVSupply
 class _Attr:
     def __init__(self, value: str | int | float) -> None:
         self.value = str(value)
+
+
+class _ReadErrorAttr:
+    def __init__(self, error_number: int) -> None:
+        self.error_number = error_number
+        self.reads = 0
+
+    @property
+    def value(self) -> str:
+        self.reads += 1
+        raise OSError(self.error_number, "HV converter read failed")
 
 
 class _Channel:
@@ -333,3 +346,88 @@ def test_factory_continues_when_channel_ids_devices_are_absent(
 
     assert result.hv is None
     assert result.scope._b is fake_backend
+
+
+@pytest.mark.parametrize("channel", [0, 1])
+@pytest.mark.parametrize("converter", ["mcp3564r", "ad5686r"])
+@pytest.mark.parametrize("error_number", [errno.EINVAL, errno.EIO, errno.ENODEV, errno.ENXIO])
+def test_factory_disables_psu_when_required_hv_readback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    channel: int,
+    converter: str,
+    error_number: int,
+) -> None:
+    from nlab.hardware.digitizer import digitizer
+    from nlab.hardware.digitizer.backends import iio_backend
+
+    context = _make_context()
+    device = context.find_device(converter)
+    assert device is not None
+    input_channel = device.find_channel(f"voltage{channel}", converter == "ad5686r")
+    assert input_channel is not None
+    raw = _ReadErrorAttr(error_number)
+    input_channel.attrs["raw"] = cast(_Attr, raw)
+    context_factory = Mock(return_value=context)
+    monkeypatch.setattr(iio, "Context", context_factory)
+    write_dac = Mock(side_effect=AssertionError("unavailable PSU must not receive writes"))
+    monkeypatch.setattr(IIOIDSBackend, "_write_dac_voltage", write_dac)
+    fake_backend = SimpleNamespace(
+        mca_dma_hardware_present=lambda: True,
+        close=Mock(),
+    )
+    monkeypatch.setattr(iio_backend, "IIODigitizerBackend", lambda ch, uri: fake_backend)
+
+    result = digitizer.Digitizer.from_iio(channel, "ip:test")
+    result.close()
+
+    assert result.hv is None
+    assert not result.capabilities.ids
+    assert result.capabilities.mca
+    assert result.scope._b is fake_backend
+    assert result.mca._b is fake_backend
+    assert result.scope_dma is not None
+    assert result.mca_dma is not None
+    assert raw.reads == 1
+    context_factory.assert_called_once_with("ip:test")
+    write_dac.assert_not_called()
+    fake_backend.close.assert_called_once_with()
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "IDS/PSU unavailable" in warnings[0].message
+    assert f"[Errno {error_number}]" in warnings[0].message
+
+
+@pytest.mark.parametrize("converter", ["mcp3564r", "ad5686r"])
+@pytest.mark.parametrize("error_number", [errno.ECONNRESET, errno.ETIMEDOUT, errno.EACCES])
+def test_hv_probe_does_not_hide_transport_or_permission_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    converter: str,
+    error_number: int,
+) -> None:
+    context = _make_context()
+    device = context.find_device(converter)
+    assert device is not None
+    input_channel = device.find_channel("voltage0", converter == "ad5686r")
+    assert input_channel is not None
+    input_channel.attrs["raw"] = cast(_Attr, _ReadErrorAttr(error_number))
+    monkeypatch.setattr(iio, "Context", lambda uri: context)
+
+    with pytest.raises(OSError) as caught:
+        IIOIDSBackend(0, "ip:test")
+
+    assert caught.value.errno == error_number
+
+
+def test_zero_hv_feedback_is_a_valid_available_supply(monkeypatch: pytest.MonkeyPatch) -> None:
+    context = _make_context()
+    adc = context.find_device("mcp3564r")
+    assert adc is not None
+    feedback = adc.find_channel("voltage0")
+    assert feedback is not None
+    feedback.attrs["raw"].value = "0"
+    monkeypatch.setattr(iio, "Context", lambda uri: context)
+
+    backend = IIOIDSBackend(0, "ip:test")
+
+    assert backend.get_hv_adc_voltage() == 0.0

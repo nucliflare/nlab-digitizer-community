@@ -43,6 +43,7 @@ from nlab.hardware.digitizer.scope import (
     TriggerMode,
 )
 from nlab.ui.ui_scope_view import Ui_ScopeView
+from nlab.views.numeric_controls import bind_numeric_control, normalize_numeric_control
 from nlab.views.panel_status import PanelStatus
 from nlab.views.plot_viewbox import DraggableScopeCurve, ModifierZoomViewBox
 from nlab.views.responsive_layout import configure_scope_layout
@@ -287,6 +288,7 @@ class ScopeController(QWidget):
         spinbox.setMaximum(int(spec.max_val))
         spinbox.setSingleStep(int(spec.step) or 1)
         spinbox.setValue(int(spec.default))
+        bind_numeric_control(spinbox, snap_to_step=True)
 
     @staticmethod
     def _apply_scaled_range_to_spinbox(
@@ -298,6 +300,7 @@ class ScopeController(QWidget):
         spinbox.setSingleStep((int(spec.step) or 1) * scale)
         spinbox.setValue(int(spec.default) * scale)
         spinbox.setSuffix(" ns")
+        bind_numeric_control(spinbox, snap_to_step=True)
 
     @staticmethod
     def _apply_range_to_slider(slider: QSlider, spec: RangeSpec) -> None:
@@ -335,6 +338,12 @@ class ScopeController(QWidget):
         self.ui.spinFrameGap.setValue(
             self._scope.get_frame_period_cycles() * self._VIEWER_POINT_PERIOD_NS
         )
+        for slider, spinbox in (
+            (self.ui.sliderPretrigger, self.ui.spinPretrigger),
+            (self.ui.sliderFrameSamples, self.ui.spinFrameSamples),
+            (self.ui.sliderFrameGap, self.ui.spinFrameGap),
+        ):
+            slider.setValue(spinbox.value())
         self.ui.comboTriggerMode.setCurrentIndex(self._scope.get_trigger_mode().value)
 
     # ------------------------------------------------------------------
@@ -665,6 +674,7 @@ class ScopeController(QWidget):
                 "DMA records the complete frame."
             )
         self.ui.spinFrameSamples.setToolTip(tip)
+        self.ui.sliderFrameSamples.setToolTip(tip)
 
     # ------------------------------------------------------------------
     # Signal wiring
@@ -690,8 +700,10 @@ class ScopeController(QWidget):
         self._raw_curve.drag_moved.connect(self._on_waveform_drag_moved)
         self._raw_curve.drag_finished.connect(self._on_waveform_drag_finished)
 
-        self.ui.spinPretrigger.editingFinished.connect(
-            self._on_pretrigger_committed
+        self._wire_slider_spinbox(
+            self.ui.sliderPretrigger,
+            self.ui.spinPretrigger,
+            lambda _value: self._on_pretrigger_committed(),
         )
         self.ui.spinPretrigger.valueChanged.connect(
             self._sync_pretrigger_line_from_widget
@@ -702,9 +714,15 @@ class ScopeController(QWidget):
         self._pretrigger_line.sigPositionChangeFinished.connect(
             self._on_pretrigger_line_drag_finished
         )
-        self.ui.spinFrameSamples.editingFinished.connect(self._on_frame_samples_changed)
-        self.ui.spinFrameGap.editingFinished.connect(
-            self._on_frame_gap_committed
+        self._wire_slider_spinbox(
+            self.ui.sliderFrameSamples,
+            self.ui.spinFrameSamples,
+            lambda _value: self._on_frame_samples_changed(),
+        )
+        self._wire_slider_spinbox(
+            self.ui.sliderFrameGap,
+            self.ui.spinFrameGap,
+            lambda _value: self._on_frame_gap_committed(),
         )
         self.ui.comboTriggerMode.currentIndexChanged.connect(
             self._on_trigger_mode_changed
@@ -767,9 +785,7 @@ class ScopeController(QWidget):
             )
             self._update_waveform_drag_enabled()
         target_ns = line.value() * self._time_scale.ns_per_unit
-        step = spin.singleStep()
-        value = spin.minimum() + round((target_ns - spin.minimum()) / step) * step
-        spin.setValue(max(spin.minimum(), min(spin.maximum(), value)))
+        normalize_numeric_control(spin, target_ns)
         self._sync_pretrigger_line_from_widget()
         state = self._pretrigger_line_drag
         if state is not None:
@@ -897,16 +913,12 @@ class ScopeController(QWidget):
         if state is None:
             return
         pre_spin = self.ui.spinPretrigger
-        pre_step = pre_spin.singleStep()
         target_ns = state.pretrigger_ns + dx * self._time_scale.ns_per_unit
-        pre_ns = pre_spin.minimum() + round(
-            (target_ns - pre_spin.minimum()) / pre_step
-        ) * pre_step
-        pre_ns = max(pre_spin.minimum(), min(pre_spin.maximum(), pre_ns))
+        normalize_numeric_control(pre_spin, target_ns)
+        pre_ns = pre_spin.value()
         dac_spin = self.ui.spinDacValue
         dac_value = state.dac_value + round(dy / state.adc_per_dac)
         dac_value = max(dac_spin.minimum(), min(dac_spin.maximum(), dac_value))
-        pre_spin.setValue(pre_ns)
         dac_spin.setValue(dac_value)
         x_shift = (pre_ns - state.pretrigger_ns) / self._time_scale.ns_per_unit
         y_shift = (dac_value - state.dac_value) * state.adc_per_dac
@@ -1000,31 +1012,36 @@ class ScopeController(QWidget):
         enabled = periodic and self._scope.frame_period_cycles_supported()
         self.ui.labelFrameGap.setEnabled(enabled)
         self.ui.spinFrameGap.setEnabled(enabled)
+        self.ui.sliderFrameGap.setEnabled(enabled)
 
     def _wire_slider_spinbox(
         self,
         slider: QSlider,
         spinbox: QSpinBox,
-        set_fn: object,
+        set_fn: Callable[[int], None],
     ) -> None:
+        slider.setRange(spinbox.minimum(), spinbox.maximum())
+        slider.setSingleStep(spinbox.singleStep())
+        slider.setPageStep(spinbox.singleStep() * 10)
+        slider.setValue(spinbox.value())
+        slider.setToolTip(spinbox.toolTip())
         slider.valueChanged.connect(spinbox.setValue)
 
         def on_spin_changed(v: int) -> None:
-            slider.blockSignals(True)
-            slider.setValue(v)
-            slider.blockSignals(False)
+            blocked = slider.blockSignals(True)
+            try:
+                slider.setValue(v)
+            finally:
+                slider.blockSignals(blocked)
 
-        def on_spin_committed() -> None:
+        def commit() -> None:
+            normalize_numeric_control(spinbox)
             if not self._replay_hardware_interlocked:
-                set_fn(spinbox.value())  # type: ignore[operator]
-
-        def on_slider_released() -> None:
-            if not self._replay_hardware_interlocked:
-                set_fn(spinbox.value())  # type: ignore[operator]
+                set_fn(spinbox.value())
 
         spinbox.valueChanged.connect(on_spin_changed)
-        spinbox.editingFinished.connect(on_spin_committed)
-        slider.sliderReleased.connect(on_slider_released)
+        spinbox.editingFinished.connect(commit)
+        slider.sliderReleased.connect(commit)
 
     # ------------------------------------------------------------------
     # Start / Stop
@@ -1120,21 +1137,21 @@ class ScopeController(QWidget):
             finally:
                 widget.blockSignals(blocked)
 
-        set_without_signal(
-            self.ui.spinPretrigger,
-            self.ui.spinPretrigger.setValue,
-            0,
-        )
-        set_without_signal(
-            self.ui.spinFrameSamples,
-            self.ui.spinFrameSamples.setValue,
-            frame_samples * self._SAMPLE_PERIOD_NS,
-        )
-        set_without_signal(
-            self.ui.spinFrameGap,
-            self.ui.spinFrameGap.setValue,
-            gap_cycles * self._VIEWER_POINT_PERIOD_NS,
-        )
+        for spinbox, slider, value in (
+            (self.ui.spinPretrigger, self.ui.sliderPretrigger, 0),
+            (
+                self.ui.spinFrameSamples,
+                self.ui.sliderFrameSamples,
+                frame_samples * self._SAMPLE_PERIOD_NS,
+            ),
+            (
+                self.ui.spinFrameGap,
+                self.ui.sliderFrameGap,
+                gap_cycles * self._VIEWER_POINT_PERIOD_NS,
+            ),
+        ):
+            set_without_signal(spinbox, spinbox.setValue, value)
+            set_without_signal(slider, slider.setValue, value)
         set_without_signal(
             self.ui.comboTriggerMode,
             self.ui.comboTriggerMode.setCurrentIndex,
