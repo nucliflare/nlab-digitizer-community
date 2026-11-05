@@ -422,3 +422,91 @@ def test_waveform_worker_is_deleted_by_its_finished_thread(
 
     assert destroyed == [True]
     assert finish_threads == [dialog.thread()]
+
+
+@pytest.mark.parametrize(
+    "outcome,action",
+    [("loaded", "display"), ("failed", "display"), ("cancelled", "display"),
+     ("loaded", "cancel"), ("loaded", "close")],
+)
+def test_psd_terminal_display_waits_for_worker_cleanup_and_discards_stale_results(
+    tmp_path: Path, qtbot: QtBot, monkeypatch: pytest.MonkeyPatch,
+    outcome: str, action: str,
+) -> None:
+    path = tmp_path / "deferred-result.bin"
+    samples = np.asarray((100, 100, 100, 90, 60, 70, 90, 100), dtype="<i2")
+    path.write_bytes(
+        FILE_HEADER_STRUCT.pack(FILE_MAGIC, FILE_VERSION, 0, 0, 0.0, 12)
+        + struct.pack("<Q", 1) + samples.tobytes()
+    )
+    published = threading.Event()
+    destroyed = threading.Event()
+    result = WaveformPsdAccumulator(_settings()).result()
+
+    class BlockingWorker(BaseWorker):
+        progress = Signal(object, object)
+        loaded = Signal(object)
+        cancelled = Signal()
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            super().__init__()
+            self.release = threading.Event()
+
+        def run(self) -> None:
+            try:
+                assert QThread.currentThread() is self.thread()
+                if outcome == "loaded":
+                    self.loaded.emit(result)
+                elif outcome == "failed":
+                    self.error.emit("simulated reconstruction error")
+                else:
+                    self.cancelled.emit()
+                published.set()
+                assert self.release.wait(5)
+            finally:
+                self.finished.emit()
+
+        def stop(self) -> None:
+            self.release.set()
+
+    dialog = WaveformAnalysisDialog()
+    qtbot.addWidget(dialog)
+    dialog.auto_recalculate.setChecked(False)
+    dialog.open_path(path)
+    qtbot.waitUntil(lambda: dialog._index_thread is None, timeout=5000)
+    monkeypatch.setattr(waveform_dialog_module, "WaveformPsdWorker", BlockingWorker)
+    displayed: list[tuple[str, bool]] = []
+    original_draw = dialog.psd_plot.set_data
+
+    def draw(*args: object, **kwargs: object) -> None:
+        assert QThread.currentThread() is dialog.thread()
+        displayed.append(("loaded", destroyed.is_set()))
+        original_draw(*args, **kwargs)
+
+    monkeypatch.setattr(dialog.psd_plot, "set_data", draw)
+    monkeypatch.setattr(
+        waveform_dialog_module.QMessageBox, "critical",
+        lambda *_args: displayed.append(("failed", destroyed.is_set())),
+    )
+    dialog._start_analysis()
+    worker = dialog._analysis_worker
+    assert isinstance(worker, BlockingWorker)
+    worker.destroyed.connect(destroyed.set, Qt.ConnectionType.DirectConnection)
+    try:
+        qtbot.waitUntil(published.is_set, timeout=5000)
+        qtbot.waitUntil(lambda: dialog._analysis_outcome is not None, timeout=5000)
+        assert displayed == []
+        assert "cancelled." not in dialog.status.text()
+        if action == "cancel":
+            dialog._cancel_analysis()
+        elif action == "close":
+            dialog.close_file()
+    finally:
+        worker.release.set()
+    qtbot.waitUntil(lambda: dialog._analysis_thread is None, timeout=5000)
+    assert destroyed.is_set()
+    if action != "display" or outcome == "cancelled":
+        assert displayed == []
+    else:
+        assert displayed == [(outcome, True)]
+    dialog.close_file()

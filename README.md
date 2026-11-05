@@ -1466,6 +1466,8 @@ containing `nlab.exe`.
 To run build chores without changing the version, push the desired commit to a
 `chore/build-*` branch on each remote. Both workflows test and build Windows and
 Ubuntu artifacts for that commit. Release publishing remains limited to `v*` tags.
+CI logs individual tests and dumps thread stacks when a test takes over 60 seconds;
+the test step has a ten-minute deadline so hangs cannot stall builds indefinitely.
 
 ## Known target-side limitations
 

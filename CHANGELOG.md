@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Retire waveform indexing, averaging, PSD, and optimization workers from the
+  GUI thread and join their deferred deletion before continuing GUI operations,
+  avoiding a Windows Qt/Python lock deadlock during plot-label updates. PSD
+  outcomes display after cleanup; cancelled or closed analyses discard results.
+  CI test steps now log individual tests, dump stacks after a stalled test,
+  and have a ten-minute deadline.
 - Use dot decimal separators consistently in External controls and telemetry,
   regardless of the system locale. Label plot traces and axes with their units,
   keep SiPM current plots in uA without automatic prefix changes, and convert

@@ -10,7 +10,7 @@ from typing import Literal, cast
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -112,6 +112,8 @@ class WaveformAnalysisDialog(QDialog):
         self._index_worker: WaveformFileIndexWorker | None = None
         self._analysis_thread: QThread | None = None
         self._analysis_worker: WaveformPsdWorker | None = None
+        self._analysis_outcome: tuple[str, object] | None = None
+        self._analysis_cancel_requested = False
         self._optimization_thread: QThread | None = None
         self._optimization_worker: WaveformFomOptimizationWorker | None = None
         self._optimization_total_pairs: int | None = None
@@ -696,16 +698,13 @@ class WaveformAnalysisDialog(QDialog):
         worker = WaveformFileIndexWorker(path)
         thread = QThread(self)
         worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress.connect(self._index_progress)
-        worker.loaded.connect(self._index_loaded)
-        worker.cancelled.connect(self._index_cancelled)
-        worker.error.connect(self._index_failed)
-        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
-        # Delete the worker only once QThread has stopped its event loop. If
-        # deleteLater() is queued from worker.finished after the direct quit,
-        # a long-running job can leave the QObject alive until the GUI drops
-        # its final Python reference, causing cross-thread native destruction.
+        thread.started.connect(worker.run, Qt.ConnectionType.DirectConnection)
+        worker.progress.connect(self._index_progress, Qt.ConnectionType.QueuedConnection)
+        worker.loaded.connect(self._index_loaded, Qt.ConnectionType.QueuedConnection)
+        worker.cancelled.connect(self._index_cancelled, Qt.ConnectionType.QueuedConnection)
+        worker.error.connect(self._index_failed, Qt.ConnectionType.QueuedConnection)
+        worker.finished.connect(self._finish_worker, Qt.ConnectionType.QueuedConnection)
+        # The owning thread handles deferred worker deletion during retirement.
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(
             self._index_thread_finished,
@@ -718,6 +717,20 @@ class WaveformAnalysisDialog(QDialog):
         self.progress.setValue(0)
         QSettings().setValue("analysis/waveform_folder", str(path.parent))
         thread.start()
+
+    @Slot()
+    def _finish_worker(self) -> None:
+        worker = self.sender()
+        if worker is None:
+            return  # A synchronous stop already joined and deleted this worker.
+        thread = worker.thread()
+        if thread is None or thread is self.thread():
+            return
+        # Retire a worker in one GUI turn. The wait releases the GIL while Qt
+        # destroys the worker, so GUI text updates cannot deadlock against its
+        # connection cleanup (observed on Windows with PySide6 6.9.3).
+        thread.quit()
+        thread.wait()
 
     def _index_progress(self, processed: int, total: int) -> None:
         self.progress.setValue(round(1000 * processed / total) if total else 0)
@@ -849,10 +862,10 @@ class WaveformAnalysisDialog(QDialog):
         )
         thread = QThread(self)
         worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.loaded.connect(self._average_loaded)
-        worker.error.connect(self._average_failed)
-        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        thread.started.connect(worker.run, Qt.ConnectionType.DirectConnection)
+        worker.loaded.connect(self._average_loaded, Qt.ConnectionType.QueuedConnection)
+        worker.error.connect(self._average_failed, Qt.ConnectionType.QueuedConnection)
+        worker.finished.connect(self._finish_worker, Qt.ConnectionType.QueuedConnection)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(self._average_thread_finished, Qt.ConnectionType.QueuedConnection)
         self._average_frames = frames
@@ -1186,13 +1199,13 @@ class WaveformAnalysisDialog(QDialog):
 
         thread = QThread(self)
         worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.status.connect(self._optimization_status)
-        worker.progress.connect(self._optimization_progress)
-        worker.loaded.connect(self._optimization_loaded)
-        worker.cancelled.connect(self._optimization_cancelled)
-        worker.error.connect(self._optimization_failed)
-        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        thread.started.connect(worker.run, Qt.ConnectionType.DirectConnection)
+        worker.status.connect(self._optimization_status, Qt.ConnectionType.QueuedConnection)
+        worker.progress.connect(self._optimization_progress, Qt.ConnectionType.QueuedConnection)
+        worker.loaded.connect(self._optimization_loaded, Qt.ConnectionType.QueuedConnection)
+        worker.cancelled.connect(self._optimization_cancelled, Qt.ConnectionType.QueuedConnection)
+        worker.error.connect(self._optimization_failed, Qt.ConnectionType.QueuedConnection)
+        worker.finished.connect(self._finish_worker, Qt.ConnectionType.QueuedConnection)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(
             self._optimization_thread_finished,
@@ -1336,12 +1349,12 @@ class WaveformAnalysisDialog(QDialog):
             return
         thread = QThread(self)
         worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress.connect(self._analysis_progress)
-        worker.loaded.connect(self._analysis_loaded)
-        worker.cancelled.connect(self._analysis_cancelled)
-        worker.error.connect(self._analysis_failed)
-        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        thread.started.connect(worker.run, Qt.ConnectionType.DirectConnection)
+        worker.progress.connect(self._analysis_progress, Qt.ConnectionType.QueuedConnection)
+        worker.loaded.connect(self._analysis_result_ready, Qt.ConnectionType.QueuedConnection)
+        worker.cancelled.connect(self._analysis_cancel_ready, Qt.ConnectionType.QueuedConnection)
+        worker.error.connect(self._analysis_error_ready, Qt.ConnectionType.QueuedConnection)
+        worker.finished.connect(self._finish_worker, Qt.ConnectionType.QueuedConnection)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(
             self._analysis_thread_finished,
@@ -1349,6 +1362,8 @@ class WaveformAnalysisDialog(QDialog):
         )
         self._analysis_worker = worker
         self._analysis_thread = thread
+        self._analysis_outcome = None
+        self._analysis_cancel_requested = False
         self._active_analysis_kind = kind
         self.cluster_selection.invalidate()
         self._active_report_context = _WaveformAnalysisContext(
@@ -1383,6 +1398,15 @@ class WaveformAnalysisDialog(QDialog):
         else:
             prefix = "Full PSD"
         self.status.setText(f"{prefix}: integrating {processed:,}/{total:,} waveforms...")
+
+    def _analysis_result_ready(self, value: object) -> None:
+        self._analysis_outcome = ("loaded", value)
+
+    def _analysis_cancel_ready(self) -> None:
+        self._analysis_outcome = ("cancelled", None)
+
+    def _analysis_error_ready(self, message: str) -> None:
+        self._analysis_outcome = ("failed", message)
 
     def _analysis_loaded(self, value: object) -> None:
         if not isinstance(value, WaveformPsdResult):
@@ -1469,6 +1493,7 @@ class WaveformAnalysisDialog(QDialog):
     def _cancel_analysis(self) -> None:
         self._auto_preview_timer.stop()
         self._pending_analysis_kind = None
+        self._analysis_cancel_requested = True
         if self._optimization_worker is not None:
             self._optimization_worker.stop()
             self.status.setText("Cancelling FOM gate optimization...")
@@ -1478,6 +1503,22 @@ class WaveformAnalysisDialog(QDialog):
 
     def _analysis_thread_finished(self) -> None:
         thread = self._analysis_thread
+        if thread is not None:
+            # finished is emitted before deferred worker deletion completes.
+            # Join with the GIL released before Qt text/plot operations: on
+            # PySide6 6.9, concurrent QObject destruction and setHtml can lock
+            # each other out (Qt connection mutex versus Python's GIL).
+            thread.wait()
+        outcome = self._analysis_outcome
+        self._analysis_outcome = None
+        if outcome is not None and self._index is not None:
+            kind, value = outcome
+            if kind == "cancelled" or self._analysis_cancel_requested:
+                self._analysis_cancelled()
+            elif kind == "loaded":
+                self._analysis_loaded(value)
+            else:
+                self._analysis_failed(str(value))
         self._analysis_worker = None
         self._analysis_thread = None
         self._active_analysis_kind = None
@@ -1744,14 +1785,16 @@ class WaveformAnalysisDialog(QDialog):
     def _stop_index_sync(self) -> None:
         if self._index_worker is not None:
             self._index_worker.stop()
-        if self._index_thread is not None and self._index_thread.isRunning():
+        if self._index_thread is not None:
+            self._index_thread.quit()
             if not self._index_thread.wait(5_000):
                 log.warning("Waveform index worker did not stop within 5 seconds")
 
     def _stop_average_sync(self) -> None:
         self.cluster_selection.average_button.setChecked(False)
         self._toggle_cluster_average(False)
-        if self._average_thread is not None and self._average_thread.isRunning():
+        if self._average_thread is not None:
+            self._average_thread.quit()
             if not self._average_thread.wait(5_000):
                 log.warning("Waveform average worker did not stop within 5 seconds")
 
@@ -1766,16 +1809,19 @@ class WaveformAnalysisDialog(QDialog):
     def _stop_analysis_sync(self) -> None:
         self._auto_preview_timer.stop()
         self._pending_analysis_kind = None
+        self._analysis_cancel_requested = True
         if self._analysis_worker is not None:
             self._analysis_worker.stop()
-        if self._analysis_thread is not None and self._analysis_thread.isRunning():
+        if self._analysis_thread is not None:
+            self._analysis_thread.quit()
             if not self._analysis_thread.wait(5_000):
                 log.warning("Waveform PSD worker did not stop within 5 seconds")
 
     def _stop_optimization_sync(self) -> None:
         if self._optimization_worker is not None:
             self._optimization_worker.stop()
-        if self._optimization_thread is not None and self._optimization_thread.isRunning():
+        if self._optimization_thread is not None:
+            self._optimization_thread.quit()
             if not self._optimization_thread.wait(5_000):
                 log.warning("Waveform FOM optimization worker did not stop within 5 seconds")
         self._completed_optimization = None
