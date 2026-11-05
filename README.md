@@ -1468,6 +1468,8 @@ To run build chores without changing the version, push the desired commit to a
 Ubuntu artifacts for that commit. Release publishing remains limited to `v*` tags.
 CI logs individual tests and dumps thread stacks when a test takes over 60 seconds;
 the test step has a ten-minute deadline so hangs cannot stall builds indefinitely.
+GUI object cleanup is scheduled on the GUI thread while numerical analysis runs
+in background workers, preventing collection-related plotting deadlocks.
 
 ## Known target-side limitations
 

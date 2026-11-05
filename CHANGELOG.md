@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Schedule cyclic garbage collection on the GUI thread, so allocations during
+  background FOM fits cannot destroy Qt plot/widget cycles from a worker and
+  deadlock GUI cleanup. Collection remains periodic and restores the previous
+  automatic-GC state when the application quits.
 - Retire waveform indexing, averaging, PSD, and optimization workers from the
   GUI thread and join their deferred deletion before continuing GUI operations,
   avoiding a Windows Qt/Python lock deadlock during plot-label updates. PSD

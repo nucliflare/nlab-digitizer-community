@@ -53,6 +53,7 @@ from nlab.analysis.waveform_psd import (
     integrate_waveform,
 )
 from nlab.help.context import HelpContext
+from nlab.views.gui_gc import install_gui_garbage_collector
 from nlab.views.help_dialog import HelpDialog
 from nlab.views.offline_psd_plot import OfflinePsdPlot
 from nlab.views.plot_viewbox import WAVEFORM_STEP_MODE, ModifierZoomViewBox, style_plot_widget
@@ -101,6 +102,7 @@ class WaveformAnalysisDialog(QDialog):
     def __init__(self, parent: QWidget | None = None, *,
                  gate_targets: Callable[[], Sequence[McaGateTransferTarget]] | None = None) -> None:
         super().__init__(parent)
+        install_gui_garbage_collector()
         self._gate_targets = gate_targets
         self._set_current_file(None)
         self.setModal(False)
