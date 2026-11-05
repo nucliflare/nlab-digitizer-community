@@ -9,8 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Allow Windows/Ubuntu build chores on `chore/build-*` branches on GitHub and
+  Gitea without changing the application version. Only `v*` tag pushes verify
+  release versions and publish releases.
+
 ### Fixed
 
+- Use dot decimal separators consistently in External controls and telemetry,
+  regardless of the system locale. Label plot traces and axes with their units,
+  keep SiPM current plots in uA without automatic prefix changes, and convert
+  older A/mA current recordings for plotting while preserving recorded values
+  and schemas. Covered by simulated I/O and offscreen Polish/German locale tests.
 - Update the shared Modbus register definitions to match the supplied
   `modbus_reg.c` units/comments: SiPM current in uA, voltage setpoints in V,
   temperatures in degC, and compensation in mV/degC. PMT temperature now

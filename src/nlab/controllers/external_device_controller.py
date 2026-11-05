@@ -6,7 +6,7 @@ from collections import deque
 import pyqtgraph as pg
 from nlab_modbus.core.base_modbus_device import BaseModbusDevice
 from nlab_modbus.core.register_specs import RegisterSpec, RegisterType
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QLocale, Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 
 _SETTINGS_COLUMN_MAX_WIDTHS = (180, 96, 96)
 _TELEMETRY_COLUMN_MAX_WIDTHS = (180, 96, 58, 48)
+_CURRENT_TO_UA = {"A": 1e6, "mA": 1e3, "uA": 1.0, "µA": 1.0, "μA": 1.0}
 
 
 def _is_boolean_spec(spec: RegisterSpec) -> bool:
@@ -127,6 +128,12 @@ class ExternalDeviceController(QWidget):
         auto_start: bool = True,
     ) -> None:
         super().__init__(parent)
+        # Keep inputs consistent with Python-formatted telemetry and saved numbers.
+        locale = QLocale.c()
+        locale.setNumberOptions(
+            QLocale.NumberOption.OmitGroupSeparator | QLocale.NumberOption.RejectGroupSeparator
+        )
+        self.setLocale(locale)
         self.device = device
         self.ui = Ui_ExternalDeviceView()
         self.ui.setupUi(self)
@@ -169,6 +176,9 @@ class ExternalDeviceController(QWidget):
         self.ui.plotWidget.setBackground("#f8f9fa")
         self.ui.plotWidget.showGrid(x=True, y=True, alpha=0.2)
         self.ui.plotWidget.setLabel("bottom", "Time", units="s")
+        self.ui.plotWidget.setLabel("left", "Value", units="")
+        # Register units already contain prefixes (uA, mV, ...); retain those units.
+        self.ui.plotWidget.getAxis("left").enableAutoSIPrefix(False)
         self.ui.plotWidget.addLegend()
 
         self._populate_settings_rows()
@@ -304,7 +314,10 @@ class ExternalDeviceController(QWidget):
     def _on_plot_toggled(self, name: str, checked: bool) -> None:
         if checked:
             pen = pg.mkPen(self._plot_colors[name], width=2)
-            self._plot_curves[name] = self.ui.plotWidget.plot(pen=pen, name=_label_for(name))
+            unit, _scale = self._plot_unit_and_scale(name)
+            label = _label_for(name)
+            legend = f"{label} ({unit})" if unit else label
+            self._plot_curves[name] = self.ui.plotWidget.plot(pen=pen, name=legend)
             self._plot_ts[name] = deque()
             self._plot_values[name] = deque()
         else:
@@ -313,6 +326,27 @@ class ExternalDeviceController(QWidget):
                 self.ui.plotWidget.removeItem(curve)
             self._plot_ts.pop(name, None)
             self._plot_values.pop(name, None)
+        self._update_plot_axis_label()
+
+    def _plot_unit_and_scale(self, name: str) -> tuple[str, float]:
+        unit = self.device.REGISTER_MAP[name].unit or ""
+        if name == "sipm_current_ua" and unit in _CURRENT_TO_UA:
+            # Live values are already uA. Convert older recorded A/mA only for
+            # display; cached samples, tables, recording data and schemas stay native.
+            return "uA", _CURRENT_TO_UA[unit]
+        return unit, 1.0
+
+    def _update_plot_axis_label(self) -> None:
+        names = list(self._plot_curves)
+        units = {self._plot_unit_and_scale(name)[0] for name in names}
+        if len(names) == 1:
+            label, unit = _label_for(names[0]), units.pop()
+        elif len(units) == 1:
+            label, unit = "Value", units.pop()
+        else:
+            label = "Value (units in legend)" if names else "Value"
+            unit = ""
+        self.ui.plotWidget.setLabel("left", label, units=unit)
 
     def _make_editor(self, name: str, spec: RegisterSpec) -> QAbstractSpinBox | QCheckBox:
         if _is_boolean_spec(spec):
@@ -604,7 +638,8 @@ class ExternalDeviceController(QWidget):
             while ts and ts[0] < cutoff:
                 ts.popleft()
                 values.popleft()
-            curve.setData(list(ts), list(values))
+            _unit, scale = self._plot_unit_and_scale(name)
+            curve.setData(list(ts), [sample * scale for sample in values])
 
     def begin_session_replay(self) -> None:
         self._session_replay_active = True

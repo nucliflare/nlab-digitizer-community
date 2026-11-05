@@ -6,11 +6,24 @@ import pytest
 from nlab_modbus.devices.geiger import GeigerDevice
 from nlab_modbus.devices.psu import PSUDevice
 from nlab_modbus.devices.sipm import SiPMDevice
+from PySide6.QtCore import QLocale, Qt
 from PySide6.QtGui import QFontMetrics
-from PySide6.QtWidgets import QStyleOptionViewItem
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QDoubleSpinBox, QStyleOptionViewItem
 
 from nlab.controllers.external_device_controller import ExternalDeviceController
 from nlab.hardware.digitizer.offline import OfflineExternalDevice
+
+
+@pytest.fixture(params=[QLocale.Language.Polish, QLocale.Language.German])
+def comma_decimal_locale(request, qapp):
+    previous = QLocale()
+    locale = QLocale(request.param)
+    QLocale.setDefault(locale)
+    try:
+        yield locale
+    finally:
+        QLocale.setDefault(previous)
 
 
 def make_view(qtbot, device_class, input_words=None, holding_words=None):
@@ -87,7 +100,13 @@ def test_sipm_settings_keep_voltage_fractions_and_encode_native_counts(qtbot):
     client.write_register.assert_called_once_with(address=3, value=4625, device_id=1)
 
 
-def test_older_recording_keeps_its_recorded_ampere_values_and_units(qtbot):
+@pytest.mark.parametrize(
+    "recorded_unit,recorded_value,recorded_scale",
+    [("A", 0.00012, 1e-6), ("mA", 0.12, 1e-3)],
+)
+def test_older_recording_keeps_native_values_while_plotting_microamps(
+    qtbot, recorded_unit, recorded_value, recorded_scale
+):
     schema = {
         "registers": [
             {
@@ -97,18 +116,110 @@ def test_older_recording_keeps_its_recorded_ampere_values_and_units(qtbot):
                 "dtype": "int16",
                 "min": -32768,
                 "max": 32767,
-                "scale": 1e-6,
-                "unit": "A",
+                "scale": recorded_scale,
+                "unit": recorded_unit,
             }
         ]
     }
-    device = OfflineExternalDevice("SIPM:1", {}, {"sipm_current_ua": 0.00012}, schema=schema)
+    device = OfflineExternalDevice("SIPM:1", {}, {"sipm_current_ua": recorded_value}, schema=schema)
     view = ExternalDeviceController(device, auto_start=False)
     qtbot.addWidget(view)
     row = view._row_by_name["telemetry:sipm_current_ua"]
     view.ui.telemetryTable.cellWidget(row, 3).setChecked(True)
     view.begin_session_replay()
-    view.display_session_replay_readback(0.5, {"sipm_current_ua": 0.00012})
-    assert view.ui.telemetryTable.item(row, 2).text() == "A"
-    assert list(view._plot_values["sipm_current_ua"]) == [0.00012]
-    assert view.replay_schema()["registers"][0]["scale"] == 1e-6
+    view.display_session_replay_readback(0.5, {"sipm_current_ua": recorded_value})
+    assert view.ui.telemetryTable.item(row, 2).text() == recorded_unit
+    assert list(view._plot_values["sipm_current_ua"]) == [recorded_value]
+    document = view.replay_schema()["registers"][0]
+    assert document["scale"] == recorded_scale
+    assert document["unit"] == recorded_unit
+    assert view._plot_curves["sipm_current_ua"].getData()[1] == pytest.approx([120])
+    assert view.ui.plotWidget.getAxis("left").labelUnits == "uA"
+
+
+@pytest.mark.parametrize("device_class", [SiPMDevice, GeigerDevice, PSUDevice])
+def test_external_floats_use_dots_with_comma_system_locales(
+    qtbot, comma_decimal_locale, device_class
+):
+    view, _device, _client = make_view(qtbot, device_class)
+    editors = view.findChildren(QDoubleSpinBox)
+    assert view.locale().decimalPoint() == "."
+    if device_class is SiPMDevice:
+        assert editors
+    for editor in editors:
+        editor.setValue(editor.minimum() + editor.singleStep())
+        assert editor.locale().decimalPoint() == "."
+        assert "." in editor.cleanText()
+        assert "," not in editor.cleanText()
+    view._on_readback(0.5, {"supply_voltage": 5.25})
+    row = view._row_by_name["telemetry:supply_voltage"]
+    assert view.ui.telemetryTable.item(row, 1).text() == "5.2500"
+    for side in ("bottom", "left"):
+        ticks = view.ui.plotWidget.getAxis(side).tickStrings([0, 0.5, 1], 1, 0.5)
+        assert any("." in text for text in ticks)
+        assert all("," not in text for text in ticks)
+    # This policy is local to External, without changing other workspaces' locales.
+    unrelated = QDoubleSpinBox()
+    qtbot.addWidget(unrelated)
+    assert unrelated.locale().decimalPoint() == comma_decimal_locale.decimalPoint() == ","
+
+
+def test_sipm_dot_input_commits_the_correct_native_count(qtbot, comma_decimal_locale):
+    view, _device, client = make_view(qtbot, SiPMDevice, holding_words={3: 4567})
+    row = view._row_by_name["settings:vout_set"]
+    editor = view.ui.settingsTable.cellWidget(row, 1)
+    assert editor.cleanText() == "45.6700"
+    editor.lineEdit().setText("46.25")
+    QTest.keyClick(editor, Qt.Key.Key_Return)
+    assert editor.value() == 46.25
+    client.write_register.assert_called_once_with(address=3, value=4625, device_id=1)
+    client.write_register.reset_mock()
+    # A pasted comma must not become a thousands separator and clamp to 78 V.
+    editor.lineEdit().setText("46,250")
+    QTest.keyClick(editor, Qt.Key.Key_Return)
+    assert editor.value() == 46.25
+    assert all(call.kwargs["value"] == 4625 for call in client.write_register.call_args_list)
+
+
+@pytest.mark.parametrize(
+    "raw,expected", [(0, 0), (1, 1), (120, 120), (10000, 10000), (0xFFF1, -15)]
+)
+def test_sipm_current_plot_retains_microamps_through_ten_milliamps(qtbot, raw, expected):
+    view, device, _client = make_view(qtbot, SiPMDevice, input_words={4: raw})
+    name = "sipm_current_ua"
+    row = view._row_by_name[f"telemetry:{name}"]
+    view.ui.telemetryTable.cellWidget(row, 3).setChecked(True)
+    view._on_readback(0.5, device.read_snapshot())
+    curve = view._plot_curves[name]
+    assert list(curve.getData()[1]) == [expected]
+    assert curve.name() == "SiPM Output Current (uA)"
+    assert float(view.ui.telemetryTable.item(row, 1).text()) == expected
+    assert view.ui.telemetryTable.item(row, 2).text() == "uA"
+    axis = view.ui.plotWidget.getAxis("left")
+    assert axis.labelText == "SiPM Output Current"
+    assert axis.labelUnits == "uA"
+    assert not axis.autoSIPrefix
+
+
+def test_external_plot_updates_axis_units_and_labels_mixed_traces(qtbot):
+    view, _device, _client = make_view(qtbot, SiPMDevice)
+
+    def select(name, enabled):
+        row = view._row_by_name[f"telemetry:{name}"]
+        view.ui.telemetryTable.cellWidget(row, 3).setChecked(enabled)
+
+    axis = view.ui.plotWidget.getAxis("left")
+    select("sipm_voltage_10mv", True)
+    select("supply_voltage", True)
+    assert axis.labelUnits == "V"
+    select("sipm_current_ua", True)
+    assert axis.labelText == "Value (units in legend)"
+    assert axis.labelUnits == ""
+    assert view._plot_curves["sipm_voltage_10mv"].name() == "SiPM Output Voltage (V)"
+    assert view._plot_curves["sipm_current_ua"].name() == "SiPM Output Current (uA)"
+    select("sipm_current_ua", False)
+    assert axis.labelUnits == "V"
+    select("sipm_voltage_10mv", False)
+    select("supply_voltage", False)
+    assert axis.labelText == "Value"
+    assert axis.labelUnits == ""

@@ -1,6 +1,7 @@
 name: build
 on:
   push:
+    branches: ["chore/build-*"]
     tags: ["v*"]
   workflow_dispatch: {}
 
@@ -38,7 +39,7 @@ jobs:
             libxcb-xinerama0 patchelf
 
       - name: Verify tag matches package version
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         run: ${{ matrix.python-exe }} scripts/check_release_tag.py
 
       - name: Create venv (Windows)
@@ -96,7 +97,7 @@ jobs:
 
   release:
     needs: build
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-local
     permissions:
       actions: read

@@ -243,6 +243,11 @@ uv run python examples/measure_current.py
   temperature uses 0.01 degC per raw count. Fractional setting readbacks are
   preserved. New recordings store these units; existing replay schemas retain
   their recorded values and units.
+- External numeric controls and readbacks use a dot as the decimal separator,
+  including on systems with comma decimal locales. Plot legends include each
+  trace's unit; the vertical axis shows the common unit or refers to the legend
+  for mixed units. SiPM current plots use fixed uA (10 mA = 10000 uA), including
+  display conversion of older A/mA recordings without changing their saved data.
 - Compact External workspace tables fill the control pane while keeping every
   column visible beside the live plot; hover an elided register label to see
   its full name
@@ -1457,6 +1462,10 @@ platform-specific archives on the
 The Windows Actions artifact contains `nlab.exe` directly, so extracting its
 download ZIP once is enough. The Windows Release asset remains a single ZIP
 containing `nlab.exe`.
+
+To run build chores without changing the version, push the desired commit to a
+`chore/build-*` branch on each remote. Both workflows test and build Windows and
+Ubuntu artifacts for that commit. Release publishing remains limited to `v*` tags.
 
 ## Known target-side limitations
 
