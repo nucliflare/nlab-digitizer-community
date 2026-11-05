@@ -97,4 +97,4 @@ required-environments = [
 ]
 
 [tool.uv.sources]
-nlab-modbus = { git = "https://github.com/nucliflare/nlab-modbus", tag = "v0.2.2" }
+nlab-modbus = { git = "https://github.com/nucliflare/nlab-modbus", tag = "v0.2.7" }

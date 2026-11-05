@@ -238,6 +238,11 @@ uv run python examples/measure_current.py
   bridges; **Connection → Refresh Modbus Devices** updates the External
   workspace without reconnecting the digitizer
 - Support for SiPM bias, Geiger-Mueller, and PMT high-voltage Modbus devices
+- External-device values and units follow `modbus_reg.c`: SiPM voltage in V,
+  current in uA, temperatures in degC, and compensation in mV/degC. PMT
+  temperature uses 0.01 degC per raw count. Fractional setting readbacks are
+  preserved. New recordings store these units; existing replay schemas retain
+  their recorded values and units.
 - Compact External workspace tables fill the control pane while keeping every
   column visible beside the live plot; hover an elided register label to see
   its full name

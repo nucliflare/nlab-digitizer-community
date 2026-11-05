@@ -26,7 +26,7 @@ from nlab.workers.external_device_worker import ExternalDeviceWorker
 
 log = logging.getLogger(__name__)
 
-_SETTINGS_COLUMN_MAX_WIDTHS = (180, 96, 58)
+_SETTINGS_COLUMN_MAX_WIDTHS = (180, 96, 96)
 _TELEMETRY_COLUMN_MAX_WIDTHS = (180, 96, 58, 48)
 
 
@@ -44,8 +44,8 @@ def _is_service_register(name: str) -> bool:
 # Human-readable labels for register names shown in the Settings/Telemetry
 # tables. Covers the registers across SiPM, Geiger, and PMT HV PSU maps that
 # survive the filters above; anything missing falls back to a generic
-# snake_case -> Title Case conversion in _label_for(). Edit freely — these are
-# best-effort guesses from the register name/unit, not firmware documentation.
+# snake_case -> Title Case conversion in _label_for(). Physical units and
+# scaling come from the shared register maps, aligned with modbus_reg.c.
 _REGISTER_LABELS: dict[str, str] = {
     # shared across device types
     "cpu_temp": "CPU Temperature",
@@ -68,10 +68,10 @@ _REGISTER_LABELS: dict[str, str] = {
     "led_drv_enable": "LED Driver Enable",
     "sipm_voltage_10mv": "SiPM Output Voltage",
     "sipm_current_ua": "SiPM Output Current",
-    "board_temp_adc": "Board Temperature (ADC)",
+    "board_temp_adc": "Current Sensor Temperature",
     "adc_sipm_vout": "SiPM Output Voltage (ADC)",
     "sipm_board_temp": "SiPM Board Temperature",
-    "sipm_correct_voltage_mv": "SiPM Corrected Voltage",
+    "sipm_correct_voltage_mv": "SiPM Compensation Voltage",
     "vout_supply_fault": "Output Supply Fault",
     "ext_amp_supply_fault": "External Amplifier Supply Fault",
     "led_drv_temp": "LED Driver Temperature",
@@ -80,7 +80,7 @@ _REGISTER_LABELS: dict[str, str] = {
     "pulses_per_sec": "Pulse Rate",
     "dose_level_msvh": "Dose Rate",
     "dose_msv": "Accumulated Dose",
-    "pulse_integer": "Pulse Integral",
+    "pulse_integer": "Pulse Integrator Voltage",
     "gm_supply_fault": "GM Tube Supply Fault",
     # PMT HV PSU
     "hv_current": "HV Current",

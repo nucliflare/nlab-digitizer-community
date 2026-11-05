@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Update the shared Modbus register definitions to match the supplied
+  `modbus_reg.c` units/comments: SiPM current in uA, voltage setpoints in V,
+  temperatures in degC, and compensation in mV/degC. PMT temperature now
+  applies its 0.01 factor; fractional setting readbacks are retained.
+  External labels distinguish sensor temperature, compensation voltage, and
+  integrator voltage. Recorded replay units remain unchanged. Verified with
+  simulated register I/O and offscreen Qt tests; no live hardware validation.
+
 ## [0.7.8] — 2026-11-04
 
 ### Added
