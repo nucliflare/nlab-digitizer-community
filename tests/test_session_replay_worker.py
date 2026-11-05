@@ -199,7 +199,9 @@ def test_slow_replay_analysis_does_not_block_qt_and_stop_cancels_backlog(
 
     def slow(self: PsdAccumulator, events: np.ndarray) -> object:
         entered.set()
-        assert release.wait(3)
+        # The test's finally block always releases this barrier. A watchdog
+        # timeout here can abort analysis while a loaded CI host schedules Qt.
+        release.wait()
         return original(self, events)
 
     monkeypatch.setattr(PsdAccumulator, "add_events", slow)
@@ -214,6 +216,7 @@ def test_slow_replay_analysis_does_not_block_qt_and_stop_cancels_backlog(
         fired: list[bool] = []
         QTimer.singleShot(0, lambda: fired.append(True))
         qtbot.waitUntil(lambda: bool(fired), timeout=500)
+        assert not release.is_set()  # Qt responded while analysis was still blocked.
         worker.request_stop()
         release.set()
         worker.join(2)
