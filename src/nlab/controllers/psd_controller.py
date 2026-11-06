@@ -5,7 +5,7 @@ from collections.abc import Callable
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QRectF, QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QKeyEvent, QShowEvent
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -99,6 +99,7 @@ class PSDController(QWidget):
         self._cut_line = pg.InfiniteLine(
             angle=0,
             movable=True,
+            bounds=self._accumulator.ratio_range,
             pen=pg.mkPen("#e63946", width=2),
             hoverPen=pg.mkPen("#ff6b6b", width=3),
         )
@@ -108,6 +109,7 @@ class PSDController(QWidget):
         self._energy_roi = pg.LinearRegionItem(
             values=(0.0, self._accumulator.energy_range[1] / 4.0),
             orientation="vertical",
+            bounds=self._accumulator.energy_range,
             brush=pg.mkBrush(80, 140, 220, 35),
         )
         self._psd_plot.addItem(self._energy_roi)
@@ -283,13 +285,30 @@ class PSDController(QWidget):
         if ratio_range[0] >= ratio_range[1]:
             self.status.setText("Ratio minimum must be smaller than ratio maximum.")
             return
+        accumulator = self._accumulator
+        if (
+            accumulator.energy_bins == self.ui.spinEnergyBins.value()
+            and accumulator.ratio_bins == self.ui.spinRatioBins.value()
+            and accumulator.energy_right_shift == self.ui.spinEnergyShift.value()
+            and accumulator.ratio_range == ratio_range
+        ):
+            return
+        # Keep the selected population in plot coordinates. Only a narrower
+        # domain may clamp the cut/ROI; editing a bin count must not reseed them.
+        cut = self.ui.spinCut.value()
+        energy_roi = self._energy_roi.getRegion()
         self._event_buffer.clear()
         self._accumulator = self._make_accumulator()
         self._last_dropped_records = 0
-        self.ui.spinCut.setRange(*ratio_range)
-        self.ui.spinCut.setValue(float(np.clip(self.ui.spinCut.value(), *ratio_range)))
-        self._energy_roi.setBounds(self._accumulator.energy_range)
-        self._energy_roi.setRegion((0.0, self._accumulator.energy_range[1] / 4.0))
+        with QSignalBlocker(self.ui.spinCut):
+            self.ui.spinCut.setRange(*ratio_range)
+            self.ui.spinCut.setValue(float(np.clip(cut, *ratio_range)))
+        with QSignalBlocker(self._cut_line):
+            self._cut_line.setBounds(ratio_range)
+            self._cut_line.setPos(self.ui.spinCut.value())
+        with QSignalBlocker(self._energy_roi):
+            self._energy_roi.setBounds(self._accumulator.energy_range)
+            self._energy_roi.setRegion(tuple(np.clip(energy_roi, *self._accumulator.energy_range)))
         self._fom_widget.set_ratio_range(self._accumulator.ratio_range)
         if self._session_replay_reconfigure is not None:
             self._session_replay_reconfigure(self._make_accumulator())
@@ -300,7 +319,11 @@ class PSDController(QWidget):
             except (TypeError, ValueError):
                 log.exception("PSD ch%d: session replay analysis failed", self._channel)
                 self._capture_note = "Session replay analysis failed."
-        self._reset_display_ranges()
+        if (
+            self._accumulator.energy_range != accumulator.energy_range
+            or self._accumulator.ratio_range != accumulator.ratio_range
+        ):
+            self._reset_display_ranges()
         self._render()
 
     def begin_session_replay(
@@ -504,20 +527,32 @@ class PSDController(QWidget):
         for control in controls:
             control.blockSignals(True)
         try:
-            self.ui.spinEnergyBins.setValue(int(settings.get("energy_bins", 1024)))
-            self.ui.spinRatioBins.setValue(int(settings.get("ratio_bins", 256)))
-            self.ui.spinEnergyShift.setValue(int(settings.get("energy_right_shift", 0)))
-            ratio_range = settings.get("ratio_range", [-1.0, 1.0])
+            self.ui.spinEnergyBins.setValue(
+                int(settings.get("energy_bins", self.ui.spinEnergyBins.value()))
+            )
+            self.ui.spinRatioBins.setValue(
+                int(settings.get("ratio_bins", self.ui.spinRatioBins.value()))
+            )
+            self.ui.spinEnergyShift.setValue(
+                int(settings.get("energy_right_shift", self.ui.spinEnergyShift.value()))
+            )
+            ratio_range = settings.get("ratio_range")
             if isinstance(ratio_range, list) and len(ratio_range) == 2:
                 self.ui.spinRatioMin.setValue(float(ratio_range[0]))
                 self.ui.spinRatioMax.setValue(float(ratio_range[1]))
-            self.ui.spinCut.setValue(float(settings.get("ratio_cut", 0.0)))
-            scale_index = self.ui.comboMatrixScale.findData(settings.get("matrix_scale", "log"))
+            scale_index = self.ui.comboMatrixScale.findData(
+                settings.get("matrix_scale", "log")
+            )
             self.ui.comboMatrixScale.setCurrentIndex(max(0, scale_index))
         finally:
             for control in controls:
                 control.blockSignals(False)
         self._on_analysis_settings_changed()
+        # Restore an explicit cut only after its new range has been installed;
+        # the previous spinbox bounds may not include the saved value.
+        if "ratio_cut" in settings:
+            self.ui.spinCut.setValue(float(settings["ratio_cut"]))
+        self._on_cut_spin_changed(self.ui.spinCut.value())
         energy_roi = settings.get("energy_roi")
         if isinstance(energy_roi, list) and len(energy_roi) == 2:
             self._energy_roi.setRegion((float(energy_roi[0]), float(energy_roi[1])))
@@ -532,9 +567,11 @@ class PSDController(QWidget):
                 strict=True,
             ):
                 line.setPos(float(value))
-        self._fom_widget.guides_checkbox.setChecked(bool(settings.get("fom_guides_visible", True)))
-        self.set_energy_log_y(bool(settings.get("energy_log_y", False)))
-        self._render_projections()
+        self._fom_widget.guides_checkbox.setChecked(
+            bool(settings.get("fom_guides_visible", self._fom_widget.guides_checkbox.isChecked()))
+        )
+        self.set_energy_log_y(bool(settings.get("energy_log_y", self._energy_log_y)))
+        self._render()
 
     def stop_processing(self) -> None:
         self._timer.stop()

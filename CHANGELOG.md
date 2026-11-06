@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-11-06
+
 ### Changed
 
 - Allow Windows/Ubuntu build chores on `chore/build-*` branches on GitHub and
@@ -17,6 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve PSD cut, energy ROI, fit ROI, and centroid-guide positions through
+  analysis settings edits, replay rebinning, and readback refreshes. Clamp to new
+  limits instead of restoring default guides, keep unspecified selections during
+  partial configuration updates, keep matrix zoom when rebinning, and skip
+  unchanged analysis commits. Explicit saved selections still restore after
+  applying their bounds. Covered by
+  offscreen Qt tests with generated events; no live hardware validation.
+- Apply MCA Debug 1/Debug 2 source changes directly, without stopping or
+  resetting histogram/viewer acquisition or list-mode DMA. Preserve spectrum,
+  elapsed time, and workers; keep viewer selectors available during DMA while
+  locking measurement configuration and all replay/disconnected writes. Failed
+  changes report an error without restarting. Correct outdated busy-check
+  documentation to match the PetaLinux driver. Verified with simulated I/O and
+  offscreen Qt tests; no live hardware validation.
 - Keep the selected digitizer/channel when switching between Scope, Current,
   MCA, PSD, and PSU workspaces. Match channel identity rather than tab position,
   retain it through non-channel workspaces and missing capabilities, and cover

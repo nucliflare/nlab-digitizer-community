@@ -638,9 +638,11 @@ class MultiChannelAnalyzer:
     def reconfigure_while_running(self, write: Callable[[], None]) -> bool:
         """Apply one hardware setting, preserving a polling acquisition.
 
-        vdpp-pulse-processor.c's pp_field_store() returns EBUSY for every
-        configuration field while ``enable`` or ``list_buffer_active`` is
-        set. For a normal histogram/viewer measurement, briefly stop, write,
+        vdpp-pulse-processor.c's pp_field_store() returns EBUSY for
+        measurement-configuration fields while ``enable`` or
+        ``list_buffer_active`` is set. Debug-memory selectors are explicitly
+        exempt: use their setters directly without restarting accumulation.
+        For a normal histogram/viewer measurement, briefly stop, write,
         and restart, matching the workaround previously used by the scope
         backend. The shared lock prevents MCAWorker from mistaking that
         intentional stop for hardware time-limit completion.

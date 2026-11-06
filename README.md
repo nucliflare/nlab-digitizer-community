@@ -198,7 +198,12 @@ uv run python examples/measure_current.py
   residuals, parameter uncertainties, and variance-preserving spectrum
   arithmetic, plus evaluated radionuclide photon-line overlays for calibrated
   spectra
-- Debug waveform-bank readout
+- Debug waveform-bank readout, with **Debug 1 source** and **Debug 2 source**
+  changes applied directly during histogram/viewer acquisition and list-mode
+  DMA, preserving accumulated counts, elapsed time, and measurement workers.
+  These viewer selectors remain available while measurement settings are locked;
+  replay and connection-loss protection still applies. Older drivers that reject
+  a change report an error without restarting acquisition.
 - Synchronized stop/write/restart when changing MCA settings during acquisition
 - Numeric input widgets across the application, including dialogs, clamp
   out-of-range edits to the nearest boundary on Enter or focus loss. Discrete
@@ -212,6 +217,11 @@ uv run python examples/measure_current.py
 - The live PSD map offers **Matrix scale: Logarithmic / Linear**, matching the
   waveform workbench. Changes only density colors, keeps sparse bins transparent,
   and preserves events, projections, ROIs and FOM fits. Saved with PSD settings.
+- PSD cut, energy ROI, fit ROI, and centroid-guide positions persist across
+  bin/range edits and partial settings updates, including replay and readback.
+  New limits clamp only out-of-range positions; initial guide placement is used
+  once. Rebinning keeps the matrix zoom; unchanged field commits retain
+  accumulated events and the current fit.
 - Live PSD classification from charge-comparison and energy measurements,
   including interactive double-Gaussian projection fitting and conventional
   centroid/FWHM figure-of-merit reporting. Live and Tools/readback PSD maps,

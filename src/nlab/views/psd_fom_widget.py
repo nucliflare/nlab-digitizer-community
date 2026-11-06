@@ -6,7 +6,7 @@ import math
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -157,21 +157,28 @@ class PsdFomWidget(QGroupBox):
             self.clear_fit()
 
     def set_ratio_range(self, ratio_range: tuple[float, float]) -> None:
-        """Bound and, when the display range changes, reset the fit guides."""
+        """Initialize guides once, then preserve positions within new bounds."""
         low, high = sorted(map(float, ratio_range))
         if not math.isfinite(low) or not math.isfinite(high) or low >= high:
             raise ValueError("PSD ratio range must contain two increasing finite values")
-        changed = self._guide_range != (low, high)
-        self._guide_range = (low, high)
-        self.fit_region.setBounds((low, high))
-        for line in self.centroid_lines:
-            line.setBounds((low, high))
-        if changed:
+        if self._guide_range == (low, high):
+            return
+        if self._guide_range is None:
             span = high - low
-            self.fit_region.setRegion((low + 0.1 * span, low + 0.9 * span))
-            self.centroid_lines[0].setPos(low + 0.35 * span)
-            self.centroid_lines[1].setPos(low + 0.65 * span)
-            self.clear_fit()
+            region = (low + 0.1 * span, low + 0.9 * span)
+            seeds: tuple[float, ...] = (low + 0.35 * span, low + 0.65 * span)
+        else:
+            region = tuple(np.clip(self.fit_region.getRegion(), low, high))
+            seeds = tuple(float(np.clip(line.value(), low, high)) for line in self.centroid_lines)
+        self._guide_range = (low, high)
+        with QSignalBlocker(self.fit_region):
+            self.fit_region.setBounds((low, high))
+            self.fit_region.setRegion(region)
+        for line, seed in zip(self.centroid_lines, seeds, strict=True):
+            with QSignalBlocker(line):
+                line.setBounds((low, high))
+                line.setPos(seed)
+        self.clear_fit()
 
     def set_guides_visible(self, visible: bool) -> None:
         """Toggle all draggable fit objects without hiding fitted curves."""

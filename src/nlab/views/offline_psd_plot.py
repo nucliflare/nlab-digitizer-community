@@ -241,9 +241,6 @@ class OfflinePsdPlot(QWidget):
             low, high = sorted(map(float, previous_energy_region))
             low = float(np.clip(low, *energy_range))
             high = float(np.clip(high, *energy_range))
-            if high <= low:
-                low = energy_range[0]
-                high = energy_range[0] + (energy_range[1] - energy_range[0]) / 4.0
             self.energy_region.setRegion((low, high))
         else:
             self.energy_region.setRegion(

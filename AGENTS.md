@@ -92,9 +92,13 @@ Additional rules:
 
 ## MCA configuration and snapshots
 
-- Pulse-processor configuration writes are rejected while acquisition or list DMA owns
-  the core. For non-DMA acquisition, use the existing synchronized
+- Pulse-processor measurement-configuration writes are rejected while acquisition or
+  list DMA owns the core. For non-DMA acquisition, use the existing synchronized
   stop/write/restart helper and shared lock.
+- Debug-memory selectors are viewer muxes, explicitly exempt in
+  `vdpp-pulse-processor.c` (`pp_field_store()`, PetaLinux `167e90f`). Write them
+  directly during acquisition or DMA; never restart accumulation for debug routing.
+  Keep replay and connection-loss protection.
 - Reconfiguration while running begins a new accumulation. Clear stale histogram and
   elapsed-time presentation state accordingly.
 - Do not reconfigure the MCA during list-mode DMA; that requires the complete worker

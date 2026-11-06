@@ -80,8 +80,14 @@ _PRETRIGGER_MARKER_COLOR = "#648b71"
 _MCA_CONTROL_TOOLTIPS = {
     "comboPulsePolarity": "Selects whether pulses are expected to be negative or positive.",
     "comboBaseline": "Selects the time window used to estimate the signal baseline.",
-    "comboDebug1": "Selects the internal signal captured in diagnostic waveform bank 1.",
-    "comboDebug2": "Selects the internal signal captured in diagnostic waveform bank 2.",
+    "comboDebug1": (
+        "Selects the internal signal captured in diagnostic waveform bank 1. "
+        "Can be changed during acquisition, including DMA, without restarting accumulation."
+    ),
+    "comboDebug2": (
+        "Selects the internal signal captured in diagnostic waveform bank 2. "
+        "Can be changed during acquisition, including DMA, without restarting accumulation."
+    ),
     "spinPileupWindow": "Sets the interval in which a second pulse is classified as pile-up.",
     "comboBinning": "Sets the histogram energy-bin width; larger factors combine more codes.",
     "spinTimeLimit": "Sets the acquisition duration in seconds; 0 runs until stopped.",
@@ -549,10 +555,24 @@ class MCAController(QWidget):
     # ------------------------------------------------------------------
 
     def _set_controls_enabled(self, enabled: bool) -> None:
-        enabled = enabled and not getattr(self, "_replay_hardware_interlocked", False)
+        available = not (
+            getattr(self, "_replay_hardware_interlocked", False)
+            or getattr(self, "_connection_lost", False)
+        )
+        enabled = enabled and available
         if not enabled:
             self._cancel_debug_marker_drags()
-        self.ui.groupMca.setEnabled(enabled)
+        # Debug selectors are viewer muxes, writable even while DMA owns MCA.
+        # Keep their parent enabled and lock measurement settings individually.
+        self.ui.groupMca.setEnabled(available)
+        for widget in (
+            self.ui.comboPulsePolarity,
+            self.ui.comboBaseline,
+            self.ui.spinPileupWindow,
+            self.ui.comboBinning,
+            self.ui.cbExtTrigger,
+        ):
+            widget.setEnabled(enabled)
         # DMA selection now belongs to Measurement rather than groupMca;
         # preserve its acquisition/replay and coincidence interlocks explicitly.
         self.ui.cbDmaEnable.setEnabled(
@@ -1451,10 +1471,39 @@ class MCAController(QWidget):
     # Signal wiring
     # ------------------------------------------------------------------
 
+    def _on_debug_source_changed(self, bank: int, index: int) -> None:
+        """Route a diagnostic bank without changing measurement lifetime."""
+        if self._replay_hardware_interlocked or self._connection_lost:
+            return
+        combo = self.ui.comboDebug1 if bank == 1 else self.ui.comboDebug2
+        source = combo.itemData(index)
+        if source is None:
+            return
+        set_source = self._mca.set_mem1_sig_select if bank == 1 else self._mca.set_mem2_sig_select
+        get_source = self._mca.get_mem1_sig_select if bank == 1 else self._mca.get_mem2_sig_select
+        # PetaLinux 167e90f, vdpp-pulse-processor.c pp_field_store(): the
+        # debug muxes bypass the acquisition/DMA busy check and invalidate only
+        # the debug snapshot. Never use stop/write/restart for these selectors.
+        try:
+            set_source(int(source))
+        except Exception as exc:
+            log.exception("MCA ch%d: debug %d source update failed", self._channel, bank)
+            detail = ""
+            try:
+                actual = get_source()
+            except Exception:
+                log.exception("MCA ch%d: debug %d source readback failed", self._channel, bank)
+                detail = "; hardware state unknown; reconnect"
+            else:
+                with QSignalBlocker(combo):
+                    combo.setCurrentIndex(combo.findData(actual))
+            self.status.setText(f"Debug {bank} source update failed: {exc}{detail}")
+
     def _apply_hardware_setting(self, write: Callable[[], None]) -> None:
         """Apply a setting immediately, preserving a polling measurement.
 
-        IIO MCA fields are immutable while enabled. Unlike list-mode DMA,
+        MCA measurement fields are immutable while enabled; debug muxes use
+        _on_debug_source_changed instead. Unlike list-mode DMA,
         an ordinary histogram/viewer acquisition can be briefly stopped and
         restarted safely. MultiChannelAnalyzer owns the synchronization that
         prevents MCAWorker from treating the short stop as time-limit
@@ -1499,10 +1548,10 @@ class MCAController(QWidget):
             lambda i: self._apply_hardware_setting(lambda: self._mca.set_baseline_window(i))
         )
         self.ui.comboDebug1.currentIndexChanged.connect(
-            lambda i: self._mca.set_mem1_sig_select(int(self.ui.comboDebug1.itemData(i)))
+            lambda i: self._on_debug_source_changed(1, i)
         )
         self.ui.comboDebug2.currentIndexChanged.connect(
-            lambda i: self._mca.set_mem2_sig_select(int(self.ui.comboDebug2.itemData(i)))
+            lambda i: self._on_debug_source_changed(2, i)
         )
         self.ui.spinPileupWindow.editingFinished.connect(
             lambda: self._apply_hardware_setting(

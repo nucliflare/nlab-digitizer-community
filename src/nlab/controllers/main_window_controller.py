@@ -3682,7 +3682,8 @@ class MainWindowController:
         return None
 
     def _on_channel_dock_activated(self, dock: QDockWidget, visible: bool = True) -> None:
-        if not visible:
+        # Standalone dock hosts do not participate in workspace channel linking.
+        if not visible or not hasattr(self, "_active_channel_dock_host"):
             return
         host = self._current_channel_dock_host()
         if host is None or dock.parentWidget() is not host:
