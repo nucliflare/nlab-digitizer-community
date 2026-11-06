@@ -245,6 +245,16 @@ class MCABackend(ABC):
     def set_edge_det_coeff(self, val: int) -> None: ...
 
     # ---- CRRC2 shaping filter ----
+    def supports_crrc2_reciprocal_raw(self) -> bool:
+        """Whether the driver exposes the optional unsigned 16-bit 1/C register."""
+        return False
+
+    def get_crrc2_reciprocal_raw(self) -> int:
+        raise NotImplementedError("the driver does not expose CR-RC2 1/C")
+
+    def set_crrc2_reciprocal_raw(self, val: int) -> None:
+        raise NotImplementedError("the driver does not expose CR-RC2 1/C")
+
     @abstractmethod
     def get_crrc2_Cdelay(self) -> int: ...
 
@@ -264,6 +274,13 @@ class MCABackend(ABC):
     def set_crrc2_pzc_coeff(self, val: int) -> None: ...
 
     # ---- trapezoidal filter ----
+    def supports_trapezoid_reciprocal_raw(self) -> bool:
+        """Whether the driver exposes its derived, read-only 1/R register."""
+        return False
+
+    def get_trapezoid_reciprocal_raw(self) -> int:
+        raise NotImplementedError("the driver does not expose trapezoid 1/R")
+
     @abstractmethod
     def get_trapez_enable(self) -> bool: ...
 

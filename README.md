@@ -155,6 +155,19 @@ uv run python examples/measure_current.py
 
 ### MCA and PSD
 
+- The trapezoid panel shows **1/R (raw)** as a read-only value from the
+  driver, refreshed after applying R and loading hardware settings. The
+  driver derives it as `floor(32768 / (R_ns / 8 - 1))`; older modules show
+  **Unavailable** until `vdpp-mca` is rebuilt and deployed.
+- Applied MCA temperature coefficients are limited to signed Q1.15:
+  **-1.0 through 0.999969482421875**, with rounding to the nearest register
+  value. Out-of-range values (including +1.0) are rejected before writes.
+  The Global panel keeps the base calibration coefficient's precision;
+  the worker multiplies it by `temperature - 67` before applying this limit.
+- The CR-RC² panel includes a **1/C (raw)** slider and spin box for the
+  separate unsigned 16-bit coefficient. It is independent of C delay and
+  persists in hardware settings. The control requires the updated `vdpp-mca`
+  driver and is disabled when its IIO attribute is absent.
 - The MCA input low-pass filter is fixed at **70 MHz** for every channel. It is
   applied during initialization and reconnect; loading older settings cannot
   change it. The filter selector has been removed, and saved configurations

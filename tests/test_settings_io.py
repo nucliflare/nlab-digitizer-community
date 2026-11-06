@@ -169,6 +169,8 @@ def test_nanosecond_settings_survive_yaml_save_and_load(tmp_path: Path) -> None:
     source_mca.get_mem1_sig_select.return_value = 6
     source_mca.get_mem2_sig_select.return_value = 8
     source_mca.filters.crrc2.get_Cdelay.return_value = 128
+    source_mca.filters.crrc2.supports_reciprocal_raw.return_value = True
+    source_mca.filters.crrc2.get_reciprocal_raw.return_value = 4096
     source_mca.filters.crrc2.get_Fdelay.return_value = 16
     source_mca.filters.crrc2.get_pzc_coeff.return_value = 9
     source_mca.filters.cfd.get_enable.return_value = True
@@ -209,7 +211,9 @@ def test_nanosecond_settings_survive_yaml_save_and_load(tmp_path: Path) -> None:
     saved_mca = loaded_channel["mca"]
     assert saved_mca["signal"]["pretrigger_ns"] == 32
     assert saved_mca["signal"]["frame_ns"] == 4096
-    assert saved_mca["crrc2"] == {"cdelay_ns": 128, "fdelay_ns": 16, "pzc": 9}
+    assert saved_mca["crrc2"] == {
+        "cdelay_ns": 128, "fdelay_ns": 16, "pzc": 9, "reciprocal_raw": 4096,
+    }
     assert saved_mca["cfd"]["delay_ns"] == 8
     assert saved_mca["cfd"]["tw_low_ns"] == 16
     assert saved_mca["cfd"]["tw_high_ns"] == 64
@@ -240,6 +244,7 @@ def test_nanosecond_settings_survive_yaml_save_and_load(tmp_path: Path) -> None:
     target_mca.set_pretrigger_samples.assert_called_once_with(32)
     target_mca.set_frame_samples.assert_called_once_with(4096)
     target_mca.filters.crrc2.set_Cdelay.assert_called_once_with(128)
+    target_mca.filters.crrc2.set_reciprocal_raw.assert_called_once_with(4096)
     target_mca.filters.crrc2.set_Fdelay.assert_called_once_with(16)
     target_mca.filters.cfd.set_delay.assert_called_once_with(8)
     target_mca.filters.cfd.set_time_window_low.assert_called_once_with(16)

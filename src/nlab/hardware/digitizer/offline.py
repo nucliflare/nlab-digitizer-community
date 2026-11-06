@@ -111,6 +111,22 @@ class _OfflineDigitizerBackend:
     def get_viewer_frame_samples_limit(self) -> int | None:
         return None
 
+    def supports_crrc2_reciprocal_raw(self) -> bool:
+        return True  # In-memory settings only; offline controls remain interlocked.
+
+    def supports_trapezoid_reciprocal_raw(self) -> bool:
+        return True
+
+    def get_trapezoid_reciprocal_raw(self) -> int:
+        return cast(int, self._values.get("trapezoid_reciprocal_raw", 0))
+
+    def set_trapez_R(self, val: int) -> None:  # noqa: N802 - Existing backend API.
+        # Emulate only the documented register dependency, not the DSP output.
+        if not isinstance(val, int) or not 16 <= val <= 4088 or val % 8:
+            raise ValueError("trapezoid R must be 16..4088 ns in steps of 8 ns")
+        self._values["trapez_R"] = val
+        self._values["trapezoid_reciprocal_raw"] = 32768 // (val // 8 - 1)
+
     def edge_det_coeff_is_hardware_backed(self) -> bool:
         return False
 

@@ -238,6 +238,8 @@ def collect_channel_hardware(
                 "high_ns": mca.filters.psd_zc.get_time_window_high(),
             },
         }
+        if mca.filters.crrc2.supports_reciprocal_raw():
+            mca_settings["crrc2"]["reciprocal_raw"] = mca.filters.crrc2.get_reciprocal_raw()
         if mca_lp_preset is not None:
             mca_settings["low_pass"] = {"preset": mca_lp_preset}
         settings["mca"] = mca_settings
@@ -288,6 +290,9 @@ def _apply_time_ns(
 
 
 def _apply_mca(mca: MultiChannelAnalyzer, settings: Mapping[str, Any]) -> None:
+    crrc2 = _mapping(settings, "crrc2")
+    if "reciprocal_raw" in crrc2 and not mca.filters.crrc2.supports_reciprocal_raw():
+        raise NotImplementedError("saved CR-RC2 1/C requires an updated vdpp-mca driver")
     signal = _mapping(settings, "signal")
     _apply_ints(
         signal,
@@ -323,7 +328,6 @@ def _apply_mca(mca: MultiChannelAnalyzer, settings: Mapping[str, Any]) -> None:
     # Older settings may request another preset; never write that obsolete choice.
     mca.filters.lp.set_preset(MCA_FIXED_LOW_PASS_PRESET)
 
-    crrc2 = _mapping(settings, "crrc2")
     for key, setter in (
         ("cdelay_ns", mca.filters.crrc2.set_Cdelay),
         ("fdelay_ns", mca.filters.crrc2.set_Fdelay),
@@ -331,6 +335,10 @@ def _apply_mca(mca: MultiChannelAnalyzer, settings: Mapping[str, Any]) -> None:
     ):
         if key in crrc2:
             setter(int(crrc2[key]))
+
+    if "reciprocal_raw" in crrc2:
+        # Preserve raw integers; do not silently truncate a fractional setting.
+        mca.filters.crrc2.set_reciprocal_raw(crrc2["reciprocal_raw"])
 
     cfd = _mapping(settings, "cfd")
     _apply_bools(cfd, (("enable", mca.filters.cfd.set_enable),))

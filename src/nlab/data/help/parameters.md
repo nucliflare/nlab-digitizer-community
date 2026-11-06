@@ -310,6 +310,13 @@ this fixed response; calibrations made with another response may be stale.
 ## MCA — CR-RC² shaping {#mca-crrc}
 
 **C delay** and **F delay** set the C- and F-stage delays in nanoseconds.
+**1/C (raw)** sets the separate unsigned 16-bit coefficient (0 through 65535).
+It starts at the existing zero baseline and is saved with hardware settings.
+The firmware interface does not specify its numerical scale, so the application
+does not derive it from C delay or label it as inverse nanoseconds. Changing C
+delay leaves this coefficient unchanged. The control is disabled on older
+drivers; deploy the updated `vdpp-mca` module to enable it.
+
 **PZC coefficient** is the raw pole-zero correction coefficient for this filter,
 not a time in nanoseconds. The current control's tooltip identifies the selected
 parameter above this guide.
@@ -337,6 +344,13 @@ instead of assuming the enable checkbox alone guarantees fine resolution.
 **Pole-zero time** sets the time constant; **Energy time** sets the energy-sampling
 time. These time controls are in nanoseconds. **FT** selects the flat-top window
 duration offered by the hardware.
+
+**1/R (raw)** is the driver's read-only derived coefficient:
+`floor(32768 / (R_ns / 8 - 1))`. It refreshes when R is applied or hardware
+settings are loaded, not while an uncommitted R value is being edited.
+For example, R = 64 ns gives 4681. It is a raw register coefficient, not
+1/R in inverse nanoseconds. The readout is a software shadow of the write,
+not an independent measurement; older drivers show **Unavailable**.
 
 The public IIO interface handles its register encoding; the GUI's pole-zero time
 is not the CR-RC² raw PZC coefficient. Shaping affects noise, pulse overlap,
@@ -938,6 +952,12 @@ Software start does not synchronize independent boards' clocks.
 Coefficient and offset configure the board-wide MCA temperature correction;
 Enabled and its update interval control its use. They are not the same as the
 PSU bias-compensation slope and reference temperature.
+
+The base coefficient is multiplied by `temperature - 67` to obtain the
+applied coefficient. Only that applied value is encoded as signed Q1.15,
+with a 1/32768 LSB and limits -1.0 through 0.999969482421875. +1.0 is
+outside the hardware range. Invalid applied values are rejected before
+writing either correction term; the base calibration retains its precision.
 
 Use a validated calibration and check the correction's source and diagnostics.
 Do not assume a correction fitted for one detector or gain setting applies to

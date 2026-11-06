@@ -381,11 +381,33 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
              </layout>
             </item>
             <item row="1" column="0">
+             <widget class="QLabel" name="labelCrrc2Reciprocal">
+              <property name="text"><string>1/C (raw):</string></property>
+             </widget>
+            </item>
+            <item row="1" column="1">
+             <layout class="QHBoxLayout" name="hCrrc2Reciprocal">
+              <item>
+               <widget class="QSlider" name="sliderCrrc2Reciprocal">
+                <property name="minimum"><number>0</number></property>
+                <property name="maximum"><number>65535</number></property>
+                <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QSpinBox" name="spinCrrc2Reciprocal">
+                <property name="minimum"><number>0</number></property>
+                <property name="maximum"><number>65535</number></property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item row="2" column="0">
              <widget class="QLabel" name="labelCrrc2Fdelay">
               <property name="text"><string>F delay:</string></property>
              </widget>
             </item>
-            <item row="1" column="1">
+            <item row="2" column="1">
              <layout class="QHBoxLayout" name="hCrrc2Fdelay">
               <item>
                <widget class="QSlider" name="sliderCrrc2Fdelay">
@@ -406,12 +428,12 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
               </item>
              </layout>
             </item>
-            <item row="2" column="0">
+            <item row="3" column="0">
              <widget class="QLabel" name="labelCrrc2Pzc">
               <property name="text"><string>PZC coeff:</string></property>
              </widget>
             </item>
-            <item row="2" column="1">
+            <item row="3" column="1">
              <layout class="QHBoxLayout" name="hCrrc2Pzc">
               <item>
                <widget class="QSlider" name="sliderCrrc2Pzc">
@@ -545,11 +567,23 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
              </layout>
             </item>
             <item row="2" column="0">
+             <widget class="QLabel" name="labelTrapReciprocal">
+              <property name="text"><string>1/R (raw):</string></property>
+             </widget>
+            </item>
+            <item row="2" column="1">
+             <widget class="QLabel" name="lblTrapReciprocal">
+              <property name="toolTip"><string>Read-only driver shadow, derived when R is applied: floor(32768 / (R_ns / 8 - 1)). This is a raw coefficient, not a reciprocal in 1/ns.</string></property>
+              <property name="text"><string>Unavailable</string></property>
+              <property name="textInteractionFlags"><set>Qt::TextInteractionFlag::TextSelectableByMouse</set></property>
+             </widget>
+            </item>
+            <item row="3" column="0">
              <widget class="QLabel" name="labelTrapM">
               <property name="text"><string>M:</string></property>
              </widget>
             </item>
-            <item row="2" column="1">
+            <item row="3" column="1">
              <layout class="QHBoxLayout" name="hTrapM">
               <item>
                <widget class="QSlider" name="sliderTrapM">
@@ -570,12 +604,12 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
               </item>
              </layout>
             </item>
-            <item row="3" column="0">
+            <item row="4" column="0">
              <widget class="QLabel" name="labelTrapT">
               <property name="text"><string>Pole-zero time:</string></property>
              </widget>
             </item>
-            <item row="3" column="1">
+            <item row="4" column="1">
              <widget class="QDoubleSpinBox" name="spinTrapT">
               <property name="decimals"><number>0</number></property>
               <property name="minimum"><double>0</double></property>
@@ -583,12 +617,12 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
               <property name="value"><double>96</double></property>
              </widget>
             </item>
-            <item row="4" column="0">
+            <item row="5" column="0">
              <widget class="QLabel" name="labelTrapE">
               <property name="text"><string>Energy time:</string></property>
              </widget>
             </item>
-            <item row="4" column="1">
+            <item row="5" column="1">
              <layout class="QHBoxLayout" name="hTrapE">
               <item>
                <widget class="QSlider" name="sliderTrapE">
@@ -609,12 +643,12 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
               </item>
              </layout>
             </item>
-            <item row="5" column="0">
+            <item row="6" column="0">
              <widget class="QLabel" name="labelTrapFt">
               <property name="text"><string>FT (flat top):</string></property>
              </widget>
             </item>
-            <item row="5" column="1">
+            <item row="6" column="1">
              <widget class="QComboBox" name="comboTrapFt"/>
             </item>
            </layout>

@@ -632,6 +632,7 @@ def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> No
     mca = SimpleNamespace(
         edge_det_coeff_is_hardware_backed=lambda: False,
         get_debug_signal_selectors=lambda: tuple(range(9)),
+        filters=SimpleNamespace(crrc2=SimpleNamespace(supports_reciprocal_raw=lambda: True)),
     )
     controller = SimpleNamespace(
         ui=ui,
@@ -652,6 +653,7 @@ def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> No
         MCAParam.CRRC2_CDELAY: (ui.spinCrrc2Cdelay, ui.sliderCrrc2Cdelay),
         MCAParam.CRRC2_FDELAY: (ui.spinCrrc2Fdelay, ui.sliderCrrc2Fdelay),
         MCAParam.CRRC2_PZC: (ui.spinCrrc2Pzc, ui.sliderCrrc2Pzc),
+        MCAParam.CRRC2_RECIPROCAL: (ui.spinCrrc2Reciprocal, ui.sliderCrrc2Reciprocal),
         MCAParam.CFD_DELAY: (ui.spinCfdDelay, ui.sliderCfdDelay),
         MCAParam.TRAPEZ_R: (ui.spinTrapR, ui.sliderTrapR),
         MCAParam.TRAPEZ_M: (ui.spinTrapM, ui.sliderTrapM),

@@ -99,6 +99,10 @@ _MCA_CONTROL_TOOLTIPS = {
     "spinEdgeDetCoeff": "Sets the legacy edge-detector coefficient when supported by hardware.",
     "spinCrrc2Cdelay": "Sets the C-stage delay of the CR-RC2 shaping filter in nanoseconds.",
     "spinCrrc2Fdelay": "Sets the F-stage delay of the CR-RC2 shaping filter in nanoseconds.",
+    "spinCrrc2Reciprocal": (
+        "Sets the raw unsigned 16-bit CR-RC2 1/C coefficient. "
+        "Its numerical scale is firmware-specific; it is independent of C delay."
+    ),
     "spinCrrc2Pzc": "Sets the raw pole-zero correction coefficient for CR-RC2 shaping.",
     "spinCfdFactor": "Sets the constant-fraction multiplier used to form the CFD signal.",
     "spinCfdDelay": "Sets the CFD signal delay in nanoseconds.",
@@ -324,6 +328,8 @@ class MCAController(QWidget):
             (MCAParam.CRRC2_CDELAY, self.ui.spinCrrc2Cdelay, self.ui.sliderCrrc2Cdelay),
             (MCAParam.CRRC2_FDELAY, self.ui.spinCrrc2Fdelay, self.ui.sliderCrrc2Fdelay),
             (MCAParam.CRRC2_PZC, self.ui.spinCrrc2Pzc, self.ui.sliderCrrc2Pzc),
+            (MCAParam.CRRC2_RECIPROCAL, self.ui.spinCrrc2Reciprocal,
+             self.ui.sliderCrrc2Reciprocal),
             (MCAParam.CFD_DELAY, self.ui.spinCfdDelay, self.ui.sliderCfdDelay),
             (MCAParam.TRAPEZ_R, self.ui.spinTrapR, self.ui.sliderTrapR),
             (MCAParam.TRAPEZ_M, self.ui.spinTrapM, self.ui.sliderTrapM),
@@ -377,6 +383,18 @@ class MCAController(QWidget):
             control.setSuffix(" ns")
         # Keep runtime-generated UI modules made before the form update correct.
         self.ui.labelTrapT.setText("Pole-zero time:")
+
+        reciprocal_available = bool(self._mca.filters.crrc2.supports_reciprocal_raw())
+        for reciprocal_control in (
+            self.ui.labelCrrc2Reciprocal,
+            self.ui.spinCrrc2Reciprocal,
+            self.ui.sliderCrrc2Reciprocal,
+        ):
+            reciprocal_control.setEnabled(reciprocal_available)
+            if not reciprocal_available:
+                reciprocal_control.setToolTip(
+                    "Update the device's vdpp-mca driver to enable 1/C (raw)."
+                )
 
         # There is no edge-detector-coefficient attribute in the current
         # IIO pulse processor. Hide the legacy-only compatibility control so
@@ -457,6 +475,10 @@ class MCAController(QWidget):
         # Application policy: every channel starts with the fixed 70 MHz response.
         self._mca.filters.lp.set_preset(MCA_FIXED_LOW_PASS_PRESET)
         self._mca.filters.crrc2.set_Cdelay(int(specs[MCAParam.CRRC2_CDELAY].default))
+        if self._mca.filters.crrc2.supports_reciprocal_raw():
+            self._mca.filters.crrc2.set_reciprocal_raw(
+                int(specs[MCAParam.CRRC2_RECIPROCAL].default)
+            )
         self._mca.filters.crrc2.set_Fdelay(int(specs[MCAParam.CRRC2_FDELAY].default))
         self._mca.filters.crrc2.set_pzc_coeff(int(specs[MCAParam.CRRC2_PZC].default))
 
@@ -512,6 +534,10 @@ class MCAController(QWidget):
         # CR-RC2 (LP preset is write-only on the device, no readback)
         self.ui.spinCrrc2Cdelay.setValue(self._mca.filters.crrc2.get_Cdelay())
         self.ui.sliderCrrc2Cdelay.setValue(self._mca.filters.crrc2.get_Cdelay())
+        if self._mca.filters.crrc2.supports_reciprocal_raw():
+            reciprocal = self._mca.filters.crrc2.get_reciprocal_raw()
+            self.ui.spinCrrc2Reciprocal.setValue(reciprocal)
+            self.ui.sliderCrrc2Reciprocal.setValue(reciprocal)
         self.ui.spinCrrc2Fdelay.setValue(self._mca.filters.crrc2.get_Fdelay())
         self.ui.sliderCrrc2Fdelay.setValue(self._mca.filters.crrc2.get_Fdelay())
         self.ui.spinCrrc2Pzc.setValue(self._mca.filters.crrc2.get_pzc_coeff())
@@ -529,6 +555,7 @@ class MCAController(QWidget):
         self.ui.cbTrapezEnable.setChecked(self._mca.filters.trapezoid.get_enable())
         self.ui.spinTrapR.setValue(self._mca.filters.trapezoid.get_R())
         self.ui.sliderTrapR.setValue(self._mca.filters.trapezoid.get_R())
+        self._refresh_trapezoid_reciprocal()
         self.ui.spinTrapM.setValue(self._mca.filters.trapezoid.get_M())
         self.ui.sliderTrapM.setValue(self._mca.filters.trapezoid.get_M())
         self.ui.spinTrapT.setValue(self._mca.filters.trapezoid.get_T())
@@ -1462,6 +1489,19 @@ class MCAController(QWidget):
     # Signal wiring
     # ------------------------------------------------------------------
 
+    def _refresh_trapezoid_reciprocal(self) -> None:
+        label = self.ui.lblTrapReciprocal
+        label.setText("Unavailable")  # Never leave a stale value after a failed read.
+        trapezoid = self._mca.filters.trapezoid
+        if not trapezoid.supports_reciprocal_raw():
+            label.setToolTip("Update vdpp-mca to read the derived trapezoid 1/R register.")
+            return
+        label.setText(str(trapezoid.get_reciprocal_raw()))
+
+    def _set_trapezoid_r(self, value: int) -> None:
+        self._mca.filters.trapezoid.set_R(value)
+        self._refresh_trapezoid_reciprocal()
+
     def _on_debug_source_changed(self, bank: int, index: int) -> None:
         """Route a diagnostic bank without changing measurement lifetime."""
         if self._replay_hardware_interlocked or self._connection_lost:
@@ -1501,6 +1541,11 @@ class MCAController(QWidget):
         completion. DMA controls remain disabled because an armed list-mode
         buffer requires its full stop/drain/close lifecycle.
         """
+        if getattr(self, "_connection_lost", False):
+            log.warning(
+                "MCA ch%d: ignored configuration write after connection loss", self._channel
+            )
+            return
         if getattr(self, "_replay_hardware_interlocked", False):
             log.warning("MCA ch%d: ignored configuration write during replay", self._channel)
             return
@@ -1612,6 +1657,12 @@ class MCAController(QWidget):
             self.ui.spinCrrc2Cdelay,
             lambda v: self._mca.filters.crrc2.set_Cdelay(v),
         )
+        if self._mca.filters.crrc2.supports_reciprocal_raw():
+            self._wire_slider_spinbox(
+                self.ui.sliderCrrc2Reciprocal,
+                self.ui.spinCrrc2Reciprocal,
+                self._mca.filters.crrc2.set_reciprocal_raw,
+            )
         self._wire_slider_spinbox(
             self.ui.sliderCrrc2Fdelay,
             self.ui.spinCrrc2Fdelay,
@@ -1657,7 +1708,7 @@ class MCAController(QWidget):
         self._wire_slider_spinbox(
             self.ui.sliderTrapR,
             self.ui.spinTrapR,
-            lambda v: self._mca.filters.trapezoid.set_R(v),
+            self._set_trapezoid_r,
         )
         self._wire_slider_spinbox(
             self.ui.sliderTrapM,

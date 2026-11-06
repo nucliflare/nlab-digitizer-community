@@ -58,6 +58,8 @@ class MCAParam(IntEnum):
     # --- internal — no JSON widget id ---
     GLOBAL_ENABLE = 200
     LP_PRESET = 202  # preset selector (0=200 MHz, 1=70 MHz, 2=moving average)
+    CRRC2_RECIPROCAL = 203  # raw 16-bit 1/C register, no legacy widget id
+    TRAPEZ_RECIPROCAL = 204  # read-only derived 1/R, no legacy widget id
 
 
 MCA_DEBUG_SIGNAL_SELECTORS = tuple(range(9))
@@ -83,8 +85,12 @@ MCA_PARAMETER_SPECS: dict[MCAParam, ParameterSpec] = {
     # u32 multiplied by measurement_time_scale=0.134217728 seconds/count.
     MCAParam.TIME_LIMIT: RangeSpec(min_val=0, max_val=576460752, step=1, default=0),
     MCAParam.GLOBAL_ENABLE: ListSpec(items=(False, True), default=False),
-    # float on wire; FPGA register is 16-bit fixed-point (xinput_filters_hw.h: temp_coeff_V)
-    MCAParam.TEMP_COEFF: RangeSpec(min_val=-1.0, max_val=1.0, step=1e-9, default=-0.00026735),
+    # Applied coefficient: vdpp-input-filter.c uses signed Q1.15. +1.0
+    # would encode as 32768, outside the signed 16-bit register range.
+    # The Global panel's base coefficient is a separate calibration input.
+    MCAParam.TEMP_COEFF: RangeSpec(
+        min_val=-1.0, max_val=32767 / 32768, step=2**-15, default=-0.00026735,
+    ),
     # int16_t (hw_def for temp_offset not present; using input.txt C type range)
     MCAParam.TEMP_OFFSET: RangeSpec(min_val=-32768, max_val=32767, step=1, default=7),
     MCAParam.TRAPEZ_ENABLE: ListSpec(items=(False, True), default=False),
@@ -118,6 +124,9 @@ MCA_PARAMETER_SPECS: dict[MCAParam, ParameterSpec] = {
     # Physical delay [ns]. The IIO register is raw 8 ns ticks with an
     # additional raw alignment of 8, hence 64 ns public steps.
     MCAParam.CRRC2_CDELAY: RangeSpec(min_val=64, max_val=4032, step=64, default=64),
+    # v101 0x00f8 is unsigned 16-bit; keep the existing zero baseline.
+    # Its fixed-point scale is not specified by the register interface.
+    MCAParam.CRRC2_RECIPROCAL: RangeSpec(min_val=0, max_val=65535, step=1, default=0),
     # Physical F-stage delay [ns]; the kernel applies value / 8 - 1.
     MCAParam.CRRC2_FDELAY: RangeSpec(min_val=8, max_val=1016, step=8, default=8),
     # int16_t (hw_def: MIN–MAX, step 1)
@@ -160,6 +169,15 @@ class Trapezoid:
 
     def set_enable(self, val: bool) -> None:
         self._b.set_trapez_enable(val)
+
+    def supports_reciprocal_raw(self) -> bool:
+        """Whether the driver exposes its derived, read-only raw 1/R value."""
+        return bool(getattr(self._b, "supports_trapezoid_reciprocal_raw", lambda: False)())
+
+    def get_reciprocal_raw(self) -> int:
+        if not self.supports_reciprocal_raw():
+            raise NotImplementedError("the driver does not expose trapezoid 1/R")
+        return self._b.get_trapezoid_reciprocal_raw()
 
     def get_R(self) -> int:
         return self._b.get_trapez_R()
@@ -243,6 +261,23 @@ class CFD:
 class CRRC2:
     def __init__(self, backend: MCABackend) -> None:
         self._b = backend
+
+    def supports_reciprocal_raw(self) -> bool:
+        """Return whether the driver exposes the optional raw 1/C coefficient."""
+        return bool(getattr(self._b, "supports_crrc2_reciprocal_raw", lambda: False)())
+
+    def get_reciprocal_raw(self) -> int:
+        if not self.supports_reciprocal_raw():
+            raise NotImplementedError("the driver does not expose CR-RC2 1/C")
+        return self._b.get_crrc2_reciprocal_raw()
+
+    def set_reciprocal_raw(self, val: int) -> None:
+        if not isinstance(val, int):
+            raise ValueError("CR-RC2 1/C must be an integer")
+        MCA_PARAMETER_SPECS[MCAParam.CRRC2_RECIPROCAL].validate(val, "crrc2_1cdelay_raw")
+        if not self.supports_reciprocal_raw():
+            raise NotImplementedError("the driver does not expose CR-RC2 1/C")
+        self._b.set_crrc2_reciprocal_raw(val)
 
     def get_Cdelay(self) -> int:
         return self._b.get_crrc2_Cdelay()
@@ -680,6 +715,7 @@ class MultiChannelAnalyzer:
         return self._b.get_temp_coeff()
 
     def set_temp_coeff(self, val: float) -> None:
+        MCA_PARAMETER_SPECS[MCAParam.TEMP_COEFF].validate(val, "temperature_coefficient")
         self._b.set_temp_coeff(val)
 
     def get_temp_offset(self) -> int:
@@ -773,10 +809,11 @@ class MultiChannelAnalyzer:
     def get_settings(self) -> list[MCASettingEntry]:
         """Return current hardware state as a flat list for GUI consumption.
 
-        IDs match vdpp_config.json mca/hw section widget ids.
+        Legacy IDs match vdpp_config.json mca/hw section widget ids;
+        optional raw 1/C uses internal ID 203; derived read-only 1/R uses 204.
         LP coefficients (LP_COEFFS) are returned as list[int] via .tolist().
         """
-        return [
+        settings = [
             MCASettingEntry(id=int(MCAParam.PULSE_POLARITY), value=self.get_pulse_polarity()),
             MCASettingEntry(id=int(MCAParam.TRIGGER_LEVEL), value=self.get_trigger_level()),
             MCASettingEntry(id=int(MCAParam.PRETRIGGER_SAMPLES), value=self.get_pretrigger_samples()),
@@ -814,3 +851,14 @@ class MultiChannelAnalyzer:
             MCASettingEntry(id=int(MCAParam.PSD_ZC_LOW), value=self.filters.psd_zc.get_time_window_low()),
             MCASettingEntry(id=int(MCAParam.PSD_ZC_HIGH), value=self.filters.psd_zc.get_time_window_high()),
         ]
+        if self.filters.crrc2.supports_reciprocal_raw():
+            settings.append(MCASettingEntry(
+                id=int(MCAParam.CRRC2_RECIPROCAL),
+                value=self.filters.crrc2.get_reciprocal_raw(),
+            ))
+        if self.filters.trapezoid.supports_reciprocal_raw():
+            settings.append(MCASettingEntry(
+                id=int(MCAParam.TRAPEZ_RECIPROCAL),
+                value=self.filters.trapezoid.get_reciprocal_raw(),
+            ))
+        return settings

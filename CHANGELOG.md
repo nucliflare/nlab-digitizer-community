@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-11-06
+
+### Added
+
+- Raw unsigned 16-bit CR-RC² 1/C control across the IIO backend, MCA API,
+  settings and GUI, with slider/spin-box editing, F1 help, and capability
+  detection for older drivers. Keep the existing zero initialization and
+  expose the value independently of C delay without assuming a Q format.
+
+- Read-only trapezoid **1/R (raw)** readout, with optional driver capability
+  detection, refresh after R commits/settings loads, and F1 explanation.
+
+### Fixed
+
+- Match applied MCA temperature coefficients to the signed Q1.15 maximum
+  of 32767/32768 instead of +1.0. Validate direct and worker IIO writes
+  before encoding, while retaining base calibration precision.
+
 ## [0.8.1] — 2026-11-06
 
 ### Changed
@@ -1030,7 +1048,8 @@ Initial open-source release of the Nuclear Lab Digitizer Community Edition.
 
 ---
 
-[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.8.1...main
+[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.8.2...main
+[0.8.2]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.8.2
 [0.8.1]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.8.1
 [0.7.6]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.6
 [0.7.5]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.5

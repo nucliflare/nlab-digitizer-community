@@ -44,6 +44,10 @@ PP_FMT_RAW are converted here to preserve the legacy physical API:
 crrc2_cdelay uses 8 ns ticks and trapezoid_beta_raw is derived from the
 pole-zero time constant.
 
+The later optional crrc2_1cdelay_raw and trapezoid_1r_raw interfaces are
+source-derived and unit-tested; they are not covered by those earlier
+live checks.
+
 read_waveform_banks() and read_histogram() are confirmed live over the IIO
 network transport after the driver began registering the binary attributes
 explicitly. The newer ABI splits the histogram into histogram_data0..3 to
@@ -2877,9 +2881,26 @@ class IIODigitizerBackend(DigitizerBackend):
         scale = float(self._if_attr_get("temperature_coefficient_scale"))
         return raw * scale
 
+    @staticmethod
+    def _encode_temperature_coefficient(value: float, scale: float) -> int:
+        """Encode the driver's signed 16-bit scaled value, rejecting overflow.
+
+        vdpp-input-filter.c accepts s16 raw values with scale 2^-15. Validate
+        physical bounds before rounding so +1.0 cannot become raw +32768.
+        """
+        if not math.isfinite(scale) or scale <= 0:
+            raise ValueError("temperature coefficient scale must be finite and positive")
+        minimum, maximum = -32768 * scale, 32767 * scale
+        if not math.isfinite(value) or not minimum <= value <= maximum:
+            raise ValueError(
+                f"temperature coefficient {value} out of range [{minimum}, {maximum}]"
+            )
+        return round(value / scale)
+
     def set_temp_coeff(self, val: float) -> None:
         scale = float(self._if_attr_get("temperature_coefficient_scale"))
-        self._if_attr_set("temperature_coefficient_raw", str(round(val / scale)))
+        raw = self._encode_temperature_coefficient(val, scale)
+        self._if_attr_set("temperature_coefficient_raw", str(raw))
 
     def get_temp_offset(self) -> int:
         return int(self._if_attr_get("temperature_offset_raw"))
@@ -2910,9 +2931,8 @@ class IIODigitizerBackend(DigitizerBackend):
                 "temperature correction"
             )
         scale = float(device.attrs["temperature_coefficient_scale"].value)
-        device.attrs["temperature_coefficient_raw"].value = str(
-            round(coefficient / scale)
-        )
+        raw = self._encode_temperature_coefficient(coefficient, scale)
+        device.attrs["temperature_coefficient_raw"].value = str(raw)
         device.attrs["temperature_offset_raw"].value = str(offset)
 
     def get_edge_det_coeff(self) -> int:
@@ -2934,6 +2954,28 @@ class IIODigitizerBackend(DigitizerBackend):
     def edge_det_coeff_is_hardware_backed(self) -> bool:
         """The current IIO pulse processor exposes no such register."""
         return False
+
+    def supports_crrc2_reciprocal_raw(self) -> bool:
+        """Detect the additive vdpp-pulse-processor CR-RC2 1/C control ABI."""
+        return self._pp is not None and "crrc2_1cdelay_raw" in self._pp.attrs
+
+    def get_crrc2_reciprocal_raw(self) -> int:
+        """Read the driver shadow of the v101 0x00f8 unsigned 16-bit register.
+
+        The generated xpulse_processor_hw.h defines its width but not its
+        numerical scale. Preserve raw units rather than guessing a Q format.
+        """
+        if not self.supports_crrc2_reciprocal_raw():
+            raise NotImplementedError("update vdpp-mca: driver lacks crrc2_1cdelay_raw")
+        return int(self._pp_attr_get("crrc2_1cdelay_raw"))
+
+    def set_crrc2_reciprocal_raw(self, val: int) -> None:
+        if not isinstance(val, int) or not 0 <= val <= 65535:
+            raise ValueError("CR-RC2 1/C must be an unsigned 16-bit integer")
+        if not self.supports_crrc2_reciprocal_raw():
+            raise NotImplementedError("update vdpp-mca: driver lacks crrc2_1cdelay_raw")
+        # Raw passthrough; the driver retains the normal measurement/DMA busy gate.
+        self._pp_attr_set("crrc2_1cdelay_raw", str(val))
 
     def get_crrc2_Cdelay(self) -> int:
         """Return physical C-stage delay in ns.
@@ -2974,6 +3016,20 @@ class IIODigitizerBackend(DigitizerBackend):
     def set_trapez_enable(self, val: bool) -> None:
         self._pp_attr_set("trapezoid_enable", "1" if val else "0")
 
+    def supports_trapezoid_reciprocal_raw(self) -> bool:
+        return self._pp is not None and "trapezoid_1r_raw" in self._pp.attrs
+
+    def get_trapezoid_reciprocal_raw(self) -> int:
+        """Read the driver shadow of 0x0110, derived when trapezoid_r is set.
+
+        vdpp-pulse-processor.c computes floor(32768 / (R_ns / 8 - 1)) under
+        the configuration mutex. Read the advertised value, without issuing
+        another write or guessing a value for older drivers.
+        """
+        if not self.supports_trapezoid_reciprocal_raw():
+            raise NotImplementedError("update vdpp-mca: driver lacks trapezoid_1r_raw")
+        return int(self._pp_attr_get("trapezoid_1r_raw"))
+
     def get_trapez_R(self) -> int:
         """PP_FMT_TRAPEZOID_R -- (raw + 1) * 8, same formula as PLUS1_X8
         (pp_field_to_user()'s switch shares the case) -- but that
@@ -2984,8 +3040,8 @@ class IIODigitizerBackend(DigitizerBackend):
 
         Per mca-architecture.md, writing trapezoid_r also writes the
         dependent trapezoid_1r register kernel-side (Rdelay/1Rdelay) --
-        there is no separate userspace attribute for that, nothing extra
-        needed here. The kernel's real minimum is 16 (8 would make Rdelay
+        newer drivers expose its shadow as read-only trapezoid_1r_raw.
+        The kernel's real minimum is 16 (8 would make Rdelay
         zero, per the same doc). ``mca.py`` and the GUI use the same
         16..4088 step-8 range, so invalid values are rejected before I/O.
         """
