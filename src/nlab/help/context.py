@@ -57,7 +57,7 @@ FORM_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
         "RefreshRate": "refresh", "TriggerLevel": "mca-trigger",
         "TriggerSource": "mca-trigger", "EdgeDetCoeff": "mca-trigger",
         "FrameSamples": "mca-window", "Pretrigger": "mca-window",
-        "LpPreset": "mca-lowpass", "Crrc2Cdelay": "mca-crrc",
+        "Crrc2Cdelay": "mca-crrc",
         "Crrc2Fdelay": "mca-crrc", "Crrc2Pzc": "mca-crrc",
         "CfdEnable": "mca-cfd", "CfdFactor": "mca-cfd", "CfdDelay": "mca-cfd",
         "CfdTwLow": "mca-cfd", "CfdTwHigh": "mca-cfd",
@@ -128,6 +128,8 @@ CLASS_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
     }),
     "PsdFomWidget": ("fom", {
         "guides_checkbox": "fom-guides", "fit_button": "fom",
+        "mode_combo": "fom", "continuous_checkbox": "fom",
+        "background_checkbox": "fom-offset",
         "copy_button": "export", "deviance_label": "fom-quality",
         "status_label": "fom-quality", "first_label": "fom",
         "second_label": "fom", "fom_label": "fom",

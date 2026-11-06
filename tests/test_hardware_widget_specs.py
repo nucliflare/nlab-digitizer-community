@@ -745,11 +745,9 @@ def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> No
         "256",
         "512",
     ]
-    assert [ui.comboLpPreset.itemText(i) for i in range(3)] == [
-        "200 MHz",
-        "70 MHz",
-        "Moving average",
-    ]
+    assert widget.findChild(QWidget, "comboLpPreset") is None
+    assert widget.findChild(QWidget, "labelLpPreset") is None
+    assert ui.formCrRc2.getWidgetPosition(ui.labelCrrc2Cdelay)[0] == 0
     assert [ui.comboTrapFt.itemText(i) for i in range(7)] == [
         "8 ns",
         "16 ns",

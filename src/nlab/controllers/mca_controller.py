@@ -15,6 +15,7 @@ import pyqtgraph as pg
 from PySide6.QtCore import QSettings, QSignalBlocker, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QDoubleSpinBox, QFileDialog, QSlider, QSpinBox, QWidget
 
+from nlab.acquisition_policy import MCA_FIXED_LOW_PASS_PRESET
 from nlab.analysis.dose_calibration import McaDoseCalibrationSnapshot
 from nlab.analysis.energy_calibration import (
     EnergyCalibration,
@@ -61,7 +62,6 @@ _DEBUG_SIGNAL_NAMES = [
 _BINNING_LABELS = ["1", "2", "4", "8", "16", "32", "64", "128", "256", "512"]
 _WINDOW_LABELS = ["8 ns", "16 ns", "32 ns", "64 ns", "128 ns", "256 ns", "512 ns"]
 _TRIGGER_SOURCE_LABELS = ["Threshold", "CR-RC2", "CR2-RC2"]
-_LP_PRESET_LABELS = ["200 MHz", "70 MHz", "Moving average"]
 
 # Hardware/network polling can run faster than Qt can repaint the two debug
 # curves plus a 16384-bin histogram. Keep acquisition at the requested rate,
@@ -97,7 +97,6 @@ _MCA_CONTROL_TOOLTIPS = {
     "spinPretrigger": "Sets the diagnostic waveform offset before the trigger in nanoseconds.",
     "comboTriggerSource": "Selects threshold, CR-RC2, or CR2-RC2 pulse triggering.",
     "spinEdgeDetCoeff": "Sets the legacy edge-detector coefficient when supported by hardware.",
-    "comboLpPreset": "Selects the input FIR low-pass response or moving-average filter.",
     "spinCrrc2Cdelay": "Sets the C-stage delay of the CR-RC2 shaping filter in nanoseconds.",
     "spinCrrc2Fdelay": "Sets the F-stage delay of the CR-RC2 shaping filter in nanoseconds.",
     "spinCrrc2Pzc": "Sets the raw pole-zero correction coefficient for CR-RC2 shaping.",
@@ -304,8 +303,6 @@ class MCAController(QWidget):
 
         self.ui.comboTriggerSource.clear()
         self.ui.comboTriggerSource.addItems(_TRIGGER_SOURCE_LABELS)
-        self.ui.comboLpPreset.clear()
-        self.ui.comboLpPreset.addItems(_LP_PRESET_LABELS)
         self.ui.comboTrapFt.addItems(_WINDOW_LABELS)
 
     # ------------------------------------------------------------------
@@ -457,7 +454,8 @@ class MCAController(QWidget):
         self._mca.set_mem2_sig_select(int(specs[MCAParam.MEM2_SIG_SELECT].default))
 
         # CR-RC2 / LP filter
-        self._mca.filters.lp.set_preset(int(specs[MCAParam.LP_PRESET].default))
+        # Application policy: every channel starts with the fixed 70 MHz response.
+        self._mca.filters.lp.set_preset(MCA_FIXED_LOW_PASS_PRESET)
         self._mca.filters.crrc2.set_Cdelay(int(specs[MCAParam.CRRC2_CDELAY].default))
         self._mca.filters.crrc2.set_Fdelay(int(specs[MCAParam.CRRC2_FDELAY].default))
         self._mca.filters.crrc2.set_pzc_coeff(int(specs[MCAParam.CRRC2_PZC].default))
@@ -1130,15 +1128,8 @@ class MCAController(QWidget):
         self._hist_plot.autoRange()
 
     def hardware_configuration_settings(self) -> dict[str, int]:
-        """Return write-only hardware choices that cannot be read back."""
-        return {"low_pass_preset": self.ui.comboLpPreset.currentIndex()}
-
-    def populate_hardware_configuration_settings(self, settings: object) -> None:
-        if not isinstance(settings, dict) or "low_pass_preset" not in settings:
-            return
-        self.ui.comboLpPreset.blockSignals(True)
-        self.ui.comboLpPreset.setCurrentIndex(int(settings["low_pass_preset"]))
-        self.ui.comboLpPreset.blockSignals(False)
+        """Record the fixed, write-only 70 MHz response for saved configuration."""
+        return {"low_pass_preset": MCA_FIXED_LOW_PASS_PRESET}
 
     def configuration_settings(self) -> dict[str, object]:
         """Return controls that affect only GUI polling and presentation."""
@@ -1185,7 +1176,7 @@ class MCAController(QWidget):
         return {
             "binning": self.ui.comboBinning.currentIndex(),
             "pulse_polarity": self.ui.comboPulsePolarity.currentIndex(),
-            "low_pass_preset": self.ui.comboLpPreset.currentIndex(),
+            "low_pass_preset": MCA_FIXED_LOW_PASS_PRESET,
             "trapezoid_enabled": self.ui.cbTrapezEnable.isChecked(),
             "trapezoid_r_ns": self.ui.spinTrapR.value(),
             "trapezoid_m_ns": self.ui.spinTrapM.value(),
@@ -1616,10 +1607,6 @@ class MCAController(QWidget):
             )
         )
 
-        self.ui.comboLpPreset.currentIndexChanged.connect(
-            lambda i: self._apply_hardware_setting(lambda: self._mca.filters.lp.set_preset(i))
-        )
-
         self._wire_slider_spinbox(
             self.ui.sliderCrrc2Cdelay,
             self.ui.spinCrrc2Cdelay,
@@ -1696,7 +1683,6 @@ class MCAController(QWidget):
         # those controls changes; the raw channel axis remains authoritative.
         self.ui.comboPulsePolarity.currentIndexChanged.connect(self._refresh_energy_axis)
         self.ui.comboBinning.currentIndexChanged.connect(self._refresh_energy_axis)
-        self.ui.comboLpPreset.currentIndexChanged.connect(self._refresh_energy_axis)
         self.ui.cbTrapezEnable.toggled.connect(self._refresh_energy_axis)
         self.ui.spinTrapR.valueChanged.connect(self._refresh_energy_axis)
         self.ui.spinTrapM.valueChanged.connect(self._refresh_energy_axis)

@@ -510,6 +510,11 @@ class PSDController(QWidget):
             "fom_fit_roi": [float(value) for value in self._fom_widget.fit_region.getRegion()],
             "fom_centroid_seeds": [float(line.value()) for line in self._fom_widget.centroid_lines],
             "fom_guides_visible": self._fom_widget.guides_checkbox.isChecked(),
+            "fom_fit_mode": self._fom_widget.mode_combo.currentData(),
+            "fom_use_background": self._fom_widget.background_checkbox.isChecked(),
+            "fom_peak_rois": [list(map(float, region.getRegion()))
+                              for region in self._fom_widget.peak_regions],
+            "fom_continuous": self._fom_widget.continuous_checkbox.isChecked(),
         }
 
     def apply_configuration_settings(self, settings: object) -> None:
@@ -559,6 +564,19 @@ class PSDController(QWidget):
         fom_fit_roi = settings.get("fom_fit_roi")
         if isinstance(fom_fit_roi, list) and len(fom_fit_roi) == 2:
             self._fom_widget.fit_region.setRegion((float(fom_fit_roi[0]), float(fom_fit_roi[1])))
+        if "fom_fit_mode" in settings:
+            mode_index = self._fom_widget.mode_combo.findData(settings["fom_fit_mode"])
+            if mode_index >= 0:
+                self._fom_widget.mode_combo.setCurrentIndex(mode_index)
+        peak_rois = settings.get("fom_peak_rois")
+        if isinstance(peak_rois, list) and len(peak_rois) == 2:
+            for region, limits in zip(self._fom_widget.peak_regions, peak_rois, strict=True):
+                if isinstance(limits, list) and len(limits) == 2:
+                    region.setRegion(tuple(map(float, limits)))
+        if "fom_use_background" in settings:
+            self._fom_widget.background_checkbox.setChecked(bool(settings["fom_use_background"]))
+        if "fom_continuous" in settings:
+            self._fom_widget.continuous_checkbox.setChecked(bool(settings["fom_continuous"]))
         fom_centroid_seeds = settings.get("fom_centroid_seeds")
         if isinstance(fom_centroid_seeds, list) and len(fom_centroid_seeds) == 2:
             for line, value in zip(

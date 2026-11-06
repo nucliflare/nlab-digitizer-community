@@ -2,11 +2,13 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import Mock, call
+from unittest.mock import MagicMock, Mock, call
 
 import numpy as np
 import pyqtgraph as pg
 import pytest
+from PySide6.QtWidgets import QWidget
+from pytestqt.qtbot import QtBot
 
 from nlab.controllers import mca_controller as mca_controller_module
 from nlab.controllers.mca_controller import MCAController
@@ -345,6 +347,28 @@ def test_controller_initialization_unconditionally_clears_stale_enable() -> None
 
     mca.stop.assert_called_once_with()
     mca.get_measurement_in_progress.assert_not_called()
+
+
+@pytest.mark.parametrize("channel", [0, 1])
+def test_controller_initialization_fixes_low_pass_and_records_it(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, channel: int
+) -> None:
+    mca = MagicMock()
+    mca.get_debug_signal_selectors.return_value = tuple(range(9))
+    mca.edge_det_coeff_is_hardware_backed.return_value = False
+    monkeypatch.setattr(MCAController, "_load_hardware_state", lambda self: None)
+
+    controller = MCAController(mca, channel=channel)
+    qtbot.addWidget(controller)
+
+    mca.filters.lp.set_preset.assert_called_once_with(1)  # Public preset: 70 MHz.
+    assert mca.mock_calls.index(call.stop()) < mca.mock_calls.index(
+        call.filters.lp.set_preset(1)
+    )
+    assert controller.findChild(QWidget, "comboLpPreset") is None
+    assert controller.findChild(QWidget, "labelLpPreset") is None
+    assert controller.hardware_configuration_settings() == {"low_pass_preset": 1}
+    assert controller.energy_calibration_fingerprint()["low_pass_preset"] == 1
 
 
 def test_shutdown_stops_externally_armed_channel_even_when_not_in_progress() -> None:

@@ -1,12 +1,14 @@
-"""Double-Gaussian figure-of-merit fitting for PSD projections."""
+"""Joint and independent Gaussian figure-of-merit fits for PSD projections."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 from lmfit import Minimizer, Parameters
+from lmfit.minimizer import MinimizerResult
 
 _FWHM_FACTOR = 2.0 * math.sqrt(2.0 * math.log(2.0))
 _MIN_FIT_BINS = 12
@@ -14,7 +16,7 @@ _MIN_FIT_BINS = 12
 
 @dataclass(frozen=True)
 class PsdFomFit:
-    """Result of a Poisson-deviance LM double-Gaussian fit."""
+    """Result of joint or independent Poisson-deviance Gaussian fits."""
 
     success: bool
     message: str
@@ -33,11 +35,20 @@ class PsdFomFit:
     reduced_deviance: float
     evaluations: int
     warnings: tuple[str, ...]
+    fit_mode: Literal["double", "separate"] = "double"
+    fit_regions: tuple[tuple[float, float], ...] = ()
+    use_background: bool = True
 
     @property
     def poor_convergence(self) -> bool:
         """Whether diagnostics make the numerical result unsafe to trust."""
         return bool(self.warnings) or not self.success
+
+    @property
+    def varied_parameters(self) -> int:
+        """Six peak parameters plus one joint or two independent offsets."""
+        offsets = 2 if self.fit_mode == "separate" else 1
+        return 6 + offsets * int(self.use_background)
 
     @property
     def reduced_chi_square(self) -> float:
@@ -51,26 +62,22 @@ def fit_psd_fom_lm(
     *,
     roi: tuple[float, float],
     centroid_seeds: tuple[float, float],
+    max_nfev: int = 10_000,
+    use_background: bool = True,
 ) -> PsdFomFit:
     """Fit two Gaussian populations with a constant background using LM.
 
     The objective is the signed Poisson-deviance residual, so empty and sparse
     bins are handled without observed-count inverse-variance bias. Bounds are
     applied through lmfit's internal parameter transforms while MINPACK's
-    Levenberg-Marquardt solver performs the fit.
+    Levenberg-Marquardt solver performs the fit. With use_background=False,
+    the constant count offset is fixed to zero rather than fitted.
     """
-    ratio_values = np.asarray(ratio, dtype=np.float64)
-    count_values = np.asarray(counts, dtype=np.float64)
-    if ratio_values.ndim != 1 or count_values.ndim != 1:
-        raise ValueError("PSD ratio and count inputs must be one-dimensional")
-    if ratio_values.shape != count_values.shape:
-        raise ValueError("PSD ratio and count inputs must have the same length")
-    if not np.all(np.isfinite(ratio_values)) or not np.all(np.isfinite(count_values)):
-        raise ValueError("PSD projection contains non-finite values")
-    if np.any(count_values < 0.0):
-        raise ValueError("PSD projection counts cannot be negative")
+    ratio_values, count_values = _validated_projection(ratio, counts, max_nfev)
 
     roi_low, roi_high = sorted(map(float, roi))
+    if not math.isfinite(roi_low) or not math.isfinite(roi_high) or roi_low >= roi_high:
+        raise ValueError("fit ROI must contain two increasing finite bounds")
     selected = (ratio_values >= roi_low) & (ratio_values <= roi_high)
     x = ratio_values[selected]
     y = count_values[selected]
@@ -90,7 +97,7 @@ def fit_psd_fom_lm(
         raise ValueError("PSD ratio bins must be strictly increasing")
     span = roi_high - roi_low
     split = 0.5 * (first_seed + second_seed)
-    background_guess = max(0.1, float(np.percentile(y, 10.0)))
+    background_guess = max(0.1, float(np.percentile(y, 10.0))) if use_background else 0.0
     sigma_min = max(bin_width / 4.0, np.finfo(np.float64).eps)
     sigma_max = span / 2.0
     first_height, first_sigma = _initial_peak_shape(
@@ -117,7 +124,7 @@ def fit_psd_fom_lm(
     fraction_margin = min(1.0e-6, bin_width / span / 10.0)
 
     parameters = Parameters()
-    parameters.add("background", value=background_guess, min=0.0)
+    parameters.add("background", value=background_guess, min=0.0, vary=use_background)
     parameters.add("first_height", value=first_height, min=0.0)
     parameters.add(
         "first_center",
@@ -143,7 +150,7 @@ def fit_psd_fom_lm(
     def objective(params: Parameters) -> np.ndarray:
         return _poisson_deviance_residual(y, _model(params, x))
 
-    result = Minimizer(objective, parameters).minimize(method="leastsq", max_nfev=10_000)
+    result = Minimizer(objective, parameters).minimize(method="leastsq", max_nfev=max_nfev)
     first = _gaussian(
         x,
         float(result.params["first_height"].value),
@@ -217,6 +224,152 @@ def fit_psd_fom_lm(
         reduced_deviance=reduced_deviance,
         evaluations=int(result.nfev),
         warnings=warnings,
+        fit_regions=((roi_low, roi_high),),
+        use_background=use_background,
+    )
+
+
+def _validated_projection(
+    ratio: np.ndarray, counts: np.ndarray, max_nfev: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    x = np.asarray(ratio, dtype=np.float64)
+    y = np.asarray(counts, dtype=np.float64)
+    if x.ndim != 1 or y.ndim != 1:
+        raise ValueError("PSD ratio and count inputs must be one-dimensional")
+    if x.shape != y.shape:
+        raise ValueError("PSD ratio and count inputs must have the same length")
+    if not np.all(np.isfinite(x)) or not np.all(np.isfinite(y)):
+        raise ValueError("PSD projection contains non-finite values")
+    if np.any(y < 0):
+        raise ValueError("PSD projection counts cannot be negative")
+    if np.any(np.diff(x) <= 0):
+        raise ValueError("PSD ratio bins must be strictly increasing")
+    if max_nfev <= 0:
+        raise ValueError("maximum fit evaluations must be positive")
+    return x, y
+
+
+def fit_psd_fom_separate_lm(
+    ratio: np.ndarray,
+    counts: np.ndarray,
+    *,
+    rois: tuple[tuple[float, float], tuple[float, float]],
+    centroid_seeds: tuple[float, float],
+    max_nfev: int = 10_000,
+    use_background: bool = True,
+) -> PsdFomFit:
+    """Fit an independent Gaussian plus constant background in each window.
+
+    Use only for well-separated populations whose other Gaussian tail is
+    negligible inside each window. The gap contributes neither observations
+    nor residuals. Each window has four varied parameters with its offset
+    enabled, or three with the offset fixed to zero. Combined reduced deviance
+    uses the total fitted bins minus the total varied parameters.
+    Counts and widths have the same meaning as in the joint fit.
+    """
+    ratio_values, count_values = _validated_projection(ratio, counts, max_nfev)
+    regions = tuple(tuple(sorted(map(float, roi))) for roi in rois)
+    if len(regions) != 2 or any(
+        len(region) != 2 or not all(map(math.isfinite, region)) or region[0] >= region[1]
+        for region in regions
+    ):
+        raise ValueError("each peak ROI must contain two increasing finite bounds")
+    if regions[0][1] >= regions[1][0]:
+        raise ValueError("peak ROIs must be ordered and non-overlapping, with a gap between them")
+    seeds = tuple(map(float, centroid_seeds))
+    if len(seeds) != 2:
+        raise ValueError("two centroid estimates are required")
+    results: list[MinimizerResult] = []
+    coordinates: list[np.ndarray] = []
+    observations: list[np.ndarray] = []
+    components: list[np.ndarray] = []
+    backgrounds: list[np.ndarray] = []
+    warnings: list[str] = []
+    deviance = 0.0
+    for index, ((low, high), seed) in enumerate(zip(regions, seeds, strict=True), start=1):
+        selected = (ratio_values >= low) & (ratio_values <= high)
+        x, y = ratio_values[selected], count_values[selected]
+        if len(x) < _MIN_FIT_BINS:
+            raise ValueError(
+                f"population {index} fit ROI must contain at least {_MIN_FIT_BINS} bins"
+            )
+        if not low < seed < high:
+            raise ValueError(f"population {index} centroid estimate must be inside its fit ROI")
+        if np.sum(y) <= 0 or not np.any(y != y[0]):
+            raise ValueError(f"population {index} fit ROI contains no resolvable count structure")
+        width = float(np.median(np.diff(x)))
+        sigma_min, sigma_max = width / 4.0, (high - low) / 2.0
+        background = max(0.1, float(np.percentile(y, 10))) if use_background else 0.0
+        height, sigma = _initial_peak_shape(
+            x, y, search_range=(low, high), background=background,
+            bin_width=width, sigma_bounds=(sigma_min, sigma_max),
+        )
+        parameters = Parameters()
+        parameters.add("background", value=background, min=0.0, vary=use_background)
+        parameters.add("height", value=height, min=0.0)
+        parameters.add("center", value=seed, min=low, max=high)
+        parameters.add("sigma", value=sigma, min=sigma_min, max=sigma_max)
+
+        def objective(params: Parameters) -> np.ndarray:
+            model = float(params["background"].value) + _gaussian(
+                x, float(params["height"].value), float(params["center"].value),
+                float(params["sigma"].value),
+            )
+            return _poisson_deviance_residual(y, model)
+
+        result = Minimizer(objective, parameters).minimize(method="leastsq", max_nfev=max_nfev)
+        center = float(result.params["center"].value)
+        sigma = float(result.params["sigma"].value)
+        height = float(result.params["height"].value)
+        background = float(result.params["background"].value)
+        peak = _gaussian(x, height, center, sigma)
+        local_deviance = float(np.sum(np.square(_poisson_deviance_residual(y, peak + background))))
+        local_warnings = _fit_warnings(
+            result=result, y=y, roi=(low, high), bin_width=width,
+            centroids=(center, center), sigmas=(sigma, sigma), heights=(height, height),
+            background=background,
+            reduced_deviance=local_deviance / (len(x) - len(result.var_names)),
+            check_separation=False,
+        )
+        warnings.extend(f"Population {index}: {warning}" for warning in local_warnings)
+        results.append(result)
+        coordinates.append(x)
+        observations.append(y)
+        components.append(peak)
+        backgrounds.append(np.full_like(x, background))
+        deviance += local_deviance
+
+    first, second = results
+    centers = (float(first.params["center"].value), float(second.params["center"].value))
+    sigmas = (float(first.params["sigma"].value), float(second.params["sigma"].value))
+    first_error = _finite_optional(first.params["sigma"].stderr)
+    second_error = _finite_optional(second.params["sigma"].stderr)
+    component1 = np.concatenate((components[0], np.zeros_like(components[1])))
+    component2 = np.concatenate((np.zeros_like(components[0]), components[1]))
+    background_values = np.concatenate(backgrounds)
+    x = np.concatenate(coordinates)
+    return PsdFomFit(
+        success=bool(first.success and second.success),
+        message=f"Population 1: {first.message}; Population 2: {second.message}",
+        x=_readonly(x), observed=_readonly(np.concatenate(observations)),
+        best_fit=_readonly(component1 + component2 + background_values),
+        first_component=_readonly(component1), second_component=_readonly(component2),
+        background_component=_readonly(background_values), centroids=centers,
+        centroid_uncertainties=(
+            _finite_optional(first.params["center"].stderr),
+            _finite_optional(second.params["center"].stderr),
+        ),
+        sigmas=sigmas, fwhms=(_FWHM_FACTOR * sigmas[0], _FWHM_FACTOR * sigmas[1]),
+        fwhm_uncertainties=(
+            None if first_error is None else _FWHM_FACTOR * first_error,
+            None if second_error is None else _FWHM_FACTOR * second_error,
+        ),
+        fom=(centers[1] - centers[0]) / (_FWHM_FACTOR * sum(sigmas)),
+        reduced_deviance=deviance / (len(x) - sum(len(result.var_names) for result in results)),
+        evaluations=int(first.nfev + second.nfev), warnings=tuple(warnings),
+        fit_mode="separate", fit_regions=((regions[0][0], regions[0][1]),
+                                         (regions[1][0], regions[1][1])),
+        use_background=use_background,
     )
 
 
@@ -342,6 +495,7 @@ def _fit_warnings(
     heights: tuple[float, float],
     background: float,
     reduced_deviance: float,
+    check_separation: bool = True,
 ) -> tuple[str, ...]:
     warnings: list[str] = []
     if not bool(getattr(result, "success", False)):
@@ -349,7 +503,7 @@ def _fit_warnings(
     if not bool(getattr(result, "errorbars", False)):
         warnings.append("parameter covariance could not be estimated")
     if not math.isfinite(reduced_deviance) or reduced_deviance > 3.0:
-        warnings.append("reduced Poisson deviance indicates a poor double-Gaussian fit")
+        warnings.append("reduced Poisson deviance indicates a poor Gaussian fit")
     if float(np.sum(y)) < 100.0:
         warnings.append("fit ROI contains fewer than 100 counts")
 
@@ -366,7 +520,7 @@ def _fit_warnings(
         warnings.append("a fitted width is pinned near its upper bound")
     if any(height / math.sqrt(max(height + background, 1.0)) < 3.0 for height in heights):
         warnings.append("a fitted population has less than 3-sigma peak significance")
-    if abs(centroids[1] - centroids[0]) <= 0.5 * (sigmas[0] + sigmas[1]):
+    if check_separation and abs(centroids[1] - centroids[0]) <= 0.5 * (sigmas[0] + sigmas[1]):
         warnings.append("the fitted populations are not independently resolved")
     return tuple(dict.fromkeys(warnings))
 

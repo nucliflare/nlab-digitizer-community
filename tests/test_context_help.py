@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QKeySequence, QShortcut, QWheelEvent
+from PySide6.QtGui import QKeySequence, QShortcut, QTextFormat, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -29,6 +29,7 @@ from nlab.help.content import load_topics, parse_topics
 from nlab.help.context import CLASS_TOPICS, FORM_TOPICS, HelpContext, resolve_context
 from nlab.help.controller import HelpController
 from nlab.views.help_dialog import HelpDialog
+from nlab.views.offline_psd_plot import OfflinePsdPlot
 from nlab.views.waveform_analysis_dialog import WaveformAnalysisDialog
 
 type Workspace = tuple[QMainWindow, HelpController, QLabel, QSpinBox, QPushButton]
@@ -335,3 +336,58 @@ def test_main_window_help_menu_is_available_offline(
     window.close()
     hardware_controller.shutdown.assert_called_once()
     assert help_controller._disposed
+
+
+
+@pytest.mark.parametrize("selection", ("fom_caption", "fom_readout", "offset", "warning"))
+def test_f1_fom_selection_shows_formulas_offsets_and_warning_implications(
+    qtbot: QtBot, selection: str,
+) -> None:
+    window = QMainWindow()
+    qtbot.addWidget(window)
+    plot = OfflinePsdPlot(window)
+    window.setCentralWidget(plot)
+    window.resize(1100, 700)
+    window.show()
+    widget = plot.fom_widget
+    targets = {
+        "fom_readout": widget.fom_label,
+        "offset": widget.background_checkbox,
+        "warning": widget.status_label,
+    }
+    if selection == "fom_caption":
+        form = next(form for form in widget.findChildren(QFormLayout)
+                    if form.indexOf(widget.fom_label) >= 0)
+        label = form.labelForField(widget.fom_label)
+        assert label is not None
+        target = label
+    else:
+        target = targets[selection]
+    controller = HelpController(window)
+    try:
+        qtbot.keyClick(target, Qt.Key.Key_F1)
+        assert controller.active
+        qtbot.mouseClick(target, Qt.MouseButton.LeftButton)
+        dialog = controller._dialogs[window]
+        text = dialog.browser.toPlainText()
+        if selection.startswith("fom"):
+            assert dialog.current_topic == "fom"
+            images = [item.toImageFormat() for item in dialog.browser.document().allFormats()
+                      if item.isImageFormat()]
+            formulas = [image.property(QTextFormat.Property.ImageAltText) for image in images]
+            assert len(images) == 5
+            assert any(r"G_i(x)=A_i\exp" in formula for formula in formulas)
+            assert r"m(x)=y_0+G_1(x)+G_2(x)" in formulas
+            assert any(r"\mathrm{FWHM}_i=2\sqrt{2\ln 2}" in formula for formula in formulas)
+            assert any(r"\mathrm{FOM}=\frac{|\mu_2-\mu_1|}" in formula for formula in formulas)
+            assert "Poor convergence" in text and "not yet trustworthy" in text
+        elif selection == "offset":
+            assert dialog.current_topic == "fom-offset"
+            assert "fix every" in text and "exactly zero" in text
+            assert widget.background_checkbox.isChecked()  # Help click never edits the model.
+        else:
+            assert dialog.current_topic == "fom-quality"
+            assert "covariance" in text and "biased or unstable" in text
+            assert "p-value" in text and "Uncertainties are unavailable" in text
+    finally:
+        controller.dispose()

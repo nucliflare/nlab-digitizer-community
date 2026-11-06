@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-11-06
+
+### Changed
+
+- Fix the MCA input low-pass response at 70 MHz on every channel during
+  initialization and reconnect, and preserve it when loading older settings.
+  Remove the filter selector and record the fixed response in saved settings
+  and energy-calibration fingerprints.
+
+### Added
+
+- Offline LaTeX-style equations in F1 help using Markdown display-math blocks
+  and the existing Matplotlib Mathtext renderer, with theme-aware text colors,
+  high-resolution images, cached rendering, and readable TeX on rendering errors.
+
+- Optional y0 count offsets for joint and separate PSD Gaussian fits, enabled
+  by default and fixed to zero when unchecked. Settings, reports, and waveform
+  gate optimization preserve the choice and account for the varied parameters.
+- F1 FOM help now shows Gaussian, joint/separate model, FWHM, and FOM formulas,
+  with dedicated offset help and detailed convergence-warning implications.
+
+- Optional continuous PSD FOM fitting of the latest projection and fit guides,
+  coalesced at up to two fits per second with a bounded evaluation budget.
+- Separate Gaussian FOM fitting for well-separated populations, with two
+  independent colored fit ranges and local constant backgrounds. The gap is
+  excluded; mode and fit ranges are preserved in live PSD settings and reports.
+
+- Native minimize/maximize controls on floating channel and device panels,
+  preserving their position, size, visibility, and ability to dock again after
+  repeated undocking or saved-layout restoration. Verified with offscreen Qt
+  tests and a hidden native-Windows caption check.
+- The native **X** on floating panels docks them back into their original tab
+  group and selects the panel, including from maximized windows. This uses the
+  existing caption controls without adding a button row above the content;
+  application shutdown keeps its normal close and cleanup behavior.
+
+### Fixed
+
+- Floating title-bar double-clicks now leave maximize/restore to the native
+  window manager instead of also redocking the panel, which could make the
+  floating window disappear.
+
 ## [0.8.0] — 2026-11-06
 
 ### Changed
@@ -988,7 +1030,8 @@ Initial open-source release of the Nuclear Lab Digitizer Community Edition.
 
 ---
 
-[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.7.6...main
+[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.8.1...main
+[0.8.1]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.8.1
 [0.7.6]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.6
 [0.7.5]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.5
 [0.7.4]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.7.4

@@ -53,6 +53,7 @@ from nlab.views.dose_calibration_dialog import (
 )
 from nlab.views.energy_calibration_dialog import EnergyCalibrationDialog
 from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
+from nlab.views.panel_dock import PanelDockWidget
 from nlab.views.panel_status import PanelStatus, PanelStatusPresenter
 from nlab.views.psd_readback_dialog import PsdReadbackDialog
 from nlab.views.waveform_analysis_dialog import WaveformAnalysisDialog
@@ -449,19 +450,46 @@ class MainWindowController:
             signal.connect(slot)
 
     def _make_dock(self, obj_name: str, title: str, widget: QWidget) -> QDockWidget:
-        dock = QDockWidget(title)
+        dock = PanelDockWidget(title)
         dock.setObjectName(obj_name)
         dock.setWidget(widget)
         dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
         )
+        dock.topLevelChanged.connect(partial(self._on_dock_floating_changed, dock))
         panel_name = obj_name.split("_", 1)[0]
         panel_name = panel_name.upper() if panel_name in {"mca", "psd"} else panel_name.title()
         self._bind_panel_status(widget, f"{panel_name} {title}", dock)
         if self._dock_channel(dock) is not None:
             dock.visibilityChanged.connect(partial(self._on_channel_dock_activated, dock))
         return dock
+
+    @staticmethod
+    def _on_dock_floating_changed(dock: QDockWidget, floating: bool) -> None:
+        if not floating:
+            return
+        # Qt restores tool-window flags on each undock. Use a normal window
+        # so the native title bar supports independent minimize/maximize.
+        # Mask integer values: enum inversion can discard high hint bits.
+        flags = (
+            Qt.WindowType(int(dock.windowFlags()) & ~int(Qt.WindowType.WindowType_Mask))
+            | Qt.WindowType.Window
+            | Qt.WindowType.CustomizeWindowHint
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinMaxButtonsHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        if flags == dock.windowFlags():
+            return
+        visible = dock.isVisible()
+        geometry = dock.geometry()
+        dock.setWindowFlags(flags)
+        dock.setGeometry(geometry)
+        # Changing window flags hides a widget; retain its previous visibility.
+        if visible:
+            dock.show()
 
     def _bind_panel_status(
         self,
@@ -3541,13 +3569,6 @@ class MainWindowController:
             channel = self._display_channel(idx)
             hardware = channel_entry(document, channel)
             if hardware is not None:
-                mca_settings = hardware.get("mca", {})
-                if mca_ctrl is not None and isinstance(mca_settings, dict):
-                    low_pass = mca_settings.get("low_pass", {})
-                    if isinstance(low_pass, dict) and "preset" in low_pass:
-                        mca_ctrl.populate_hardware_configuration_settings(
-                            {"low_pass_preset": low_pass["preset"]}
-                        )
                 psu_ctrl = self._psu_controller_by_device.get(idx)
                 if psu_ctrl is not None:
                     psu_settings = hardware.get("psu", {})

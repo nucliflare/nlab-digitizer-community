@@ -372,3 +372,13 @@ def test_waveform_workbench_applies_and_confirms_optimized_gates(
         assert dialog._last_report_context.optimization.evaluated_candidates == 60
     assert dialog.exhaustive_search.isEnabled()
     dialog.close_file()
+
+
+
+def test_gate_search_preserves_zero_offset_model() -> None:
+    request = replace(_request(), use_background=False)
+    result = optimize_waveform_gate_ends(np.cumsum(_synthetic_pulses(), axis=1), request)
+    assert result.best.fit.success
+    assert not result.best.fit.use_background
+    assert np.all(result.best.fit.background_component == 0)
+    assert result.best.fit.varied_parameters == 6

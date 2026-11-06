@@ -155,6 +155,10 @@ uv run python examples/measure_current.py
 
 ### MCA and PSD
 
+- The MCA input low-pass filter is fixed at **70 MHz** for every channel. It is
+  applied during initialization and reconnect; loading older settings cannot
+  change it. The filter selector has been removed, and saved configurations
+  and calibration fingerprints record the fixed response.
 - **Record list-mode DMA** is grouped with the measurement controls, directly
   above **DMA File...**, in both regular and compact layouts.
 - Enabling charge comparison adds a dashed black step guide to the MCA waveform
@@ -269,7 +273,11 @@ uv run python examples/measure_current.py
   latest published stable release on GitHub. The check runs only on request,
   keeps the interface responsive, and offers a release-page link when an update
   is available. Downloads and installation remain manual.
-- Dockable and floatable channel panels, including multi-monitor layouts
+- Dockable and floatable channel panels, including multi-monitor layouts.
+  Floating panels have standard minimize/maximize controls and retain their
+  position and size. Click the floating window's **X** to return it to its
+  original tab group and select the panel. Dragging it back into the workspace
+  also docks it. Double-click the native title bar to maximize or restore it.
 - Scope, Current, MCA, PSD, Coincidence, PSU, Global, External, and System Log
   workspaces
 - Switching between Scope, Current, MCA, PSD, and PSU follows the selected
@@ -1108,7 +1116,28 @@ cancellation, and report availability are unchanged; there is no separate toolba
 The live and readback ratio projections include a shaded draggable fit ROI and
 two draggable centroid estimates. **Fit** runs a bounded double-Gaussian
 Levenberg-Marquardt fit with a constant background and Poisson-deviance
-residuals on the current projection snapshot. It reports both centroids, both
+residuals on the current projection snapshot. **Separate Gaussians** instead
+shows two independently draggable, colored fit ranges: blue for population 1
+and orange for population 2. Each range fits one Gaussian plus its own constant
+background. Keep the ranges ordered and disjoint, with each centroid marker
+inside its corresponding range. This mode assumes the other population's tail
+is negligible in each range and excludes the gap entirely; use the joint fit
+when the populations overlap. Reports record the model and the exact fit ranges.
+**Use y0 offset** is enabled by default. Uncheck it to fix the constant count
+background to zero; separate mode applies this choice to both local offsets.
+The option is saved with live PSD settings and recorded in reports; waveform
+gate searches use the same choice. Press **F1**, then select the FOM label or
+readout for typeset Gaussian, FWHM, and FOM formulas. Help renders Markdown
+`$$...$$` display equations locally using Matplotlib Mathtext; an internet
+connection or external LaTeX installation is not required. Selecting a convergence warning
+explains why the reported widths/FOM may be unstable or biased and how to
+investigate each warning.
+**Continuous fit** refits changed projections and completed guide edits using
+the latest data at most twice per second, with a bounded evaluation budget and
+no queued fit jobs. Leave it unchecked for manual snapshots; **Fit** uses the
+full evaluation budget. Live PSD saves the mode, ranges, and continuous setting
+with its application configuration. The waveform gate optimizer still requires
+the joint fit mode. Both modes report both centroids, both
 FWHMs, reduced Poisson deviance, and
 `FOM = |μ2 - μ1| / (FWHM1 + FWHM2)`. The guide overlay can be hidden without
 hiding a completed fit. Sparse data, unresolved populations, parameters at

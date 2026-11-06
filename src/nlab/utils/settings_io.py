@@ -17,6 +17,7 @@ from typing import Any, cast
 
 import yaml
 
+from nlab.acquisition_policy import MCA_FIXED_LOW_PASS_PRESET
 from nlab.hardware.digitizer.hv import HVSupply
 from nlab.hardware.digitizer.mca import MultiChannelAnalyzer
 from nlab.hardware.digitizer.scope import (
@@ -318,9 +319,9 @@ def _apply_mca(mca: MultiChannelAnalyzer, settings: Mapping[str, Any]) -> None:
     if "mem2_sig_select" in debug:
         mca.set_mem2_sig_select(int(debug["mem2_sig_select"]))
 
-    low_pass = _mapping(settings, "low_pass")
-    if "preset" in low_pass:
-        mca.filters.lp.set_preset(int(low_pass["preset"]))
+    # Enforce the application policy inside the existing reconfiguration transaction.
+    # Older settings may request another preset; never write that obsolete choice.
+    mca.filters.lp.set_preset(MCA_FIXED_LOW_PASS_PRESET)
 
     crrc2 = _mapping(settings, "crrc2")
     for key, setter in (
@@ -390,7 +391,9 @@ def apply_mca_hardware(
     This is useful for focused command-line diagnostics which must reproduce
     an MCA configuration without writing unrelated Scope or PSU registers.
     ``settings`` is the complete per-channel hardware mapping returned by
-    :func:`channel_entry`; missing MCA data is ignored.
+    :func:`channel_entry`; missing MCA data is ignored. The input low-pass
+    response always uses the application's fixed 70 MHz preset, including
+    when an older document requests a different response.
     """
 
     if not isinstance(settings.get("mca"), Mapping):

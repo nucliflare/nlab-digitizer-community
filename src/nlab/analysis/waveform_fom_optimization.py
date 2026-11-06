@@ -31,6 +31,7 @@ class WaveformFomOptimizationRequest:
     long_bounds: tuple[int, int]
     initial_step: int
     search_mode: FomSearchMode = "local"
+    use_background: bool = True
 
     def __post_init__(self) -> None:
         gate_start = self.settings.gate_start
@@ -238,6 +239,7 @@ def _evaluate_candidate(
             counts,
             roi=request.fit_roi,
             centroid_seeds=request.centroid_seeds,
+            use_background=request.use_background,
         )
     except (RuntimeError, TypeError, ValueError):
         return None

@@ -94,6 +94,7 @@ class _FomOptimizationContext:
     fit_roi: tuple[float, float]
     centroid_seeds: tuple[float, float]
     result: WaveformFomOptimizationResult | None = None
+    use_background: bool = True
 
 
 class WaveformAnalysisDialog(QDialog):
@@ -1171,6 +1172,7 @@ class WaveformAnalysisDialog(QDialog):
                 long_bounds=long_bounds,
                 initial_step=initial_step,
                 search_mode="exhaustive" if self.exhaustive_search.isChecked() else "local",
+                use_background=fit.use_background,
             )
             if request.search_mode == "exhaustive":
                 answer = QMessageBox.warning(
@@ -1221,6 +1223,7 @@ class WaveformAnalysisDialog(QDialog):
         self._active_optimization_context = _FomOptimizationContext(
             fit_roi=request.fit_roi,
             centroid_seeds=request.centroid_seeds,
+            use_background=request.use_background,
         )
         self._completed_optimization = None
         self._set_optimization_busy(True)
@@ -1266,6 +1269,7 @@ class WaveformAnalysisDialog(QDialog):
             fit_roi=context.fit_roi,
             centroid_seeds=context.centroid_seeds,
             result=value,
+            use_background=context.use_background,
         )
 
     def _optimization_failed(self, message: str) -> None:
@@ -1452,6 +1456,7 @@ class WaveformAnalysisDialog(QDialog):
         )
         if optimization is not None and optimization.result is not None:
             fit_widget = self.psd_plot.fom_widget
+            fit_widget.background_checkbox.setChecked(optimization.use_background)
             fit_widget.fit_region.setRegion(optimization.fit_roi)
             for line, seed in zip(
                 fit_widget.centroid_lines,
@@ -1582,9 +1587,13 @@ class WaveformAnalysisDialog(QDialog):
             self.long_end_line,
             self.psd_plot.energy_region,
             self.psd_plot.fom_widget.fit_region,
+            *self.psd_plot.fom_widget.peak_regions,
             *self.psd_plot.fom_widget.centroid_lines,
         ):
             item.setMovable(not busy)
+        self.psd_plot.fom_widget.background_checkbox.setEnabled(not busy)
+        self.psd_plot.fom_widget.mode_combo.setEnabled(not busy)
+        self.psd_plot.fom_widget.continuous_checkbox.setEnabled(not busy)
         self.psd_plot.fom_widget.fit_button.setEnabled(not busy)
         self.psd_plot.fom_widget.guides_checkbox.setEnabled(not busy)
         self._update_report_button()
@@ -1610,6 +1619,7 @@ class WaveformAnalysisDialog(QDialog):
             and self._index is not None
             and context_matches
             and fit is not None
+            and fit.fit_mode == "double"
             and not fit.poor_convergence
         )
 

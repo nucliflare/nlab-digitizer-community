@@ -350,6 +350,10 @@ def _mapping_rows(section: str, values: Mapping[str, object]) -> list[tuple[str,
 
 def _fit_rows(fit: PsdFomFit) -> list[tuple[str, str, str]]:
     rows = [
+        ("fit", "model", fit.fit_mode),
+        ("fit", "use y0 offset", str(fit.use_background)),
+        ("fit", "varied parameters", str(fit.varied_parameters)),
+        ("fit", "ratio fit regions", str(fit.fit_regions)),
         ("fit", "population 1 centroid", _number(fit.centroids[0])),
         ("fit", "population 1 centroid uncertainty", _value_text(fit.centroid_uncertainties[0])),
         ("fit", "population 1 FWHM", _number(fit.fwhms[0])),
@@ -403,6 +407,10 @@ def _write_metadata(
         "digitizer": _json_mapping(request.digitizer_info),
         "statistics": _json_mapping(request.statistics),
         "fit": {
+            "mode": fit.fit_mode,
+            "use_y0_offset": fit.use_background,
+            "varied_parameters": fit.varied_parameters,
+            "ratio_fit_regions": [list(region) for region in fit.fit_regions],
             "success": fit.success,
             "message": fit.message,
             "evaluations": fit.evaluations,
@@ -499,7 +507,7 @@ def _write_pdf(
         story.append(Paragraph(f"<b>Fit warning:</b> {_escape(warning)}", styles["ReportWarning"]))
     story.append(Spacer(1, 3 * mm))
     story.append(Paragraph("Fitting method and FOM", styles["Heading3"]))
-    story.extend(_fit_method_explanation(styles))
+    story.extend(_fit_method_explanation(styles, request.fit))
     story.append(PageBreak())
 
     story.append(Paragraph("Cut-separated energy spectra", styles["Heading1"]))
@@ -604,25 +612,34 @@ def _settings_table(
 
 
 
-def _fit_method_explanation(styles: Mapping[str, ParagraphStyle]) -> list[Flowable]:
+def _fit_method_explanation(
+    styles: Mapping[str, ParagraphStyle], fit: PsdFomFit,
+) -> list[Flowable]:
     """Explain the equations implemented by :func:`fit_psd_fom_lm` in the PDF."""
+    separate = fit.fit_mode == "separate"
+    offset_note = (
+        "The y0 offset is fitted and constrained non-negative. "
+        if fit.use_background else "The y0 offset is fixed to zero. "
+    )
     return [
         Paragraph(
-            "Counts in the selected energy ROI are summed by PSD-ratio bin. "
-            "Only the selected ratio fit ROI enters the fit. For ratio x, the "
-            "expected bin count is a constant background plus two Gaussian peaks:",
+            "Energy-ROI projected counts in the ratio fit ROI use two Gaussians plus y0:"
+            if not separate else
+            "Disjoint ratio windows are fitted independently with one Gaussian and local y0 each. "
+            "The other population's tail is assumed negligible; the gap is excluded:",
             styles["ReportSmall"],
         ),
         _math_formula(
-            r"m(x)=B+A_1\exp\!\left[-\frac{(x-\mu_1)^2}{2\sigma_1^2}\right]"
+            r"m(x)=y_0+A_1\exp\!\left[-\frac{(x-\mu_1)^2}{2\sigma_1^2}\right]"
             r"+A_2\exp\!\left[-\frac{(x-\mu_2)^2}{2\sigma_2^2}\right]"
+            if not separate else
+            r"m_j(x)=y_{0,j}+A_j\exp\!\left[-\frac{(x-\mu_j)^2}{2\sigma_j^2}\right],"
+            r"\quad x\in R_j"
         ),
         Paragraph(
-            "The background and peak heights are non-negative; the peak widths "
-            "are positive and the fitted centroids remain ordered. Bounded "
-            "Levenberg-Marquardt minimizes the sum of squared signed "
-            "Poisson-deviance residuals. For each observed bin count, the "
-            "expected count is floored at a small positive value:",
+            offset_note + "Heights are non-negative, widths positive, and centroids stay "
+            "inside their ranges. Bounded Levenberg-Marquardt minimizes squared signed "
+            "Poisson-deviance residuals. Expected counts are floored:",
             styles["ReportSmall"],
         ),
         _math_formula(r"m_i=\max\!\left(m(x_i),10^{-12}\right)"),
@@ -633,7 +650,7 @@ def _fit_method_explanation(styles: Mapping[str, ParagraphStyle]) -> list[Flowab
         Paragraph(
             "The logarithmic contribution is defined as zero for an empty bin. "
             "The reported reduced Poisson deviance uses the number of fitted "
-            "bins and varied parameters:",
+            f"bins and {fit.varied_parameters} varied parameters:",
             styles["ReportSmall"],
         ),
         _math_formula(
@@ -821,19 +838,24 @@ def _fom_figure(projection: _ProjectionData, fit: PsdFomFit) -> BytesIO:
         linewidth=1.1,
         label="Projected counts",
     )
-    axis.plot(fit.x, fit.best_fit, color="#2A9D8F", linewidth=2.0, label="Double-Gaussian fit")
-    axis.plot(
-        fit.x, fit.first_component, "--", color="#277DA1", linewidth=1.2, label="Population 1"
-    )
-    axis.plot(
-        fit.x, fit.second_component, "--", color="#F8961E", linewidth=1.2, label="Population 2"
-    )
-    axis.plot(
-        fit.x, fit.background_component, ":", color="#64748B", linewidth=1.0, label="Background"
-    )
-    axis.axvspan(
-        float(fit.x[0]), float(fit.x[-1]), color="#2A9D8F", alpha=0.07, label="Fit input bins"
-    )
+    regions = fit.fit_regions or ((float(fit.x[0]), float(fit.x[-1])),)
+    for index, (low, high) in enumerate(regions):
+        selected = (fit.x >= low) & (fit.x <= high)
+        x = fit.x[selected]
+        label = "Separate Gaussian fits" if fit.fit_mode == "separate" else "Double-Gaussian fit"
+        axis.plot(x, fit.best_fit[selected], color="#2A9D8F", linewidth=2.0,
+                  label=label if index == 0 else None)
+        if fit.fit_mode == "double" or index == 0:
+            axis.plot(x, fit.first_component[selected], "--", color="#277DA1",
+                      linewidth=1.2, label="Population 1")
+        if fit.fit_mode == "double" or index == 1:
+            axis.plot(x, fit.second_component[selected], "--", color="#F8961E",
+                      linewidth=1.2, label="Population 2")
+        if fit.use_background:
+            axis.plot(x, fit.background_component[selected], ":", color="#64748B",
+                      linewidth=1.0, label="Background" if index == 0 else None)
+        axis.axvspan(low, high, color="#2A9D8F", alpha=0.07,
+                     label="Fit input bins" if index == 0 else None)
     for index, centroid in enumerate(fit.centroids, start=1):
         axis.axvline(centroid, color=("#277DA1", "#F8961E")[index - 1], alpha=0.65, linewidth=1.0)
     axis.set(xlabel="PSD ratio", ylabel="Counts", title=f"FOM = {fit.fom:.5g}")

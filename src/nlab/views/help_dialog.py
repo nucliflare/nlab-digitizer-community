@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from nlab.help.content import HelpTopic, load_topics
 from nlab.help.context import HelpContext
+from nlab.help.mathtext import set_help_markdown
 
 
 class HelpDialog(QDialog):
@@ -105,7 +106,7 @@ class HelpDialog(QDialog):
 
     def _display(self, context: HelpContext) -> None:
         topic = self.topics[context.topic]
-        self.browser.setMarkdown(f"# {topic.title}\n\n{topic.markdown}")
+        set_help_markdown(self.browser, f"# {topic.title}\n\n{topic.markdown}")
         lines = []
         if context.control:
             lines.append(f"Selected: {context.control}")

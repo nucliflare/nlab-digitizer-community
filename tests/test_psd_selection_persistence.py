@@ -19,6 +19,7 @@ _SELECTION_KEYS = (
     "fom_fit_roi",
     "fom_centroid_seeds",
     "fom_guides_visible",
+    "fom_use_background",
     "energy_log_y",
 )
 _ANALYSIS_CONTROLS = (
@@ -239,3 +240,27 @@ def test_readback_refresh_retains_fit_guides_and_clamps_roi(qtbot: QtBot) -> Non
 
     plot.set_data(np.ones((128, 128)), energy_range=(0, 4096), ratio_range=(-0.5, 0.9))
     assert plot.energy_region.getRegion() == pytest.approx((4096, 4096))
+
+
+
+def test_independent_fit_ranges_and_continuous_option_round_trip(controller: PSDController) -> None:
+    widget = controller._fom_widget
+    widget.mode_combo.setCurrentIndex(widget.mode_combo.findData("separate"))
+    widget.peak_regions[0].setRegion((-0.1, 0.15))
+    widget.peak_regions[1].setRegion((0.25, 0.65))
+    widget.continuous_checkbox.setChecked(True)
+    widget.background_checkbox.setChecked(False)
+    saved = controller.configuration_settings()
+    controller.apply_configuration_settings({"energy_bins": 2048})
+    assert controller.configuration_settings()["fom_peak_rois"] == saved["fom_peak_rois"]
+    widget.mode_combo.setCurrentIndex(widget.mode_combo.findData("double"))
+    widget.background_checkbox.setChecked(True)
+    widget.continuous_checkbox.setChecked(False)
+    widget.peak_regions[0].setRegion((0.0, 0.1))
+    controller.apply_configuration_settings(saved)
+    current = controller.configuration_settings()
+    assert current["fom_fit_mode"] == "separate"
+    assert current["fom_peak_rois"] == saved["fom_peak_rois"]
+    assert current["fom_continuous"] is True
+    assert current["fom_use_background"] is False
+    widget.continuous_checkbox.setChecked(False)

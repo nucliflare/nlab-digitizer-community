@@ -355,23 +355,11 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
            <attribute name="title"><string>CR-RC²</string></attribute>
            <layout class="QFormLayout" name="formCrRc2">
             <item row="0" column="0">
-             <widget class="QLabel" name="labelLpPreset">
-              <property name="text"><string>Low Pass filter:</string></property>
-             </widget>
-            </item>
-            <item row="0" column="1">
-             <widget class="QComboBox" name="comboLpPreset">
-              <item><property name="text"><string>200 MHz</string></property></item>
-              <item><property name="text"><string>70 MHz</string></property></item>
-              <item><property name="text"><string>Moving average</string></property></item>
-             </widget>
-            </item>
-            <item row="1" column="0">
              <widget class="QLabel" name="labelCrrc2Cdelay">
               <property name="text"><string>C delay:</string></property>
              </widget>
             </item>
-            <item row="1" column="1">
+            <item row="0" column="1">
              <layout class="QHBoxLayout" name="hCrrc2Cdelay">
               <item>
                <widget class="QSlider" name="sliderCrrc2Cdelay">
@@ -392,12 +380,12 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
               </item>
              </layout>
             </item>
-            <item row="2" column="0">
+            <item row="1" column="0">
              <widget class="QLabel" name="labelCrrc2Fdelay">
               <property name="text"><string>F delay:</string></property>
              </widget>
             </item>
-            <item row="2" column="1">
+            <item row="1" column="1">
              <layout class="QHBoxLayout" name="hCrrc2Fdelay">
               <item>
                <widget class="QSlider" name="sliderCrrc2Fdelay">
@@ -418,12 +406,12 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
               </item>
              </layout>
             </item>
-            <item row="3" column="0">
+            <item row="2" column="0">
              <widget class="QLabel" name="labelCrrc2Pzc">
               <property name="text"><string>PZC coeff:</string></property>
              </widget>
             </item>
-            <item row="3" column="1">
+            <item row="2" column="1">
              <layout class="QHBoxLayout" name="hCrrc2Pzc">
               <item>
                <widget class="QSlider" name="sliderCrrc2Pzc">

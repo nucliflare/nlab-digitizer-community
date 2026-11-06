@@ -15,7 +15,7 @@ from pypdf import PdfReader
 import nlab.analysis.psd_report as psd_report
 from nlab import __version__
 from nlab.analysis.capture_metadata import capture_digitizer_info
-from nlab.analysis.psd_fom import fit_psd_fom_lm
+from nlab.analysis.psd_fom import fit_psd_fom_lm, fit_psd_fom_separate_lm
 from nlab.analysis.psd_report import PsdReportRequest, export_psd_report
 
 
@@ -186,3 +186,59 @@ def test_capture_digitizer_info_marks_missing_identity(tmp_path: Path) -> None:
     path.write_bytes(b"capture")
 
     assert capture_digitizer_info(path) == {"device endpoint": "Not embedded in source file"}
+
+
+
+def test_separate_fit_report_records_ranges_and_excludes_valley(tmp_path: Path) -> None:
+    request = _request(tmp_path / "generated_events.bin")
+    edges = np.linspace(*request.ratio_range, request.matrix.shape[1] + 1)
+    ratio = (edges[:-1] + edges[1:]) / 2
+    fit = fit_psd_fom_separate_lm(
+        ratio, request.matrix[2:12].sum(axis=0),
+        rois=((-0.02, 0.26), (0.32, 0.68)), centroid_seeds=(0.12, 0.48),
+    )
+    bundle = export_psd_report(replace(request, fit=fit), tmp_path)
+    metadata = json.loads(bundle.metadata_json.read_text(encoding="utf-8"))
+    assert metadata["fit"]["mode"] == "separate"
+    assert metadata["fit"]["ratio_fit_regions"] == [[-0.02, 0.26], [0.32, 0.68]]
+    with bundle.fom_projection_csv.open(encoding="utf-8", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    gap = [row for row in rows if 0.26 < float(row["psd_ratio"]) < 0.32]
+    assert gap and all(row["included_in_fit"] == "0" for row in gap)
+    pdf = PdfReader(bundle.pdf)
+    assert len(pdf.pages) == 3
+    text = " ".join(" ".join(page.extract_text() or "" for page in pdf.pages).split())
+    assert "fitted independently" in text
+    assert "other population's tail" in text
+
+
+
+@pytest.mark.parametrize("mode", ("double", "separate"))
+def test_report_records_zero_offset_and_six_varied_parameters(tmp_path: Path, mode: str) -> None:
+    request = _request(tmp_path / "generated_zero_offset_test.bin")
+    edges = np.linspace(*request.ratio_range, request.matrix.shape[1] + 1)
+    ratio = (edges[:-1] + edges[1:]) / 2
+    counts = request.matrix[2:12].sum(axis=0)
+    if mode == "double":
+        fit = fit_psd_fom_lm(
+            ratio, counts, roi=(-0.05, 0.65), centroid_seeds=(0.12, 0.48),
+            use_background=False,
+        )
+    else:
+        fit = fit_psd_fom_separate_lm(
+            ratio, counts, rois=((-0.02, 0.26), (0.32, 0.68)),
+            centroid_seeds=(0.12, 0.48), use_background=False,
+        )
+    bundle = export_psd_report(replace(request, fit=fit), tmp_path)
+    metadata = json.loads(bundle.metadata_json.read_text(encoding="utf-8"))
+    assert metadata["fit"]["use_y0_offset"] is False
+    assert metadata["fit"]["varied_parameters"] == 6
+    with bundle.fom_projection_csv.open(encoding="utf-8", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    fitted = [row for row in rows if row["included_in_fit"] == "1"]
+    assert fitted and all(float(row["fitted_background"]) == 0 for row in fitted)
+    pdf = PdfReader(bundle.pdf)
+    assert len(pdf.pages) == 3
+    text = " ".join(" ".join(page.extract_text() or "" for page in pdf.pages).split())
+    assert "y0 offset is fixed to zero" in text
+    assert "6 varied parameters" in text

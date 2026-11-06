@@ -11,6 +11,7 @@ from nlab.hardware.digitizer.scope import TriggerMode
 from nlab.utils.settings_io import (
     FORMAT_VERSION,
     apply_channel_hardware,
+    apply_mca_hardware,
     channel_application_entry,
     channel_entry,
     collect_channel_hardware,
@@ -300,8 +301,33 @@ def test_apply_channel_hardware_includes_write_only_and_previously_missing_value
     mca.reconfigure_while_running.assert_called_once()
     mca.set_ext_trig_enable.assert_called_once_with(True)
     mca.set_dma_enable.assert_not_called()
-    mca.filters.lp.set_preset.assert_called_once_with(2)
+    mca.filters.lp.set_preset.assert_called_once_with(1)
     hv.set_hv_voltage.assert_called_once_with(500.0)
     hv.set_hv_compens_tref.assert_called_once_with(21.5)
     hv.set_sipm_enable.assert_called_once_with(1)
     hv.set_sipm_compens_mode.assert_called_once_with(2)
+
+
+@pytest.mark.parametrize(
+    "low_pass", [None, {}, {"preset": 0}, {"preset": 1}, {"preset": 2}, {"preset": "old"}]
+)
+def test_mca_settings_keep_fixed_low_pass_inside_reconfiguration(
+    low_pass: dict[str, object] | None,
+) -> None:
+    mca = Mock()
+    events: list[object] = []
+
+    def reconfigure(write) -> None:
+        events.append("stop")
+        write()
+        events.append("restart")
+
+    mca.reconfigure_while_running.side_effect = reconfigure
+    mca.filters.lp.set_preset.side_effect = lambda value: events.append(("low_pass", value))
+    settings = {"mca": {} if low_pass is None else {"low_pass": low_pass}}
+
+    apply_mca_hardware(mca, settings)
+
+    assert events == ["stop", ("low_pass", 1), "restart"]
+    mca.filters.lp.set_preset.assert_called_once_with(1)
+    mca.reconfigure_while_running.assert_called_once()

@@ -297,12 +297,15 @@ fingerprint must remain applicable after DSP or gain changes.
 
 ## MCA — input low-pass response {#mca-lowpass}
 
-The low-pass preset selects the available FIR response, including the labelled
-bandwidth presets or moving-average response. It can change pulse bandwidth,
-noise, and timing shape before subsequent processing.
+The MCA input FIR low-pass response is fixed at **70 MHz**. The application
+sets it on every channel during initialization, including after reconnecting.
+There is no filter selector; loading settings also keeps 70 MHz even if the
+saved document requests another preset.
 
-Recheck triggering and energy/PSD performance after changing it. The option
-label is not a measurement of your detector's actual pulse bandwidth.
+The response affects noise and pulse shape before subsequent processing.
+70 MHz names the filter preset, not a measurement of your detector's actual
+pulse bandwidth. Saved configurations and calibration fingerprints record
+this fixed response; calibrations made with another response may be stale.
 
 ## MCA — CR-RC² shaping {#mca-crrc}
 
@@ -495,8 +498,62 @@ or detector settings; a different selected population can change FOM by itself.
 
 **Fit** fits two ordered Gaussian populations plus a constant
 background to the selected ratio projection using Poisson-deviance residuals.
-It reports centroids, FWHMs, and
-`FOM = |mu2 - mu1| / (FWHM1 + FWHM2)`.
+The fitting functions, for PSD-ratio coordinate `x`, are:
+
+**Gaussian peak**
+
+$$
+G_i(x)=A_i\exp\!\left[-\frac{(x-\mu_i)^2}{2\sigma_i^2}\right]
+$$
+
+**Joint fit**
+
+$$
+m(x)=y_0+G_1(x)+G_2(x)
+$$
+
+**Separate fits**
+
+$$
+m_i(x)=y_{0,i}+G_i(x),\qquad x\in R_i
+$$
+
+**Widths and figure of merit**
+
+$$
+\mathrm{FWHM}_i=2\sqrt{2\ln 2}\,\sigma_i
+$$
+
+$$
+\mathrm{FOM}=\frac{|\mu_2-\mu_1|}{\mathrm{FWHM}_1+\mathrm{FWHM}_2}
+$$
+
+`mu_i` is the fitted centroid, `sigma_i` is the positive Gaussian width,
+and `A_i` is the peak height in counts per ratio bin, above its background.
+The Gaussians here describe the **count projection**, not individual waveform
+shapes or normalized probability densities. The offset `y0` is a constant count
+background. The [Use y0 offset](#fom-offset) checkbox chooses whether to fit it
+or fix it to zero. Joint mode uses one shared offset; separate mode uses one
+per selected range. FWHM is the width of the Gaussian above that background.
+
+FOM is dimensionless. A narrow, incorrectly fitted peak can produce an
+artificially large FOM. **Poor convergence** means the displayed separation
+is not yet trustworthy, even when the optimizer itself reports success.
+Inspect the [warning explanations and remedies](#fom-quality) before using it
+for comparisons, classification settings, or detector-performance claims.
+
+**Separate Gaussians** fits each population independently in its own colored
+ratio range, with its own constant background. Use it for well-separated peaks
+whose other population contributes negligible tails inside each fit range.
+The two ranges must be ordered and disjoint; the gap is excluded from the fit.
+With offsets enabled, reduced deviance uses eight varied parameters in separate
+mode and seven in joint mode. With offsets fixed to zero, either mode has six. Reports preserve the model and both ranges.
+Waveform gate optimization continues to require the joint fit mode.
+
+**Continuous fit** follows changed projections and completed guide edits using
+the latest data at most twice per second. Fits use a limited evaluation budget;
+manual **Fit** allows a longer optimization. Automatic updates coalesce and do
+not queue fit jobs. Turning continuous fitting off leaves manual fitting available.
 
 A larger FOM indicates greater fitted separation relative to the fitted widths
 for those selected events. It is not a classification efficiency, neutron
@@ -506,11 +563,29 @@ histogram resolution, and sample size all matter.
 Inspect [fit quality](#fom-quality) before accepting the number.
 **Copy table** copies the fit snapshot and diagnostics for comparison.
 
+## PSD — constant count offset y0 {#fom-offset}
+
+**Use y0 offset** is checked by default, preserving the original fit model.
+Checked: fit a non-negative constant background (`y0` in the joint model,
+or independent `y0_1`, `y0_2` in the separate windows). Unchecked: fix every
+offset to exactly zero and fit only peak heights, centroids, and widths.
+See the [Gaussian and FOM equations](#fom).
+
+Use zero offset when a zero count background is supported by the selected
+projection. Leaving a needless free background near its lower bound can make
+covariance estimation unreliable. Conversely, forcing zero when a real
+background exists can bias the fitted widths and FOM. Changing this checkbox
+invalidates the old fit and triggers a new one when continuous fitting is on.
+It changes the count model, not the waveform baseline or stored measurements.
+
 ## PSD — fit ROI and centroid guides {#fom-guides}
 
 The shaded fit region selects the ratio interval used by the Gaussian fit.
 Place the two centroid guides near the two candidate peaks, with enough of
 each distribution inside the fit ROI to constrain its width and background.
+In separate mode, drag the blue population-1 range and orange population-2 range
+independently, and keep each centroid guide inside its own range. Their bounds
+and the fit mode remain selected when histogram settings change.
 
 Guides are starting estimates, not imposed population means. Hiding draggable
 guides changes their visibility, not the underlying physics or a hardware gate.
@@ -518,15 +593,37 @@ These are ratio coordinates, distinct from the energy ROI and waveform time gate
 
 ## PSD — convergence and fit-quality warnings {#fom-quality}
 
-A solver returning a number is not sufficient. Inspect convergence, covariance,
-parameter bounds, count statistics, population significance, fitted widths,
-separation, and reduced Poisson deviance. The application reports suspect fits
-and gate optimization rejects fits that fail its trust checks.
+**Poor convergence** is a combined warning about numerical convergence or fit
+quality. It does not always mean the solver stopped early: the optimizer may
+converge while the model or its uncertainties remain unreliable. The listed
+reason identifies what needs attention.
 
-Reduced deviance measures model agreement relative to the fitted degrees of
-freedom. A large value can expose skew, background mismatch, or extra populations.
-A large FOM from a poor fit is not a qualified detector-performance result.
-Changing the ROI until a warning disappears is not independent validation.
+| Reported reason | Meaning and practical implication | What to check |
+| --- | --- | --- |
+| LM solver did not converge | The evaluation budget was exhausted or the solver could not settle. Centroids and widths may still move; FOM is provisional. | Place seeds near real peaks, improve the ranges and counts, and try manual Fit with its larger budget. |
+| Parameter covariance could not be estimated | Uncertainties are unavailable; the parameters may be poorly constrained or correlated, even with a plausible-looking curve. | Check counts, overlap, truncation, and whether a free y0 is needed. Do not invent error bars or treat missing uncertainties as zero. |
+| Reduced Poisson deviance indicates a poor Gaussian fit | The selected model disagrees with the observed shape. Skew, extra populations, non-constant background, or unmodeled overlap may bias the widths. | Inspect the shape and use joint mode for overlapping peaks; reconsider the model or physically justified selection. |
+| Fewer than 100 counts / less than 3-sigma peak significance | The selected peak has weak statistical support. The reported width or separation can fluctuate strongly. | Accumulate more events or use a physically appropriate energy selection. Separate mode checks each population independently. |
+| Centroid or width pinned near a bound | A fit may be using a range edge or constraint instead of measuring the full peak. Its apparent width can be misleading. | Keep each centroid inside its range and include both tails plus enough baseline to constrain y0. |
+| Width below histogram resolution | The fitted width is too narrow relative to the ratio-bin spacing to resolve reliably; FOM may be inflated. | Revisit histogram resolution and collect enough counts at that binning. |
+| Populations not independently resolved | The joint fit cannot distinguish the two populations cleanly, so their centroids and widths can trade off. | Improve statistics or selection; separate mode is appropriate only when the other peak's tail is negligible in each range. |
+
+The minimized objective uses signed Poisson-deviance residuals, including empty
+bins. Reduced deviance is their squared sum divided by `N - p`: `N` is the
+number of included ratio bins and `p` is 7 (joint, offset on), 8 (separate,
+offsets on), or 6 (either mode, offsets off). For separate fits the gap is
+excluded and the counts and varied parameters from the two ranges are added.
+A value near one can be consistent with the counting model, but is not proof
+that the detector model or Gaussian assumption is correct. The warning threshold
+above 3 is a diagnostic heuristic, not a confidence level or p-value.
+
+A large FOM from a poor fit is not a qualified detector-performance result:
+centroid separation, fitted widths, their uncertainties, and the resulting FOM
+may all be biased or unstable. The application keeps the numbers available
+with a warning, and waveform gate optimization rejects fits with warnings.
+Fix the underlying issue before comparing runs or quoting a separation result.
+Changing the range or disabling y0 merely to remove a warning is not independent
+validation; include enough tails and use selections justified by the data.
 
 ## Waveforms — offline reconstruction {#waveform}
 
