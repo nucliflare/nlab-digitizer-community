@@ -185,6 +185,8 @@ class MainWindowController:
                 self._devices.append(self._connect_channel(channel))
             log.info("All %d device(s) connected", len(self._devices))
 
+        self._selected_channel: int | None = None
+        self._active_channel_dock_host: QMainWindow | None = None
         self._scope_controllers: list[ScopeController] = []
         self._current_monitor_controllers: list[CurrentMonitorController] = []
         self._current_monitor_controller_by_device: dict[int, CurrentMonitorController] = {}
@@ -457,6 +459,8 @@ class MainWindowController:
         panel_name = obj_name.split("_", 1)[0]
         panel_name = panel_name.upper() if panel_name in {"mca", "psd"} else panel_name.title()
         self._bind_panel_status(widget, f"{panel_name} {title}", dock)
+        if self._dock_channel(dock) is not None:
+            dock.visibilityChanged.connect(partial(self._on_channel_dock_activated, dock))
         return dock
 
     def _bind_panel_status(
@@ -3653,9 +3657,62 @@ class MainWindowController:
                 log.warning("Ignoring invalid configured %s dock layout", name)
                 self._reset_dock_host(host)
 
+    def _channel_dock_hosts(self) -> tuple[tuple[QWidget, QMainWindow], ...]:
+        ui = self._window.ui
+        return (
+            (ui.tabScope, self._scope_dock_host),
+            (ui.tabCurrent, self._current_dock_host),
+            (ui.tabMCA, self._mca_dock_host),
+            (ui.tabPSD, self._psd_dock_host),
+            (ui.tabPSU, self._psu_dock_host),
+        )
+
+    def _current_channel_dock_host(self) -> QMainWindow | None:
+        page = self._window.ui.mainTabs.currentWidget()
+        return next((host for tab, host in self._channel_dock_hosts() if tab is page), None)
+
+    @staticmethod
+    def _dock_channel(dock: QDockWidget) -> int | None:
+        # Dock names contain the flat channel ID, independent of tab order or
+        # missing capabilities (e.g. PSD available only on the second channel).
+        workspace, separator, channel = dock.objectName().rpartition("_ch")
+        if separator and workspace in {"scope", "current", "mca", "psd", "psu"}:
+            if channel.isdecimal():
+                return int(channel)
+        return None
+
+    def _on_channel_dock_activated(self, dock: QDockWidget, visible: bool = True) -> None:
+        if not visible:
+            return
+        host = self._current_channel_dock_host()
+        if host is None or dock.parentWidget() is not host:
+            return
+        # Incoming docks become visible before mainTabs.currentChanged fires.
+        # Ignore that reveal so the destination's old tab cannot replace the
+        # channel chosen in the workspace we are leaving.
+        # If navigation started on a non-channel page, the first channel view
+        # seeds the selection from its restored tab when it becomes visible.
+        if self._selected_channel is not None and host is not self._active_channel_dock_host:
+            return
+        channel = self._dock_channel(dock)
+        if channel is not None:
+            self._selected_channel = channel
+
     def _connect_signals(self) -> None:
+        self._active_channel_dock_host = self._current_channel_dock_host()
+        for _page, host in self._channel_dock_hosts():
+            host.tabifiedDockWidgetActivated.connect(self._on_channel_dock_activated)
         self._window.ui.mainTabs.currentChanged.connect(self._on_tab_changed)
 
     def _on_tab_changed(self, index: int) -> None:
         tab_name = self._window.ui.mainTabs.tabText(index)
         log.info("Active tab: %s", tab_name)
+        host = self._current_channel_dock_host()
+        self._active_channel_dock_host = host
+        channel = self._selected_channel
+        if host is None or channel is None:
+            return
+        for dock in host.findChildren(QDockWidget):
+            if self._dock_channel(dock) == channel:
+                dock.raise_()
+                break

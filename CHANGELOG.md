@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep the selected digitizer/channel when switching between Scope, Current,
+  MCA, PSD, and PSU workspaces. Match channel identity rather than tab position,
+  retain it through non-channel workspaces and missing capabilities, and cover
+  navigation with offscreen Qt tests.
 - Schedule cyclic garbage collection on the GUI thread, so allocations during
   background FOM fits cannot destroy Qt plot/widget cycles from a worker and
   deadlock GUI cleanup. Collection remains periodic and restores the previous

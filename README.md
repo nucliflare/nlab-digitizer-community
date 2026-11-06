@@ -262,6 +262,10 @@ uv run python examples/measure_current.py
 - Dockable and floatable channel panels, including multi-monitor layouts
 - Scope, Current, MCA, PSD, Coincidence, PSU, Global, External, and System Log
   workspaces
+- Switching between Scope, Current, MCA, PSD, and PSU follows the selected
+  digitizer/channel, including CH0 and reordered channel tabs. If that channel
+  is unavailable in a workspace, its existing view stays selected and the
+  remembered channel is retained for the next workspace.
 - Matching launch and connection-progress splashes, showing startup stages
   while channels and instrument views are initialized
 - Save and restore hardware plus application settings in YAML
