@@ -60,7 +60,10 @@ def test_scope_widgets_are_driven_from_hardware_specs(qapp: QApplication) -> Non
     ui.setupUi(widget)
     controller = SimpleNamespace(
         ui=ui,
-        _scope=SimpleNamespace(specs=PARAMETER_SPECS),
+        _scope=SimpleNamespace(
+            specs=PARAMETER_SPECS,
+            supported_trigger_modes=lambda: tuple(TriggerMode(i) for i in range(5)),
+        ),
         _apply_range_to_spinbox=ScopeController._apply_range_to_spinbox,
         _apply_scaled_range_to_spinbox=ScopeController._apply_scaled_range_to_spinbox,
         _apply_range_to_slider=ScopeController._apply_range_to_slider,
@@ -97,6 +100,7 @@ def test_scope_widgets_are_driven_from_hardware_specs(qapp: QApplication) -> Non
 def _scope_model_for_controller() -> MagicMock:
     scope = MagicMock(spec=Scope)
     scope.specs = PARAMETER_SPECS
+    scope.supported_trigger_modes.return_value = tuple(TriggerMode(i) for i in range(5))
     scope.get_trigger_level.return_value = 0
     scope.get_dac_value.return_value = 512
     scope.get_pretrigger_samples.return_value = 32
@@ -254,6 +258,8 @@ def test_scope_dma_selection_is_application_configuration(qtbot: QtBot) -> None:
     controller = ScopeController(scope, scope_dma=None, channel=0)
     qtbot.addWidget(controller)
 
+    # Startup checks ownership; toggling this software selection must not.
+    scope.reset_mock()
     controller.ui.cbDmaEnable.setChecked(True)
     assert controller.configuration_settings()["dma_enabled"] is True
 
@@ -630,6 +636,7 @@ def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> No
     ui = Ui_MCAView()
     ui.setupUi(widget)
     mca = SimpleNamespace(
+        dc_blocker_supported=lambda: False,
         edge_det_coeff_is_hardware_backed=lambda: False,
         get_debug_signal_selectors=lambda: tuple(range(9)),
         filters=SimpleNamespace(crrc2=SimpleNamespace(supports_reciprocal_raw=lambda: True)),
@@ -720,21 +727,21 @@ def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> No
     for control in (
         ui.spinPretrigger,
         ui.spinFrameSamples,
-        ui.spinCrrc2Cdelay,
         ui.spinCrrc2Fdelay,
         ui.spinCfdDelay,
         ui.spinCfdTwLow,
         ui.spinCfdTwHigh,
         ui.spinTrapR,
         ui.spinTrapM,
-        ui.spinTrapT,
         ui.spinTrapE,
         ui.spinCcTime,
         ui.spinPsdZcLow,
         ui.spinPsdZcHigh,
     ):
-        assert control.suffix() == " ns"
-    assert ui.labelTrapT.text() == "Pole-zero time:"
+        assert control.suffix() == " samples"
+    assert ui.labelTrapT.text() == "Beta (raw):"
+    assert ui.spinTrapT.suffix() == ""
+    assert ui.spinCrrc2Cdelay.suffix() == " (exponent)"
     assert [ui.comboBinning.itemText(i) for i in range(10)] == [
         "1",
         "2",
@@ -763,10 +770,10 @@ def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> No
     _assert_all_spinboxes_and_combos_have_tooltips(widget)
 
 
-def test_iio_mca_raw_registers_are_exposed_as_physical_nanoseconds() -> None:
+def test_iio_mca_selector_and_beta_are_native_abi2_values() -> None:
     backend = object.__new__(IIODigitizerBackend)
     values = {
-        "crrc2_cdelay": "16",
+        "crrc2_cdelay": "3",
         "trapezoid_beta_raw": "1975780336",
     }
     backend._pp_attr_get = lambda name: values[name]  # type: ignore[method-assign]
@@ -774,12 +781,12 @@ def test_iio_mca_raw_registers_are_exposed_as_physical_nanoseconds() -> None:
         lambda name, value: values.__setitem__(name, value)
     )
 
-    assert backend.get_crrc2_Cdelay() == 128
-    backend.set_crrc2_Cdelay(64)
-    assert values["crrc2_cdelay"] == "8"
+    assert backend.get_crrc2_Cdelay() == 3
+    backend.set_crrc2_Cdelay(4)
+    assert values["crrc2_cdelay"] == "4"
 
-    assert backend.get_trapez_T() == 96
-    backend.set_trapez_T(96)
+    assert backend.get_trapez_T() == 1975780336
+    backend.set_trapez_T(1975780336)
     assert values["trapezoid_beta_raw"] == "1975780336"
     backend.set_trapez_T(0)
     assert values["trapezoid_beta_raw"] == "0"

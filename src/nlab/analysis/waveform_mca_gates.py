@@ -33,10 +33,10 @@ class WaveformGateSource:
             spec = MCA_PARAMETER_SPECS[param]
             assert isinstance(spec, RangeSpec)
             minimum, maximum, step = map(lambda x: Decimal(str(x)),
-                                         (spec.min_val, spec.max_val, spec.step))
-            if not minimum <= value <= maximum:
+                                         (spec.min_val * 2, spec.max_val * 2, spec.step * 2))
+            if not 0 <= value <= maximum:
                 raise ValueError(f"{param.name}: {value} ns outside {minimum}–{maximum} ns")
-            actual = minimum + ((value - minimum) / step).to_integral_value(
+            actual = minimum + ((max(value, minimum) - minimum) / step).to_integral_value(
                 rounding=ROUND_CEILING,
             ) * step
             if actual > maximum:

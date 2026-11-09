@@ -2521,6 +2521,23 @@ class MainWindowController:
         if path is not None:
             self._psd_readback_dialog.open_path(path)
 
+    def show_scope_sums(self, path: Path) -> None:
+        """Display a recorded sum capture in the Current workspace."""
+        if not self._current_monitor_controllers:
+            QMessageBox.information(
+                self._window, "Scope sums",
+                "Connect a device or open offline analysis to use Current."
+            )
+            return
+        controller = self._current_monitor_controllers[0]
+        controller.open_sum_capture(path)
+        self._window.ui.mainTabs.setCurrentWidget(self._window.ui.tabCurrent)
+        for dock in self._current_dock_host.findChildren(QDockWidget):
+            if dock.widget() is controller:
+                dock.show()
+                dock.raise_()
+                break
+
     def show_waveform_analysis(self, path: Path | None = None) -> None:
         """Open the waveform browser and offline PSD reconstruction workbench."""
         if self._waveform_analysis_dialog is None:

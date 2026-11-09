@@ -92,6 +92,28 @@ class MCABackend(ABC):
         )
 
     # ---- device info ----
+    def mca_parameter_contract(self) -> dict[str, object]:
+        return {}
+
+    def prepare_mca_configuration(self, values: dict[str, int]) -> None:
+        from ..mca_parameters import validate_parameters
+        validate_parameters(values, complete=True)
+
+    def mca_parameter_snapshot(self) -> dict[str, int]:
+        raise NotImplementedError("Backend does not expose native ABI2 settings")
+
+    def configure_mca_parameters(self, values: dict[str, int]) -> None:
+        raise NotImplementedError("Backend does not expose native ABI2 settings")
+
+    def supports_dc_blocker(self) -> bool:
+        return False
+
+    def get_dc_blocker_bypass(self) -> bool:
+        raise NotImplementedError("DC-blocker status is not advertised")
+
+    def set_dc_blocker_bypass(self, value: bool) -> None:
+        raise NotImplementedError("DC-blocker control is not advertised")
+
     @abstractmethod
     def get_hw_version(self) -> int: ...
 

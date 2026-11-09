@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 import yaml
 
+from nlab.hardware.digitizer.mca_parameters import DEFAULT_PARAMETERS
 from nlab.hardware.digitizer.scope import TriggerMode
 from nlab.utils.settings_io import (
     FORMAT_VERSION,
@@ -147,6 +148,10 @@ def test_nanosecond_settings_survive_yaml_save_and_load(tmp_path: Path) -> None:
     source_scope.get_dac_value.return_value = 7
 
     source_mca = Mock()
+    native = DEFAULT_PARAMETERS | {"pretrigger_samples": 32, "frame_samples": 4096,
+        "crrc2_cdelay": 4, "trapezoid_beta_raw": 0xffffffff}
+    source_mca.parameter_snapshot.return_value = native
+    source_mca.dc_blocker_supported.return_value = False
     source_mca.filters = SimpleNamespace(
         lp=Mock(),
         crrc2=Mock(),
@@ -209,21 +214,10 @@ def test_nanosecond_settings_survive_yaml_save_and_load(tmp_path: Path) -> None:
     assert saved_scope["frame_gap_ns"] == 9872
 
     saved_mca = loaded_channel["mca"]
-    assert saved_mca["signal"]["pretrigger_ns"] == 32
-    assert saved_mca["signal"]["frame_ns"] == 4096
-    assert saved_mca["crrc2"] == {
-        "cdelay_ns": 128, "fdelay_ns": 16, "pzc": 9, "reciprocal_raw": 4096,
-    }
-    assert saved_mca["cfd"]["delay_ns"] == 8
-    assert saved_mca["cfd"]["tw_low_ns"] == 16
-    assert saved_mca["cfd"]["tw_high_ns"] == 64
-    assert saved_mca["trapezoid"]["rise_ns"] == 64
-    assert saved_mca["trapezoid"]["flat_top_ns"] == 128
-    assert saved_mca["trapezoid"]["pole_zero_ns"] == 96
-    assert saved_mca["trapezoid"]["energy_time_ns"] == 256
-    assert saved_mca["charge_comparison"]["time_ns"] == 80
-    assert saved_mca["psd_zc"]["low_ns"] == 24
-    assert saved_mca["psd_zc"]["high_ns"] == 160
+    assert saved_mca["parameter_abi_version"] == 2
+    assert saved_mca["parameter_units"] == "adc_samples"
+    assert saved_mca["parameters"] == native
+    assert saved_mca["optional_parameters"] == {"crrc2_1cdelay_raw": 4096}
 
     target_scope = Mock()
     target_mca = Mock()
@@ -241,22 +235,8 @@ def test_nanosecond_settings_survive_yaml_save_and_load(tmp_path: Path) -> None:
     target_scope.set_pretrigger_samples.assert_called_once_with(24)
     target_scope.set_frame_samples.assert_called_once_with(1024)
     target_scope.set_frame_period_cycles.assert_called_once_with(1234)
-    target_mca.set_pretrigger_samples.assert_called_once_with(32)
-    target_mca.set_frame_samples.assert_called_once_with(4096)
-    target_mca.filters.crrc2.set_Cdelay.assert_called_once_with(128)
+    target_mca.configure_parameters.assert_called_once_with(native)
     target_mca.filters.crrc2.set_reciprocal_raw.assert_called_once_with(4096)
-    target_mca.filters.crrc2.set_Fdelay.assert_called_once_with(16)
-    target_mca.filters.cfd.set_delay.assert_called_once_with(8)
-    target_mca.filters.cfd.set_time_window_low.assert_called_once_with(16)
-    target_mca.filters.cfd.set_time_window_high.assert_called_once_with(64)
-    target_mca.filters.trapezoid.set_R.assert_called_once_with(64)
-    target_mca.filters.trapezoid.set_M.assert_called_once_with(128)
-    target_mca.filters.trapezoid.set_T.assert_called_once_with(96)
-    target_mca.filters.trapezoid.set_E.assert_called_once_with(256)
-    target_mca.filters.charge_comparison.set_time.assert_called_once_with(80)
-    target_mca.filters.psd_zc.set_time_window_low.assert_called_once_with(24)
-    target_mca.filters.psd_zc.set_time_window_high.assert_called_once_with(160)
-
 
 def test_apply_channel_hardware_includes_write_only_and_previously_missing_values() -> None:
     scope = Mock()
@@ -283,8 +263,9 @@ def test_apply_channel_hardware_includes_write_only_and_previously_missing_value
             "dma_enabled": True,
         },
         "mca": {
-            "signal": {"ext_trig_enable": True},
-            "acquisition": {"dma_enabled": False},
+            "parameter_abi_version": 2,
+            "parameter_units": "adc_samples",
+            "parameters": DEFAULT_PARAMETERS | {"external_trigger_enable": 1},
             "low_pass": {"preset": 2},
         },
         "psu": {
@@ -304,7 +285,9 @@ def test_apply_channel_hardware_includes_write_only_and_previously_missing_value
     scope.set_trigger_mode.assert_called_once_with(TriggerMode(1))
     scope.set_dma_enable.assert_not_called()
     mca.reconfigure_while_running.assert_called_once()
-    mca.set_ext_trig_enable.assert_called_once_with(True)
+    mca.configure_parameters.assert_called_once_with(
+        DEFAULT_PARAMETERS | {"external_trigger_enable": 1}
+    )
     mca.set_dma_enable.assert_not_called()
     mca.filters.lp.set_preset.assert_called_once_with(1)
     hv.set_hv_voltage.assert_called_once_with(500.0)
@@ -329,7 +312,8 @@ def test_mca_settings_keep_fixed_low_pass_inside_reconfiguration(
 
     mca.reconfigure_while_running.side_effect = reconfigure
     mca.filters.lp.set_preset.side_effect = lambda value: events.append(("low_pass", value))
-    settings = {"mca": {} if low_pass is None else {"low_pass": low_pass}}
+    settings = {"mca": {"parameter_abi_version": 2, "parameter_units": "adc_samples",
+                        "parameters": dict(DEFAULT_PARAMETERS), "low_pass": low_pass}}
 
     apply_mca_hardware(mca, settings)
 

@@ -16,6 +16,10 @@ class _Sync:
         self.writes: list[int] = []
         self.events: list[tuple[str, int | bool]] = []
 
+    def set_trig_src(self, value: int) -> None:
+        self.source = value
+        self.events.append(("source", value))
+
     def get_enable(self) -> bool:
         return self.enable
 
@@ -43,6 +47,12 @@ class _MCA:
     def get_global_enable(self) -> bool:
         return self._armed
 
+    def stop(self) -> None:
+        self._armed = False
+
+    def dma_active(self) -> bool:
+        return False
+
     def get_ext_trig_enable(self) -> bool:
         return self._external
 
@@ -50,7 +60,9 @@ class _MCA:
 def _controller(sync: _Sync, *mcas: _MCA) -> GlobalController:
     controller: Any = GlobalController.__new__(GlobalController)
     controller._sync = sync
-    controller._devices = tuple(SimpleNamespace(mca=mca) for mca in mcas)
+    controller._devices = tuple(
+        SimpleNamespace(mca=mca, mca_available=lambda: True) for mca in mcas
+    )
     controller._channel_labels = tuple(range(len(mcas)))
     controller.ui = SimpleNamespace(
         lblSoftwareState=SimpleNamespace(setText=Mock()),
@@ -94,8 +106,8 @@ def test_global_start_output_is_reset_to_safe_state_during_initialization() -> N
 
     controller._reset_sync_for_initialization()
 
-    assert sync.events == [("enable", False), ("software", 0)]
-    assert sync.enable is False
+    assert sync.events == [("enable", False), ("source", 0), ("software", 0), ("enable", True)]
+    assert sync.enable is True
     assert sync.software == 0
 
 
@@ -149,3 +161,13 @@ def test_temperature_readback_updates_global_panel() -> None:
     controller.ui.lblAppliedTempCoeff.setText.assert_called_once_with("-0.000534700")
     controller.ui.lblAppliedTempOffset.setText.assert_called_once_with("14")
     assert "2 MCA channel" in controller.ui.lblTemperatureStatus.setText.call_args.args[0]
+
+
+def test_shared_settings_refuse_armed_channels_before_routing_writes() -> None:
+    import pytest
+    sync = _Sync()
+    controller = _controller(sync, _MCA(armed=True), _MCA(armed=False))
+    controller._sync_available = True
+    with pytest.raises(RuntimeError, match="Stop both MCAs"):
+        controller.apply_hardware_configuration_settings({"trigger_source": 1, "enabled": False})
+    assert sync.events == []

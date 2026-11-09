@@ -123,7 +123,7 @@ The complete sessions and reference figures are published on
 
 ### Live current monitor
 
-Each channel has a **Current** workspace with two acquisition modes. The
+Each channel has a **Current** workspace with three acquisition modes (subject to firmware support). The
 monitor starts stopped and opens no polling or DMA transport until **Start
 monitor** is pressed.
 
@@ -131,8 +131,9 @@ monitor** is pressed.
 |---|---|---|---|
 | **IIR polling** | Signed FPGA input-filter output | Lightweight continuous scalar monitoring | Host-timed reads; the requested 1 kHz spacing is not a hardware-time grid |
 | **Scope DMA** | Complete timestamped Scope waveforms | Raw waveform inspection and sample-weighted interval statistics | Direct IIO only; owns Scope DMA while running |
+| **Periodic sums** | All-sample window sums | Window means, exposure, and lossless HDF5 recording | IP123/IP124; uses the Current plot with raw ADC-code readings |
 
-Both modes retain a rolling ten-second numeric history and support the saved
+IIR polling and Scope DMA retain a rolling ten-second numeric history and support the saved
 linear calibration `(raw - zero) * scale`. IIR and DMA expose different raw
 signals, so each sensor/front-end path must be calibrated appropriately before
 the display can be interpreted as A, mA, uA, nA, or pA.
@@ -153,21 +154,41 @@ wiki. Run the example with:
 uv run python examples/measure_current.py
 ```
 
+### Scope periodic sums (IP123/IP124)
+
+Select **Current > Periodic sums**, then **Start monitor** to use the existing Current plot. Periodic sums are not
+a selectable Scope waveform trigger. On startup, idle hardware left in sum mode
+returns to waveform defaults before applying the waveform pretrigger.
+**Window size** and **Window gap** are set directly in Current while stopped.
+The timing row shows the window duration and scheduled start interval. The sum monitor temporarily uses zero pretrigger
+and restores the waveform trigger, frame size, pretrigger, and gap after capture stops and DMA is released. Stop any
+existing Scope acquisition before opening it. Window length and gap determine the interval. The view plots measured
+window means, sample-weighted session means, exposure, and missed windows.
+It reports ADC codes; physical current needs qualified channel/DC calibration.
+Waveform persistence, single-frame viewing, and pulse analysis do not apply.
+
+**Stop and drain** retains accepted tail windows before closing the buffer.
+Optional HDF5 recording preserves original 4096-byte packets, exact uint64
+sums/timestamps, valid counts, geometry, identity, and cleanup/completion status.
+Use **Open sum capture** in Current or **File > Open Scope sum capture** for inline offline replay. Existing files are
+preserved. This is a separate format from NDMA waveforms and MCA list mode; see the
+[sum file specification](docs/scope-sum-format.md).
+
 ### MCA and PSD
 
-- The trapezoid panel shows **1/R (raw)** as a read-only value from the
-  driver, refreshed after applying R and loading hardware settings. The
-  driver derives it as `floor(32768 / (R_ns / 8 - 1))`; older modules show
-  **Unavailable** until `vdpp-mca` is rebuilt and deployed.
+- The current MCA interface requires **parameter ABI2 / adc_samples** before
+  startup configuration. Timing editors show native ADC samples (2 ns each);
+  debug plots retain ns axes. C delay is exponent 0..6; beta is a raw u32.
+  **1/R (calculated)** uses `32768 // (R_samples // 4)`; R=16 gives 8192.
+  An optional driver-advertised raw readback is labelled separately.
 - Applied MCA temperature coefficients are limited to signed Q1.15:
   **-1.0 through 0.999969482421875**, with rounding to the nearest register
   value. Out-of-range values (including +1.0) are rejected before writes.
   The Global panel keeps the base calibration coefficient's precision;
   the worker multiplies it by `temperature - 67` before applying this limit.
-- The CR-RC² panel includes a **1/C (raw)** slider and spin box for the
-  separate unsigned 16-bit coefficient. It is independent of C delay and
-  persists in hardware settings. The control requires the updated `vdpp-mca`
-  driver and is disabled when its IIO attribute is absent.
+- The current driver exposes no editable 1/C attribute; its optional control
+  stays disabled. The DC-blocker bypass is available independently, with explicit
+  input-path semantics. Scope sees raw ADC before MCA correction/filtering.
 - The MCA input low-pass filter is fixed at **70 MHz** for every channel. It is
   applied during initialization and reconnect; loading older settings cannot
   change it. The filter selector has been removed, and saved configurations
@@ -221,12 +242,15 @@ uv run python examples/measure_current.py
   These viewer selectors remain available while measurement settings are locked;
   replay and connection-loss protection still applies. Older drivers that reject
   a change report an error without restarting acquisition.
-- Synchronized stop/write/restart when changing MCA settings during acquisition
+- ABI2 requires explicit stop/configure/start for measurement settings; debug
+  selector changes remain live. A rejected/partial write stays stopped.
+  Histogram assemblies and measurement writes share one session lock. STOP does
+  not establish the deferred FPGA downstream-completion acknowledgement.
 - Numeric input widgets across the application, including dialogs, clamp
   out-of-range edits to the nearest boundary on Enter or focus loss. Discrete
   MCA/Scope hardware settings, external-device registers, and the Current DMA
   gap also snap to the nearest supported step; halfway values round up
-  (e.g. a 409 ns MCA window becomes 410 ns). Corrected values appear before
+  (e.g. a 409-sample MCA window becomes 408 samples). Corrected values appear before
   settings are written, with paired sliders kept in sync. Continuous float
   settings retain their precision; their arrow increment is not a validity
   constraint. Direct hardware API validation remains strict.
@@ -1567,3 +1591,18 @@ Technologies and are not covered by the MIT license.
 
 - [`nlab-modbus`](https://github.com/nucliflare/nlab-modbus) — Python support for the RS-485 Modbus instruments
 - [Eastern Wall Technologies](https://ewt.tech) — hardware manufacturer
+
+### Updated IIO settings and qualification
+
+Settings schema 5 carries a native MCA hardware block with
+`parameter_abi_version: 2`, `parameter_units: adc_samples`, and canonical
+`parameters`. Format 3/4 presentation data remains readable, but old MCA hardware
+presets are refused pending explicit review. No silent ns/selector conversion
+is applied. Beta no longer uses the old undocumented time adapter.
+
+`examples/verify_iio_update.py` performs read-only discovery by default. With
+`--exercise` it runs bounded register and sum tests and records restoration
+exceptions. Live tests on 192.168.10.128 (IP124, MCA ABI2) verified both channels'
+parameter boundaries, debug routing, sum STOP tails, and lossless reopening.
+They do not qualify detector response, physical A/B mapping, fault injection,
+or the deferred processing-completion fence.

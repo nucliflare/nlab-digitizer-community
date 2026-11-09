@@ -276,19 +276,19 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
             <layout class="QHBoxLayout" name="hFrameSamples">
              <item>
               <widget class="QSlider" name="sliderFrameSamples">
-               <property name="minimum"><number>0</number></property>
-               <property name="maximum"><number>8190</number></property>
-               <property name="singleStep"><number>2</number></property>
-               <property name="value"><number>256</number></property>
+               <property name="minimum"><number>4</number></property>
+               <property name="maximum"><number>4096</number></property>
+               <property name="singleStep"><number>4</number></property>
+               <property name="value"><number>128</number></property>
                <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
               </widget>
              </item>
              <item>
               <widget class="QSpinBox" name="spinFrameSamples">
-               <property name="minimum"><number>0</number></property>
-               <property name="maximum"><number>8190</number></property>
-               <property name="singleStep"><number>2</number></property>
-               <property name="value"><number>256</number></property>
+               <property name="minimum"><number>4</number></property>
+               <property name="maximum"><number>4096</number></property>
+               <property name="singleStep"><number>4</number></property>
+               <property name="value"><number>128</number></property>
               </widget>
              </item>
             </layout>
@@ -303,18 +303,18 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
              <item>
               <widget class="QSlider" name="sliderPretrigger">
                <property name="minimum"><number>0</number></property>
-               <property name="maximum"><number>4094</number></property>
-               <property name="singleStep"><number>2</number></property>
-               <property name="value"><number>24</number></property>
+               <property name="maximum"><number>2044</number></property>
+               <property name="singleStep"><number>4</number></property>
+               <property name="value"><number>12</number></property>
                <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
               </widget>
              </item>
              <item>
               <widget class="QSpinBox" name="spinPretrigger">
                <property name="minimum"><number>0</number></property>
-               <property name="maximum"><number>4094</number></property>
-               <property name="singleStep"><number>2</number></property>
-               <property name="value"><number>24</number></property>
+               <property name="maximum"><number>2044</number></property>
+               <property name="singleStep"><number>4</number></property>
+               <property name="value"><number>12</number></property>
               </widget>
              </item>
             </layout>
@@ -363,19 +363,19 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
              <layout class="QHBoxLayout" name="hCrrc2Cdelay">
               <item>
                <widget class="QSlider" name="sliderCrrc2Cdelay">
-                <property name="minimum"><number>8</number></property>
-                <property name="maximum"><number>504</number></property>
-                <property name="singleStep"><number>8</number></property>
-                <property name="value"><number>8</number></property>
+                <property name="minimum"><number>0</number></property>
+                <property name="maximum"><number>6</number></property>
+                <property name="singleStep"><number>1</number></property>
+                <property name="value"><number>3</number></property>
                 <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
                </widget>
               </item>
               <item>
                <widget class="QSpinBox" name="spinCrrc2Cdelay">
-                <property name="minimum"><number>8</number></property>
-                <property name="maximum"><number>504</number></property>
-                <property name="singleStep"><number>8</number></property>
-                <property name="value"><number>8</number></property>
+                <property name="minimum"><number>0</number></property>
+                <property name="maximum"><number>6</number></property>
+                <property name="singleStep"><number>1</number></property>
+                <property name="value"><number>3</number></property>
                </widget>
               </item>
              </layout>
@@ -411,19 +411,19 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
              <layout class="QHBoxLayout" name="hCrrc2Fdelay">
               <item>
                <widget class="QSlider" name="sliderCrrc2Fdelay">
-                <property name="minimum"><number>8</number></property>
-                <property name="maximum"><number>1016</number></property>
-                <property name="singleStep"><number>8</number></property>
-                <property name="value"><number>8</number></property>
+                <property name="minimum"><number>4</number></property>
+                <property name="maximum"><number>508</number></property>
+                <property name="singleStep"><number>4</number></property>
+                <property name="value"><number>4</number></property>
                 <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
                </widget>
               </item>
               <item>
                <widget class="QSpinBox" name="spinCrrc2Fdelay">
-                <property name="minimum"><number>8</number></property>
-                <property name="maximum"><number>1016</number></property>
-                <property name="singleStep"><number>8</number></property>
-                <property name="value"><number>8</number></property>
+                <property name="minimum"><number>4</number></property>
+                <property name="maximum"><number>508</number></property>
+                <property name="singleStep"><number>4</number></property>
+                <property name="value"><number>4</number></property>
                </widget>
               </item>
              </layout>
@@ -451,6 +451,12 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
                </widget>
               </item>
              </layout>
+            </item>
+            <item row="4" column="0" colspan="2">
+             <widget class="QCheckBox" name="cbDcBlockerBypass">
+              <property name="text"><string>Bypass DC blocker</string></property>
+              <property name="toolTip"><string>1 bypasses the DC blocker; 0 enables it. MCA path only; Scope observes raw ADC before the input filter.</string></property>
+             </widget>
             </item>
            </layout>
           </widget>
@@ -486,19 +492,19 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
              <layout class="QHBoxLayout" name="hCfdDelay">
               <item>
                <widget class="QSlider" name="sliderCfdDelay">
-                <property name="minimum"><number>0</number></property>
-                <property name="maximum"><number>254</number></property>
-                <property name="singleStep"><number>2</number></property>
-                <property name="value"><number>2</number></property>
+                <property name="minimum"><number>5</number></property>
+                <property name="maximum"><number>132</number></property>
+                <property name="singleStep"><number>1</number></property>
+                <property name="value"><number>5</number></property>
                 <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
                </widget>
               </item>
               <item>
                <widget class="QSpinBox" name="spinCfdDelay">
-                <property name="minimum"><number>0</number></property>
-                <property name="maximum"><number>254</number></property>
-                <property name="singleStep"><number>2</number></property>
-                <property name="value"><number>2</number></property>
+                <property name="minimum"><number>5</number></property>
+                <property name="maximum"><number>132</number></property>
+                <property name="singleStep"><number>1</number></property>
+                <property name="value"><number>5</number></property>
                </widget>
               </item>
              </layout>
@@ -511,9 +517,9 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
             <item row="3" column="1">
              <widget class="QSpinBox" name="spinCfdTwLow">
               <property name="minimum"><number>0</number></property>
-              <property name="maximum"><number>65534</number></property>
-              <property name="singleStep"><number>2</number></property>
-              <property name="value"><number>8</number></property>
+              <property name="maximum"><number>32764</number></property>
+              <property name="singleStep"><number>4</number></property>
+              <property name="value"><number>0</number></property>
              </widget>
             </item>
             <item row="4" column="0">
@@ -524,9 +530,9 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
             <item row="4" column="1">
              <widget class="QSpinBox" name="spinCfdTwHigh">
               <property name="minimum"><number>0</number></property>
-              <property name="maximum"><number>65534</number></property>
-              <property name="singleStep"><number>2</number></property>
-              <property name="value"><number>64</number></property>
+              <property name="maximum"><number>32764</number></property>
+              <property name="singleStep"><number>4</number></property>
+              <property name="value"><number>32</number></property>
              </widget>
             </item>
            </layout>
@@ -549,31 +555,31 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
              <layout class="QHBoxLayout" name="hTrapR">
               <item>
                <widget class="QSlider" name="sliderTrapR">
-                <property name="minimum"><number>16</number></property>
-                <property name="maximum"><number>4088</number></property>
-                <property name="singleStep"><number>8</number></property>
-                <property name="value"><number>64</number></property>
+                <property name="minimum"><number>8</number></property>
+                <property name="maximum"><number>2044</number></property>
+                <property name="singleStep"><number>4</number></property>
+                <property name="value"><number>32</number></property>
                 <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
                </widget>
               </item>
               <item>
                <widget class="QSpinBox" name="spinTrapR">
-                <property name="minimum"><number>16</number></property>
-                <property name="maximum"><number>4088</number></property>
-                <property name="singleStep"><number>8</number></property>
-                <property name="value"><number>64</number></property>
+                <property name="minimum"><number>8</number></property>
+                <property name="maximum"><number>2044</number></property>
+                <property name="singleStep"><number>4</number></property>
+                <property name="value"><number>32</number></property>
                </widget>
               </item>
              </layout>
             </item>
             <item row="2" column="0">
              <widget class="QLabel" name="labelTrapReciprocal">
-              <property name="text"><string>1/R (raw):</string></property>
+              <property name="text"><string>1/R (calculated):</string></property>
              </widget>
             </item>
             <item row="2" column="1">
              <widget class="QLabel" name="lblTrapReciprocal">
-              <property name="toolTip"><string>Read-only driver shadow, derived when R is applied: floor(32768 / (R_ns / 8 - 1)). This is a raw coefficient, not a reciprocal in 1/ns.</string></property>
+              <property name="toolTip"><string>Read-only driver shadow, derived when R is applied: floor(32768 / (R_samples / 4)). This is a raw coefficient, not a reciprocal in 1/ns.</string></property>
               <property name="text"><string>Unavailable</string></property>
               <property name="textInteractionFlags"><set>Qt::TextInteractionFlag::TextSelectableByMouse</set></property>
              </widget>
@@ -588,25 +594,25 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
               <item>
                <widget class="QSlider" name="sliderTrapM">
                 <property name="minimum"><number>0</number></property>
-                <property name="maximum"><number>4088</number></property>
-                <property name="singleStep"><number>8</number></property>
-                <property name="value"><number>64</number></property>
+                <property name="maximum"><number>2044</number></property>
+                <property name="singleStep"><number>4</number></property>
+                <property name="value"><number>32</number></property>
                 <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
                </widget>
               </item>
               <item>
                <widget class="QSpinBox" name="spinTrapM">
                 <property name="minimum"><number>0</number></property>
-                <property name="maximum"><number>4088</number></property>
-                <property name="singleStep"><number>8</number></property>
-                <property name="value"><number>64</number></property>
+                <property name="maximum"><number>2044</number></property>
+                <property name="singleStep"><number>4</number></property>
+                <property name="value"><number>32</number></property>
                </widget>
               </item>
              </layout>
             </item>
             <item row="4" column="0">
              <widget class="QLabel" name="labelTrapT">
-              <property name="text"><string>Pole-zero time:</string></property>
+              <property name="text"><string>Beta (raw):</string></property>
              </widget>
             </item>
             <item row="4" column="1">
@@ -614,7 +620,7 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
               <property name="decimals"><number>0</number></property>
               <property name="minimum"><double>0</double></property>
               <property name="maximum"><double>4294967295</double></property>
-              <property name="value"><double>96</double></property>
+              <property name="value"><double>0</double></property>
              </widget>
             </item>
             <item row="5" column="0">
@@ -627,18 +633,18 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
               <item>
                <widget class="QSlider" name="sliderTrapE">
                 <property name="minimum"><number>0</number></property>
-                <property name="maximum"><number>16376</number></property>
-                <property name="singleStep"><number>8</number></property>
-                <property name="value"><number>256</number></property>
+                <property name="maximum"><number>8188</number></property>
+                <property name="singleStep"><number>4</number></property>
+                <property name="value"><number>64</number></property>
                 <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
                </widget>
               </item>
               <item>
                <widget class="QSpinBox" name="spinTrapE">
                 <property name="minimum"><number>0</number></property>
-                <property name="maximum"><number>16376</number></property>
-                <property name="singleStep"><number>8</number></property>
-                <property name="value"><number>256</number></property>
+                <property name="maximum"><number>8188</number></property>
+                <property name="singleStep"><number>4</number></property>
+                <property name="value"><number>64</number></property>
                </widget>
               </item>
              </layout>
@@ -675,10 +681,10 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
                </item>
                <item row="1" column="1">
                 <widget class="QSpinBox" name="spinCcTime">
-                 <property name="minimum"><number>0</number></property>
-                 <property name="maximum"><number>65534</number></property>
-                 <property name="singleStep"><number>2</number></property>
-                 <property name="value"><number>8</number></property>
+                 <property name="minimum"><number>4</number></property>
+                 <property name="maximum"><number>32768</number></property>
+                 <property name="singleStep"><number>4</number></property>
+                 <property name="value"><number>4</number></property>
                 </widget>
                </item>
               </layout>
@@ -713,9 +719,9 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
                <item row="2" column="1">
                 <widget class="QSpinBox" name="spinPsdZcLow">
                  <property name="minimum"><number>0</number></property>
-                 <property name="maximum"><number>65534</number></property>
-                 <property name="singleStep"><number>2</number></property>
-                 <property name="value"><number>8</number></property>
+                 <property name="maximum"><number>32764</number></property>
+                 <property name="singleStep"><number>4</number></property>
+                 <property name="value"><number>0</number></property>
                 </widget>
                </item>
                <item row="3" column="0">
@@ -726,9 +732,9 @@ QPushButton:disabled { background-color: #EF9A9A; color: #E0E0E0; }</string></pr
                <item row="3" column="1">
                 <widget class="QSpinBox" name="spinPsdZcHigh">
                  <property name="minimum"><number>0</number></property>
-                 <property name="maximum"><number>65534</number></property>
-                 <property name="singleStep"><number>2</number></property>
-                 <property name="value"><number>16</number></property>
+                 <property name="maximum"><number>32764</number></property>
+                 <property name="singleStep"><number>4</number></property>
+                 <property name="value"><number>8</number></property>
                 </widget>
                </item>
               </layout>

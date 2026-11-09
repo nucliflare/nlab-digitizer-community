@@ -266,7 +266,7 @@ def test_dma_finish_unlocks_file_button_after_psd_session(
     controller.ui.btnDmaFile.setEnabled.assert_called_once_with(True)
 
 
-def test_live_reconfiguration_restarts_after_failed_write() -> None:
+def test_live_reconfiguration_stays_stopped_after_failed_write() -> None:
     backend = _Backend()
     mca = MultiChannelAnalyzer(backend)  # type: ignore[arg-type]
 
@@ -277,8 +277,8 @@ def test_live_reconfiguration_restarts_after_failed_write() -> None:
     with pytest.raises(ValueError, match="bad setting"):
         mca.reconfigure_while_running(fail)
 
-    assert backend.events == [("enable", False), "write", ("enable", True)]
-    assert backend.enabled is True
+    assert backend.events == [("enable", False), "write"]
+    assert backend.enabled is False
 
 
 def test_completion_poll_cannot_observe_reconfiguration_stop() -> None:
@@ -390,6 +390,7 @@ def test_polling_start_clears_enable_before_writing_time_limit() -> None:
     mca.start.side_effect = lambda: events.append("start")
     start_worker = Mock(side_effect=lambda: events.append("worker"))
     controller = SimpleNamespace(
+        _set_controls_enabled=Mock(),
         _mca=mca,
         _channel=0,
         _start_worker=start_worker,
@@ -488,7 +489,8 @@ def test_dma_output_and_psd_interception_are_independent(
         _event_buffer=event_buffer,
         _channel=0,
         _mca=Mock(),
-        _mca_dma=IIOMcaDmaStreamer(backend=Mock(), channel=0),
+        _mca_dma=IIOMcaDmaStreamer(backend=Mock(mca_producer_identity=lambda: {
+            "qualified_record_schema": "vdpp-zc-calc-q2.14-v1"}), channel=0),
         _measurement_configuration=lambda: {},
         _generate_filepath=Mock(return_value=destination),
         _output_mode=lambda: mode,

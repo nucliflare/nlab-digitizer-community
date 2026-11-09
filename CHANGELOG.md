@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Current periodic sums have dedicated window-size and window-gap controls,
+  duration/interval preview, saved window size, and Scope frame restoration.
+- Capability-gated IP123/IP124 Scope periodic-sum analysis, measured window means,
+  sample-weighted summaries, bounded display history, joined cancellation, and
+  versioned lossless HDF5 recording/offline replay.
+- MCA ABI2 discovery/idle acknowledgement, native ADC-sample controls, C-delay
+  exponent, raw beta, calculated 1/R, and explicit DC-blocker bypass.
+- An opt-in maintained live smoke test for both IIO channels.
+
+### Changed
+
+- Periodic sums use the existing Current plot and Start/Stop controls, with
+  inline HDF5 recording/replay and waveform trigger settings restored after
+  stop/drain; Scope no longer offers this non-waveform trigger.
+- Settings schema 5 records MCA ABI/units and canonical parameters. Old MCA
+  hardware presets require explicit review; presentation settings stay readable.
+- Measurement settings require explicit stop/configure/start on ABI2. Debug
+  routing remains live; event decoding is bound to producer identity.
+
+### Fixed
+
+- Scope startup/reset leaves periodic-sum mode before restoring nonzero waveform
+  pretrigger, stops stale acquisition, and preserves an active DMA owner.
+- Shared histogram/configuration serialization, failed-write restart/rollback,
+  propagated LM drain/release errors, poison checks, common START bypass semantics,
+  native gate transfer, debug timing/cropping, and calibration fingerprints.
+- Sum packets retain valid STOP tail records without waveform reinterpretation.
+
+
 ## [0.8.2] — 2026-11-06
 
 ### Added

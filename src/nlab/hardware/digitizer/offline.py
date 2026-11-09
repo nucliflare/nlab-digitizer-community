@@ -19,9 +19,44 @@ from nlab.hardware.digitizer.backends.base import DigitizerBackend, IDSBackend
 from nlab.hardware.digitizer.digitizer import Digitizer
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer
 from nlab.hardware.digitizer.mca import MCA_DEBUG_SIGNAL_SELECTORS
+from nlab.hardware.digitizer.mca_parameters import DEFAULT_PARAMETERS, validate_parameters
 
 if TYPE_CHECKING:
     from nlab.hardware.digitizer.diagnostics import GlobalDiagnosticReading
+
+
+_MCA_ALIASES = {
+    "external_trigger_enable": "ext_trig_enable",
+    "measurement_time_raw": "time_limit",
+    "trigger_source": "trg_source",
+    "trigger_level_raw": "dpp_trigger_level",
+    "pulse_polarity": "pulse_polarity",
+    "baseline_window": "bsln_window",
+    "pileup_window_raw": "pileup_window",
+    "energy_bin": "energy_bin",
+    "pretrigger_samples": "dpp_pretrigger_samples",
+    "frame_samples": "dpp_frame_samples",
+    "cfd_enable": "cfd_enable",
+    "cfd_factor_raw": "cfd_factor",
+    "cfd_delay_samples": "cfd_delay",
+    "cfd_window_low_samples": "cfd_time_window_low",
+    "cfd_window_high_samples": "cfd_time_window_high",
+    "charge_comparison_enable": "cc_enable",
+    "charge_comparison_samples": "cc_time",
+    "crrc2_cdelay": "crrc2_Cdelay",
+    "crrc2_fdelay_samples": "crrc2_Fdelay",
+    "crrc2_pzc_raw": "crrc2_pzc_coeff",
+    "trapezoid_enable": "trapez_enable",
+    "trapezoid_r_samples": "trapez_R",
+    "trapezoid_m_samples": "trapez_M",
+    "trapezoid_beta_raw": "trapez_T",
+    "trapezoid_start_offset_samples": "trapez_E",
+    "trapezoid_flat_top_window": "trapez_FT",
+    "psd_zero_crossing_enable": "psd_zc_enable",
+    "psd_zero_crossing_mode": "psd_zc_mode",
+    "psd_window_low_samples": "psd_zc_time_window_low",
+    "psd_window_high_samples": "psd_zc_time_window_high",
+}
 
 
 class _OfflineDigitizerBackend:
@@ -30,6 +65,40 @@ class _OfflineDigitizerBackend:
     def __init__(self, channel: int) -> None:
         self.channel = channel
         self._values: dict[str, object] = {}
+        self.configure_mca_parameters(dict(DEFAULT_PARAMETERS))
+
+    def get_scope_trigger_modes(self) -> tuple[int, ...]:
+        return tuple(range(5))
+
+    def mca_parameter_contract(self) -> dict[str, object]:
+        return {"supported": True, "parameter_abi_version": 2, "parameter_units": "adc_samples"}
+
+    def prepare_mca_configuration(self, values: dict[str, int]) -> None:
+        validate_parameters(values, complete=True)
+
+    def mca_parameter_snapshot(self) -> dict[str, int]:
+        result = {}
+        for field, alias in _MCA_ALIASES.items():
+            value = cast(int | float, self._values.get(alias, DEFAULT_PARAMETERS[field]))
+            if field == "cfd_factor_raw":
+                value = round(float(value) * 32768)
+            elif field == "measurement_time_raw":
+                value = round(float(value) / 0.134217728)
+            result[field] = int(value)
+        return result
+
+    def configure_mca_parameters(self, values: dict[str, int]) -> None:
+        validate_parameters(values)
+        for field, value in values.items():
+            actual = (
+                value / 32768
+                if field == "cfd_factor_raw"
+                else (value * 0.134217728 if field == "measurement_time_raw" else value)
+            )
+            if field == "trapezoid_r_samples":
+                self.set_trapez_R(value)
+            else:
+                self._values[_MCA_ALIASES[field]] = actual
 
     def __getattr__(self, name: str) -> Callable[..., object]:
         if name.startswith("set_"):
@@ -70,7 +139,7 @@ class _OfflineDigitizerBackend:
 
     def get_mem_frame_sizes(self) -> np.ndarray:
         configured = self._values.get("dpp_frame_samples", 256)
-        samples = (configured if isinstance(configured, int) else 256) // 2
+        samples = (configured if isinstance(configured, int) else 256) // 4
         return np.full(2, max(1, samples), dtype=np.uint32)
 
     def get_debug_signal_selectors(self) -> tuple[int, ...]:
@@ -111,8 +180,11 @@ class _OfflineDigitizerBackend:
     def get_viewer_frame_samples_limit(self) -> int | None:
         return None
 
+    def supports_dc_blocker(self) -> bool:
+        return True
+
     def supports_crrc2_reciprocal_raw(self) -> bool:
-        return True  # In-memory settings only; offline controls remain interlocked.
+        return True
 
     def supports_trapezoid_reciprocal_raw(self) -> bool:
         return True
@@ -122,10 +194,10 @@ class _OfflineDigitizerBackend:
 
     def set_trapez_R(self, val: int) -> None:  # noqa: N802 - Existing backend API.
         # Emulate only the documented register dependency, not the DSP output.
-        if not isinstance(val, int) or not 16 <= val <= 4088 or val % 8:
-            raise ValueError("trapezoid R must be 16..4088 ns in steps of 8 ns")
+        if type(val) is not int or not 8 <= val <= 2044 or val % 4:
+            raise ValueError("trapezoid R must be 8..2044 ADC samples in steps of 4")
         self._values["trapez_R"] = val
-        self._values["trapezoid_reciprocal_raw"] = 32768 // (val // 8 - 1)
+        self._values["trapezoid_reciprocal_raw"] = 32768 // (val // 4)
 
     def edge_det_coeff_is_hardware_backed(self) -> bool:
         return False
@@ -239,12 +311,8 @@ class OfflineExternalDevice:
             default_stop = max(input_addresses, default=-1) + 1
             saved_start = schema_map.get("readout_start")
             saved_stop = schema_map.get("readout_stop")
-            self.READOUT_START = (
-                int(saved_start) if isinstance(saved_start, int) else default_start
-            )
-            self.READOUT_STOP = (
-                int(saved_stop) if isinstance(saved_stop, int) else default_stop
-            )
+            self.READOUT_START = int(saved_start) if isinstance(saved_start, int) else default_start
+            self.READOUT_STOP = int(saved_stop) if isinstance(saved_stop, int) else default_stop
         else:
             for address, (name, value) in enumerate(sorted(telemetry_values.items())):
                 register_map[name] = _register_spec(RegisterType.INPUT, address, value)
@@ -267,9 +335,7 @@ class OfflineExternalDevice:
             return {}
         result: dict[str, RegisterSpec] = {}
         for document in documents:
-            if not isinstance(document, Mapping) or not isinstance(
-                document.get("name"), str
-            ):
+            if not isinstance(document, Mapping) or not isinstance(document.get("name"), str):
                 continue
             try:
                 result[str(document["name"])] = RegisterSpec(
@@ -280,14 +346,8 @@ class OfflineExternalDevice:
                     max=int(document["max"]),
                     count=int(document.get("count", 1)),
                     scale=float(document.get("scale", 1.0)),
-                    unit=(
-                        str(document["unit"])
-                        if document.get("unit") is not None
-                        else None
-                    ),
-                    password_protected=bool(
-                        document.get("password_protected", False)
-                    ),
+                    unit=(str(document["unit"]) if document.get("unit") is not None else None),
+                    password_protected=bool(document.get("password_protected", False)),
                     description=str(document.get("description", "")),
                 )
             except (KeyError, TypeError, ValueError):

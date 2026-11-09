@@ -53,6 +53,7 @@ from nlab.workers.scope_auto_setup_worker import (
     ScopeAutoSetupResult,
     ScopeAutoSetupWorker,
 )
+from nlab.workers.scope_sum_worker import ScopeSumWorker
 from nlab.workers.scope_worker import ScopeWorker
 
 log = logging.getLogger(__name__)
@@ -143,6 +144,8 @@ class ScopeController(QWidget):
         super().__init__(parent)
         self._scope = scope
         self._scope_dma = scope_dma
+        self._sum_worker: ScopeSumWorker | None = None
+        self._sum_previous_settings: tuple[TriggerMode, int, int, int] | None = None
         self._dma_frame_buffer = dma_frame_buffer
         self._current_accumulator = current_accumulator
         self._channel = channel
@@ -198,6 +201,7 @@ class ScopeController(QWidget):
         self._update_frame_gap_enabled()
         self._update_viewer_transport_hint()
         self.ui.btnStop.setEnabled(False)
+        self._configure_sum_controls()
 
     @property
     def channel(self) -> int:
@@ -275,6 +279,13 @@ class ScopeController(QWidget):
         )
         self.ui.labelFrameGap.setText("Periodic gap:")
 
+        self.ui.comboTriggerMode.clear()
+        for mode in self._scope.supported_trigger_modes():
+            if mode == TriggerMode.PERIODIC_SUM:
+                continue  # Structured current measurements are not Scope waveforms.
+            label = {0: "Any above", 1: "Any below", 2: "Falling edge",
+                     3: "Rising edge", 4: "Periodic"}[int(mode)]
+            self.ui.comboTriggerMode.addItem(label, int(mode))
         spec = specs[ScopeParam.EDGE_MODE]
         assert isinstance(spec, ListSpec)
         if spec.default in spec.items:
@@ -315,6 +326,14 @@ class ScopeController(QWidget):
 
     def _send_defaults(self) -> None:
         specs = self._scope.specs
+        if self._scope.dma_active():
+            raise RuntimeError("stop the active Scope DMA session before applying defaults")
+        if self._scope.get_enable():
+            self._scope.stop()
+        # vdpp-scope.c pretrigger_samples_store() rejects nonzero pretrigger
+        # in mode 5. Leave a previous sum session before restoring waveform
+        # geometry; trigger_mode_store() also requires sum acquisition stopped.
+        self._scope.set_trigger_mode(TriggerMode(int(specs[ScopeParam.EDGE_MODE].default)))
         self._scope.set_trigger_level(int(specs[ScopeParam.TRIGGER_LEVEL].default))
         self._scope.set_dac_value(int(specs[ScopeParam.DAC_VALUE].default))
         self._scope.set_pretrigger_samples(int(specs[ScopeParam.PRETRIGGER_SAMPLES].default))
@@ -322,7 +341,6 @@ class ScopeController(QWidget):
         self._scope.set_frame_period_cycles(
             int(specs[ScopeParam.FRAME_PERIOD_CYCLES].default)
         )
-        self._scope.set_trigger_mode(TriggerMode(specs[ScopeParam.EDGE_MODE].default))
 
     def _load_hardware_state(self) -> None:
         self.ui.spinTriggerLevel.setValue(self._scope.get_trigger_level())
@@ -344,7 +362,7 @@ class ScopeController(QWidget):
             (self.ui.sliderFrameGap, self.ui.spinFrameGap),
         ):
             slider.setValue(spinbox.value())
-        self.ui.comboTriggerMode.setCurrentIndex(self._scope.get_trigger_mode().value)
+        self.ui.comboTriggerMode.setCurrentIndex(self.ui.comboTriggerMode.findData(self._scope.get_trigger_mode().value))
 
     # ------------------------------------------------------------------
     # Display settings persistence
@@ -601,7 +619,8 @@ class ScopeController(QWidget):
         if self._replay_hardware_interlocked:
             raise RuntimeError("exit session replay before resetting Scope defaults")
         if (
-            self._auto_setup_thread is not None
+            self._sum_worker is not None
+            or self._auto_setup_thread is not None
             or self._dma_worker is not None
             or self._dma_thread is not None
             or self._refresh_timer.isActive()
@@ -990,8 +1009,135 @@ class ScopeController(QWidget):
     def _on_trigger_mode_changed(self, index: int) -> None:
         if self._replay_hardware_interlocked:
             return
-        self._scope.set_trigger_mode(TriggerMode(index))
+        value = self.ui.comboTriggerMode.itemData(index)
+        if value is None:
+            return
+        mode = TriggerMode(value)
+        self._scope.set_trigger_mode(mode)
+        self._configure_sum_controls()
         self._update_frame_gap_enabled()
+
+    def _configure_sum_controls(self) -> None:
+        is_sum = self._scope.get_trigger_mode() == TriggerMode.PERIODIC_SUM
+        for control in (self.ui.spinPretrigger, self.ui.sliderPretrigger,
+                        self.ui.btnAcquireFrame, self.ui.btnAutoSetup):
+            control.setEnabled(not is_sum and not self._replay_hardware_interlocked)
+        self.ui.cbDmaEnable.setEnabled(not is_sum and not self._replay_hardware_interlocked)
+        if is_sum:
+            self._raw_curve.clear()
+            self.status.setText(
+                "Periodic sums belong to Current. Select a waveform trigger "
+                "to use Scope."
+            )
+
+    def current_sum_supported(self) -> bool:
+        """Whether Current can acquire structured periodic sums on this channel."""
+        return (
+            self._scope_dma is not None
+            and TriggerMode.PERIODIC_SUM in self._scope.supported_trigger_modes()
+        )
+
+    def start_current_sum_monitor(
+        self, *, gap_cycles: int, frame_samples: int | None = None, output: Path | None = None
+    ) -> ScopeSumWorker:
+        """Reserve/configure Scope DMA; Current renders its bounded analysis."""
+        if self._replay_hardware_interlocked or self._session_replay_active:
+            raise RuntimeError("exit session replay before starting periodic sums")
+        if not self.current_sum_supported():
+            raise RuntimeError("periodic sums require supported IP123/IP124 Scope DMA")
+        if (
+            self._sum_worker is not None
+            or self._auto_setup_thread is not None
+            or self._dma_worker is not None
+            or self._dma_thread is not None
+            or self._acquiring
+            or self.measurement_active
+            or self._refresh_timer.isActive()
+            or self._scope.get_enable()
+            or self._scope.dma_active()
+        ):
+            raise RuntimeError("stop the active Scope acquisition before starting periodic sums")
+        mode = self._scope.get_trigger_mode()
+        if mode == TriggerMode.PERIODIC_SUM:
+            raise RuntimeError("select a waveform trigger in Scope before starting periodic sums")
+        previous_frame = self._scope.get_frame_samples()
+        selected_frame = previous_frame if frame_samples is None else frame_samples
+        self._scope.specs[ScopeParam.FRAME_SAMPLES].validate(selected_frame, "frame_samples")
+        self._scope.specs[ScopeParam.FRAME_PERIOD_CYCLES].validate(
+            gap_cycles, "frame_period_cycles"
+        )
+        self._sum_previous_settings = (
+            mode, self._scope.get_pretrigger_samples(), self._scope.get_frame_period_cycles(),
+            previous_frame,
+        )
+        assert self._scope_dma is not None
+        worker = None
+        try:
+            self._scope.set_pretrigger_samples(0)
+            self._scope.set_frame_samples(selected_frame)
+            self._scope.set_trigger_mode(TriggerMode.PERIODIC_SUM)
+            self._scope.set_frame_period_cycles(gap_cycles)
+            worker = ScopeSumWorker(capture=self._scope_dma.create_sum_capture())
+            self._sum_worker = worker
+            self._set_sum_controls_busy(True)
+            worker.start(output)
+            self._set_measurement_active(True)
+            return worker
+        except Exception:
+            if worker is not None:
+                worker.request_stop()
+                worker.join()
+            self._sum_worker = None
+            self._restore_current_sum_settings()
+            raise
+
+    def _set_sum_controls_busy(self, busy: bool) -> None:
+        enabled = not busy and not self._replay_hardware_interlocked
+        self._set_controls_enabled(enabled)
+        for control in (
+            self.ui.btnStart, self.ui.btnAcquireFrame, self.ui.btnAutoSetup, self.ui.btnDmaFile
+        ):
+            control.setEnabled(enabled)
+        self.ui.btnStop.setEnabled(False)
+        self._configure_sum_controls()
+
+    def finish_current_sum_monitor(self) -> None:
+        """GUI-thread completion, after the reader has drained and released DMA."""
+        worker = self._sum_worker
+        if worker is None or not worker.done:
+            return
+        worker.join()
+        self._sum_worker = None
+        try:
+            self._restore_current_sum_settings()
+        except Exception as exc:
+            worker.error = (worker.error + "; " if worker.error else "") + f"Restore: {exc}"
+        finally:
+            self._set_measurement_active(False)
+        self.status.setText(worker.message)
+
+    def _restore_current_sum_settings(self) -> None:
+        previous = self._sum_previous_settings
+        if previous is None:
+            return
+        self._sum_previous_settings = None
+        # Release the reader and restore before Digitizer.close().
+        mode, pretrigger, gap, frame = previous
+        self._scope.set_trigger_mode(mode)
+        self._scope.set_frame_samples(frame)
+        self._scope.set_pretrigger_samples(pretrigger)
+        self._scope.set_frame_period_cycles(gap)
+        self._set_sum_controls_busy(False)
+        self.status.setText("Current periodic sums stopped; Scope waveform settings restored.")
+
+    def stop_current_sum_monitor(self, *, wait: bool = False) -> None:
+        """Stop/drain Current sums; shutdown joins before restoring settings."""
+        worker = getattr(self, "_sum_worker", None)
+        if worker is not None:
+            worker.request_stop()
+            if wait:
+                worker.join()
+                self.finish_current_sum_monitor()
 
     def _on_pretrigger_committed(self) -> None:
         if self._replay_hardware_interlocked:
@@ -1008,7 +1154,7 @@ class ScopeController(QWidget):
         )
 
     def _update_frame_gap_enabled(self) -> None:
-        periodic = self.ui.comboTriggerMode.currentIndex() == TriggerMode.TIMED
+        periodic = self.ui.comboTriggerMode.currentData() == int(TriggerMode.TIMED)
         enabled = periodic and self._scope.frame_period_cycles_supported()
         self.ui.labelFrameGap.setEnabled(enabled)
         self.ui.spinFrameGap.setEnabled(enabled)
@@ -1074,6 +1220,8 @@ class ScopeController(QWidget):
                 "Scope DMA current monitoring requires the direct IIO backend "
                 "with periodic-frame support"
             )
+        if self._sum_worker is not None:
+            raise RuntimeError("Current periodic sums already own the Scope transport")
         if self._auto_setup_thread is not None:
             raise RuntimeError("Scope Auto Setup is active")
         if self._dma_worker is not None or self._dma_thread is not None:
@@ -1214,6 +1362,14 @@ class ScopeController(QWidget):
                 "Exit session replay before starting live Scope acquisition"
             )
             return
+        if (
+            self._sum_worker is not None
+            or self._scope.get_trigger_mode() == TriggerMode.PERIODIC_SUM
+        ):
+            self.status.setText(
+                "Stop Current periodic sums and select a waveform trigger to use Scope."
+            )
+            return
         self._raw_curve.cancelDrag()
         self._cancel_pretrigger_line_drag()
         if self._waveform_pending_status is not None:
@@ -1337,6 +1493,10 @@ class ScopeController(QWidget):
         log.info("Scope ch%d: IIO DMA + acquisition started", self._channel)
 
     def _on_stop(self) -> None:
+        if getattr(self, "_sum_worker", None) is not None:
+            self.stop_current_sum_monitor()
+            self.status.setText("Stopping Current periodic sums; draining accepted windows...")
+            return
         self._raw_curve.cancelDrag()
         self._cancel_pretrigger_line_drag()
         if self._waveform_pending_status is not None:
@@ -1527,6 +1687,8 @@ class ScopeController(QWidget):
             self._refresh_timer.setInterval(1000 // value)
 
     def _request_frame(self) -> None:
+        if self._scope.get_trigger_mode() == TriggerMode.PERIODIC_SUM:
+            return  # Viewer memory is unsupported for structured sums.
         if getattr(self, "_session_replay_active", False):
             return
         if self._dma_online_current and self._current_accumulator is not None:
@@ -1576,6 +1738,7 @@ class ScopeController(QWidget):
 
     def close_viewer_client(self) -> None:
         """Call only after the pool's in-flight viewer work has finished."""
+        self.stop_current_sum_monitor(wait=True)
         with self._viewer_scope_lock:
             viewer_scope = self._viewer_scope
             self._viewer_scope = None
@@ -2036,6 +2199,7 @@ class ScopeController(QWidget):
         memory just keeps showing whatever it last captured before the
         app closed, looking permanently frozen.
         """
+        self.stop_current_sum_monitor(wait=True)
         auto_worker = self._auto_setup_worker
         auto_thread = self._auto_setup_thread
         if auto_worker is not None:

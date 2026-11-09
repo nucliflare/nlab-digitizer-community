@@ -48,9 +48,7 @@ class GlobalController(QWidget):
         # The first channel owns the shared sync core. Global diagnostics and
         # temperature correction may use any channel's IDS context because
         # IIO firmware can expose IDS hardware for only a subset of channels.
-        self.device = next(
-            (device for device in devices if device.hv is not None), devices[0]
-        )
+        self.device = next((device for device in devices if device.hv is not None), devices[0])
         self._devices = tuple(devices)
         self._channel_labels = tuple(
             channel_labels if channel_labels is not None else range(len(devices))
@@ -83,7 +81,13 @@ class GlobalController(QWidget):
         self._latest_temperature_readback: TemperatureCorrectionReadback | None = None
         self._latest_diagnostics_readback: tuple[GlobalDiagnosticReading, ...] = ()
         self._reset_sync_for_initialization()
-        self._sync_available = self._load_sync_state()
+        compatible = all(device.mca_available() for device in self._devices)
+        self._sync_available = compatible and self._load_sync_state()
+        if not compatible:
+            self.ui.groupSoftwareStart.setEnabled(False)
+            self._set_sync_status(
+                "Shared START disabled: MCA parameter ABI is unsupported.", error=True
+            )
         self._load_settings()
         self._temperature_available = self.device.hv is not None and all(
             device.mca_available() for device in self._devices
@@ -167,14 +171,31 @@ class GlobalController(QWidget):
         return True
 
     def _reset_sync_for_initialization(self) -> None:
-        """Leave the shared start output gated off and LOW on every launch."""
+        """Select software LOW with both processors stopped (ABI2 contract).
+
+        start_enable=0 selects external bypass; it is not a common STOP.
+        """
+        if not all(device.mca_available() for device in self._devices):
+            return
         try:
+            for device in self._devices:
+                if device.mca.dma_active():
+                    raise RuntimeError("Close both list-mode buffers before shared START setup")
+                device.mca.stop()
             self._sync.set_enable(False)
+            self._sync.set_trig_src(0)
             self._sync.set_sw_trig(0)
+            self._sync.set_enable(True)
         except Exception:
-            # _load_sync_state() below supplies the user-facing unavailable
-            # state. Keep this reset best-effort for older firmware.
-            log.warning("Could not reset shared sync state during startup", exc_info=True)
+            log.warning("Could not prepare shared software LOW during startup", exc_info=True)
+
+    def _require_sync_idle(self) -> None:
+        if any(
+            device.mca.get_global_enable() or device.mca.dma_active() for device in self._devices
+        ):
+            raise RuntimeError(
+                "Stop both MCAs and close list DMA before changing shared START routing"
+            )
 
     def _connect_signals(self) -> None:
         if self._sync_available:
@@ -438,8 +459,9 @@ class GlobalController(QWidget):
             raise RuntimeError("exit session replay before applying shared hardware settings")
         if not self._sync_available or not isinstance(settings, dict):
             return
-        # Gate first, configure the source, and only then restore the requested
-        # gate. The software trigger level deliberately remains LOW.
+        self._require_sync_idle()
+        # External bypass/source routing changes only while both cores and
+        # list buffers are idle. The software level remains LOW.
         self._sync.set_enable(False)
         self._sync.set_sw_trig(0)
         if "trigger_source" in settings:
@@ -485,6 +507,7 @@ class GlobalController(QWidget):
         if getattr(self, "_replay_hardware_interlocked", False):
             return
         try:
+            self._require_sync_idle()
             self._sync.set_trig_src(source)
         except Exception as exc:
             self._load_sync_state()
@@ -500,6 +523,7 @@ class GlobalController(QWidget):
         if getattr(self, "_replay_hardware_interlocked", False):
             return
         try:
+            self._require_sync_idle()
             self._sync.set_enable(enabled)
         except Exception as exc:
             self._load_sync_state()
@@ -507,7 +531,9 @@ class GlobalController(QWidget):
             return
         self.ui.comboSyncSource.setEnabled(not enabled)
         self._set_sync_status(
-            "Common output gate enabled." if enabled else "Common output gate disabled.",
+            "Selected common START source enabled."
+            if enabled
+            else "External START bypass selected; this is not STOP.",
         )
 
     def _prepare_software_sync(self) -> None:
@@ -515,6 +541,7 @@ class GlobalController(QWidget):
         if getattr(self, "_replay_hardware_interlocked", False):
             return
         try:
+            self._require_sync_idle()
             self._sync.set_enable(False)
             self._sync.set_sw_trig(0)
             self._sync.set_trig_src(0)
@@ -654,19 +681,16 @@ class GlobalController(QWidget):
         self._set_sync_status("Software start level reset to LOW.")
 
     def disarm_sync(self) -> None:
-        """Best-effort shutdown reset: gate OFF first, then software LOW."""
+        """Stop cores and lower software level without changing shared routing."""
         if not self._sync_available:
             return
         try:
-            self._sync.set_enable(False)
+            for device in self._devices:
+                device.mca.stop()
             self._sync.set_sw_trig(0)
         except Exception:
             log.warning("Failed to disarm shared MCA sync during shutdown", exc_info=True)
             return
-        self.ui.cbSyncEnable.blockSignals(True)
-        self.ui.cbSyncEnable.setChecked(False)
-        self.ui.cbSyncEnable.blockSignals(False)
-        self.ui.comboSyncSource.setEnabled(True)
         self.ui.lblSoftwareState.setText("LOW")
 
     def _start_diagnostics(self) -> None:

@@ -93,30 +93,30 @@ _MCA_CONTROL_TOOLTIPS = {
     "spinTimeLimit": "Sets the acquisition duration in seconds; 0 runs until stopped.",
     "spinRefreshRate": "Sets the requested rate for waveform, spectrum, and statistics updates.",
     "spinTriggerLevel": "Sets the raw signal threshold used by the selected trigger source.",
-    "spinFrameSamples": "Sets the diagnostic waveform capture-window duration in nanoseconds.",
-    "spinPretrigger": "Sets the diagnostic waveform offset before the trigger in nanoseconds.",
+    "spinFrameSamples": 'Diagnostic window length in ADC samples (2 ns each).',
+    "spinPretrigger": 'Diagnostic pretrigger offset in ADC samples (2 ns each).',
     "comboTriggerSource": "Selects threshold, CR-RC2, or CR2-RC2 pulse triggering.",
     "spinEdgeDetCoeff": "Sets the legacy edge-detector coefficient when supported by hardware.",
-    "spinCrrc2Cdelay": "Sets the C-stage delay of the CR-RC2 shaping filter in nanoseconds.",
-    "spinCrrc2Fdelay": "Sets the F-stage delay of the CR-RC2 shaping filter in nanoseconds.",
+    "spinCrrc2Cdelay": 'C-stage exponent e=0..6; averaging window = 8 * 2^e ns.',
+    "spinCrrc2Fdelay": 'F-stage delay in ADC samples (2 ns each).',
     "spinCrrc2Reciprocal": (
         "Sets the raw unsigned 16-bit CR-RC2 1/C coefficient. "
         "Its numerical scale is firmware-specific; it is independent of C delay."
     ),
     "spinCrrc2Pzc": "Sets the raw pole-zero correction coefficient for CR-RC2 shaping.",
     "spinCfdFactor": "Sets the constant-fraction multiplier used to form the CFD signal.",
-    "spinCfdDelay": "Sets the CFD signal delay in nanoseconds.",
-    "spinCfdTwLow": "Sets the lower CFD time-walk boundary in nanoseconds.",
-    "spinCfdTwHigh": "Sets the upper CFD time-walk boundary in nanoseconds.",
-    "spinTrapR": "Sets the trapezoidal-filter rise time in nanoseconds.",
-    "spinTrapM": "Sets the trapezoidal-filter flat-top time in nanoseconds.",
-    "spinTrapT": "Sets the pole-zero time constant in nanoseconds; IIO converts it to beta.",
-    "spinTrapE": "Sets the trapezoidal-filter energy sampling time in nanoseconds.",
+    "spinCfdDelay": "Sets the CFD signal delay in ADC samples (2 ns each).",
+    "spinCfdTwLow": "Sets the lower CFD time-walk boundary in ADC samples (2 ns each).",
+    "spinCfdTwHigh": "Sets the upper CFD time-walk boundary in ADC samples (2 ns each).",
+    "spinTrapR": "Sets the trapezoidal-filter rise time in ADC samples (2 ns each).",
+    "spinTrapM": "Sets the trapezoidal-filter flat-top time in ADC samples (2 ns each).",
+    "spinTrapT": "Sets the ABI2 raw unsigned 32-bit trapezoid beta coefficient.",
+    "spinTrapE": "Sets the trapezoidal-filter energy sampling time in ADC samples (2 ns each).",
     "comboTrapFt": "Selects the trapezoidal filter's flat-top window duration.",
-    "spinCcTime": "Sets the charge-comparison integration time in nanoseconds.",
+    "spinCcTime": "Sets the charge-comparison integration time in ADC samples (2 ns each).",
     "comboPsdZcMode": "Selects hardware mode 0 or 1 for PSD zero-crossing analysis.",
-    "spinPsdZcLow": "Sets the lower PSD zero-crossing boundary in nanoseconds.",
-    "spinPsdZcHigh": "Sets the upper PSD zero-crossing boundary in nanoseconds.",
+    "spinPsdZcLow": "Sets the lower PSD zero-crossing boundary in ADC samples (2 ns each).",
+    "spinPsdZcHigh": "Sets the upper PSD zero-crossing boundary in ADC samples (2 ns each).",
 }
 
 
@@ -131,7 +131,7 @@ class _PsdCaptureSink(Protocol):
 @dataclass(frozen=True)
 class _DebugOffsetDragState:
     traces: tuple[tuple[np.ndarray, np.ndarray] | None, ...]
-    offset_ns: int
+    offset_samples: int
 
 
 class MCAController(QWidget):
@@ -328,8 +328,7 @@ class MCAController(QWidget):
             (MCAParam.CRRC2_CDELAY, self.ui.spinCrrc2Cdelay, self.ui.sliderCrrc2Cdelay),
             (MCAParam.CRRC2_FDELAY, self.ui.spinCrrc2Fdelay, self.ui.sliderCrrc2Fdelay),
             (MCAParam.CRRC2_PZC, self.ui.spinCrrc2Pzc, self.ui.sliderCrrc2Pzc),
-            (MCAParam.CRRC2_RECIPROCAL, self.ui.spinCrrc2Reciprocal,
-             self.ui.sliderCrrc2Reciprocal),
+            (MCAParam.CRRC2_RECIPROCAL, self.ui.spinCrrc2Reciprocal, self.ui.sliderCrrc2Reciprocal),
             (MCAParam.CFD_DELAY, self.ui.spinCfdDelay, self.ui.sliderCfdDelay),
             (MCAParam.TRAPEZ_R, self.ui.spinTrapR, self.ui.sliderTrapR),
             (MCAParam.TRAPEZ_M, self.ui.spinTrapM, self.ui.sliderTrapM),
@@ -380,9 +379,28 @@ class MCAController(QWidget):
             self.ui.spinPsdZcLow,
             self.ui.spinPsdZcHigh,
         ):
-            control.setSuffix(" ns")
+            control.setSuffix(" samples")
         # Keep runtime-generated UI modules made before the form update correct.
-        self.ui.labelTrapT.setText("Pole-zero time:")
+        self.ui.labelTrapT.setText("Beta (raw):")
+        self.ui.spinTrapT.setSuffix("")
+        self.ui.spinCrrc2Cdelay.setSuffix(" (exponent)")
+        self.ui.spinCrrc2Cdelay.setToolTip("C-stage averaging window = 8 * 2^exponent ns (0..6).")
+        self.ui.spinTrapT.setToolTip("ABI2 raw u32 beta coefficient; no time-law adapter.")
+        self.ui.groupSignal.setToolTip("MCA timing fields use ADC samples: 1 sample = 2 ns.")
+        self.ui.labelTrapReciprocal.setText("1/R (calculated):")
+        self._dc_bypass = self.ui.cbDcBlockerBypass
+        self._dc_bypass.setToolTip(
+            "1 bypasses the DC blocker; 0 enables it. MCA path only; "
+            "Scope is raw ADC before these filters."
+        )
+        self._dc_bypass.setEnabled(self._mca.dc_blocker_supported())
+        if self._mca.dc_blocker_supported():
+            self._dc_bypass.setChecked(self._mca.get_dc_blocker_bypass())
+        self._dc_bypass.toggled.connect(
+            lambda value: self._commit_hardware_setting(
+                lambda: self._mca.set_dc_blocker_bypass(value)
+            )
+        )
 
         reciprocal_available = bool(self._mca.filters.crrc2.supports_reciprocal_raw())
         for reciprocal_control in (
@@ -393,7 +411,7 @@ class MCAController(QWidget):
             reciprocal_control.setEnabled(reciprocal_available)
             if not reciprocal_available:
                 reciprocal_control.setToolTip(
-                    "Update the device's vdpp-mca driver to enable 1/C (raw)."
+                    "This driver does not expose an editable 1/C coefficient."
                 )
 
         # There is no edge-detector-coefficient attribute in the current
@@ -450,6 +468,7 @@ class MCAController(QWidget):
         log.debug("MCA ch%d: startup enable gate cleared", self._channel)
 
     def _send_defaults(self) -> None:
+        self._mca.prepare_configuration()
         specs = MCA_PARAMETER_SPECS
 
         # Signal
@@ -510,6 +529,9 @@ class MCAController(QWidget):
         log.info("MCA ch%d: channel defaults sent to hardware", self._channel)
 
     def _load_hardware_state(self) -> None:
+        if self._mca.dc_blocker_supported():
+            with QSignalBlocker(self._dc_bypass):
+                self._dc_bypass.setChecked(self._mca.get_dc_blocker_bypass())
         self.ui.spinTriggerLevel.setValue(self._mca.get_trigger_level())
         self.ui.sliderTriggerLevel.setValue(self._mca.get_trigger_level())
         self.ui.comboPulsePolarity.setCurrentIndex(self._mca.get_pulse_polarity())
@@ -585,6 +607,8 @@ class MCAController(QWidget):
             or getattr(self, "_connection_lost", False)
         )
         enabled = enabled and available
+        if enabled and self._mca.parameter_contract().get("parameter_abi_version") == 2:
+            enabled = not self._mca.get_global_enable()
         if not enabled:
             self._cancel_debug_marker_drags()
         # Debug selectors are viewer muxes, writable even while DMA owns MCA.
@@ -691,7 +715,7 @@ class MCAController(QWidget):
         hardware energy estimator integrates that exact interval.
         """
         curve = self._debug_cc_guide
-        end = self.ui.spinFrameSamples.value()
+        end = self.ui.spinFrameSamples.value() * 2
         visible = self.ui.cbCcEnable.isChecked() and end > 0
         legend = self._debug_plot.legend
         if visible != self._debug_cc_legend_visible:
@@ -707,7 +731,7 @@ class MCAController(QWidget):
         if not visible:
             curve.clear()
             return
-        split = min(self.ui.spinCcTime.value(), end)
+        split = min(self.ui.spinCcTime.value() * 2, end)
         low, high = self._debug_plot.getViewBox().viewRange()[1]
         span = high - low
         # Negative-going schematic: the short gate drops low, then steps up
@@ -766,11 +790,11 @@ class MCAController(QWidget):
         line = self._debug_pretrigger_line
         line.blockSignals(True)
         try:
-            line.setBounds((spin.minimum() / scale, spin.maximum() / scale))
-            line.setValue(spin.value() / scale)
+            line.setBounds((spin.minimum() * 2 / scale, spin.maximum() * 2 / scale))
+            line.setValue(spin.value() * 2 / scale)
         finally:
             line.blockSignals(False)
-        line.label.setFormat(f"Pretrigger offset {spin.value()} ns")
+        line.label.setFormat(f"Pretrigger offset {spin.value() * 2} ns")
         self._update_cc_integration_guide()
 
     def _on_debug_threshold_line_changed(self) -> None:
@@ -822,16 +846,16 @@ class MCAController(QWidget):
                     if x is not None and y is not None else None
                 )
             self._pretrigger_line_drag = _DebugOffsetDragState(
-                traces=tuple(traces), offset_ns=spin.value()
+                traces=tuple(traces), offset_samples=spin.value()
             )
         target_ns = line.value() * self._debug_time_scale.ns_per_unit
-        MCAController._snap_integer_control(spin, target_ns)
+        MCAController._snap_integer_control(spin, target_ns / 2)
         self._sync_debug_pretrigger_line()
         state = self._pretrigger_line_drag
         if state is not None:
             # A larger pretrigger offset is previewed as a later trigger in
             # the window. This is a UI-only estimate until the next readback.
-            shift = (spin.value() - state.offset_ns) / self._debug_time_scale.ns_per_unit
+            shift = (spin.value() - state.offset_samples) * 2 / self._debug_time_scale.ns_per_unit
             for curve, trace in zip((self._debug1_curve, self._debug2_curve), state.traces):
                 if trace is not None:
                     curve.setData(trace[0] + shift, trace[1])
@@ -847,14 +871,13 @@ class MCAController(QWidget):
             return
         self._pretrigger_line_drag = None
         value = self.ui.spinPretrigger.value()
-        if not self._debug_pretrigger_line.movable or value == state.offset_ns:
-            self.ui.spinPretrigger.setValue(state.offset_ns)
+        if not self._debug_pretrigger_line.movable or value == state.offset_samples:
+            self.ui.spinPretrigger.setValue(state.offset_samples)
             self._restore_debug_offset_traces(state)
             return
         try:
-            # vdpp-pulse-processor.c accepts physical ns in 2 ns steps and
-            # rejects configuration writes while enabled; the helper pauses
-            # and restarts ordinary polling acquisition exactly once.
+            # ABI2 accepts native samples on this field's four-sample grid.
+            # The marker uses ns; hardware edits require an explicit stop.
             self._apply_hardware_setting(lambda: self._mca.set_pretrigger_samples(value))
         except Exception as exc:
             log.exception("MCA ch%d: window-offset marker update failed", self._channel)
@@ -863,7 +886,7 @@ class MCAController(QWidget):
                 detail = ""
             except Exception:
                 log.exception("MCA ch%d: window-offset marker readback failed", self._channel)
-                actual = state.offset_ns
+                actual = state.offset_samples
                 detail = "; hardware state unknown—reconnect"
             self.ui.spinPretrigger.setValue(actual)
             self.status.setText(f"Window offset update failed: {exc}{detail}")
@@ -877,7 +900,7 @@ class MCAController(QWidget):
         state = self._pretrigger_line_drag
         if state is not None:
             self._pretrigger_line_drag = None
-            self.ui.spinPretrigger.setValue(state.offset_ns)
+            self.ui.spinPretrigger.setValue(state.offset_samples)
             self._restore_debug_offset_traces(state)
 
     def _on_debug_frame_length_changed(self, frame_samples: int) -> None:
@@ -887,7 +910,7 @@ class MCAController(QWidget):
     def _update_debug_time_axis(self, frame_samples: int | None = None) -> None:
         if frame_samples is None:
             frame_samples = self.ui.spinFrameSamples.value()
-        displayed_samples = frame_samples // _DEBUG_SAMPLE_PERIOD_NS
+        displayed_samples = frame_samples // 4
         duration_ns = displayed_samples * _DEBUG_SAMPLE_PERIOD_NS
         self._debug_time_scale = time_axis_scale(duration_ns)
         self._sync_debug_pretrigger_line()
@@ -1201,14 +1224,16 @@ class MCAController(QWidget):
     def energy_calibration_fingerprint(self) -> dict[str, FingerprintValue]:
         """Describe settings that can change histogram energy-channel scaling."""
         return {
+            "parameter_abi_version": 2,
+            "parameter_units": "adc_samples",
             "binning": self.ui.comboBinning.currentIndex(),
             "pulse_polarity": self.ui.comboPulsePolarity.currentIndex(),
             "low_pass_preset": MCA_FIXED_LOW_PASS_PRESET,
             "trapezoid_enabled": self.ui.cbTrapezEnable.isChecked(),
-            "trapezoid_r_ns": self.ui.spinTrapR.value(),
-            "trapezoid_m_ns": self.ui.spinTrapM.value(),
-            "trapezoid_t_ns": float(self.ui.spinTrapT.value()),
-            "trapezoid_e_ns": self.ui.spinTrapE.value(),
+            "trapezoid_r_samples": self.ui.spinTrapR.value(),
+            "trapezoid_m_samples": self.ui.spinTrapM.value(),
+            "trapezoid_beta_raw": float(self.ui.spinTrapT.value()),
+            "trapezoid_start_offset_samples": self.ui.spinTrapE.value(),
             "trapezoid_ft": self.ui.comboTrapFt.currentIndex(),
         }
 
@@ -1345,11 +1370,11 @@ class MCAController(QWidget):
         with ExitStack() as stack:
             for widget in widgets:
                 stack.enter_context(QSignalBlocker(widget))
-            self.ui.spinPretrigger.setValue(current.pretrigger_ns)
-            self.ui.sliderPretrigger.setValue(current.pretrigger_ns)
-            self.ui.spinFrameSamples.setValue(current.frame_ns)
-            self.ui.sliderFrameSamples.setValue(current.frame_ns)
-            self.ui.spinCcTime.setValue(current.cc_time_ns)
+            self.ui.spinPretrigger.setValue(current.pretrigger_ns // 2)
+            self.ui.sliderPretrigger.setValue(current.pretrigger_ns // 2)
+            self.ui.spinFrameSamples.setValue(current.frame_ns // 2)
+            self.ui.sliderFrameSamples.setValue(current.frame_ns // 2)
+            self.ui.spinCcTime.setValue(current.cc_time_ns // 2)
             self.ui.cbCcEnable.setChecked(current.cc_enabled)
         self._update_debug_time_axis()
 
@@ -1489,14 +1514,40 @@ class MCAController(QWidget):
     # Signal wiring
     # ------------------------------------------------------------------
 
+    def _commit_hardware_setting(self, write: Callable[[], None]) -> None:
+        """Surface rejected GUI edits without leaking exceptions out of Qt slots."""
+        try:
+            self._apply_hardware_setting(write)
+        except Exception as exc:
+            log.warning("MCA setting rejected: %s", exc)
+            # Hydrate only after blocking signals, so rejected controls cannot
+            # recursively write other settings during readback restoration.
+            try:
+                with ExitStack() as stack:
+                    for widget in self.findChildren(QWidget):
+                        stack.enter_context(QSignalBlocker(widget))
+                    self._load_hardware_state()
+            except Exception:
+                log.warning("MCA readback after rejection failed", exc_info=True)
+            self.status.setText(f"Setting not applied: {exc}. Inspect the current configuration.")
+
     def _refresh_trapezoid_reciprocal(self) -> None:
         label = self.ui.lblTrapReciprocal
-        label.setText("Unavailable")  # Never leave a stale value after a failed read.
+        label.setText("Unconfigured")
         trapezoid = self._mca.filters.trapezoid
-        if not trapezoid.supports_reciprocal_raw():
-            label.setToolTip("Update vdpp-mca to read the derived trapezoid 1/R register.")
+        if trapezoid.supports_reciprocal_raw():
+            label.setText(str(trapezoid.get_reciprocal_raw()))
+            self.ui.labelTrapReciprocal.setText("1/R (raw):")
+            label.setToolTip("Driver-advertised raw 1/R shadow.")
             return
-        label.setText(str(trapezoid.get_reciprocal_raw()))
+        self.ui.labelTrapReciprocal.setText("1/R (calculated):")
+        rise = trapezoid.get_R()
+        if 8 <= rise <= 2044 and rise % 4 == 0:
+            label.setText(str(32768 // (rise // 4)))
+        label.setToolTip(
+            "1/R (calculated): floor(32768 / (R_samples / 4)); "
+            "not independent hardware readback."
+        )
 
     def _set_trapezoid_r(self, value: int) -> None:
         self._mca.filters.trapezoid.set_R(value)
@@ -1531,15 +1582,11 @@ class MCAController(QWidget):
             self.status.setText(f"Debug {bank} source update failed: {exc}{detail}")
 
     def _apply_hardware_setting(self, write: Callable[[], None]) -> None:
-        """Apply a setting immediately, preserving a polling measurement.
+        """Apply an idle measurement edit, retaining replay/DMA interlocks.
 
-        MCA measurement fields are immutable while enabled; debug muxes use
-        _on_debug_source_changed instead. Unlike list-mode DMA,
-        an ordinary histogram/viewer acquisition can be briefly stopped and
-        restarted safely. MultiChannelAnalyzer owns the synchronization that
-        prevents MCAWorker from treating the short stop as time-limit
-        completion. DMA controls remain disabled because an armed list-mode
-        buffer requires its full stop/drain/close lifecycle.
+        ABI2 requires explicit stop/configure/start. Debug selectors use their
+        separate live path and do not restart accumulation. Failed writes stay
+        stopped and are surfaced by the Qt commit hook.
         """
         if getattr(self, "_connection_lost", False):
             log.warning(
@@ -1577,11 +1624,11 @@ class MCAController(QWidget):
         self.ui.comboPulsePolarity.currentIndexChanged.connect(
             lambda i: (
                 log.debug("MCA ch%d: polarity=%d", self._channel, i),
-                self._apply_hardware_setting(lambda: self._mca.set_pulse_polarity(i)),
+                self._commit_hardware_setting(lambda: self._mca.set_pulse_polarity(i)),
             )
         )
         self.ui.comboBaseline.currentIndexChanged.connect(
-            lambda i: self._apply_hardware_setting(lambda: self._mca.set_baseline_window(i))
+            lambda i: self._commit_hardware_setting(lambda: self._mca.set_baseline_window(i))
         )
         self.ui.comboDebug1.currentIndexChanged.connect(
             lambda i: self._on_debug_source_changed(1, i)
@@ -1590,19 +1637,21 @@ class MCAController(QWidget):
             lambda i: self._on_debug_source_changed(2, i)
         )
         self.ui.spinPileupWindow.editingFinished.connect(
-            lambda: self._apply_hardware_setting(
+            lambda: self._commit_hardware_setting(
                 lambda: self._mca.set_pileup_window(self.ui.spinPileupWindow.value())
             )
         )
         self.ui.comboBinning.currentIndexChanged.connect(
-            lambda i: self._apply_hardware_setting(lambda: self._mca.set_energy_bin(i))
+            lambda i: self._commit_hardware_setting(lambda: self._mca.set_energy_bin(i))
         )
         self.ui.cbExtTrigger.toggled.connect(
-            lambda value: self._apply_hardware_setting(lambda: self._mca.set_ext_trig_enable(value))
+            lambda value: self._commit_hardware_setting(
+                lambda: self._mca.set_ext_trig_enable(value)
+            )
         )
 
         self.ui.spinTimeLimit.editingFinished.connect(
-            lambda: self._apply_hardware_setting(
+            lambda: self._commit_hardware_setting(
                 lambda: self._mca.set_time_limit(self.ui.spinTimeLimit.value())
             )
         )
@@ -1619,9 +1668,7 @@ class MCAController(QWidget):
             lambda v: self._mca.set_trigger_level(v),
         )
         self.ui.spinTriggerLevel.valueChanged.connect(self._debug_threshold_line.setValue)
-        self._debug_threshold_line.sigPositionChanged.connect(
-            self._on_debug_threshold_line_changed
-        )
+        self._debug_threshold_line.sigPositionChanged.connect(self._on_debug_threshold_line_changed)
         self._debug_threshold_line.sigPositionChangeFinished.connect(
             self._on_debug_threshold_line_finished
         )
@@ -1644,10 +1691,10 @@ class MCAController(QWidget):
             self._on_debug_pretrigger_line_finished
         )
         self.ui.comboTriggerSource.currentIndexChanged.connect(
-            lambda i: self._apply_hardware_setting(lambda: self._mca.set_trg_source(i))
+            lambda i: self._commit_hardware_setting(lambda: self._mca.set_trg_source(i))
         )
         self.ui.spinEdgeDetCoeff.editingFinished.connect(
-            lambda: self._apply_hardware_setting(
+            lambda: self._commit_hardware_setting(
                 lambda: self._mca.set_edge_det_coeff(int(self.ui.spinEdgeDetCoeff.value()))
             )
         )
@@ -1675,12 +1722,12 @@ class MCAController(QWidget):
         )
 
         self.ui.cbCfdEnable.toggled.connect(
-            lambda value: self._apply_hardware_setting(
+            lambda value: self._commit_hardware_setting(
                 lambda: self._mca.filters.cfd.set_enable(value)
             )
         )
         self.ui.spinCfdFactor.editingFinished.connect(
-            lambda: self._apply_hardware_setting(
+            lambda: self._commit_hardware_setting(
                 lambda: self._mca.filters.cfd.set_factor(self.ui.spinCfdFactor.value())
             )
         )
@@ -1690,18 +1737,18 @@ class MCAController(QWidget):
             lambda v: self._mca.filters.cfd.set_delay(v),
         )
         self.ui.spinCfdTwLow.editingFinished.connect(
-            lambda: self._apply_hardware_setting(
+            lambda: self._commit_hardware_setting(
                 lambda: self._mca.filters.cfd.set_time_window_low(self.ui.spinCfdTwLow.value())
             )
         )
         self.ui.spinCfdTwHigh.editingFinished.connect(
-            lambda: self._apply_hardware_setting(
+            lambda: self._commit_hardware_setting(
                 lambda: self._mca.filters.cfd.set_time_window_high(self.ui.spinCfdTwHigh.value())
             )
         )
 
         self.ui.cbTrapezEnable.toggled.connect(
-            lambda value: self._apply_hardware_setting(
+            lambda value: self._commit_hardware_setting(
                 lambda: self._mca.filters.trapezoid.set_enable(value)
             )
         )
@@ -1716,7 +1763,7 @@ class MCAController(QWidget):
             lambda v: self._mca.filters.trapezoid.set_M(v),
         )
         self.ui.spinTrapT.editingFinished.connect(
-            lambda: self._apply_hardware_setting(
+            lambda: self._commit_hardware_setting(
                 lambda: self._mca.filters.trapezoid.set_T(int(self.ui.spinTrapT.value()))
             )
         )
@@ -1726,7 +1773,7 @@ class MCAController(QWidget):
             lambda v: self._mca.filters.trapezoid.set_E(v),
         )
         self.ui.comboTrapFt.currentIndexChanged.connect(
-            lambda i: self._apply_hardware_setting(lambda: self._mca.filters.trapezoid.set_FT(i))
+            lambda i: self._commit_hardware_setting(lambda: self._mca.filters.trapezoid.set_FT(i))
         )
 
         # A calibration belongs to the energy-processing configuration used
@@ -1742,32 +1789,32 @@ class MCAController(QWidget):
         self.ui.comboTrapFt.currentIndexChanged.connect(self._refresh_energy_axis)
 
         self.ui.cbCcEnable.toggled.connect(
-            lambda value: self._apply_hardware_setting(
+            lambda value: self._commit_hardware_setting(
                 lambda: self._mca.filters.charge_comparison.set_enable(value)
             )
         )
         self.ui.cbCcEnable.toggled.connect(self._update_cc_integration_guide)
         self.ui.spinCcTime.valueChanged.connect(self._update_cc_integration_guide)
         self.ui.spinCcTime.editingFinished.connect(
-            lambda: self._apply_hardware_setting(
+            lambda: self._commit_hardware_setting(
                 lambda: self._mca.filters.charge_comparison.set_time(self.ui.spinCcTime.value())
             )
         )
         self.ui.cbPsdZcEnable.toggled.connect(
-            lambda value: self._apply_hardware_setting(
+            lambda value: self._commit_hardware_setting(
                 lambda: self._mca.filters.psd_zc.set_enable(value)
             )
         )
         self.ui.comboPsdZcMode.currentIndexChanged.connect(
-            lambda i: self._apply_hardware_setting(lambda: self._mca.filters.psd_zc.set_mode(i))
+            lambda i: self._commit_hardware_setting(lambda: self._mca.filters.psd_zc.set_mode(i))
         )
         self.ui.spinPsdZcLow.editingFinished.connect(
-            lambda: self._apply_hardware_setting(
+            lambda: self._commit_hardware_setting(
                 lambda: self._mca.filters.psd_zc.set_time_window_low(self.ui.spinPsdZcLow.value())
             )
         )
         self.ui.spinPsdZcHigh.editingFinished.connect(
-            lambda: self._apply_hardware_setting(
+            lambda: self._commit_hardware_setting(
                 lambda: self._mca.filters.psd_zc.set_time_window_high(self.ui.spinPsdZcHigh.value())
             )
         )
@@ -1791,7 +1838,7 @@ class MCAController(QWidget):
             # Slider dragging can also land between hardware steps. Let the
             # valueChanged connection synchronize the corrected value to it.
             MCAController._snap_integer_control(spinbox)
-            self._apply_hardware_setting(
+            self._commit_hardware_setting(
                 lambda: set_fn(spinbox.value())  # type: ignore[operator]
             )
 
@@ -1864,6 +1911,7 @@ class MCAController(QWidget):
         self._mca.set_time_limit(self.ui.spinTimeLimit.value())
         self._mca.start()
         MCAController._set_measurement_active(self, True)
+        self._set_controls_enabled(False)
         self.ui.btnStop.setEnabled(True)
         self._start_worker()
         log.info(
@@ -1895,6 +1943,8 @@ class MCAController(QWidget):
             self._mca.stop()
 
         MCAController._set_measurement_active(self, False)
+        if self._dma_worker is None:
+            self._set_controls_enabled(True)
         self.ui.btnStart.setChecked(False)
         self.ui.btnStart.setEnabled(self._dma_worker is None)
         self.ui.btnStop.setEnabled(False)
@@ -2133,6 +2183,14 @@ class MCAController(QWidget):
         if self._mca_dma is None:
             raise RuntimeError("IIO MCA list-mode DMA is unavailable")
         mode = self._output_mode()
+        schema_reader = getattr(self._mca_dma, "qualified_record_schema", None)
+        producer_schema = schema_reader() if callable(schema_reader) else None
+        if callable(schema_reader) and not producer_schema:
+            if mode is not McaDmaOutputMode.BINARY or self._psd_capture_enabled:
+                raise RuntimeError(
+                    "Unrecognized list-mode producer. Use binary recording with PSD disabled; "
+                    "review the producer identity before selecting an event decoder."
+                )
         self._active_dma_mode = mode
         self._dma_summary = None
         self._dma_error = None
@@ -2193,7 +2251,7 @@ class MCAController(QWidget):
         # Pulse-processor fields are immutable while list_buffer_active is
         # set, so apply the duration before the worker's first read creates
         # and arms the lm_frame buffer.
-        client_record_schema = None
+        client_record_schema = producer_schema
         if metadata := getattr(self, "_coincidence_metadata", None):
             analysis = metadata.get("analysis")
             if isinstance(analysis, dict):

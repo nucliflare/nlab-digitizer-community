@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import struct
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -25,14 +26,14 @@ def test_mapping_uses_baseline_end_to_green_gap_and_upward_steps() -> None:
     source = WaveformGateSource(7, 10, 19, 47, 2.5)
     proposal = source.propose(True)
     assert proposal.desired_ns == (7.5, 92.5, 22.5)
-    assert proposal.timing == McaGateTiming(8, 94, 24, True)
-    assert proposal.boundaries_ns == (25.5, 49.5, 119.5)
+    assert proposal.timing == McaGateTiming(8, 96, 24, True)
+    assert proposal.boundaries_ns == (25.5, 49.5, 121.5)
     assert source == WaveformGateSource(7, 10, 19, 47, 2.5)  # No mutation of offline gates.
     # Exact decimal steps must not acquire a spurious extra step from floating arithmetic.
     assert WaveformGateSource(0, 0, 20, 40, .1).propose(False).timing == McaGateTiming(
-        0, 4, 2, False,
+        0, 8, 8, False,
     )
-    assert WaveformGateSource(0, 0, 1, 2, 2.000001).propose(True).timing.cc_time_ns == 4
+    assert WaveformGateSource(0, 0, 1, 2, 2.000001).propose(True).timing.cc_time_ns == 8
 
 
 def test_changing_baseline_end_changes_only_pretrigger_and_zero_gap_is_valid() -> None:
@@ -48,12 +49,12 @@ def test_changing_baseline_end_changes_only_pretrigger_and_zero_gap_is_valid() -
 
 
 def test_driver_range_boundaries_are_not_double_converted() -> None:
-    assert WaveformGateSource(0, 2047, 3047, 6142, 2).propose(True).timing == McaGateTiming(
-        4094, 8190, 2000, True,
+    assert WaveformGateSource(0, 2044, 3044, 6140, 2).propose(True).timing == McaGateTiming(
+        4088, 8192, 2000, True,
     )
-    assert WaveformGateSource(0, 0, 1, 1, 2).propose(False).timing == McaGateTiming(0, 2, 2, False)
+    assert WaveformGateSource(0, 0, 1, 1, 2).propose(False).timing == McaGateTiming(0, 8, 8, False)
     # CC_TIME's driver maximum is 65534 ns, but a transferable short gate must fit in the window.
-    McaGateTiming(0, 8190, 8190, True).validate()
+    McaGateTiming(0, 8192, 8192, True).validate()
 
 
 @pytest.mark.parametrize("source", [
@@ -63,7 +64,7 @@ def test_driver_range_boundaries_are_not_double_converted() -> None:
     WaveformGateSource(11, 10, 20, 40, 8),  # Baseline ends after integration start.
     WaveformGateSource(-1, 10, 20, 40, 8),
     WaveformGateSource(0, 2048, 2049, 5000, 2),  # Pretrigger exceeds driver range.
-    WaveformGateSource(0, 0, 1, 4096, 2),
+    WaveformGateSource(0, 0, 1, 4097, 2),
     WaveformGateSource(0, 0, 2, 1, 2),
     WaveformGateSource(0, 2, 3, 4, 2),  # Pretrigger is not shorter than the window.
 ])
@@ -74,6 +75,7 @@ def test_invalid_mapping_is_rejected_without_clipping(source: WaveformGateSource
 
 def _backend() -> Mock:
     backend = Mock()
+    backend.mca_configuration_lock = threading.RLock()
     values: dict[str, int | bool] = {"pre": 24, "frame": 256, "cc": 8, "enable": False}
     for getter, setter, key in (
         ("get_dpp_pretrigger_samples", "set_dpp_pretrigger_samples", "pre"),
@@ -92,18 +94,18 @@ def _backend() -> Mock:
 def test_idle_batch_writes_physical_ns_only_and_never_starts_acquisition() -> None:
     backend = _backend()
     mca = MultiChannelAnalyzer(backend)
-    candidate = McaGateTiming(32, 500, 50, True)
+    candidate = McaGateTiming(32, 504, 56, True)
     mca.apply_gate_timing(candidate)
     assert mca.gate_timing() == candidate
-    backend.set_dpp_pretrigger_samples.assert_called_once_with(32)
-    backend.set_dpp_frame_samples.assert_called_once_with(500)
-    backend.set_cc_time.assert_called_once_with(50)
+    backend.set_dpp_pretrigger_samples.assert_called_once_with(16)
+    backend.set_dpp_frame_samples.assert_called_once_with(252)
+    backend.set_cc_time.assert_called_once_with(28)
     backend.set_cc_enable.assert_called_once_with(True)
     backend.set_global_enable.assert_not_called()
 
 
-@pytest.mark.parametrize("timing", [McaGateTiming(0, 2, 2, False),
-                                   McaGateTiming(4094, 8190, 8190, True)])
+@pytest.mark.parametrize("timing", [McaGateTiming(0, 8, 8, False),
+                                   McaGateTiming(4088, 8192, 8192, True)])
 def test_idle_batch_accepts_driver_boundaries_unchanged(timing: McaGateTiming) -> None:
     backend = _backend()
     mca = MultiChannelAnalyzer(backend)
@@ -112,58 +114,46 @@ def test_idle_batch_accepts_driver_boundaries_unchanged(timing: McaGateTiming) -
     backend.set_global_enable.assert_not_called()
 
 
-def test_snapshot_failure_aborts_before_any_write() -> None:
+def test_first_write_failure_does_not_start_or_attempt_later_fields() -> None:
     backend = _backend()
-    backend.get_dpp_frame_samples.side_effect = OSError("read unavailable")
-    with pytest.raises(OSError, match="read unavailable"):
-        MultiChannelAnalyzer(backend).apply_gate_timing(McaGateTiming(32, 500, 50, True))
-    assert not any(call[0].startswith("set_") for call in backend.mock_calls)
-
+    backend.set_dpp_pretrigger_samples.side_effect = OSError("write unavailable")
+    with pytest.raises(OSError, match="write unavailable"):
+        MultiChannelAnalyzer(backend).apply_gate_timing(McaGateTiming(32, 504, 56, True))
+    backend.set_dpp_frame_samples.assert_not_called()
+    backend.set_global_enable.assert_not_called()
 
 @pytest.mark.parametrize("busy", [
-    "get_global_enable", "get_measurement_in_progress", "mca_dma_active",
+    "get_global_enable", "mca_dma_active",
 ])
 def test_hardware_busy_checks_perform_no_writes(busy: str) -> None:
     backend = _backend()
     getattr(backend, busy).return_value = True
     with pytest.raises(RuntimeError, match="Stop MCA"):
-        MultiChannelAnalyzer(backend).apply_gate_timing(McaGateTiming(32, 500, 50, True))
+        MultiChannelAnalyzer(backend).apply_gate_timing(McaGateTiming(32, 504, 56, True))
     assert not any(call[0].startswith("set_") for call in backend.mock_calls)
 
 
 @pytest.mark.parametrize("field", ["set_dpp_pretrigger_samples", "set_dpp_frame_samples",
                                     "set_cc_time", "set_cc_enable"])
-def test_each_partial_write_failure_restores_previous_settings(field: str) -> None:
+def test_each_partial_write_failure_stays_stopped_without_rollback(field: str) -> None:
     backend = _backend()
-    mca = MultiChannelAnalyzer(backend)
-    before = mca.gate_timing()
-    setter = getattr(backend, field)
-    write = setter.side_effect
-
-    def fail_first(value: int | bool) -> None:
-        if setter.call_count == 1:
-            raise OSError("simulated write failure")
-        write(value)
-
-    setter.side_effect = fail_first
-    with pytest.raises(RuntimeError, match="previous settings restored"):
-        mca.apply_gate_timing(McaGateTiming(32, 500, 50, True))
-    assert mca.gate_timing() == before
+    getattr(backend, field).side_effect = OSError("simulated write failure")
+    with pytest.raises(OSError, match="simulated write failure"):
+        MultiChannelAnalyzer(backend).apply_gate_timing(McaGateTiming(32, 504, 56, True))
+    assert getattr(backend, field).call_count == 1
     backend.set_global_enable.assert_not_called()
 
-
-def test_rollback_failure_is_reported_and_remaining_restoration_is_attempted() -> None:
+def test_partial_failure_does_not_write_following_fields_or_restart() -> None:
     backend = _backend()
     backend.set_dpp_frame_samples.side_effect = OSError("transport unavailable")
-    with pytest.raises(RuntimeError, match="rollback incomplete"):
-        MultiChannelAnalyzer(backend).apply_gate_timing(McaGateTiming(32, 500, 50, True))
-    assert backend.set_cc_time.call_count == 1
-    backend.set_cc_enable.assert_called_once_with(False)
+    with pytest.raises(OSError, match="transport unavailable"):
+        MultiChannelAnalyzer(backend).apply_gate_timing(McaGateTiming(32, 504, 56, True))
+    backend.set_cc_time.assert_not_called()
+    backend.set_cc_enable.assert_not_called()
     backend.set_global_enable.assert_not_called()
 
-
 @pytest.mark.parametrize("timing", [
-    McaGateTiming(1, 256, 8, True), McaGateTiming(0, 8192, 8, True),
+    McaGateTiming(1, 256, 8, True), McaGateTiming(0, 8200, 8, True),
     McaGateTiming(0, 256, 258, True), McaGateTiming(0, 256, 0, True),
 ])
 def test_invalid_presets_never_read_or_write_backend(timing: McaGateTiming) -> None:
@@ -186,7 +176,7 @@ def test_controller_interlocks_block_transfer(qtbot: QtBot, flag: str) -> None:
     setattr(view, flag, True)
     try:
         with pytest.raises(RuntimeError, match="busy, disconnected"):
-            view.apply_gate_timing(McaGateTiming(32, 500, 50, True))
+            view.apply_gate_timing(McaGateTiming(32, 504, 56, True))
         assert device.mca.gate_timing() == before
     finally:
         setattr(view, flag, previous)
@@ -204,11 +194,11 @@ def test_controller_refreshes_both_sliders_without_duplicate_hardware_writes(
         spy = Mock(wraps=getattr(device.mca, name))
         monkeypatch.setattr(device.mca, name, spy)
         writes.append(spy)
-    view.apply_gate_timing(McaGateTiming(32, 500, 50, True))
+    view.apply_gate_timing(McaGateTiming(32, 504, 56, True))
     assert [spy.call_count for spy in writes] == [1, 1]
-    assert view.ui.spinPretrigger.value() == view.ui.sliderPretrigger.value() == 32
-    assert view.ui.spinFrameSamples.value() == view.ui.sliderFrameSamples.value() == 500
-    assert view.ui.spinCcTime.value() == 50 and view.ui.cbCcEnable.isChecked()
+    assert view.ui.spinPretrigger.value() == view.ui.sliderPretrigger.value() == 16
+    assert view.ui.spinFrameSamples.value() == view.ui.sliderFrameSamples.value() == 252
+    assert view.ui.spinCcTime.value() == 28 and view.ui.cbCcEnable.isChecked()
     assert (device.mca.get_trigger_level(), device.mca.get_baseline_window()) == before
     assert not device.mca.get_global_enable()
 
@@ -226,7 +216,7 @@ def test_dialog_previews_baseline_gap_ceilings_and_targets_selected_channel(
     previews = []
     dialog.preview_changed.connect(previews.append)
     dialog.refresh()
-    assert previews[-1].boundaries_ns == (25.5, 49.5, 119.5)
+    assert previews[-1].boundaries_ns == (25.5, 49.5, 121.5)
     assert dialog.table.item(0, 2).text() == "7.5"
     assert dialog.table.item(0, 3).text() == "8"
     assert resolve_context(dialog.target_combo).topic == "waveform-mca-transfer"
@@ -239,7 +229,7 @@ def test_dialog_previews_baseline_gap_ceilings_and_targets_selected_channel(
     dialog.apply_button.click()
     assert dialog.result() == QDialog.DialogCode.Accepted
     targets[0].apply.assert_not_called()
-    targets[1].apply.assert_called_once_with(McaGateTiming(8, 94, 24, False))
+    targets[1].apply.assert_called_once_with(McaGateTiming(8, 96, 24, False))
 
 
 def test_dialog_cancel_invalid_range_and_missing_targets_never_write(

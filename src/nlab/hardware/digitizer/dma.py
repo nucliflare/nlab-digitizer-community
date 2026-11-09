@@ -28,12 +28,13 @@ from nlab.hardware.digitizer.iio_listmode import (
     cfd_interpolation_samples,
 )
 from nlab.hardware.digitizer.mca_capture import McaCaptureWriter, McaDmaOutputMode
+from nlab.hardware.digitizer.scope_sums import ScopeSumBackend, ScopeSumCapture
 
 if TYPE_CHECKING:
     from nlab.hardware.digitizer.current_monitor import ScopeCurrentAccumulator
 
 
-class _IIOScopeBackend(Protocol):
+class _IIOScopeBackend(ScopeSumBackend, Protocol):
     def prepare_dma_capture(self) -> None: ...
 
     def get_frame_samples(self) -> int: ...
@@ -425,6 +426,10 @@ class IIOScopeDmaStreamer:
         """Stop the acquisition gate and cancel a blocked backend refill."""
         self._backend.request_dma_stop()
 
+    def create_sum_capture(self) -> ScopeSumCapture:
+        """Create a distinct sum session; never dispatch sums into waveform consumers."""
+        return ScopeSumCapture(self._backend, self._channel)
+
     def capture_geometry(self) -> ScopeDmaGeometry:
         """Return the configured record layout, with a v121 fallback."""
         reader = getattr(self._backend, "get_scope_dma_geometry", None)
@@ -747,7 +752,15 @@ class IIOMcaDmaStreamer:
                 continue
             if isinstance(value, (int, np.integer)):
                 identity[key] = int(value)
+        producer = getattr(self._backend, "mca_producer_identity", None)
+        if callable(producer):
+            identity.update(producer())
         return identity
+
+    def qualified_record_schema(self) -> str | None:
+        identity = self.transport_identity()
+        value = identity.get("qualified_record_schema")
+        return str(value) if value else None
 
     def request_stop(self) -> None:
         """Stop production while leaving the reader armed for tail drain."""
@@ -779,6 +792,17 @@ class IIOMcaDmaStreamer:
         writer: McaCaptureWriter | None = None
         started_utc = datetime.now(UTC)
         capture_schema = client_record_schema or IIO_LM_UNQUALIFIED_SCHEMA
+        producer = getattr(self._backend, "mca_producer_identity", None)
+        if callable(producer):
+            qualified = self.qualified_record_schema()
+            if qualified is None:
+                if (event_buffer is not None or output_mode is not McaDmaOutputMode.BINARY
+                        or client_record_schema is not None):
+                    raise RuntimeError("Unknown MCA producer permits opaque binary recording only")
+            else:
+                if client_record_schema is not None and client_record_schema != qualified:
+                    raise ValueError("Selected MCA decoder differs from the identified producer")
+                capture_schema = qualified
 
         if filepath is not None:
             writer = McaCaptureWriter(

@@ -308,6 +308,9 @@ def test_mca_buffer_arm_stops_then_selects_eight_kernel_blocks(monkeypatch: Any)
     lm_frame.set_kernel_buffers_count = set_kernel_buffers_count
     pulse = SimpleNamespace(
         attrs={
+            "parameter_abi_version": attr(2),
+            "parameter_units": SimpleNamespace(value="adc_samples"),
+            "parameter_abi_ack": attr(2),
             "channel_index": attr(0),
             "enable": attr(1),
             "list_buffer_active": attr(0),
@@ -363,7 +366,9 @@ def test_mca_rejects_superseded_five_channel_scan_abi() -> None:
         channels=[SimpleNamespace(enabled=False) for _ in range(5)],
         sample_size=16,
     )
-    backend._mca_dma_pp = SimpleNamespace(attrs={"channel_index": attr(0)})
+    backend._mca_dma_pp = SimpleNamespace(attrs={"channel_index": attr(0),
+        "parameter_abi_version": attr(2), "parameter_abi_ack": attr(2),
+        "parameter_units": attr("adc_samples")})
     backend._mca_dma_control_lock = threading.RLock()
 
     with pytest.raises(RuntimeError, match="superseded Linux 5.15 ABI"):
@@ -373,7 +378,10 @@ def test_mca_rejects_superseded_five_channel_scan_abi() -> None:
 def test_mca_ready_fires_after_reader_entry_and_enable(monkeypatch: Any) -> None:
     refill_entered = threading.Event()
     release_refill = threading.Event()
-    pulse = SimpleNamespace(attrs={"enable": SimpleNamespace(value="0")})
+    pulse = SimpleNamespace(attrs={"enable": SimpleNamespace(value="0"),
+        "parameter_abi_version": SimpleNamespace(value="2"),
+        "parameter_units": SimpleNamespace(value="adc_samples"),
+        "parameter_abi_ack": SimpleNamespace(value="2")})
     buffer = SimpleNamespace(_buffer=object(), cancel=lambda: None)
     backend = object.__new__(IIODigitizerBackend)
     backend._ch = 0
@@ -610,3 +618,12 @@ def test_streamer_retains_invalid_continuity_metadata(tmp_path: Path) -> None:
     assert metadata["driver_dma_error_count"] == 4
     assert metadata["list_deadtime_raw"] == 7
     assert metadata["continuity_valid"] is False
+
+
+def test_unknown_producer_refuses_decoded_consumers_before_arm():
+    backend = Mock()
+    backend.mca_producer_identity.return_value = {"pulse_hw_version": 999}
+    streamer = IIOMcaDmaStreamer(backend, channel=0)
+    with pytest.raises(RuntimeError, match="opaque binary"):
+        streamer.stream_events(threading.Event(), event_buffer=McaEventBuffer())
+    backend.start_mca_dma_capture.assert_not_called()

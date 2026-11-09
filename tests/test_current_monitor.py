@@ -125,6 +125,7 @@ def test_controller_renders_calibrated_latest_and_interval_values(qtbot: QtBot) 
         "display_fps": 30,
         "dma_gap_cycles": 12_500,
         "analysis_bin_ms": 100,
+        "sum_frame_samples": 1024,
     }
     controller.apply_configuration_settings(
         {
@@ -142,6 +143,7 @@ def test_controller_renders_calibrated_latest_and_interval_values(qtbot: QtBot) 
         "display_fps": 30,
         "dma_gap_cycles": 10_453,
         "analysis_bin_ms": 100,
+        "sum_frame_samples": 1024,
     }
     assert controller.ui.spinDmaGap.value() == pytest.approx(83.624)
     controller._on_worker_finished()
@@ -173,6 +175,9 @@ class _FakeScopeController(QObject):
         self.start_gaps: list[int | None] = []
         self.stops = 0
         self.resets = 0
+
+    def current_sum_supported(self) -> bool:
+        return False
 
     def current_dma_supported(self) -> bool:
         return True

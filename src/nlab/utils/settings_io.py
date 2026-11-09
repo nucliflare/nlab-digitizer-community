@@ -20,6 +20,7 @@ import yaml
 from nlab.acquisition_policy import MCA_FIXED_LOW_PASS_PRESET
 from nlab.hardware.digitizer.hv import HVSupply
 from nlab.hardware.digitizer.mca import MultiChannelAnalyzer
+from nlab.hardware.digitizer.mca_parameters import validate_document
 from nlab.hardware.digitizer.scope import (
     SCOPE_ADC_SAMPLE_PERIOD_NS,
     SCOPE_DATAPATH_CLOCK_PERIOD_NS,
@@ -28,8 +29,8 @@ from nlab.hardware.digitizer.scope import (
 )
 
 log = logging.getLogger(__name__)
-FORMAT_VERSION = 4
-_MIGRATABLE_FORMAT_VERSIONS = frozenset({3})
+FORMAT_VERSION = 5
+_MIGRATABLE_FORMAT_VERSIONS = frozenset({3, 4})
 
 
 def read_configuration(path: Path) -> dict[str, Any]:
@@ -188,60 +189,19 @@ def collect_channel_hardware(
     }
     if mca is not None:
         mca_settings: dict[str, Any] = {
-            "signal": {
-                "pulse_polarity": mca.get_pulse_polarity(),
-                "trigger_level": mca.get_trigger_level(),
-                "baseline_window": mca.get_baseline_window(),
-                "pretrigger_ns": mca.get_pretrigger_samples(),
-                "frame_ns": mca.get_frame_samples(),
-                "trg_source": mca.get_trg_source(),
-                "ext_trig_enable": mca.get_ext_trig_enable(),
-                "edge_det_coeff": mca.get_edge_det_coeff(),
-            },
-            "acquisition": {
-                "energy_bin": mca.get_energy_bin(),
-                "pileup_window": mca.get_pileup_window(),
-                "time_limit": mca.get_time_limit(),
-            },
-            "debug": {
-                "mem1_sig_select": mca.get_mem1_sig_select(),
-                "mem2_sig_select": mca.get_mem2_sig_select(),
-            },
-            "crrc2": {
-                "cdelay_ns": mca.filters.crrc2.get_Cdelay(),
-                "fdelay_ns": mca.filters.crrc2.get_Fdelay(),
-                "pzc": mca.filters.crrc2.get_pzc_coeff(),
-            },
-            "cfd": {
-                "enable": mca.filters.cfd.get_enable(),
-                "factor": mca.filters.cfd.get_factor(),
-                "delay_ns": mca.filters.cfd.get_delay(),
-                "tw_low_ns": mca.filters.cfd.get_time_window_low(),
-                "tw_high_ns": mca.filters.cfd.get_time_window_high(),
-            },
-            "trapezoid": {
-                "enable": mca.filters.trapezoid.get_enable(),
-                "rise_ns": mca.filters.trapezoid.get_R(),
-                "flat_top_ns": mca.filters.trapezoid.get_M(),
-                "pole_zero_ns": mca.filters.trapezoid.get_T(),
-                "energy_time_ns": mca.filters.trapezoid.get_E(),
-                "ft": mca.filters.trapezoid.get_FT(),
-            },
-            "charge_comparison": {
-                "enable": mca.filters.charge_comparison.get_enable(),
-                "time_ns": mca.filters.charge_comparison.get_time(),
-            },
-            "psd_zc": {
-                "enable": mca.filters.psd_zc.get_enable(),
-                "mode": mca.filters.psd_zc.get_mode(),
-                "low_ns": mca.filters.psd_zc.get_time_window_low(),
-                "high_ns": mca.filters.psd_zc.get_time_window_high(),
-            },
+            "parameter_abi_version": 2,
+            "parameter_units": "adc_samples",
+            "parameters": mca.parameter_snapshot(),
+            "debug": {"mem1_sig_select": mca.get_mem1_sig_select(),
+                      "mem2_sig_select": mca.get_mem2_sig_select()},
+            "low_pass": {"preset": MCA_FIXED_LOW_PASS_PRESET},
         }
         if mca.filters.crrc2.supports_reciprocal_raw():
-            mca_settings["crrc2"]["reciprocal_raw"] = mca.filters.crrc2.get_reciprocal_raw()
-        if mca_lp_preset is not None:
-            mca_settings["low_pass"] = {"preset": mca_lp_preset}
+            mca_settings["optional_parameters"] = {
+                "crrc2_1cdelay_raw": mca.filters.crrc2.get_reciprocal_raw(),
+            }
+        if mca.dc_blocker_supported():
+            mca_settings["input_filter"] = {"dc_blocker_bypass": mca.get_dc_blocker_bypass()}
         settings["mca"] = mca_settings
     if hv is not None and psu_settings is not None:
         settings["psu"] = dict(psu_settings)
@@ -290,104 +250,28 @@ def _apply_time_ns(
 
 
 def _apply_mca(mca: MultiChannelAnalyzer, settings: Mapping[str, Any]) -> None:
-    crrc2 = _mapping(settings, "crrc2")
-    if "reciprocal_raw" in crrc2 and not mca.filters.crrc2.supports_reciprocal_raw():
-        raise NotImplementedError("saved CR-RC2 1/C requires an updated vdpp-mca driver")
-    signal = _mapping(settings, "signal")
-    _apply_ints(
-        signal,
-        (
-            ("pulse_polarity", mca.set_pulse_polarity),
-            ("trigger_level", mca.set_trigger_level),
-            ("baseline_window", mca.set_baseline_window),
-            ("pretrigger_ns", mca.set_pretrigger_samples),
-            ("frame_ns", mca.set_frame_samples),
-            ("trg_source", mca.set_trg_source),
-            ("edge_det_coeff", mca.set_edge_det_coeff),
-        ),
-    )
-    _apply_bools(signal, (("ext_trig_enable", mca.set_ext_trig_enable),))
-
-    acquisition = _mapping(settings, "acquisition")
-    _apply_ints(
-        acquisition,
-        (
-            ("energy_bin", mca.set_energy_bin),
-            ("pileup_window", mca.set_pileup_window),
-            ("time_limit", mca.set_time_limit),
-        ),
-    )
-
-    debug = _mapping(settings, "debug")
-    if "mem1_sig_select" in debug:
-        mca.set_mem1_sig_select(int(debug["mem1_sig_select"]))
-    if "mem2_sig_select" in debug:
-        mca.set_mem2_sig_select(int(debug["mem2_sig_select"]))
-
-    # Enforce the application policy inside the existing reconfiguration transaction.
-    # Older settings may request another preset; never write that obsolete choice.
+    values = validate_document(settings)
+    optional = _mapping(settings, "optional_parameters")
+    if optional:
+        if set(optional) != {"crrc2_1cdelay_raw"}:
+            raise ValueError("Unknown optional MCA parameter")
+        value = optional["crrc2_1cdelay_raw"]
+        if type(value) is not int or not 0 <= value <= 65535:
+            raise ValueError("CR-RC2 1/C must be an unsigned 16-bit integer")
+        if not mca.filters.crrc2.supports_reciprocal_raw():
+            raise NotImplementedError("This driver does not advertise CR-RC2 1/C")
+    mca.configure_parameters(values)
+    if optional:
+        mca.filters.crrc2.set_reciprocal_raw(optional["crrc2_1cdelay_raw"])
     mca.filters.lp.set_preset(MCA_FIXED_LOW_PASS_PRESET)
-
-    for key, setter in (
-        ("cdelay_ns", mca.filters.crrc2.set_Cdelay),
-        ("fdelay_ns", mca.filters.crrc2.set_Fdelay),
-        ("pzc", mca.filters.crrc2.set_pzc_coeff),
-    ):
-        if key in crrc2:
-            setter(int(crrc2[key]))
-
-    if "reciprocal_raw" in crrc2:
-        # Preserve raw integers; do not silently truncate a fractional setting.
-        mca.filters.crrc2.set_reciprocal_raw(crrc2["reciprocal_raw"])
-
-    cfd = _mapping(settings, "cfd")
-    _apply_bools(cfd, (("enable", mca.filters.cfd.set_enable),))
-    _apply_floats(cfd, (("factor", mca.filters.cfd.set_factor),))
-    _apply_ints(
-        cfd,
-        (
-            ("delay_ns", mca.filters.cfd.set_delay),
-            ("tw_low_ns", mca.filters.cfd.set_time_window_low),
-            ("tw_high_ns", mca.filters.cfd.set_time_window_high),
-        ),
-    )
-
-    trapezoid = _mapping(settings, "trapezoid")
-    _apply_bools(trapezoid, (("enable", mca.filters.trapezoid.set_enable),))
-    _apply_ints(
-        trapezoid,
-        (
-            ("rise_ns", mca.filters.trapezoid.set_R),
-            ("flat_top_ns", mca.filters.trapezoid.set_M),
-            ("pole_zero_ns", mca.filters.trapezoid.set_T),
-            ("energy_time_ns", mca.filters.trapezoid.set_E),
-            ("ft", mca.filters.trapezoid.set_FT),
-        ),
-    )
-
-    charge = _mapping(settings, "charge_comparison")
-    if "enable" in charge:
-        mca.filters.charge_comparison.set_enable(bool(charge["enable"]))
-    if "time_ns" in charge:
-        mca.filters.charge_comparison.set_time(int(charge["time_ns"]))
-
-    psd = _mapping(settings, "psd_zc")
-    _apply_bools(psd, (("enable", mca.filters.psd_zc.set_enable),))
-    _apply_ints(
-        psd,
-        (
-            ("mode", mca.filters.psd_zc.set_mode),
-            ("low_ns", mca.filters.psd_zc.set_time_window_low),
-            ("high_ns", mca.filters.psd_zc.set_time_window_high),
-        ),
-    )
-
-    # Backward compatibility with the original per-channel files.
-    temperature = _mapping(settings, "temperature")
-    if "coeff" in temperature:
-        mca.set_temp_coeff(float(temperature["coeff"]))
-    if "offset" in temperature:
-        mca.set_temp_offset(int(temperature["offset"]))
+    debug = _mapping(settings, "debug")
+    for key, setter in (("mem1_sig_select", mca.set_mem1_sig_select),
+                        ("mem2_sig_select", mca.set_mem2_sig_select)):
+        if key in debug:
+            setter(int(debug[key]))
+    input_filter = _mapping(settings, "input_filter")
+    if "dc_blocker_bypass" in input_filter:
+        mca.set_dc_blocker_bypass(bool(input_filter["dc_blocker_bypass"]))
 
 
 def apply_mca_hardware(
@@ -459,6 +343,9 @@ def apply_channel_hardware(
     settings: Mapping[str, Any],
 ) -> None:
     """Apply one channel's hardware values; missing keys are ignored."""
+    # Reject unidentified MCA semantics before writing any other hardware.
+    if mca is not None and isinstance(settings.get("mca"), Mapping):
+        validate_document(_mapping(settings, "mca"))
     scope_settings = _mapping(settings, "scope")
     _apply_ints(
         scope_settings,
