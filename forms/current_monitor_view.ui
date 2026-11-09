@@ -18,6 +18,35 @@
        <item><property name="text"><string>Scope DMA</string></property></item>
       </widget>
      </item>
+     <item><widget class="QPushButton" name="btnStart"><property name="text"><string>Start monitor</string></property></widget></item>
+     <item><widget class="QPushButton" name="btnStop"><property name="text"><string>Stop</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+     <item>
+      <widget class="QPushButton" name="btnResetScopeDefaults">
+       <property name="text"><string>Reset Scope defaults</string></property>
+       <property name="enabled"><bool>false</bool></property>
+       <property name="toolTip"><string>Restore the Scope hardware defaults after stopping Current DMA.</string></property>
+      </widget>
+     </item>
+     <item><widget class="QPushButton" name="btnZero"><property name="text"><string>Set zero from recent samples</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+     <item><spacer name="controlsSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>20</height></size></property></spacer></item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QWidget" name="sumTimingControls" native="true">
+     <layout class="QHBoxLayout" name="sumTimingLayout">
+      <property name="leftMargin"><number>0</number></property>
+      <property name="topMargin"><number>0</number></property>
+      <property name="rightMargin"><number>0</number></property>
+      <property name="bottomMargin"><number>0</number></property>
+      <item><widget class="QLabel" name="labelSumSamples"><property name="text"><string>Window size:</string></property></widget></item>
+      <item><widget class="QSpinBox" name="spinSumSamples">
+       <property name="toolTip"><string>ADC samples integrated per sum window: 4 to 8188, in steps of 4. Each sample lasts 2 ns. This sets the next capture, not the fixed 4096-byte packet size.</string></property>
+       <property name="suffix"><string> samples</string></property>
+       <property name="minimum"><number>4</number></property>
+       <property name="maximum"><number>8188</number></property>
+       <property name="singleStep"><number>4</number></property>
+       <property name="value"><number>1024</number></property>
+      </widget></item>
      <item><widget class="QLabel" name="labelDmaGap"><property name="text"><string>DMA gap:</string></property><property name="enabled"><bool>false</bool></property></widget></item>
      <item>
       <widget class="QDoubleSpinBox" name="spinDmaGap">
@@ -31,18 +60,24 @@
        <property name="value"><double>100.000000000000000</double></property>
       </widget>
      </item>
-     <item><widget class="QPushButton" name="btnStart"><property name="text"><string>Start monitor</string></property></widget></item>
-     <item><widget class="QPushButton" name="btnStop"><property name="text"><string>Stop</string></property><property name="enabled"><bool>false</bool></property></widget></item>
-     <item>
-      <widget class="QPushButton" name="btnResetScopeDefaults">
-       <property name="text"><string>Reset Scope defaults</string></property>
-       <property name="enabled"><bool>false</bool></property>
-       <property name="toolTip"><string>Restore the Scope hardware defaults after stopping Current DMA.</string></property>
-      </widget>
-     </item>
-     <item><widget class="QPushButton" name="btnZero"><property name="text"><string>Set zero from recent samples</string></property><property name="enabled"><bool>false</bool></property></widget></item>
-     <item><spacer name="controlsSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>20</height></size></property></spacer></item>
-    </layout>
+      <item><widget class="QLabel" name="labelSumTiming"><property name="text"><string/></property><property name="toolTip"><string>Window duration is N times 2 ns. Scheduled start interval is the window duration plus the window gap; missed windows are excluded from measured exposure.</string></property></widget></item>
+      <item><spacer name="sumTimingSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>20</height></size></property></spacer></item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QWidget" name="sumControls" native="true">
+     <layout class="QHBoxLayout" name="sumControlsLayout">
+      <property name="leftMargin"><number>0</number></property>
+      <property name="topMargin"><number>0</number></property>
+      <property name="rightMargin"><number>0</number></property>
+      <property name="bottomMargin"><number>0</number></property>
+      <item><widget class="QCheckBox" name="cbRecordSums"><property name="text"><string>Record HDF5 sums</string></property><property name="toolTip"><string>Record original sum packets and exact timestamps to a new HDF5 file.</string></property></widget></item>
+      <item><widget class="QLineEdit" name="editSumFile"><property name="placeholderText"><string>New .h5 file</string></property><property name="toolTip"><string>Output filename; existing files are preserved.</string></property></widget></item>
+      <item><widget class="QPushButton" name="btnSumFile"><property name="text"><string>Browse...</string></property><property name="toolTip"><string>Choose a new sum recording file.</string></property></widget></item>
+      <item><widget class="QPushButton" name="btnOpenSums"><property name="text"><string>Open sum capture...</string></property><property name="toolTip"><string>Replay recorded sums in this plot without accessing hardware.</string></property></widget></item>
+     </layout>
+    </widget>
    </item>
    <item>
     <widget class="QGroupBox" name="groupReading">

@@ -5,9 +5,8 @@ format:
     code-fold: false
 ---
 
-The per-channel **Current** workspace provides two ways to observe the detector
-current path: a lightweight scalar IIR readout and a timestamped Scope DMA
-waveform. They are different raw signals and should not be compared as though
+The per-channel **Current** workspace provides IIR polling, timestamped Scope
+DMA waveforms, and structured periodic sums on supported IP123/IP124 firmware. They are different raw signals and should not be compared as though
 they were interchangeable current measurements.
 
 ## Choose an acquisition mode
@@ -37,6 +36,28 @@ calibration.
 
 The monitor deliberately starts stopped. Merely opening the workspace does not
 create a polling connection or arm DMA.
+
+## Periodic sums (IP123/IP124)
+
+Periodic sums are available only from **Current**, not from Scope's waveform
+trigger selector. Stop any acquisition on this channel, then select
+**Current > Periodic sums**. Set **Window size** (4..8188 ADC samples, step 4)
+and **Window gap** (0..524.280 us, step 0.008 us) in the timing row. The preview
+shows window duration (N times 2 ns) and the scheduled start interval. These
+settings apply on Start and remain locked through capture and tail drain. Optionally enable **Record HDF5 sums** and select a new output
+file, then press **Start monitor**. Window means appear in the existing large
+Current plot, with the latest window mean and session statistics above it.
+
+The sum monitor reports all-sample window means in ADC codes, sample-weighted
+session means, exposure, and missed windows. Its aggregate data cannot supply
+pulse waveforms, extrema, or noise spectra. The IIR/waveform calibration controls
+do not apply to this view; physical current conversion requires a qualified
+channel/DC-path calibration.
+
+Use **Stop and drain** to retain accepted tail windows. After the reader exits,
+the waveform trigger, frame size, pretrigger, and gap are restored; the final plot stays visible. Existing
+HDF5 sum files can be opened in the same plot using **Open sum capture** or
+**File > Open Scope sum capture** without hardware. See the [sum file specification](scope-sum-format.md).
 
 ## First measurement with IIR polling
 

@@ -2304,3 +2304,19 @@ def test_peak_analysis_workbench_is_modeless_and_reused(
 
     factory.assert_called_once_with(controller._mca_controllers, parent=controller._window)
     assert dialog.show_workspace.call_count == 2
+
+
+def test_saved_sums_are_routed_to_current_workspace() -> None:
+    current, dock = Mock(), Mock()
+    dock.widget.return_value = current
+    host = Mock()
+    host.findChildren.return_value = [dock]
+    window = SimpleNamespace(ui=SimpleNamespace(mainTabs=Mock(), tabCurrent=object()))
+    controller = SimpleNamespace(
+        _current_monitor_controllers=[current], _current_dock_host=host, _window=window
+    )
+    path = Path("recorded-sums.h5")
+    MainWindowController.show_scope_sums(controller, path)
+    current.open_sum_capture.assert_called_once_with(path)
+    window.ui.mainTabs.setCurrentWidget.assert_called_once_with(window.ui.tabCurrent)
+    dock.raise_.assert_called_once()

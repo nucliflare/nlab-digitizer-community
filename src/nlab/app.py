@@ -219,6 +219,7 @@ class MainAppWindow(QMainWindow):
         self.ui.actionExitReplay.triggered.connect(self._on_exit_replay)
         self.ui.actionOpenPsdEvents.triggered.connect(self._on_open_psd_events)
         self.ui.actionOpenWaveformFile.triggered.connect(self._on_open_waveform_file)
+        self.ui.actionOpenScopeSums.triggered.connect(self._on_open_scope_sums)
         self.ui.actionEnergyCalibration.triggered.connect(self._on_energy_calibration)
         self.ui.actionDoseCalibration.triggered.connect(self._on_dose_calibration)
         self.ui.actionMcaPeakAnalysis.triggered.connect(self._on_mca_peak_analysis)
@@ -850,6 +851,13 @@ class MainAppWindow(QMainWindow):
         self._controller.clear_session_replay()
         self._set_replay_indicator(None, None)
         self.statusBar().showMessage("Session replay unloaded", 5_000)
+
+    def _on_open_scope_sums(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Open Scope sum capture", "", "Scope sum capture (*.h5)",
+        )
+        if filename:
+            self._controller.show_scope_sums(Path(filename))
 
     def _on_open_waveform_file(self) -> None:
         self._controller.show_waveform_analysis()

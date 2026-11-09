@@ -35,7 +35,7 @@ def controller(qtbot: QtBot, monkeypatch: pytest.MonkeyPatch):
             "set_frame_samples",
             MCAParam.FRAME_SAMPLES,
             409,
-            410,
+            408,
         ),
         (
             "spinPretrigger",
@@ -43,26 +43,26 @@ def controller(qtbot: QtBot, monkeypatch: pytest.MonkeyPatch):
             "set_pretrigger_samples",
             MCAParam.PRETRIGGER_SAMPLES,
             409,
-            410,
+            408,
         ),
         (
             "spinCrrc2Cdelay",
             "sliderCrrc2Cdelay",
             "filters.crrc2.set_Cdelay",
             MCAParam.CRRC2_CDELAY,
-            95,
-            64,
+            2,
+            2,
         ),
         (
             "spinCrrc2Cdelay",
             "sliderCrrc2Cdelay",
             "filters.crrc2.set_Cdelay",
             MCAParam.CRRC2_CDELAY,
-            96,
-            128,
+            7,
+            6,
         ),
-        ("spinTrapR", "sliderTrapR", "filters.trapezoid.set_R", MCAParam.TRAPEZ_R, 19, 16),
-        ("spinTrapR", "sliderTrapR", "filters.trapezoid.set_R", MCAParam.TRAPEZ_R, 20, 24),
+        ("spinTrapR", "sliderTrapR", "filters.trapezoid.set_R", MCAParam.TRAPEZ_R, 19, 20),
+        ("spinTrapR", "sliderTrapR", "filters.trapezoid.set_R", MCAParam.TRAPEZ_R, 20, 20),
         (
             "spinTriggerLevel",
             "sliderTriggerLevel",
@@ -77,7 +77,7 @@ def controller(qtbot: QtBot, monkeypatch: pytest.MonkeyPatch):
             "set_frame_samples",
             MCAParam.FRAME_SAMPLES,
             -20,
-            0,
+            4,
         ),
         (
             "spinFrameSamples",
@@ -85,7 +85,7 @@ def controller(qtbot: QtBot, monkeypatch: pytest.MonkeyPatch):
             "set_frame_samples",
             MCAParam.FRAME_SAMPLES,
             99999,
-            8190,
+            4096,
         ),
     ],
 )
@@ -108,11 +108,11 @@ def test_setting_commit_snaps_and_synchronizes_once(
 @pytest.mark.parametrize(
     "spin_name,method,parameter,requested,expected",
     [
-        ("spinCcTime", "filters.charge_comparison.set_time", MCAParam.CC_TIME, 409, 410),
-        ("spinCfdTwLow", "filters.cfd.set_time_window_low", MCAParam.CFD_TW_LOW, 409, 410),
-        ("spinPsdZcHigh", "filters.psd_zc.set_time_window_high", MCAParam.PSD_ZC_HIGH, 409, 410),
-        ("spinTrapT", "filters.trapezoid.set_T", MCAParam.TRAPEZ_T, 67, 64),
-        ("spinTrapT", "filters.trapezoid.set_T", MCAParam.TRAPEZ_T, 68, 72),
+        ("spinCcTime", "filters.charge_comparison.set_time", MCAParam.CC_TIME, 409, 408),
+        ("spinCfdTwLow", "filters.cfd.set_time_window_low", MCAParam.CFD_TW_LOW, 409, 408),
+        ("spinPsdZcHigh", "filters.psd_zc.set_time_window_high", MCAParam.PSD_ZC_HIGH, 409, 408),
+        ("spinTrapT", "filters.trapezoid.set_T", MCAParam.TRAPEZ_T, 67, 67),
+        ("spinTrapT", "filters.trapezoid.set_T", MCAParam.TRAPEZ_T, 68, 68),
     ],
 )
 def test_standalone_and_double_spinbox_timings_snap_before_writing(
@@ -141,8 +141,8 @@ def test_running_setting_snaps_before_one_stop_write_restart(controller):
     view.ui.spinFrameSamples.setValue(409)
     view.ui.spinFrameSamples.editingFinished.emit()
     mca.reconfigure_while_running.assert_called_once()
-    mca.set_frame_samples.assert_called_once_with(410)
-    assert view.ui.sliderFrameSamples.value() == 410
+    mca.set_frame_samples.assert_called_once_with(408)
+    assert view.ui.sliderFrameSamples.value() == 408
 
 
 @pytest.mark.parametrize("interlock", ["replay", "dma"])
@@ -154,7 +154,7 @@ def test_snapping_preserves_replay_and_dma_write_interlocks(controller, interloc
         view._dma_worker = object()
     view.ui.spinFrameSamples.setValue(409)
     view.ui.spinFrameSamples.editingFinished.emit()
-    assert view.ui.spinFrameSamples.value() == 410
+    assert view.ui.spinFrameSamples.value() == 408
     mca.set_frame_samples.assert_not_called()
     mca.reconfigure_while_running.assert_not_called()
 
@@ -180,7 +180,7 @@ def test_snapping_uses_minimum_and_last_valid_grid_point(qtbot, widget_class, re
     assert spinbox.value() == expected
 
 
-@pytest.mark.parametrize("position,expected", [(28.9, 28), (29.0, 30), (29.1, 30)])
+@pytest.mark.parametrize("position,expected", [(27.9, 12), (28.0, 16), (28.1, 16)])
 def test_pretrigger_marker_uses_same_nearest_step_without_double_rounding(
     controller, position, expected
 ):
@@ -188,7 +188,7 @@ def test_pretrigger_marker_uses_same_nearest_step_without_double_rounding(
     view._debug_pretrigger_line.setValue(position)
     assert view.ui.spinPretrigger.value() == expected
     assert view.ui.sliderPretrigger.value() == expected
-    assert view._debug_pretrigger_line.value() == expected
+    assert view._debug_pretrigger_line.value() == expected * 2
     mca.set_pretrigger_samples.assert_not_called()
 
 

@@ -10,6 +10,7 @@ import numpy as np
 
 from .backends.base import MCABackend
 from .current_monitor import CurrentMonitorClient
+from .mca_parameters import DEFAULT_PARAMETERS, validate_parameters
 from .scope import ListSpec, ParameterSpec, RangeSpec
 
 # ---------------------------------------------------------------------------
@@ -65,89 +66,50 @@ class MCAParam(IntEnum):
 MCA_DEBUG_SIGNAL_SELECTORS = tuple(range(9))
 
 
+# ABI2 native ADC samples (2 ns); C delay/averaging are exponents, beta is raw.
 MCA_PARAMETER_SPECS: dict[MCAParam, ParameterSpec] = {
-    # Ranges below follow user-api.md and the checked-in kernel drivers.
-    # int16_t (hw_def: MIN–MAX, step 1)
     MCAParam.TRIGGER_LEVEL: RangeSpec(min_val=-32768, max_val=32767, step=1, default=-512),
-    # VDPP_PULSE_POLARITY (hw_def: 0–1); 0=negative (falling edge), 1=positive (rising edge)
     MCAParam.PULSE_POLARITY: ListSpec(items=(0, 1), default=0),
-    # VDPP_BSLN_WIND enum (hw_def: 0–6); 0–6 map to 8/16/32/64/128/256/512 ns
     MCAParam.BASELINE_WINDOW: ListSpec(items=(0, 1, 2, 3, 4, 5, 6), default=3),
-    # Physical diagnostic-window offset [ns]; kernel converts register = value / 2.
-    MCAParam.PRETRIGGER_SAMPLES: RangeSpec(min_val=0, max_val=4094, step=2, default=24),
-    # Physical diagnostic-window duration [ns]; kernel converts register = value / 2.
-    MCAParam.FRAME_SAMPLES: RangeSpec(min_val=0, max_val=8190, step=2, default=256),
-    # VDPP_HIST_BIN enum (hw_def: 0–9); index → divisor: 0=1, 1=2, 2=4, ..., 9=512
+    MCAParam.PRETRIGGER_SAMPLES: RangeSpec(0, 2044, 4, 12),
+    MCAParam.FRAME_SAMPLES: RangeSpec(4, 4096, 4, 128),
     MCAParam.ENERGY_BIN: ListSpec(items=(0, 1, 2, 3, 4, 5, 6, 7, 8, 9), default=0),
-    # uint8_t (hw_def: 0–255, step 1)
     MCAParam.PILEUP_WINDOW: RangeSpec(min_val=0, max_val=255, step=1, default=0),
-    # GUI/API value is seconds. The IIO hardware range is measurement_time_raw
-    # u32 multiplied by measurement_time_scale=0.134217728 seconds/count.
     MCAParam.TIME_LIMIT: RangeSpec(min_val=0, max_val=576460752, step=1, default=0),
     MCAParam.GLOBAL_ENABLE: ListSpec(items=(False, True), default=False),
-    # Applied coefficient: vdpp-input-filter.c uses signed Q1.15. +1.0
-    # would encode as 32768, outside the signed 16-bit register range.
-    # The Global panel's base coefficient is a separate calibration input.
     MCAParam.TEMP_COEFF: RangeSpec(
         min_val=-1.0, max_val=32767 / 32768, step=2**-15, default=-0.00026735,
     ),
-    # int16_t (hw_def for temp_offset not present; using input.txt C type range)
     MCAParam.TEMP_OFFSET: RangeSpec(min_val=-32768, max_val=32767, step=1, default=7),
     MCAParam.TRAPEZ_ENABLE: ListSpec(items=(False, True), default=False),
-    # vdpp-pulse-processor.c rejects 0 and 8: the dependent reciprocal
-    # calculation is undefined at 8 (Rdelay would be zero).
-    MCAParam.TRAPEZ_R: RangeSpec(min_val=16, max_val=4088, step=8, default=64),  # ns
-    MCAParam.TRAPEZ_M: RangeSpec(min_val=0, max_val=4088, step=8, default=64),  # ns
-    # Physical pole-zero time [ns]. IIO converts this to trapezoid_beta_raw;
-    # the range and step retain the legacy GUI/API contract.
-    MCAParam.TRAPEZ_T: RangeSpec(min_val=0, max_val=16777216, step=8, default=96),
-    # Physical energy sampling time [ns].
-    MCAParam.TRAPEZ_E: RangeSpec(min_val=0, max_val=16376, step=8, default=256),
-    # VDPP_TRAPEZ_WINDOW enum (hw_def: 0–6)
+    MCAParam.TRAPEZ_R: RangeSpec(8, 2044, 4, 32),
+    MCAParam.TRAPEZ_M: RangeSpec(0, 2044, 4, 32),
+    MCAParam.TRAPEZ_T: RangeSpec(0, 4294967295, 1, 0),
+    MCAParam.TRAPEZ_E: RangeSpec(0, 8188, 4, 64),
     MCAParam.TRAPEZ_FT: ListSpec(items=(0, 1, 2, 3, 4, 5, 6), default=0),
     MCAParam.CFD_ENABLE: ListSpec(items=(False, True), default=False),
-    # cfd_factor_raw is an unsigned 16-bit Q1.15 value. Its live scale is
-    # exactly 2^-15, hence the representable physical range is 0..1.99996948.
-    MCAParam.CFD_FACTOR: RangeSpec(
-        min_val=0.0,
-        max_val=1.999969482421875,
-        step=0.000030517578125,
-        default=0.4,
-    ),
-    # Physical CFD delay [ns].
-    MCAParam.CFD_DELAY: RangeSpec(min_val=0, max_val=254, step=2, default=2),
+    MCAParam.CFD_FACTOR: RangeSpec(0.0, 32767 / 32768, 2**-15, 13107 / 32768),
+    MCAParam.CFD_DELAY: RangeSpec(5, 132, 1, 5),
     MCAParam.CC_ENABLE: ListSpec(items=(False, True), default=False),
-    # Physical charge-comparison integration time [ns].
-    MCAParam.CC_TIME: RangeSpec(min_val=0, max_val=65534, step=2, default=8),
-    # trigger_source_available: 0=threshold, 1=CR-RC2, 2=CR2-RC2
+    MCAParam.CC_TIME: RangeSpec(4, 32768, 4, 4),
     MCAParam.TRG_SOURCE: ListSpec(items=(0, 1, 2), default=0),
-    # Physical delay [ns]. The IIO register is raw 8 ns ticks with an
-    # additional raw alignment of 8, hence 64 ns public steps.
-    MCAParam.CRRC2_CDELAY: RangeSpec(min_val=64, max_val=4032, step=64, default=64),
-    # v101 0x00f8 is unsigned 16-bit; keep the existing zero baseline.
-    # Its fixed-point scale is not specified by the register interface.
+    MCAParam.CRRC2_CDELAY: RangeSpec(0, 6, 1, 3),
     MCAParam.CRRC2_RECIPROCAL: RangeSpec(min_val=0, max_val=65535, step=1, default=0),
-    # Physical F-stage delay [ns]; the kernel applies value / 8 - 1.
-    MCAParam.CRRC2_FDELAY: RangeSpec(min_val=8, max_val=1016, step=8, default=8),
-    # int16_t (hw_def: MIN–MAX, step 1)
+    MCAParam.CRRC2_FDELAY: RangeSpec(4, 508, 4, 4),
     MCAParam.CRRC2_PZC: RangeSpec(min_val=-32768, max_val=32767, step=1, default=32761),
-    # Physical CFD time-walk boundaries [ns].
-    MCAParam.CFD_TW_LOW: RangeSpec(min_val=0, max_val=65534, step=2, default=8),
-    MCAParam.CFD_TW_HIGH: RangeSpec(min_val=0, max_val=65534, step=2, default=64),
-    # Corrected pulse-processor v101 drivers expose the complete 0..8 mux.
+    MCAParam.CFD_TW_LOW: RangeSpec(0, 32764, 4, 0),
+    MCAParam.CFD_TW_HIGH: RangeSpec(0, 32764, 4, 32),
     MCAParam.MEM1_SIG_SELECT: ListSpec(items=MCA_DEBUG_SIGNAL_SELECTORS, default=0),
     MCAParam.MEM2_SIG_SELECT: ListSpec(items=MCA_DEBUG_SIGNAL_SELECTORS, default=1),
     MCAParam.EXT_TRIG_ENABLE: ListSpec(items=(False, True), default=False),
-    # uint32_t (hw_def: not present; using full C type range)
     MCAParam.EDGE_DET_COEFF: RangeSpec(min_val=0, max_val=4294967295, step=1, default=1),
-    # PSD controls; low/high are physical nanosecond boundaries converted x2 by the kernel.
     MCAParam.PSD_ZC_ENABLE: ListSpec(items=(False, True), default=False),
     MCAParam.PSD_ZC_MODE: ListSpec(items=(0, 1), default=0),
-    MCAParam.PSD_ZC_LOW: RangeSpec(min_val=0, max_val=65534, step=2, default=8),
-    MCAParam.PSD_ZC_HIGH: RangeSpec(min_val=0, max_val=65534, step=2, default=16),
-    # fir_preset: 0=200 MHz, 1=70 MHz, 2=moving average
+    MCAParam.PSD_ZC_LOW: RangeSpec(0, 32764, 4, 0),
+    MCAParam.PSD_ZC_HIGH: RangeSpec(0, 32764, 4, 8),
     MCAParam.LP_PRESET: ListSpec(items=(0, 1, 2), default=0),
 }
+
 
 
 class MCASettingEntry(TypedDict):
@@ -198,7 +160,7 @@ class Trapezoid:
 
     def set_T(self, val: int) -> None:
         MCA_PARAMETER_SPECS[MCAParam.TRAPEZ_T].validate(
-            val, "trapezoid_pole_zero_time_ns"
+            val, "trapezoid_beta_raw"
         )
         self._b.set_trapez_T(val)
 
@@ -491,7 +453,9 @@ class McaGateTiming:
                              (MCAParam.CC_TIME, self.cc_time_ns)):
             if type(value) is not int:
                 raise ValueError(f"{param.name} must be an integer number of ns")
-            MCA_PARAMETER_SPECS[param].validate(value, param.name)
+            if value % 2:
+                raise ValueError(f"{param.name} must align to 2 ns ADC samples")
+            MCA_PARAMETER_SPECS[param].validate(value // 2, param.name)
         if type(self.cc_enabled) is not bool:
             raise ValueError("Charge-comparison enable must be boolean")
         if not 0 <= self.pretrigger_ns < self.frame_ns:
@@ -511,7 +475,9 @@ class MultiChannelAnalyzer:
         # configuration with MCAWorker's measurement-completion poll. Without
         # this, the worker can observe the intentional enable=0 interval and
         # incorrectly report that the hardware time limit ended the run.
-        self._configuration_lock = threading.RLock()
+        self._configuration_lock = (
+            getattr(backend, "mca_configuration_lock", None) or threading.RLock()
+        )
         self.filters = MCAFilters(backend)
         self.statistics = MCAStatistics(backend)
         self.sync = SyncTrigger(backend)
@@ -594,48 +560,32 @@ class MultiChannelAnalyzer:
     def gate_timing(self) -> McaGateTiming:
         with self._configuration_lock:
             return McaGateTiming(
-                self.get_pretrigger_samples(), self.get_frame_samples(),
-                self.filters.charge_comparison.get_time(),
+                self.get_pretrigger_samples() * 2, self.get_frame_samples() * 2,
+                self.filters.charge_comparison.get_time() * 2,
                 self.filters.charge_comparison.get_enable(),
             )
 
     def apply_gate_timing(self, timing: McaGateTiming) -> None:
-        """Apply an idle-only candidate preset; never stop/restart acquisition.
+        """Transfer physical ns to native ADC samples while stopped.
 
-        PetaLinux 167e90f, vdpp-pulse-processor.c pp_fields/pp_field_store:
-        these three public fields are physical ns in steps of 2, already encoded
-        by the driver. This does NOT establish equivalence to offline integrals.
-        Configuration reads are driver shadows, not independent FPGA readback.
-        Writes are sequential, not atomic; attempt full restoration on failure.
+        A failed partial write stays stopped; inspect hardware before retrying.
+        STOP is an ownership gate, not a downstream-completion acknowledgement.
         """
         timing.validate()
         with self._configuration_lock:
-            if (self.get_global_enable() or self.get_measurement_in_progress()
-                    or self.dma_active()):
+            if self.get_global_enable() or self.dma_active():
                 raise RuntimeError("Stop MCA acquisition and close list-mode DMA before transfer")
-            previous = self.gate_timing()
-
-            def operations(value: McaGateTiming) -> tuple[Callable[[], None], ...]:
-                return (
-                    lambda: self.set_pretrigger_samples(value.pretrigger_ns),
-                    lambda: self.set_frame_samples(value.frame_ns),
-                    lambda: self.filters.charge_comparison.set_time(value.cc_time_ns),
-                    lambda: self.filters.charge_comparison.set_enable(value.cc_enabled),
-                )
-
-            try:
-                for write in operations(timing):
-                    write()
-            except Exception as exc:
-                failures = []
-                for write in operations(previous):
-                    try:
-                        write()
-                    except Exception as rollback_error:
-                        failures.append(str(rollback_error))
-                state = ("rollback incomplete; inspect MCA settings: " + "; ".join(failures)
-                         if failures else "previous settings restored")
-                raise RuntimeError(f"Gate transfer failed ({state}): {exc}") from exc
+            if self.parameter_contract().get("parameter_abi_version") == 2:
+                validate_parameters(self.parameter_snapshot() | {
+                    "pretrigger_samples": timing.pretrigger_ns // 2,
+                    "frame_samples": timing.frame_ns // 2,
+                    "charge_comparison_samples": timing.cc_time_ns // 2,
+                    "charge_comparison_enable": int(timing.cc_enabled),
+                }, complete=True)
+            self.set_pretrigger_samples(timing.pretrigger_ns // 2)
+            self.set_frame_samples(timing.frame_ns // 2)
+            self.filters.charge_comparison.set_time(timing.cc_time_ns // 2)
+            self.filters.charge_comparison.set_enable(timing.cc_enabled)
 
     def get_time_limit(self) -> int:
         """Return time limit in seconds. 0 = no limit."""
@@ -671,45 +621,54 @@ class MultiChannelAnalyzer:
             return self._b.get_measurement_in_progress()
 
     def reconfigure_while_running(self, write: Callable[[], None]) -> bool:
-        """Apply one hardware setting, preserving a polling acquisition.
+        """Apply while idle; ABI2 requires an explicit stop/configure/start.
 
-        vdpp-pulse-processor.c's pp_field_store() returns EBUSY for
-        measurement-configuration fields while ``enable`` or
-        ``list_buffer_active`` is set. Debug-memory selectors are explicitly
-        exempt: use their setters directly without restarting accumulation.
-        For a normal histogram/viewer measurement, briefly stop, write,
-        and restart, matching the workaround previously used by the scope
-        backend. The shared lock prevents MCAWorker from mistaking that
-        intentional stop for hardware time-limit completion.
-
-        A list-mode buffer cannot be handled this way: it remains active
-        after enable=0 and its teardown/drain lifecycle belongs to the DMA
-        worker. The GUI disables hardware controls during DMA, and this
-        method rejects any accidental programmatic call in that state.
-
-        Restarting begins a new hardware acquisition, so histogram and
-        elapsed/statistics counters may reset. If the write itself fails,
-        the original acquisition is still restarted before re-raising.
+        A07 downstream-completion fencing is deferred by the driver contract.
+        Legacy test/offline surfaces retain successful stop/write/start behavior,
+        but a failed write always leaves the core stopped.
         """
         with self._configuration_lock:
-            was_enabled = self._b.get_global_enable()
-            if not was_enabled:
-                write()
-                return False
             if self._b.mca_dma_active():
-                raise RuntimeError(
-                    "cannot reconfigure MCA while list-mode DMA is active; "
-                    "stop the DMA measurement first"
-                )
-
-            self._b.set_global_enable(False)
-            try:
-                write()
-            finally:
+                raise RuntimeError("Stop list-mode DMA before configuring MCA")
+            running = self._b.get_global_enable()
+            if running and self.parameter_contract().get("parameter_abi_version") == 2:
+                raise RuntimeError("Stop MCA before changing measurement settings (ABI2)")
+            if running:
+                self._b.set_global_enable(False)
+            write()
+            if running:
                 self._b.set_global_enable(True)
-            return True
+            return running
 
-    # ---- temperature compensation ----
+    def parameter_contract(self) -> dict[str, object]:
+        reader = getattr(self._b, "mca_parameter_contract", None)
+        return reader() if reader is not None else {}
+
+    def prepare_configuration(self, values: dict[str, int] | None = None) -> None:
+        candidate = dict(DEFAULT_PARAMETERS if values is None else values)
+        validate_parameters(candidate, complete=True)
+        prepare = getattr(self._b, "prepare_mca_configuration", None)
+        if prepare is not None:
+            prepare(candidate)
+
+    def parameter_snapshot(self) -> dict[str, int]:
+        return self._b.mca_parameter_snapshot()
+
+    def configure_parameters(self, values: dict[str, int]) -> None:
+        with self._configuration_lock:
+            self._b.configure_mca_parameters(values)
+
+    def dc_blocker_supported(self) -> bool:
+        return bool(getattr(self._b, "supports_dc_blocker", lambda: False)())
+
+    def get_dc_blocker_bypass(self) -> bool:
+        return self._b.get_dc_blocker_bypass()
+
+    def set_dc_blocker_bypass(self, bypass: bool) -> None:
+        with self._configuration_lock:
+            if self.get_global_enable() or self.dma_active():
+                raise RuntimeError("Stop MCA before changing its DC path")
+            self._b.set_dc_blocker_bypass(bypass)
 
     def get_temp_coeff(self) -> float:
         return self._b.get_temp_coeff()
@@ -792,7 +751,8 @@ class MultiChannelAnalyzer:
 
     def acquire_spectrum(self) -> np.ndarray:
         """Read the accumulated histogram. Returns uint32 array of shape (n_bins,)."""
-        return self._b.read_histogram()
+        with self._configuration_lock:
+            return self._b.read_histogram()
 
     def clear_spectrum(self) -> None:
         self._b.clear_histogram()

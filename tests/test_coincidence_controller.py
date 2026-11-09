@@ -146,7 +146,8 @@ def _make_controller(
         _McaView(1, mcas[1], fail_start=fail_second, auto_ready=not delay_second),
     )
     devices = [
-        SimpleNamespace(mca=mca, mca_dma=IIOMcaDmaStreamer(Mock(), channel=channel))
+        SimpleNamespace(mca=mca, mca_dma=IIOMcaDmaStreamer(Mock(mca_producer_identity=lambda: {
+            "qualified_record_schema": "vdpp-zc-calc-q2.14-v1"}), channel=channel))
         for channel, mca in enumerate(mcas)
     ]
     global_view = SimpleNamespace(set_coincidence_locked=Mock())

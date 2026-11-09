@@ -59,7 +59,7 @@ FORM_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
         "FrameSamples": "mca-window", "Pretrigger": "mca-window",
         "Crrc2Cdelay": "mca-crrc",
         "Crrc2Fdelay": "mca-crrc", "Crrc2Pzc": "mca-crrc",
-        "Crrc2Reciprocal": "mca-crrc",
+        "Crrc2Reciprocal": "mca-crrc", "DcBlockerBypass": "mca-crrc",
         "CfdEnable": "mca-cfd", "CfdFactor": "mca-cfd", "CfdDelay": "mca-cfd",
         "CfdTwLow": "mca-cfd", "CfdTwHigh": "mca-cfd",
         "TrapezEnable": "mca-trapezoid", "TrapR": "mca-trapezoid",
@@ -82,6 +82,8 @@ FORM_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
     }),
     "CurrentMonitorView": ("current", {
         "Mode": "current-mode", "DmaGap": "current-mode",
+        "RecordSums": "scope-sums", "SumFile": "scope-sums", "OpenSums": "scope-sums",
+        "SumSamples": "scope-sums", "SumTiming": "scope-sums",
         "Start": "current", "Stop": "current", "ResetScopeDefaults": "current-mode",
         "Zero": "current-calibration", "Scale": "current-calibration",
         "Unit": "current-calibration", "Calibration": "current-calibration",

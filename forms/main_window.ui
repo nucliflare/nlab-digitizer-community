@@ -197,6 +197,7 @@
     <addaction name="separator"/>
     <addaction name="actionOpenPsdEvents"/>
     <addaction name="actionOpenWaveformFile"/>
+    <addaction name="actionOpenScopeSums"/>
    </widget>
    <addaction name="menuFile"/>
    <addaction name="menuConnection"/>
@@ -280,6 +281,10 @@
   </action>
   <action name="actionOpenPsdEvents">
    <property name="text"><string>PSD Event Readback...</string></property>
+  </action>
+  <action name="actionOpenScopeSums">
+   <property name="text"><string>Open Scope sum capture...</string></property>
+   <property name="toolTip"><string>Replay measured periodic window sums from a versioned HDF5 capture without connecting hardware.</string></property>
   </action>
   <action name="actionOpenWaveformFile">
    <property name="text"><string>Waveform Analysis Workbench...</string></property>

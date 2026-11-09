@@ -13,6 +13,7 @@ from pytestqt.qtbot import QtBot
 from nlab.controllers.mca_controller import MCAController
 from nlab.hardware.digitizer.backends.iio_backend import IIODigitizerBackend
 from nlab.hardware.digitizer.mca import MCAParam, MultiChannelAnalyzer
+from nlab.hardware.digitizer.mca_parameters import DEFAULT_PARAMETERS
 from nlab.hardware.digitizer.offline import create_offline_digitizer
 from nlab.help.context import resolve_context
 from nlab.utils.settings_io import (
@@ -26,7 +27,10 @@ from nlab.utils.settings_io import (
 
 def _backend(*, supported: bool = True) -> IIODigitizerBackend:
     backend = object.__new__(IIODigitizerBackend)
-    attributes = {"crrc2_cdelay": SimpleNamespace(value="8")}
+    attributes = {"crrc2_cdelay": SimpleNamespace(value="3"),
+                  "parameter_abi_version": SimpleNamespace(value="2"),
+                  "parameter_units": SimpleNamespace(value="adc_samples"),
+                  "parameter_abi_ack": SimpleNamespace(value="2")}
     if supported:
         attributes["crrc2_1cdelay_raw"] = SimpleNamespace(value="0")
     backend._pp = SimpleNamespace(attrs=attributes)
@@ -43,7 +47,7 @@ def test_iio_register_and_public_api_preserve_all_raw_bits(value: int) -> None:
 
     assert backend._pp.attrs["crrc2_1cdelay_raw"].value == str(value)
     assert shape.get_reciprocal_raw() == value
-    assert backend._pp.attrs["crrc2_cdelay"].value == "8"
+    assert backend._pp.attrs["crrc2_cdelay"].value == "3"
 
 
 @pytest.mark.parametrize("value", [-1, 65536, 1.5])
@@ -93,7 +97,7 @@ def test_settings_round_trip_and_flat_snapshot_keep_raw_coefficient(tmp_path: Pa
 
     apply_mca_hardware(target.mca, restored)
 
-    assert restored["mca"]["crrc2"]["reciprocal_raw"] == 54321
+    assert restored["mca"]["optional_parameters"]["crrc2_1cdelay_raw"] == 54321
     assert target.mca.filters.crrc2.get_reciprocal_raw() == 54321
     settings = {entry["id"]: entry["value"] for entry in target.mca.get_settings()}
     assert settings[int(MCAParam.CRRC2_RECIPROCAL)] == 54321
@@ -107,19 +111,21 @@ def test_invalid_saved_raw_values_are_rejected_without_truncation(value: object)
     assert device.mca.filters.crrc2.get_reciprocal_raw() == 0
 
 
-def test_legacy_settings_leave_reciprocal_unchanged() -> None:
+def test_legacy_settings_require_review_and_leave_register_unchanged() -> None:
     device = create_offline_digitizer(0)
     device.mca.filters.crrc2.set_reciprocal_raw(4096)
-    apply_mca_hardware(device.mca, {"mca": {"crrc2": {"cdelay_ns": 128}}})
-    assert device.mca.filters.crrc2.get_Cdelay() == 128
+    with pytest.raises(ValueError, match="review older"):
+        apply_mca_hardware(device.mca, {"mca": {"crrc2": {"cdelay_ns": 128}}})
     assert device.mca.filters.crrc2.get_reciprocal_raw() == 4096
-
 
 def test_saved_reciprocal_requires_driver_support(monkeypatch: pytest.MonkeyPatch) -> None:
     device = create_offline_digitizer(0)
     monkeypatch.setattr(device._backend, "supports_crrc2_reciprocal_raw", lambda: False)
-    with pytest.raises(NotImplementedError, match="updated vdpp-mca"):
-        apply_mca_hardware(device.mca, {"mca": {"crrc2": {"reciprocal_raw": 1}}})
+    with pytest.raises(NotImplementedError, match="does not advertise"):
+        apply_mca_hardware(device.mca, {"mca": {
+            "parameter_abi_version": 2, "parameter_units": "adc_samples",
+            "parameters": dict(DEFAULT_PARAMETERS),
+            "optional_parameters": {"crrc2_1cdelay_raw": 1}}})
 
 
 @pytest.mark.parametrize("supported", [False, True])
@@ -142,12 +148,12 @@ def test_gui_initialization_and_driver_capability(
     snapshot = {entry["id"]: entry["value"] for entry in device.mca.get_settings()}
     if supported:
         write.assert_called_once_with(0)
-        assert hardware["mca"]["crrc2"]["reciprocal_raw"] == 0
+        assert hardware["mca"]["optional_parameters"]["crrc2_1cdelay_raw"] == 0
         assert snapshot[int(MCAParam.CRRC2_RECIPROCAL)] == 0
     else:
-        assert "Update" in spinbox.toolTip()
+        assert "does not expose" in spinbox.toolTip()
         write.assert_not_called()
-        assert "reciprocal_raw" not in hardware["mca"]["crrc2"]
+        assert "optional_parameters" not in hardware["mca"]
         assert int(MCAParam.CRRC2_RECIPROCAL) not in snapshot
 
 
@@ -169,9 +175,13 @@ def test_gui_commits_spinbox_and_slider_without_linking_cdelay(
         assert slider.value() == 4096
         assert device.mca.filters.crrc2.get_reciprocal_raw() == 0
         spinbox.editingFinished.emit()
-        assert transaction.call_count == int(running)
+        if running:
+            assert device.mca.filters.crrc2.get_reciprocal_raw() == 0
+            assert "Stop MCA" in view.status.text()
+            return
+        assert transaction.call_count == 0
         assert device.mca.filters.crrc2.get_reciprocal_raw() == 4096
-        view.ui.spinCrrc2Cdelay.setValue(128)
+        view.ui.spinCrrc2Cdelay.setValue(4)
         view.ui.spinCrrc2Cdelay.editingFinished.emit()
         assert device.mca.filters.crrc2.get_reciprocal_raw() == 4096
         slider.setValue(65535)

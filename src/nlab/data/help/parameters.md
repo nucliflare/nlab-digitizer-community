@@ -50,9 +50,9 @@ Each DMA path has one owner. Current waveform DMA uses the Scope path;
 Coincidence owns both selected MCA streams. Stop the current owner and allow
 its worker to drain and release the buffer before starting a conflicting task.
 
-Do not reconfigure MCA DSP settings during list-mode DMA. For ordinary histogram
-acquisition the application's synchronized configuration path can stop, write,
-and restart, beginning a new accumulation. A disabled control may indicate this
+Stop and close list-mode DMA before configuring its measurement. ABI2 also
+requires an explicit stop/configure/start for ordinary histogram acquisition.
+Debug selector changes remain live without resetting accumulation. A disabled control may indicate this
 ownership interlock, not a missing feature.
 
 The client validates complete frames. A clean plot alone does not establish
@@ -78,17 +78,14 @@ display resolution; steps do not reconstruct the analogue waveform.
 
 ## Scope — trigger level and mode {#scope-trigger}
 
-**Level (raw)** sets the Scope ADC threshold, not volts or the baseline-subtracted
-MCA threshold. The dashed threshold line and number field are synchronized.
+**Mode** uses the selectors advertised by the connected Scope. Level and edge
+modes capture individual waveforms. **Periodic** uses the IP122+ mean4 waveform
+format where supported. Structured **Periodic sums** are available only in
+[Current](#scope-sums) on IP123/IP124; they are not a Scope waveform trigger.
 
-**Mode** chooses the available level, edge, or periodic triggering behavior.
-For a negative-going pulse, its leading edge falls in amplitude; its recovery
-edge rises. Select the desired crossing rather than inferring it solely from
-the pulse minimum. Periodic acquisition is not a pulse-threshold selection.
-
-Choose a threshold distinguishable from baseline noise. A threshold beyond
-the pulse amplitude can leave acquisition waiting for a trigger. Changing
-Scope triggering does not change the separate [MCA trigger](#mca-trigger).
+**Level (raw)** is an ADC-code threshold, not volts or the MCA threshold.
+A negative-going pulse has a falling leading edge. Select a crossing that is
+separated from baseline noise. Periodic modes do not select threshold crossings.
 
 ## Scope — DAC baseline {#scope-dac}
 
@@ -251,14 +248,14 @@ unsupported settings should not be interpreted as active hardware behavior.
 
 ## MCA — debug window and pretrigger offset {#mca-window}
 
-**Window length** sets the diagnostic waveform capture-window duration;
-**Pretrigger offset** positions it relative to the diagnostic trigger.
-Both controls are displayed in nanoseconds. Debug samples use an 8 ns timebase.
+MCA ABI2 timings use **ADC samples**, each 2 ns. **Window length** is 4..4096
+samples in steps of four. **Pretrigger offset** is 0..2044 in steps of four.
+The debug plot retains its physical ns axis and one displayed point per 8 ns.
 
-The green line marks the configured offset. It is not a universal proof of
-the analogue threshold-crossing instant in every internal signal: filter and
-logic paths can have different latencies. These controls do not define offline
-short/long PSD integration gates.
+The green line shows the configured offset. Different filter/logic paths can
+have different latency; it does not prove the analogue threshold-crossing time.
+The driver does not impose a universal pretrigger<=window rule. The provisional
+offline gate-transfer workflow checks that relationship for its own mapping.
 
 ## MCA — diagnostic signal sources {#mca-debug}
 
@@ -309,85 +306,61 @@ this fixed response; calibrations made with another response may be stale.
 
 ## MCA — CR-RC² shaping {#mca-crrc}
 
-**C delay** and **F delay** set the C- and F-stage delays in nanoseconds.
-**1/C (raw)** sets the separate unsigned 16-bit coefficient (0 through 65535).
-It starts at the existing zero baseline and is saved with hardware settings.
-The firmware interface does not specify its numerical scale, so the application
-does not derive it from C delay or label it as inverse nanoseconds. Changing C
-delay leaves this coefficient unchanged. The control is disabled on older
-drivers; deploy the updated `vdpp-mca` module to enable it.
+**C delay** is an exponent e=0..6. Its averaging window is $8\times 2^e$ ns:
+selector 3 means 64 ns. **F delay** is 4..508 ADC samples in steps of four.
+**PZC coefficient** is a signed raw pole-zero correction coefficient.
 
-**PZC coefficient** is the raw pole-zero correction coefficient for this filter,
-not a time in nanoseconds. The current control's tooltip identifies the selected
-parameter above this guide.
+The current driver does not export an editable **1/C (raw)** attribute, so
+that control is disabled. An explicitly advertised optional attribute retains
+raw unsigned 16-bit editing and persistence, with no assumed fixed-point scale.
 
-These settings change a shaped signal and may affect filtered triggering.
-Inspect the appropriate debug output and keep the underlying decay and count-rate
-conditions in mind. Do not copy the raw coefficient into the trapezoid pole-zero
-time field; they are different parameterizations.
+Scope observes the raw ADC branch. MCA sees temperature correction, the optional
+DC blocker, and FIR shaping. **Bypass DC blocker** maps to disable=1; unchecked
+maps to disable=0. The MCA FIR response remains fixed at 70 MHz.
 
 ## MCA — constant-fraction discriminator {#mca-cfd}
 
-**Enable CFD** enables the constant-fraction path. **Factor** sets the fraction
-multiplier; **Delay** sets the delayed signal interval in nanoseconds.
-**TW low/high** set the lower and upper time-walk boundaries in nanoseconds.
+The constant-fraction multiplier is raw/32768 with raw=0..32767: its maximum
+is 0.999969482421875. **Delay** is 5..132 native ADC samples, including the
+kernel's phase encoding; the application does not encode it again.
 
-CFD aims to reduce amplitude-dependent timing shifts, but fine timing still
-requires a supported record schema, valid interpolation, and calibration.
-Inspect the CFD signal/window and qualified [coincidence timing](#coincidence-timing)
-instead of assuming the enable checkbox alone guarantees fine resolution.
+The inclusive low/high window boundaries use ADC samples in steps of four.
+When enabled, low<=high<frame_samples and delay<frame_samples. Low=0 and
+high=12 admit four beats, or 16 original ADC positions.
 
 ## MCA — trapezoidal shaping and energy {#mca-trapezoid}
 
-**Enable Trapezoid** enables this energy-processing path.
-**R (rise)** sets the rise time; **M** sets the flat-top time;
-**Pole-zero time** sets the time constant; **Energy time** sets the energy-sampling
-time. These time controls are in nanoseconds. **FT** selects the flat-top window
-duration offered by the hardware.
+**R**, **M**, and **Energy time** use ADC samples (2 ns each). R is 8..2044,
+M is 0..2044, and the averaging start is 0..8188, all in steps of four. **FT**
+is exponent 0..6. With the algorithm enabled, start + $4\times 2^{FT}$ must
+fit within the pulse length.
 
-**1/R (raw)** is the driver's read-only derived coefficient:
-`floor(32768 / (R_ns / 8 - 1))`. It refreshes when R is applied or hardware
-settings are loaded, not while an uncommitted R value is being edited.
-For example, R = 64 ns gives 4681. It is a raw register coefficient, not
-1/R in inverse nanoseconds. The readout is a software shadow of the write,
-not an independent measurement; older drivers show **Unavailable**.
+**Beta (raw)** is an unsigned 32-bit coefficient. The current contract does
+not establish the previous editable exponential time-law adapter.
 
-The public IIO interface handles its register encoding; the GUI's pole-zero time
-is not the CR-RC² raw PZC coefficient. Shaping affects noise, pulse overlap,
-energy scale, and calibration. Inspect the trapezoid debug outputs and rebuild
-or verify calibration after material changes.
+**1/R (calculated)** is $\lfloor32768/(R_{samples}/4)\rfloor$ from accepted R
+readback. R=16 samples gives 8192. Reset R=4 is unconfigured. This is not an
+independent FPGA measurement. If an actual driver advertises an optional raw
+readback, the label identifies that shadow separately.
+
+Shaping changes noise, pileup behavior, and energy calibration. Recheck a
+calibration after material changes; saved fingerprints include ABI and units.
 
 ## MCA — charge comparison {#mca-charge}
 
-**Enable** activates charge comparison; **Time** sets its integration duration
-in nanoseconds. In the current live PSD workflow, this supplies `charge_energy`,
-used as the short-charge estimate against `trapezoid_energy`.
+**Charge comparison time** is 4..32768 ADC samples in steps of four (2 ns
+per sample). When enabled it must not exceed the pulse length. The guide on
+the debug plot uses ns and is schematic, not a measured FPGA integration gate.
 
-While enabled, a dashed black stepped timing guide appears on the MCA waveform
-plot. The inverted lower step starts at the signal/frame beginning (0) and ends at CC time,
-including pretrigger and clipped to Window length. The pretrigger/threshold marker
-is not the short-window origin; moving it does not shift the guide. The upper
-step marks the remaining diagnostic window.
-It tracks timing edits, unit changes and zoom without changing waveform auto-range
-or ADC data, and disappears when CC is disabled or the window length is zero.
-Its vertical heights are schematic, not ADC amplitudes. It is not a
-measured FPGA gate signal, and the remainder is not a qualified long-charge
-integration interval; select the actual charge-comparison debug source to
-inspect firmware-produced signals. The legend describes the two step levels.
-Click the guide's legend sample to hide or show it without disabling hardware
-CC. Your choice is retained across measurement refreshes, zoom, timing edits,
-gate transfer, and CC off/on changes for the lifetime of that channel view.
-The legend entry remains available while CC is enabled so you can show it again.
-
-Live PSD uses `(Qlong - Qshort) / Qlong`; the exact producer quantities must be
-validated for the setup. Enabling charge comparison is required for this live
-ratio path. It is not the same function as [PSD zero crossing](#mca-zerocross),
-and the two features should not be treated as one mutually exclusive selector.
+Stop acquisition before changing the measurement. Offline integration and the
+hardware estimator are separate algorithms; transferring gates does not qualify
+their equivalence.
 
 ## MCA — PSD zero crossing {#mca-zerocross}
 
 This block enables hardware zero-crossing analysis. **Mode** selects hardware
-mode 0 or 1; **Window low/high** set its timing boundaries in nanoseconds.
+mode 0 or 1; **Window low/high** are inclusive ADC-sample positions in steps
+of four (2 ns per ADC sample), with low<=high<frame when enabled.
 Interpret mode-specific results using the matching firmware/record schema;
 the application does not infer a particle identity from the mode number.
 
@@ -402,8 +375,9 @@ ends acquisition and, for DMA, starts final drain and cleanup. **Clear Spectrum*
 clears the accumulation rather than changing the detector response.
 
 Hardware histogram chunks are read sequentially and are not an atomic snapshot
-while running. Stop for a stable final spectrum. Ordinary synchronized DSP
-reconfiguration can restart accumulation and resets elapsed/presentation state.
+while running. STOP releases acquisition ownership but the FPGA provides no
+A07 downstream-completion acknowledgement, so the application cannot promise a
+final coherent snapshot. Failed settings stay stopped; inspect them before START.
 
 ## MCA — list-mode DMA and output format {#mca-dma}
 
@@ -861,11 +835,16 @@ Raw values are not amperes until the appropriate zero, scale, and units have
 been established. IIR and DMA expose different signals and need separate
 qualification. See [mode](#current-mode) and [calibration](#current-calibration).
 
-## Current — IIR versus Scope DMA {#current-mode}
+## Current — IIR, Scope DMA, and periodic sums {#current-mode}
 
 IIR polling reads signed FPGA input-filter output for lightweight monitoring.
 Its host polling schedule is not a hardware-time sample grid. Scope DMA reads
 complete timestamped waveforms and computes sample-weighted statistics.
+**Periodic sums** (IP123/IP124) uses this plot for [window means](#scope-sums)
+with inline HDF5 recording. Set its **Window size** and **Window gap** directly
+in Current while stopped; the preview shows window duration and start interval.
+Stop drains the reader and restores Scope waveform settings, including frame size. The sum view reports ADC codes
+and does not apply the IIR/waveform linear calibration.
 
 DMA owns the Scope buffer and applies its qualified periodic preset. The stopped
 view can change the DMA frame gap or Reset Scope defaults afterward. Do not start
@@ -937,15 +916,19 @@ See [software start](#global-sync) and [temperature correction](#global-temperat
 
 ## Global — synchronized software start {#global-sync}
 
-The shared source and enable controls select the board's MCA synchronization
-path. Prepare Software Sync establishes the software-start arrangement;
-Start Armed MCA Channels releases eligible armed channels. Reset Software Level
-resets that shared level.
+**start_enable=0 selects external bypass; it does not assert common STOP.**
+Change shared source/routing with both MCAs stopped and their list buffers
+closed. Startup selects software source at LOW with both cores stopped.
 
-Arming and starting are different states. A channel waiting for a shared trigger
-can appear inactive yet still own the core. Coincidence manages this lifecycle
-itself; do not independently change its shared-start configuration mid-run.
-Software start does not synchronize independent boards' clocks.
+Prepare Software Sync sets the selected software level LOW. Arm both receivers
+and pulse processors before Start Armed MCA Channels asserts HIGH. START is a
+level participating throughout the run, not a latched pulse. Lowering the level
+and stopping each processor are distinct operations. Duration timeout can lock
+until each processor's global enable has been cleared.
+
+Coincidence owns this sequence during its run. Software START does not
+synchronize clocks on independent boards. STOP/progress status does not provide
+the deferred A07 downstream-completion acknowledgement.
 
 ## Global — shared temperature correction {#global-temperature}
 
@@ -1145,3 +1128,38 @@ or connection errors; it does not silently install an update.
 
 Third-Party Licenses lists bundled dependency notices. Offline help is packaged
 with this application version and does not require an update check or network.
+
+## Scope periodic sums {#scope-sums}
+
+Select **Current > Periodic sums > Start monitor** to use the existing Current plot. This is not a Scope
+waveform trigger. Stop the channel's Scope acquisition first. **Stop and drain**
+restores the waveform trigger, pretrigger, and gap after releasing DMA.
+
+**Window size** sets N original ADC samples per sum window: 4..8188, step four,
+at 2 ns/sample. **Window gap** is the unobserved time between windows, in us,
+with 0.008 us resolution and a 524.280 us maximum. Both controls apply on Start
+and stay locked through tail drain. Pretrigger is zero. Each 4096-byte packet transports
+254 timestamp/sum pairs (IP123) or 508 uniformly spaced sums (IP124). Only the
+valid records contribute; STOP padding is excluded.
+
+The signed window mean is $S/N-32768$, where S is the offset-binary sum.
+The interval is $(N/4+gap)\times 8$ ns. Native timestamps and sums stay exact
+integers in the recording; the Current plot shows time relative to the latest window.
+Exposure counts measured samples; gaps and missed windows are excluded. The
+session mean is weighted by measured samples, not by packets or screen updates.
+
+Use **Start**, then **Stop and drain**. A healthy STOP retains accepted tail
+windows through a terminal transport timeout before closing. Review missed
+counts and errors. A poisoned DMA channel requires a board reboot.
+
+**Record HDF5 sums** creates a new versioned sum file with original packets,
+lossless uint64 columns, settings, producer/channel/clock identity, and completion
+status. **File > Open Scope sum capture** reopens it without hardware. An
+incomplete recording remains marked incomplete. The plot cannot recover pulse
+shapes, waveform extrema, or noise spectra. Physical current conversion needs
+qualified channel/DC-path calibration; this view reports ADC codes.
+
+MCA settings use GUI schema 5 and an explicit hardware block with
+parameter_abi_version=2 and parameter_units=adc_samples. Old format 3/4
+presentation settings remain readable; unidentified MCA hardware values must
+be reviewed before applying. No automatic numerical conversion is performed.

@@ -1073,8 +1073,9 @@ class CoincidenceController(QWidget):
         if error is not None:
             self._run_error = error
         self.status.setText("Stopping both channels and draining DMA…")
+        # Lower the selected software level; enable=0 would expose external
+        # bypass and must not be used as a common STOP while cores are armed.
         operations: tuple[Callable[[], None], ...] = (
-            lambda: self._sync.set_enable(False),
             lambda: self._sync.set_sw_trig(0),
         )
         for operation in operations:

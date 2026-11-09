@@ -5,21 +5,33 @@ import math
 import statistics
 import time
 from collections import deque
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import QLocale, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import QFileDialog, QWidget
 
 from nlab.hardware.digitizer.current_monitor import (
     ScopeCurrentAccumulator,
     ScopeCurrentSnapshot,
 )
 from nlab.hardware.digitizer.mca import MultiChannelAnalyzer
-from nlab.hardware.digitizer.scope import SCOPE_DATAPATH_CLOCK_PERIOD_NS
+from nlab.hardware.digitizer.scope import (
+    PARAMETER_SPECS,
+    SCOPE_ADC_SAMPLE_PERIOD_NS,
+    SCOPE_DATAPATH_CLOCK_PERIOD_NS,
+    RangeSpec,
+    ScopeParam,
+)
 from nlab.ui.ui_current_monitor_view import Ui_CurrentMonitorView
-from nlab.views.numeric_controls import bind_numeric_control, nearest_step_value
+from nlab.views.numeric_controls import (
+    bind_numeric_control,
+    nearest_step_value,
+    normalize_numeric_control,
+)
 from nlab.views.panel_status import PanelStatus
 from nlab.views.plot_viewbox import WAVEFORM_STEP_MODE
 from nlab.workers.current_monitor_worker import (
@@ -27,6 +39,7 @@ from nlab.workers.current_monitor_worker import (
     CurrentSample,
     CurrentSampleBuffer,
 )
+from nlab.workers.scope_sum_worker import ScopeSumWorker
 
 if TYPE_CHECKING:
     from nlab.controllers.scope_controller import ScopeController
@@ -42,6 +55,8 @@ _ZERO_WINDOW_NS = 1_000_000_000
 _MIN_STALE_NS = 50_000_000
 _MODE_IIR = 0
 _MODE_SCOPE_DMA = 1
+_MODE_PERIODIC_SUM = 2
+_MODE_NAMES = ("iir", "scope_dma", "periodic_sum")
 _DMA_GAP_CYCLE_NS = SCOPE_DATAPATH_CLOCK_PERIOD_NS
 _DMA_GAP_MAX_CYCLES = 65_535
 _DEFAULT_DMA_GAP_CYCLES = 12_500
@@ -50,7 +65,7 @@ _DMA_PLOT_PERIOD_NS = round(1_000_000_000 / _DMA_PLOT_HZ)
 
 
 class CurrentMonitorController(QWidget):
-    """Live current estimates from IIR polling or periodic Scope DMA."""
+    """Current monitoring from IIR, Scope waveforms, or structured periodic sums."""
 
     session_samples = Signal(int, object)
 
@@ -70,6 +85,10 @@ class CurrentMonitorController(QWidget):
         self._scope_controller = scope_controller
         self._scope_current_accumulator = scope_current_accumulator
         self._dma_active = False
+        self._sum_active = False
+        self._sum_replay_active = False
+        self._sum_worker: ScopeSumWorker | None = None
+        self._last_mode_index: int | None = None
         self._sample_buffer = CurrentSampleBuffer()
         self._worker: CurrentMonitorWorker | None = None
         self._worker_thread: QThread | None = None
@@ -90,10 +109,22 @@ class CurrentMonitorController(QWidget):
 
         self.ui = Ui_CurrentMonitorView()
         self.ui.setupUi(self)  # type: ignore[no-untyped-call]
+        if self._sum_supported():
+            self.ui.comboMode.addItem("Periodic sums")
         self.status = PanelStatus(self, "Monitor stopped.")
         bind_numeric_control(self.ui.spinDmaGap, snap_to_step=True)
+        self.ui.spinDmaGap.setLocale(QLocale.c())
+        frame_spec = PARAMETER_SPECS[ScopeParam.FRAME_SAMPLES]
+        assert isinstance(frame_spec, RangeSpec)
+        self.ui.spinSumSamples.setRange(int(frame_spec.min_val), int(frame_spec.max_val))
+        self.ui.spinSumSamples.setSingleStep(int(frame_spec.step))
+        self.ui.spinSumSamples.setValue(int(frame_spec.default))
+        bind_numeric_control(self.ui.spinSumSamples, snap_to_step=True)
+        self.ui.sumTimingControls.setProperty("nlabHelpTopic", "scope-sums")
+        self.ui.sumControls.setProperty("nlabHelpTopic", "scope-sums")
         self._setup_plot()
         self._connect_signals()
+        self._update_sum_timing()
         if self._scope_controller is not None:
             self._scope_controller.current_dma_state_changed.connect(
                 self._on_scope_dma_state_changed
@@ -135,13 +166,26 @@ class CurrentMonitorController(QWidget):
         self.ui.btnResetScopeDefaults.clicked.connect(self._reset_scope_defaults)
         self.ui.btnZero.clicked.connect(self._set_zero_from_recent)
         self.ui.spinDmaGap.editingFinished.connect(self._normalize_dma_gap)
+        self.ui.spinDmaGap.valueChanged.connect(self._update_sum_timing)
+        self.ui.spinSumSamples.valueChanged.connect(self._update_sum_timing)
         self.ui.spinZero.valueChanged.connect(self._calibration_changed)
         self.ui.spinScale.valueChanged.connect(self._calibration_changed)
         self.ui.comboUnit.currentTextChanged.connect(self._calibration_changed)
         self.ui.comboMode.currentIndexChanged.connect(self._on_mode_changed)
+        self.ui.btnSumFile.clicked.connect(self._choose_sum_output)
+        self.ui.btnOpenSums.clicked.connect(self._choose_sum_capture)
 
     def _is_running(self) -> bool:
-        return self._worker_thread is not None or self._dma_active
+        return (
+            self._worker_thread is not None or self._dma_active
+            or self._sum_active or self._sum_replay_active
+        )
+
+    def _sum_supported(self) -> bool:
+        return (
+            self._scope_controller is not None
+            and self._scope_controller.current_sum_supported()
+        )
 
     def _dma_supported(self) -> bool:
         return (
@@ -151,6 +195,16 @@ class CurrentMonitorController(QWidget):
         )
 
     def _set_running_controls(self, running: bool) -> None:
+        sum_mode = self.ui.comboMode.currentIndex() == _MODE_PERIODIC_SUM
+        record_enabled = (
+            sum_mode and not running and self._sum_supported()
+            and not self._replay_hardware_interlocked
+        )
+        for record_widget in (self.ui.cbRecordSums, self.ui.editSumFile, self.ui.btnSumFile):
+            record_widget.setEnabled(record_enabled)
+        self.ui.btnOpenSums.setEnabled(not running)
+        self.ui.spinSumSamples.setEnabled(record_enabled)
+        self.ui.btnStop.setText("Stop and drain" if self._sum_active else "Stop")
         if self._replay_hardware_interlocked:
             for widget in (
                 self.ui.btnStart,
@@ -161,38 +215,74 @@ class CurrentMonitorController(QWidget):
             ):
                 widget.setEnabled(False)
             self.ui.labelDmaGap.setEnabled(False)
+            self.ui.btnStop.setEnabled(self._sum_replay_active)
             return
-        self.ui.btnStart.setEnabled(not running)
+        self.ui.btnStart.setEnabled(not running and (not sum_mode or self._sum_supported()))
         self.ui.btnStop.setEnabled(running)
         self.ui.comboMode.setEnabled(not running)
         dma_gap_enabled = (
             not running
-            and self.ui.comboMode.currentIndex() == _MODE_SCOPE_DMA
-            and self._dma_supported()
+            and (
+                (self.ui.comboMode.currentIndex() == _MODE_SCOPE_DMA and self._dma_supported())
+                or (
+                    self.ui.comboMode.currentIndex() == _MODE_PERIODIC_SUM
+                    and self._sum_supported()
+                )
+            )
         )
         self.ui.labelDmaGap.setEnabled(dma_gap_enabled)
         self.ui.spinDmaGap.setEnabled(dma_gap_enabled)
         self.ui.btnResetScopeDefaults.setEnabled(
-            dma_gap_enabled
+            dma_gap_enabled and self.ui.comboMode.currentIndex() == _MODE_SCOPE_DMA
         )
 
     @Slot(int)
     def _on_mode_changed(self, index: int) -> None:
+        if index != self._last_mode_index and not self._is_running():
+            self._sum_worker = None
+            self._reset_measurement_state()
+        self._last_mode_index = index
         dma_mode = index == _MODE_SCOPE_DMA
-        self.ui.labelRaw.setText("Raw DMA sample:" if dma_mode else "Raw IIR code:")
+        sum_mode = index == _MODE_PERIODIC_SUM
+        self.ui.btnStart.setText("Start monitor")
+        self.ui.sumControls.setVisible(sum_mode)
+        self.ui.sumTimingControls.setVisible(sum_mode or dma_mode)
+        for widget in (self.ui.labelSumSamples, self.ui.spinSumSamples, self.ui.labelSumTiming):
+            widget.setVisible(sum_mode)
+        self.ui.labelDmaGap.setText("Window gap:" if sum_mode else "DMA gap:")
+        self.ui.spinDmaGap.setToolTip(
+            "Gap between sum windows; 0 to 524.280 us in 0.008 us (8 ns) steps. "
+            "Editable while stopped; applied on Start."
+            if sum_mode else
+            "Post-frame gap for Scope DMA; 0.008 us (8 ns) hardware resolution."
+        )
+        self.ui.groupReading.setTitle("Window means" if sum_mode else "Live current")
+        self.ui.groupCalibration.setEnabled(not sum_mode)
+        self.ui.btnZero.setEnabled(not sum_mode and self._latest is not None)
+        self.ui.labelRaw.setText(
+            "Window mean:" if sum_mode else "Raw DMA sample:" if dma_mode else "Raw IIR code:"
+        )
         self.ui.labelInterval.setText(
-            "Latest DMA fragment:" if dma_mode else "Last screen interval:"
+            "Session mean:" if sum_mode else (
+                "Latest DMA fragment:" if dma_mode else "Last screen interval:"
+            )
         )
         base_label = "DMA waveform" if dma_mode else "IIR output"
         label = "Current" if self._unit() != "raw" else base_label
-        self._plot.setLabel("left", label, units=self._unit())
+        self._plot.setLabel(
+            "left", "Window mean" if sum_mode else label,
+            units="ADC codes" if sum_mode else self._unit(),
+        )
         if self._is_running():
             return
-        dma_controls_enabled = dma_mode and self._dma_supported()
-        self.ui.labelDmaGap.setEnabled(dma_controls_enabled)
-        self.ui.spinDmaGap.setEnabled(dma_controls_enabled)
-        self.ui.btnResetScopeDefaults.setEnabled(dma_controls_enabled)
-        if dma_mode and not self._dma_supported():
+        self._set_running_controls(False)
+        if sum_mode:
+            self.status.setText(
+                "Start to plot measured window means here; optional HDF5 recording. "
+                "Set Window size and Window gap here while stopped. "
+                "The sum view reports ADC codes, without the IIR/waveform calibration."
+            )
+        elif dma_mode and not self._dma_supported():
             self.status.setText(
                 "Scope DMA mode is unavailable on this backend/firmware."
             )
@@ -217,6 +307,21 @@ class CurrentMonitorController(QWidget):
             "Scope defaults restored; Current DMA optimization is inactive."
         )
 
+    def _sum_frame_samples(self) -> int:
+        spinbox = self.ui.spinSumSamples
+        return int(nearest_step_value(
+            spinbox.value(), spinbox.minimum(), spinbox.maximum(), spinbox.singleStep()
+        ))
+
+    @Slot()
+    def _update_sum_timing(self) -> None:
+        duration_ns = self._sum_frame_samples() * SCOPE_ADC_SAMPLE_PERIOD_NS
+        interval_ns = duration_ns + self._dma_gap_cycles() * _DMA_GAP_CYCLE_NS
+        self.ui.labelSumTiming.setText(
+            f"Window: {duration_ns / 1000:.3f} us; "
+            f"start interval: {interval_ns / 1000:.3f} us"
+        )
+
     def _dma_gap_cycles(self) -> int:
         gap_us = nearest_step_value(
             self.ui.spinDmaGap.value(),
@@ -234,6 +339,7 @@ class CurrentMonitorController(QWidget):
             self.ui.spinDmaGap.setValue(cycles * _DMA_GAP_CYCLE_NS / 1000)
         finally:
             self.ui.spinDmaGap.blockSignals(blocked)
+        self._update_sum_timing()
 
     @Slot()
     def _normalize_dma_gap(self) -> None:
@@ -251,6 +357,9 @@ class CurrentMonitorController(QWidget):
         if self._is_running():
             return
         self._reset_measurement_state()
+        if self.ui.comboMode.currentIndex() == _MODE_PERIODIC_SUM:
+            self._start_sum_monitor()
+            return
         if self.ui.comboMode.currentIndex() == _MODE_SCOPE_DMA:
             self._start_dma_monitor()
             return
@@ -356,6 +465,120 @@ class CurrentMonitorController(QWidget):
         self._last_dma_plot_update_ns = 0
         self.ui.btnZero.setEnabled(False)
         self._curve.setData([], [])
+        for label in (
+            self.ui.lblCurrent, self.ui.lblRaw, self.ui.lblInterval, self.ui.lblAcquisition
+        ):
+            label.setText("-")
+
+    def _start_sum_monitor(self) -> None:
+        scope_controller = self._scope_controller
+        if scope_controller is None or not self._sum_supported():
+            self.status.setText("Periodic sums are unavailable on this backend/firmware.")
+            return
+        if self.ui.cbRecordSums.isChecked() and not self.ui.editSumFile.text().strip():
+            self.status.setText("Choose a new HDF5 file or turn recording off.")
+            return
+        output = (
+            Path(self.ui.editSumFile.text().strip()) if self.ui.cbRecordSums.isChecked() else None
+        )
+        self._normalize_dma_gap()
+        normalize_numeric_control(self.ui.spinSumSamples)
+        try:
+            self._sum_worker = scope_controller.start_current_sum_monitor(
+                frame_samples=self._sum_frame_samples(),
+                gap_cycles=self._dma_gap_cycles(), output=output
+            )
+        except Exception as exc:
+            self._monitor_error = f"Could not start periodic sums: {exc}"
+            self.status.setText(self._monitor_error)
+            log.exception("Starting Current periodic sums failed")
+            return
+        self._sum_active = True
+        self._stop_requested = False
+        self._set_running_controls(True)
+        self.status.setText("Acquiring periodic sums; Stop drains accepted tail windows.")
+        self._next_display_ns = time.perf_counter_ns() + self._display_period_ns
+        self._schedule_display()
+
+    def _choose_sum_output(self) -> None:
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "New sum recording", "", "Scope sum capture (*.h5)"
+        )
+        if filename:
+            self.ui.editSumFile.setText(filename if filename.endswith(".h5") else filename + ".h5")
+            self.ui.cbRecordSums.setChecked(True)
+
+    def _choose_sum_capture(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Open sum capture", "", "Scope sum capture (*.h5)"
+        )
+        if filename:
+            self.open_sum_capture(Path(filename))
+
+    def open_sum_capture(self, path: Path) -> None:
+        """Replay exact recorded windows in this plot, without a hardware client."""
+        self.stop_monitor_sync()
+        if self.ui.comboMode.count() <= _MODE_PERIODIC_SUM:
+            self.ui.comboMode.addItem("Periodic sums")
+        self.ui.comboMode.setCurrentIndex(_MODE_PERIODIC_SUM)
+        self._reset_measurement_state()
+        self._sum_worker = ScopeSumWorker(replay=path)
+        self._sum_worker.start()
+        self._sum_replay_active = True
+        self._stop_requested = False
+        self._set_running_controls(True)
+        self.status.setText("Reading recorded sums; hardware is not used for replay.")
+        self._next_display_ns = time.perf_counter_ns() + self._display_period_ns
+        self._schedule_display()
+
+    def _finish_sum_monitor(self) -> None:
+        worker = self._sum_worker
+        if worker is None or not worker.done:
+            return
+        if self._sum_active and self._scope_controller is not None:
+            self._scope_controller.finish_current_sum_monitor()
+        worker.join()
+        self._display_timer.stop()
+        self._sum_active = self._sum_replay_active = False
+        self._stop_requested = False
+        self._set_running_controls(False)
+        self.status.setText(worker.message)
+
+    def _render_sum_snapshot(self) -> None:
+        worker = self._sum_worker
+        if worker is None:
+            return
+        self.ui.groupReading.setTitle(
+            "Recorded window means" if worker.capture is None else "Window means"
+        )
+        snapshot = worker.analysis.snapshot()
+        points, mean = snapshot["points"], snapshot["mean"]
+        if points and mean is not None:
+            data = np.asarray(points)
+            self._curve.setData(
+                data[:, 0] - data[-1, 0], data[:, 1], stepMode=None, connect="auto"
+            )
+            self.ui.lblCurrent.setText(f"{self._format_value(points[-1][1])} ADC codes")
+            self.ui.lblRaw.setText(self._format_value(points[-1][1]))
+            self.ui.lblInterval.setText(f"{self._format_value(mean)} ADC codes (sample-weighted)")
+            self.ui.lblAcquisition.setText(
+                f"{snapshot['windows']:,} windows; {snapshot['samples']:,} samples; "
+                f"exposure {snapshot['coverage_ns'] * 1e-9:.6g} s"
+            )
+            if not worker.done:
+                state = "Draining accepted tail windows" if self._stop_requested else "Live sums"
+                if self._sum_replay_active:
+                    state = "Recorded sums"
+                self.status.setText(
+                    f"{state}; IP{snapshot.get('ip_version')}; "
+                    f"N={snapshot.get('samples_per_window')} samples; "
+                    f"gap={snapshot.get('gap_cycles')} cycles; "
+                    f"interval={snapshot.get('interval_ns')} ns. "
+                    f"Missed (hardware): {snapshot['missed']}; "
+                    f"gaps (timestamps): {snapshot['skipped']}. ADC codes; calibration required."
+                )
+        if worker.done:
+            self._finish_sum_monitor()
 
     def _start_dma_monitor(self) -> None:
         scope_controller = self._scope_controller
@@ -397,6 +620,12 @@ class CurrentMonitorController(QWidget):
         if self._stop_requested:
             return
         self._stop_requested = True
+        if self._sum_active or self._sum_replay_active:
+            if self._sum_worker is not None:
+                self._sum_worker.request_stop()
+            self.ui.btnStop.setEnabled(False)
+            self.status.setText("Stopping; draining accepted windows and closing the transport...")
+            return
         if self._dma_active:
             if self._scope_controller is not None:
                 self._scope_controller.stop_current_dma_monitor()
@@ -409,6 +638,13 @@ class CurrentMonitorController(QWidget):
 
     def stop_monitor_sync(self) -> None:
         """Stop the selected transport and wait for resource release."""
+        if self._sum_active or self._sum_replay_active:
+            worker = self._sum_worker
+            if worker is not None:
+                worker.request_stop()
+                worker.join()
+                self._render_sum_snapshot()
+            return
         if self._dma_active:
             self._stop_requested = True
             if self._scope_controller is not None:
@@ -479,6 +715,8 @@ class CurrentMonitorController(QWidget):
         return f"{value:,.6g}"
 
     def _calibration_changed(self, *_args: object) -> None:
+        if self.ui.comboMode.currentIndex() == _MODE_PERIODIC_SUM:
+            return  # The sum view reports measured ADC codes, without calibration.
         self._calibration_dirty = True
         self._last_dma_plot_update_ns = 0
         raw_label = (
@@ -530,7 +768,9 @@ class CurrentMonitorController(QWidget):
     @Slot()
     def _render_pending(self) -> None:
         now_ns = time.perf_counter_ns()
-        if self.ui.comboMode.currentIndex() == _MODE_SCOPE_DMA:
+        if self.ui.comboMode.currentIndex() == _MODE_PERIODIC_SUM:
+            self._render_sum_snapshot()
+        elif self.ui.comboMode.currentIndex() == _MODE_SCOPE_DMA:
             accumulator = self._scope_current_accumulator
             if accumulator is not None:
                 snapshot = accumulator.snapshot(now_ns=now_ns)
@@ -806,12 +1046,13 @@ class CurrentMonitorController(QWidget):
 
     def configuration_settings(self) -> dict[str, object]:
         return {
-            "mode": "scope_dma" if self.ui.comboMode.currentIndex() else "iir",
+            "mode": _MODE_NAMES[self.ui.comboMode.currentIndex()],
             "zero_code": self.ui.spinZero.value(),
             "scale_per_code": self.ui.spinScale.value(),
             "unit": self._unit(),
             "display_fps": self._display_hz,
             "dma_gap_cycles": self._dma_gap_cycles(),
+            "sum_frame_samples": self._sum_frame_samples(),
             "analysis_bin_ms": (
                 self._scope_current_accumulator.bin_width_ms
                 if self._scope_current_accumulator is not None
@@ -822,13 +1063,19 @@ class CurrentMonitorController(QWidget):
     def apply_configuration_settings(self, settings: object) -> None:
         if not isinstance(settings, dict):
             return
+        if "sum_frame_samples" in settings:
+            if self._is_running():
+                raise RuntimeError("cannot change sum window size while monitor is running")
+            normalize_numeric_control(self.ui.spinSumSamples, int(settings["sum_frame_samples"]))
         if "dma_gap_cycles" in settings:
             if self._is_running():
                 raise RuntimeError("cannot change DMA gap while monitor is running")
             self._set_dma_gap_cycles(int(settings["dma_gap_cycles"]))
         requested_mode = settings.get("mode")
-        if requested_mode in ("iir", "scope_dma"):
-            target = _MODE_SCOPE_DMA if requested_mode == "scope_dma" else _MODE_IIR
+        if requested_mode in _MODE_NAMES:
+            target = _MODE_NAMES.index(requested_mode)
+            if target == _MODE_PERIODIC_SUM and not self._sum_supported():
+                raise ValueError("periodic_sum requires supported IP123/IP124 Scope DMA")
             if target != self.ui.comboMode.currentIndex():
                 restart = self._is_running()
                 if restart:
@@ -856,3 +1103,7 @@ class CurrentMonitorController(QWidget):
             accumulator = self._scope_current_accumulator
             if accumulator is not None:
                 accumulator.configure_bin_width_ms(int(settings["analysis_bin_ms"]))
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        self.stop_monitor_sync()
+        super().closeEvent(event)

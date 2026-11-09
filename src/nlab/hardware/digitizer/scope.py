@@ -55,6 +55,7 @@ class TriggerMode(IntEnum):
     FALLING_EDGE = 2
     RISING_EDGE = 3
     TIMED = 4
+    PERIODIC_SUM = 5
 
 
 class ScopeParam(IntEnum):
@@ -163,10 +164,17 @@ class Scope:
         PARAMETER_SPECS[ScopeParam.TRIGGER_LEVEL].validate(val, "trigger_level")
         self._b.set_trigger_level(val)
 
+    def supported_trigger_modes(self) -> tuple[TriggerMode, ...]:
+        reader = getattr(self._b, "get_scope_trigger_modes", None)
+        modes = reader() if reader is not None else tuple(range(5))
+        return tuple(TriggerMode(mode) for mode in modes)
+
     def get_trigger_mode(self) -> TriggerMode:
         return TriggerMode(self._b.get_edge())
 
     def set_trigger_mode(self, val: TriggerMode) -> None:
+        if val not in self.supported_trigger_modes():
+            raise ValueError("Trigger mode is not supported by this Scope IP")
         self._b.set_edge(int(val))
 
     def frame_period_cycles_supported(self) -> bool:

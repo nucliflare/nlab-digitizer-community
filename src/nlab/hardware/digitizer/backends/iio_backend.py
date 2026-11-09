@@ -1,60 +1,9 @@
-"""IIO backend for the vdpp_scope driver (board driver rewrite).
+"""Direct IIO control and DMA for Digitizer 4.0.
 
-This is a from-scratch rewrite of the scope half, following a full rewrite
-of the on-FPGA driver (vdpp-scope.c). Nothing from the previous
-ewt-scope-iio-based implementation carries over: different device name
-("vdpp_scope" instead of "ewt-scope{N}"), different attribute names, a
-plain-integer trigger_mode register instead of a string attribute, a
-text-based (not binary) viewer attribute, and a standard IIO dmaengine
-buffer instead of the old custom cyclic frame-ring. Written from the driver
-source (vdpp-scope.c) plus a reference client stub (scope_backend_iio.py)
-supplied alongside it, and confirmed live against the rewritten board.
-
-MCABackend is implemented against vdpp-pulse-processor.c (signal
-parameters, acquisition control, statistics, filters, pulse memory,
-histogram) and vdpp-input-filter.c (FIR/IIR low-pass filter, temperature
-compensation). The channel-independent trigger-sync interface is implemented
-against vdpp-sync-trigger.c. The extension methods below also implement the
-fixed-frame list-mode DMA path owned by vdpp-lm-frame.c -- see
-mca-architecture.md for how the three per-channel cores relate, and
-notebooks/mca_walkthrough.ipynb for a live-tested, cell-by-cell
-verification of the register/configuration half. A few MCABackend methods stay stubbed
-because no matching register exists in either driver: see
-_MCA_EVENTS_LOST_UNSUPPORTED and _MCA_HISTOGRAM_CLEAR_UNSUPPORTED below for
-the specifics. get_edge_det_coeff/
-set_edge_det_coeff() are a software-only shadow value for the same reason
-(no register), kept non-raising only so MCAController's unconditional
-default-hydration pass doesn't need a backend-specific special case.
-
-Every register-based get/set pair (signal parameters, all five filter
-groups, temperature compensation) is confirmed live and correct, INCLUDING
-one real bug the live run caught and fixed: an earlier revision of this
-file reimplemented the driver's PP_FMT_X2/X8/PLUS1_X8/TRAPEZOID_R
-conversions (pp_field_to_user()/pp_field_from_user()) client-side, on the
-wrong assumption that the sysfs attribute held the raw register value.
-It doesn't -- pp_field_show()/pp_field_store() already do that conversion
-*inside the kernel*, so the sysfs value already is the physical/user
-value. The old code was applying the same conversion a second time,
-silently writing a roughly-halved-or-eighthed value to hardware while
-still round-tripping correctly through get_*() (a symmetric bug, invisible
-to a get-after-set check) -- see the NOTE at the top of the MCABackend
-section for the full account and get_trapez_R()'s docstring for the
-clearest single example. Two fields that the driver explicitly exposes as
-PP_FMT_RAW are converted here to preserve the legacy physical API:
-crrc2_cdelay uses 8 ns ticks and trapezoid_beta_raw is derived from the
-pole-zero time constant.
-
-The later optional crrc2_1cdelay_raw and trapezoid_1r_raw interfaces are
-source-derived and unit-tested; they are not covered by those earlier
-live checks.
-
-read_waveform_banks() and read_histogram() are confirmed live over the IIO
-network transport after the driver began registering the binary attributes
-explicitly. The newer ABI splits the histogram into histogram_data0..3 to
-fit iiod's attribute-transport limit; the client retains compatibility with
-the earlier monolithic histogram_data ABI. The current remote transport also
-needs roughly twice the raw-payload capacity and returns a counted trailing
-NUL; _read_large_pp_attr() handles that without truncating embedded NULs.
+MCA uses parameter ABI2 (PetaLinux bb8c57e): ADC samples are native 2 ns
+positions, C delay is an exponent, and trapezoid beta is a raw u32.
+Register encoding belongs to the kernel. Historical ABI1 live checks do not
+qualify ABI2. Scope raw/mean4 and structured periodic sums remain distinct.
 """
 
 from __future__ import annotations
@@ -74,12 +23,12 @@ from ..current_monitor import CurrentMonitorClient
 from ..dma import ScopeDmaGeometry
 from ..iio_listmode import IIO_LM_EVENT_DTYPE
 from ..iio_scope_stream import IiodScopeStream
+from ..mca_parameters import PARAMETERS, validate_parameters
+from ..scope_sums import ScopeSumGeometry
 from .base import DigitizerBackend
 
 log = logging.getLogger(__name__)
 
-_MCA_DECIMATED_TICK_NS = 8
-_TRAPEZOID_BETA_SCALE = 1 << 31
 
 # Registers genuinely do not exist in the MCA driver sources (checked
 # against every #define/PP_F_* in vdpp-pulse-processor.c and every attribute
@@ -443,7 +392,7 @@ class IIODigitizerBackend(DigitizerBackend):
         self._dma_buf_frame_samples: int | None = None
         self._dma_capture_transport: str | None = None
         self._dma_capture_kernel_buffers: int | None = None
-        self._dma_capture_geometry: ScopeDmaGeometry | None = None
+        self._dma_capture_geometry: ScopeDmaGeometry | ScopeSumGeometry | None = None
         self._dma_last_timestamp: int | None = None
         # Set by IIOScopeDmaWorker.stop() through the streamer. Buffer.cancel()
         # is the libiio-supported way to interrupt a refill blocked in another
@@ -785,7 +734,7 @@ class IIODigitizerBackend(DigitizerBackend):
         except OSError:
             pass
 
-        if drain:
+        if drain and not isinstance(getattr(self, "_dma_capture_geometry", None), ScopeSumGeometry):
             try:
                 self._drain_for_close(buf)
             except Exception:
@@ -875,8 +824,52 @@ class IIODigitizerBackend(DigitizerBackend):
                 "DMA fault is latched from a previous session -- call "
                 "acknowledge_dma_recovery() before capturing again"
             )
+        if "dma_poisoned" in self._dma_scope.attrs and int(self._dma_attr_get("dma_poisoned")):
+            raise RuntimeError("Scope DMA is poisoned; reboot the target before reuse")
         self._wait_for_dma_release()
+        self._sum_draining = False
         self._dma_stop_requested.clear()
+
+    def get_scope_trigger_modes(self) -> tuple[int, ...]:
+        if "trigger_mode_available" not in self._scope.attrs:
+            return tuple(range(5))
+        tokens = self._attr_get("trigger_mode_available").split()
+        # Driver emits alternating numeric selectors and descriptive names.
+        advertised = tuple(int(item) for item in tokens if item.isdecimal())
+        ip = self.get_ip_version()
+        return tuple(
+            mode for mode in advertised if mode in range(6) and (mode != 5 or ip in (123, 124))
+        )
+
+    def request_scope_sum_stop(self) -> None:
+        """Control-context STOP; keep the single DMA reader alive for the tail."""
+        self._sum_draining = True
+        self.set_enable(False)
+
+    def stop_scope_sum_from_reader(self) -> None:
+        """Worker-owned context STOP, distinct from the GUI stop hook."""
+        self._sum_draining = True
+        self._dma_set_enable(False)
+
+    def scope_sum_status(self) -> tuple[int, int]:
+        return (int(self._dma_attr_get("sum_status")),
+                int(self._dma_attr_get("sum_missed_windows")))
+
+    def scope_sum_identity(self) -> dict[str, object]:
+        return {
+            "uri": self._uri,
+            "channel": self._ch,
+            "device": self._dma_scope.id,
+            "ip_version": int(self._dma_attr_get("ip_version")),
+            "driver_reference": "PetaLinux bb8c57e",
+            "channel_mapping": "sorted discovery; physical A/B mapping not independently verified",
+        }
+
+    def close_scope_sum_capture(self) -> None:
+        self._close_dma_buffer(drain=False)
+        if "dma_poisoned" in self._dma_scope.attrs and int(self._dma_attr_get("dma_poisoned")):
+            self._dma_fault_latched = True
+            raise RuntimeError("Scope DMA poisoned during teardown; reboot required")
 
     def request_dma_stop(self) -> None:
         """Stop acquisition and interrupt a possibly blocked DMA refill.
@@ -922,6 +915,8 @@ class IIODigitizerBackend(DigitizerBackend):
         acquisition stopped; raises if either still holds the gate, since
         this method does not do that cleanup itself.
         """
+        if "dma_poisoned" in self._scope.attrs and int(self._attr_get("dma_poisoned")):
+            raise RuntimeError("Scope DMA is poisoned; reboot required before recovery")
         if self._dma_buf is not None:
             raise RuntimeError(
                 "cannot acknowledge DMA recovery while a capture buffer "
@@ -989,11 +984,17 @@ class IIODigitizerBackend(DigitizerBackend):
 
     def _pp_attr_set(self, name: str, value: str) -> None:
         if self._pp is None:
-            raise RuntimeError(
-                f"no {_PULSE_PROCESSOR_DEVICE_NAME} device bound -- pulse-"
-                "processor core not present on this channel's firmware"
-            )
-        self._pp.attrs[name].value = value
+            raise RuntimeError("Pulse processor absent")
+        with self.mca_configuration_lock:
+            if name not in ("debug_signal1", "debug_signal2") and not (
+                name == "enable" and value == "0"
+            ):
+                self._require_mca_contract(self._pp)
+                if name in PARAMETERS:
+                    validate_parameters({name: int(value)})
+                if name == "enable" and value == "1":
+                    validate_parameters(self.mca_parameter_snapshot(), complete=True)
+            self._pp.attrs[name].value = value
 
     def _if_attr_get(self, name: str) -> str:
         if self._input_filter is None:
@@ -1009,7 +1010,8 @@ class IIODigitizerBackend(DigitizerBackend):
                 f"no {_INPUT_FILTER_DEVICE_NAME} device bound -- input-"
                 "filter core not present on this channel's firmware"
             )
-        self._input_filter.attrs[name].value = value
+        with self.mca_configuration_lock:
+            self._input_filter.attrs[name].value = value
 
     def _sync_attr_get(self, name: str) -> str:
         if self._sync_trigger is None:
@@ -1109,7 +1111,10 @@ class IIODigitizerBackend(DigitizerBackend):
 
     def _mca_dma_pp_attr_set(self, name: str, value: str) -> None:
         with self._mca_dma_control_lock:
-            self._require_mca_dma_pp().attrs[name].value = value
+            pp = self._require_mca_dma_pp()
+            if not (name == "enable" and value == "0"):
+                self._require_mca_contract(pp)
+            pp.attrs[name].value = value
 
     def _validate_lm_geometry(self) -> None:
         """Validate the fixed v121 ABI before creating a DMA buffer.
@@ -1121,11 +1126,18 @@ class IIODigitizerBackend(DigitizerBackend):
         five-channel driver fail precisely before iio.Buffer() returns its
         otherwise opaque EINVAL.
         """
+        self._require_mca_contract(self._require_mca_dma_pp())
+        if "dma_poisoned" in self._require_lm_frame().attrs and int(
+            self._lm_attr_get("dma_poisoned")
+        ):
+            raise RuntimeError("MCA DMA is poisoned; reboot the target before reuse")
         version = int(self._lm_attr_get("ip_version"))
         records = int(self._lm_attr_get("frame_records"))
         frame_bytes = int(self._lm_attr_get("frame_bytes"))
         if (version, records, frame_bytes) != (
-            _LM_IP_VERSION, _LM_FRAME_RECORDS, _LM_FRAME_BYTES,
+            _LM_IP_VERSION,
+            _LM_FRAME_RECORDS,
+            _LM_FRAME_BYTES,
         ):
             raise RuntimeError(
                 "unsupported list-mode geometry: "
@@ -1460,7 +1472,7 @@ class IIODigitizerBackend(DigitizerBackend):
         """
         stop = threading.Event()
         entered = threading.Event()
-        errors: list[str] = []
+        errors: list[tuple[int, str]] = []
         drained = 0
         last_activity = [time.monotonic()]
 
@@ -1480,7 +1492,7 @@ class IIODigitizerBackend(DigitizerBackend):
                     if not stop.is_set():
                         # Do not retain a traceback that owns this closure and
                         # its Buffer reference across native buffer teardown.
-                        errors.append(f"{type(exc).__name__}: {exc}")
+                        errors.append((getattr(exc, "errno", None) or errno.EIO, str(exc)))
                     return
 
         worker = threading.Thread(
@@ -1504,15 +1516,9 @@ class IIODigitizerBackend(DigitizerBackend):
             worker.join(_LM_CLOSE_JOIN_SECONDS)
 
         if worker.is_alive():
-            log.warning(
-                "IIO backend ch%d: MCA list-mode drain did not stop after cancellation",
-                self._ch,
-            )
+            raise RuntimeError("MCA drain reader did not stop; native buffer remains owned")
         if errors:
-            log.warning(
-                "IIO backend ch%d: MCA list-mode drain refill failed: %s",
-                self._ch, errors[0],
-            )
+            raise OSError(*errors[0]) from None
         return drained
 
     def _wait_for_mca_dma_release(self) -> None:
@@ -1535,56 +1541,51 @@ class IIODigitizerBackend(DigitizerBackend):
         *,
         drain: bool = True,
     ) -> int:
-        """Stop, drain, then destroy the list-mode buffer in driver order."""
+        """Stop/drain/destroy/join; retain primary errno and report cleanup failures."""
         with self._mca_dma_lifecycle_lock:
-            cancel_timer = self._mca_dma_cancel_timer
+            timer = self._mca_dma_cancel_timer
             self._mca_dma_cancel_timer = None
-            if cancel_timer is not None:
-                cancel_timer.cancel()
-
+            if timer is not None:
+                timer.cancel()
         buf = self._mca_dma_buf
         if buf is None:
             return 0
-
+        errors: list[tuple[int, str]] = []
+        drained = 0
         try:
-            if bool(int(self._mca_dma_pp_attr_get("enable"))):
-                self._mca_dma_pp_attr_set("enable", "0")
-        except OSError:
-            log.warning(
-                "IIO backend ch%d: failed to stop pulse processor before "
-                "MCA list-mode drain",
-                self._ch, exc_info=True,
-            )
-
-        if drain:
-            drained = self._drain_mca_for_close(buf, on_frame)
-        else:
-            # Failed arm/start or refill has no trustworthy tail to drain.
-            # Interrupt the outstanding descriptor before native teardown.
-            self._cancel_mca_dma_refill(buf, "capture cleanup without tail drain")
-            drained = 0
-
+            self._mca_dma_pp_attr_set("enable", "0")
+        except Exception as exc:
+            errors.append((getattr(exc, "errno", None) or errno.EIO, f"Stop: {exc}"))
+            drain = False
+        try:
+            if drain:
+                drained = self._drain_mca_for_close(buf, on_frame)
+            else:
+                self._cancel_mca_dma_refill(buf, "capture cleanup without tail drain")
+        except Exception as exc:
+            # A live reader may still own this native buffer: do not destroy it.
+            if "reader did not stop" in str(exc):
+                raise
+            errors.append((getattr(exc, "errno", None) or errno.EIO, f"Drain: {exc}"))
         self._mca_dma_buf = None
-        # Match the hardened scope path: Buffer.__del__ timing is not a
-        # lifecycle boundary after cancellation. Destroy explicitly once all
-        # refill threads have stopped, then null the wrapper for idempotency.
-        native_buffer = buf._buffer
+        native = buf._buffer
         buf._buffer = None
-        if native_buffer is not None:
-            iio._buffer_destroy(native_buffer)
+        if native is not None:
+            iio._buffer_destroy(native)
         del buf
         try:
             self._wait_for_mca_dma_release()
-        except RuntimeError:
-            log.error(
-                "IIO backend ch%d: MCA list-mode buffer did not release in time",
-                self._ch, exc_info=True,
-            )
+            if "dma_poisoned" in self._require_lm_frame().attrs and int(
+                self._lm_attr_get("dma_poisoned")
+            ):
+                raise RuntimeError("MCA DMA poisoned during close; reboot required")
+        except Exception as exc:
+            errors.append((getattr(exc, "errno", None) or errno.EIO, f"Release: {exc}"))
         finally:
-            # mca_listmode_capture.py: the scan element remains selected for
-            # the complete drain and is released only after buffer teardown.
             for channel in self._require_lm_frame().channels:
                 channel.enabled = False
+        if errors:
+            raise OSError(errors[0][0], "; ".join(message for _, message in errors))
         return drained
 
     def close_mca_dma_capture(
@@ -1712,21 +1713,17 @@ class IIODigitizerBackend(DigitizerBackend):
         return int(self._attr_get("trigger_level_raw"))
 
     def set_trigger_level(self, val: int) -> None:
-        """Plain, unguarded write. A prior driver revision briefly
-        rejected this with -EBUSY while armed (hit live via the GUI,
-        worked around at the time with a disarm/write/re-arm wrapper);
-        the revision documented in vdpp-scope.c's trigger_level_raw_store()
-        removed that guard entirely -- only frame_samples is still
-        restricted (see its own docstring for why).
-        """
+        """Write the raw threshold; the driver permits changes while armed."""
         self._attr_set("trigger_level_raw", str(val))
 
     def get_edge(self) -> int:
         return int(self._attr_get("trigger_mode"))
 
     def set_edge(self, val: int) -> None:
-        """See set_trigger_level()'s docstring -- same history, same
-        current lack of a guard.
+        """Write the mode, subject to vdpp-scope.c trigger_mode_store() guards.
+
+        Sum transitions require stopped acquisition. An owned DMA buffer also
+        forbids a transition that changes the transport format.
         """
         self._attr_set("trigger_mode", str(val))
 
@@ -1740,41 +1737,48 @@ class IIODigitizerBackend(DigitizerBackend):
         return int(self._attr_get("frame_period_cycles"))
 
     def set_frame_period_cycles(self, val: int) -> None:
-        """See set_trigger_level()'s docstring -- same history, same
-        current lack of a guard.
-        """
+        """Write the gap; running or buffer-owned sum geometry is immutable."""
         self._attr_set("frame_period_cycles", str(val))
 
     def get_pretrigger_samples(self) -> int:
         return int(self._attr_get("pretrigger_samples"))
 
     def set_pretrigger_samples(self, val: int) -> None:
-        """See set_trigger_level()'s docstring -- same history, same
-        current lack of a guard.
+        """Write native ADC samples under pretrigger_samples_store() guards.
+
+        Sum mode requires zero and disallows writes while acquisition or its
+        DMA buffer is active. Switch to a waveform mode before restoring a
+        nonzero waveform pretrigger.
         """
         self._attr_set("pretrigger_samples", str(val))
 
     def get_frame_samples(self) -> int:
         return int(self._attr_get("frame_samples"))
 
-    def get_scope_dma_geometry(self) -> ScopeDmaGeometry:
-        """Return the complete record geometry advertised by the driver.
+    def get_scope_dma_geometry(self) -> ScopeDmaGeometry | ScopeSumGeometry:
+        """Advertised mode-specific record geometry (PetaLinux bb8c57e).
 
-        Scope v121 has no geometry attributes and transports one int16 scan
-        for every configured sample.  The deployed v122 driver changes its
-        periodic layout dynamically: it advertises the exact byte count,
-        waveform count and sample decimation after ``trigger_mode`` and
-        ``frame_samples`` are configured.  Live v122 validation on
-        192.168.10.128 showed that a 512-sample periodic frame is 264 bytes
-        (132 scans), not 1024 bytes; inferring the IIO length from
-        ``frame_samples`` is therefore rejected in favour of these attrs.
-
-        The corresponding v122 driver source is not yet present in the
-        supplied PetaLinux checkout, so this branch treats the three names as
-        a capability-qualified live ABI and retains the source-derived v121
-        fallback only when all three are absent.
+        Raw, mean4, and structured sum layouts are distinct. A legacy fallback
+        is permitted only when all three geometry attributes are absent.
+        The kernel owns register encoding and advertises the exact scan count.
         """
         frame_samples = self._dma_get_frame_samples()
+        mode = (
+            int(self._dma_attr_get("trigger_mode"))
+            if "trigger_mode" in self._dma_scope.attrs
+            else 0
+        )
+        if mode == 5:
+            version = int(self._dma_attr_get("ip_version"))
+            advertised = tuple(
+                int(self._dma_attr_get(name))
+                for name in ("dma_frame_bytes", "dma_waveform_samples", "dma_sample_decimation")
+            )
+            if advertised != (4096, 0, 0):
+                raise RuntimeError(f"Invalid periodic-sum geometry: {advertised}")
+            return ScopeSumGeometry(
+                frame_samples, version, int(self._dma_attr_get("frame_period_cycles"))
+            )
         names = (
             "dma_frame_bytes",
             "dma_waveform_samples",
@@ -1784,20 +1788,14 @@ class IIODigitizerBackend(DigitizerBackend):
         if not any(present):
             return ScopeDmaGeometry.legacy(frame_samples)
         if not all(present):
-            missing = ", ".join(
-                name for name, available in zip(names, present) if not available
-            )
-            raise RuntimeError(
-                f"incomplete Scope DMA geometry capability; missing {missing}"
-            )
+            missing = ", ".join(name for name, available in zip(names, present) if not available)
+            raise RuntimeError(f"incomplete Scope DMA geometry capability; missing {missing}")
 
         frame_bytes = int(self._dma_attr_get("dma_frame_bytes"))
         waveform_samples = int(self._dma_attr_get("dma_waveform_samples"))
         sample_decimation = int(self._dma_attr_get("dma_sample_decimation"))
         if frame_bytes % np.dtype("<i2").itemsize:
-            raise RuntimeError(
-                f"Scope DMA frame size {frame_bytes} is not int16-aligned"
-            )
+            raise RuntimeError(f"Scope DMA frame size {frame_bytes} is not int16-aligned")
         payload_bytes = 8 + waveform_samples * np.dtype("<i2").itemsize
         padding_bytes = frame_bytes - payload_bytes
         try:
@@ -2232,6 +2230,11 @@ class IIODigitizerBackend(DigitizerBackend):
 
         if refill_failed:
             del buf
+            if (isinstance(getattr(self, "_dma_capture_geometry", None), ScopeSumGeometry)
+                    and getattr(self, "_sum_draining", False)
+                    and failure_errno in _LIBIIO_TIMEOUT_ERRNOS):
+                # Terminal transport timeout: inspect sum status before destroying the buffer.
+                raise OSError(errno.ETIMEDOUT, failure_text) from None
             if self._dma_stop_requested.is_set():
                 self._close_dma_buffer(drain=False)
                 raise InterruptedError(
@@ -2288,6 +2291,8 @@ class IIODigitizerBackend(DigitizerBackend):
             start = iio._buffer_start(buf._buffer)
             raw = ctypes.string_at(start, nbytes)
 
+        if isinstance(getattr(self, "_dma_capture_geometry", None), ScopeSumGeometry):
+            return raw  # Packet decoder owns modulo timestamp and sequence validation.
         timestamp = int.from_bytes(raw[:8], "little")
         previous = getattr(self, "_dma_last_timestamp", None)
         if not timestamp or (previous is not None and timestamp <= previous):
@@ -2364,14 +2369,14 @@ class IIODigitizerBackend(DigitizerBackend):
         """
         entered = threading.Event()
         result: list[int] = []
-        errors: list[BaseException] = []
+        errors: list[tuple[int, str]] = []
 
         def reader() -> None:
             entered.set()
             try:
                 result.append(self._refill_scope_buffer(buf))
             except BaseException as exc:
-                errors.append(exc)
+                errors.append((getattr(exc, "errno", None) or errno.EIO, str(exc)))
 
         thread = threading.Thread(
             target=reader,
@@ -2380,23 +2385,28 @@ class IIODigitizerBackend(DigitizerBackend):
         )
         thread.start()
         if not entered.wait(_DMA_FIRST_REFILL_ENTER_SECONDS):
+            buf.cancel()
+            thread.join()
             raise RuntimeError(
-                "DMA reader thread did not start within "
-                f"{_DMA_FIRST_REFILL_ENTER_SECONDS:.2f} seconds -- refusing "
-                "to write enable=1 with no confirmed listener"
+                "DMA reader did not enter its first refill; acquisition remains stopped"
             )
 
-        if self._dma_stop_requested.is_set():
+        try:
+            sum_cancelled = (
+                isinstance(getattr(self, "_dma_capture_geometry", None), ScopeSumGeometry)
+                and getattr(self, "_sum_draining", False)
+            )
+            if self._dma_stop_requested.is_set() or sum_cancelled:
+                raise InterruptedError(errno.ECANCELED, "scope DMA stop requested before enable")
+            if not self._dma_get_enable():
+                self._dma_set_enable(True)
+        except BaseException:
             buf.cancel()
-            thread.join(_DMA_CLOSE_JOIN_SECONDS)
-            raise InterruptedError(errno.ECANCELED, "scope DMA stop requested")
-
-        if not self._dma_get_enable():
-            self._dma_set_enable(True)
-
+            thread.join()
+            raise
         thread.join()
         if errors:
-            raise errors[0]
+            raise OSError(*errors[0]) from None
         return result[0]
 
     def _create_dma_buffer(self, n: int) -> None:
@@ -2474,7 +2484,8 @@ class IIODigitizerBackend(DigitizerBackend):
 
         kernel_buffers = self._scope_dma_kernel_buffers()
         use_batched_iiod = (
-            self._uri.startswith("ip:")
+            not isinstance(geometry, ScopeSumGeometry)
+            and self._uri.startswith("ip:")
             and "dma_queue_mode" in self._dma_scope.attrs
             and self._dma_attr_get("dma_queue_mode") == "dmaengine"
         )
@@ -2490,6 +2501,8 @@ class IIODigitizerBackend(DigitizerBackend):
                 "failed to select Scope DMA kernel-buffer depth before arming"
             ) from exc
 
+        if isinstance(geometry, ScopeSumGeometry):
+            self._dma_ctx.set_timeout(2000)
         if use_batched_iiod:
             self._dma_buf = IiodScopeStream(
                 self._uri,
@@ -2584,39 +2597,117 @@ class IIODigitizerBackend(DigitizerBackend):
     # MCABackend -- vdpp-pulse-processor.c + vdpp-input-filter.c
     # (see module docstring for the handful of methods that stay stubbed)
     #
-    # NOTE on PP_FMT_X2/X8/PLUS1_X8/TRAPEZOID_R fields (pretrigger_samples,
-    # frame_samples, cfd_delay, both CFD/PSD time-window pairs,
-    # charge_comparison_time, crrc2_fdelay, trapezoid_r/m/time): an earlier
-    # revision of this section reimplemented vdpp-pulse-processor.c's
-    # pp_field_to_user()/pp_field_from_user() client-side for these. That
-    # was wrong and has been removed -- pp_field_show()/pp_field_store()
-    # already apply that conversion *inside the kernel*, so the sysfs
-    # value is already the physical/user value, confirmed live (writing
-    # "24" to pretrigger_samples reads back "24", not "12"). Applying the
-    # same conversion again client-side silently wrote a wrong (roughly
-    # halved or eighthed) value to hardware on every affected field while
-    # still round-tripping correctly through get_*() -- the bug was
-    # symmetric and invisible to a get-after-set check, only surfacing
-    # when the double-converted value happened to fall outside a field's
-    # valid range (crrc2_fdelay's minimum, confirmed live as an -ERANGE).
-    # Every one of these formatted fields is a plain passthrough now. Raw
-    # fields remain raw unless the public legacy API promises a physical
-    # value; crrc2_cdelay and trapezoid_beta_raw are the two such conversions.
-    # See get_trapez_R()'s docstring for the fullest passthrough example.
-    # ------------------------------------------------------------------
+    # PetaLinux bb8c57e, mca-parameter-abi-v2.md: native ADC samples.
+    # Never reapply the kernel's register encoding in these methods.
 
     def mca_hardware_present(self) -> bool:
-        """Extension method (not part of MCABackend), consumed by
-        Digitizer.mca_available(): whether this channel's firmware has the
-        pulse-processor/input-filter devices at all. False means every
-        MCABackend method that goes through _pp_attr_get/set or
-        _if_attr_get/set raises RuntimeError -- callers building GUI docks
-        (MainWindowController) should check this before constructing
-        anything that unconditionally writes MCA defaults on init (e.g.
-        MCAController), same spirit as dma_fault_is_latched()/
-        acknowledge_dma_recovery() for the scope DMA fault path.
+        """Unknown MCA contracts are read-only; independent Scope remains usable."""
+        return self._input_filter is not None and bool(self.mca_parameter_contract()["supported"])
+
+    def mca_parameter_contract(self) -> dict[str, object]:
+        pp = self._pp
+        if pp is None:
+            return {"supported": False, "reason": "Pulse processor absent"}
+        try:
+            version = int(pp.attrs["parameter_abi_version"].value)
+            units = str(pp.attrs["parameter_units"].value).strip()
+        except (KeyError, ValueError, OSError) as exc:
+            return {"supported": False, "reason": f"Cannot discover MCA ABI: {exc}"}
+        return {"supported": version == 2 and units == "adc_samples",
+                "parameter_abi_version": version, "parameter_units": units}
+
+    @property
+    def mca_configuration_lock(self) -> threading.RLock:
+        # Shared by complete histogram assemblies and all control-context writes.
+        if not hasattr(self, "_configuration_lock"):
+            self._configuration_lock = threading.RLock()
+        return self._configuration_lock
+
+    @staticmethod
+    def _require_mca_contract(pp: iio.Device | None, *, acknowledged: bool = True) -> None:
+        if pp is None:
+            raise RuntimeError("MCA parameter ABI2 discovery failed; pulse processor absent")
+        try:
+            valid = (
+                int(pp.attrs["parameter_abi_version"].value) == 2
+                and str(pp.attrs["parameter_units"].value).strip() == "adc_samples"
+            )
+            ack = int(pp.attrs["parameter_abi_ack"].value) if acknowledged else 2
+        except (AttributeError, KeyError, ValueError, OSError) as exc:
+            raise RuntimeError(
+                "MCA parameter ABI2 discovery failed; no configuration permitted"
+            ) from exc
+        if not valid or ack != 2:
+            raise RuntimeError("MCA requires ABI2/adc_samples and an explicit idle acknowledgement")
+
+    def prepare_mca_configuration(self, values: dict[str, int]) -> None:
+        validate_parameters(values, complete=True)
+        with self.mca_configuration_lock:
+            pp = self._pp
+            self._require_mca_contract(pp, acknowledged=False)
+            assert pp is not None
+            if int(pp.attrs["enable"].value) or int(pp.attrs["list_buffer_active"].value):
+                raise RuntimeError("Stop MCA and close list DMA before acknowledging ABI2")
+            if self._lm_frame is not None and "dma_poisoned" in self._lm_frame.attrs:
+                if int(self._lm_frame.attrs["dma_poisoned"].value):
+                    raise RuntimeError("MCA DMA is poisoned; reboot the target before reuse")
+            pp.attrs["parameter_abi_ack"].value = "2"
+            self._require_mca_contract(pp)
+
+    def mca_parameter_snapshot(self) -> dict[str, int]:
+        with self.mca_configuration_lock:
+            self._require_mca_contract(self._pp, acknowledged=False)
+            return {name: int(self._pp_attr_get(name)) for name in PARAMETERS}
+
+    def configure_mca_parameters(self, values: dict[str, int]) -> None:
+        values = validate_parameters(values)
+        with self.mca_configuration_lock:
+            candidate = self.mca_parameter_snapshot() | values
+            self.prepare_mca_configuration(candidate)
+            # Disable algorithms first; final admission uses the complete candidate.
+            enables = [name for name in PARAMETERS if name.endswith("_enable")]
+            for name in enables:
+                self._pp_attr_set(name, "0")
+            try:
+                for name, value in candidate.items():
+                    if name not in enables:
+                        self._pp_attr_set(name, str(value))
+                for name in enables:
+                    self._pp_attr_set(name, str(candidate[name]))
+            except Exception:
+                self._pp_attr_set("enable", "0")
+                raise
+
+    def supports_dc_blocker(self) -> bool:
+        return self._input_filter is not None and "dc_blocker_disable" in self._input_filter.attrs
+
+    def get_dc_blocker_bypass(self) -> bool:
+        return bool(int(self._if_attr_get("dc_blocker_disable")))
+
+    def set_dc_blocker_bypass(self, value: bool) -> None:
+        self._if_attr_set("dc_blocker_disable", "1" if value else "0")
+
+    def mca_producer_identity(self) -> dict[str, int | str]:
+        """Bind the selected event decoder to a source-derived producer identity.
+
+        Matching versions establish the record contract, not detector calibration
+        or physical channel wiring. Unknown producers remain opaque captures.
         """
-        return self._pp is not None and self._input_filter is not None
+        contract = self.mca_parameter_contract()
+        identity: dict[str, int | str] = {
+            "pulse_hw_version": self.get_hw_version(),
+            "pulse_sw_version": self.get_sw_version(),
+            "ip_version": self.get_lm_ip_version(),
+            "parameter_abi_version": int(str(contract.get("parameter_abi_version", 0))),
+            "parameter_units": str(contract.get("parameter_units", "unknown")),
+        }
+        known = (identity["pulse_hw_version"], identity["pulse_sw_version"],
+                 identity["ip_version"], identity["parameter_abi_version"],
+                 identity["parameter_units"]) == (101, 103023, 121, 2, "adc_samples")
+        if known:
+            identity["qualified_record_schema"] = "vdpp-zc-calc-q2.14-v1"
+        identity["energy_field"] = "selected estimator; not universally trapezoid energy"
+        return identity
 
     def mca_dma_hardware_present(self) -> bool:
         """Whether the dedicated context found both paired DMA devices."""
@@ -2671,22 +2762,14 @@ class IIODigitizerBackend(DigitizerBackend):
         self._pp_attr_set("baseline_window", str(val))
 
     def get_dpp_pretrigger_samples(self) -> int:
-        """PP_FMT_X2 -- but pp_field_show()/pp_field_store() already apply
-        the raw<->user (x2) conversion inside the kernel; the sysfs value
-        is the legacy nanosecond value despite the attribute's stale
-        ``_samples`` suffix. Confirmed live: writing "24" reads back "24",
-        not "12". No client-side conversion here -- see the NOTE above for
-        the double-conversion bug this used to have.
-        """
+        """ABI2 native ADC samples (2 ns each); kernel owns register encoding."""
         return int(self._pp_attr_get("pretrigger_samples"))
 
     def set_dpp_pretrigger_samples(self, val: int) -> None:
         self._pp_attr_set("pretrigger_samples", str(val))
 
     def get_dpp_frame_samples(self) -> int:
-        """See get_dpp_pretrigger_samples()'s docstring -- same PP_FMT_X2
-        field and same already-converted legacy nanosecond value.
-        """
+        """ABI2 native ADC samples (2 ns each); kernel owns register encoding."""
         return int(self._pp_attr_get("frame_samples"))
 
     def set_dpp_frame_samples(self, val: int) -> None:
@@ -2978,31 +3061,19 @@ class IIODigitizerBackend(DigitizerBackend):
         self._pp_attr_set("crrc2_1cdelay_raw", str(val))
 
     def get_crrc2_Cdelay(self) -> int:
-        """Return physical C-stage delay in ns.
-
-        Unlike the other MCA timing fields, the current driver deliberately
-        exposes ``crrc2_cdelay`` as ``PP_FMT_RAW``. The legacy API accepted a
-        nanosecond value and divided it by the 8 ns decimated clock before
-        writing this register, so restore that public API conversion here.
-        """
-        return int(self._pp_attr_get("crrc2_cdelay")) * _MCA_DECIMATED_TICK_NS
+        """ABI2 native value; kernel owns register encoding."""
+        return int(self._pp_attr_get("crrc2_cdelay"))
 
     def set_crrc2_Cdelay(self, val: int) -> None:
-        if val % _MCA_DECIMATED_TICK_NS:
-            raise ValueError(
-                f"crrc2 C delay must align to {_MCA_DECIMATED_TICK_NS} ns"
-            )
-        self._pp_attr_set("crrc2_cdelay", str(val // _MCA_DECIMATED_TICK_NS))
+        validate_parameters({"crrc2_cdelay": val})
+        self._pp_attr_set("crrc2_cdelay", str(val))
 
     def get_crrc2_Fdelay(self) -> int:
-        """PP_FMT_PLUS1_X8 -- pp_field_show()/pp_field_store() apply the
-        (raw+1)*8 conversion inside the kernel already; the sysfs value is
-        the physical delay, confirmed live. No client-side conversion.
-        """
-        return int(self._pp_attr_get("crrc2_fdelay"))
+        """ABI2 native value; kernel owns register encoding."""
+        return int(self._pp_attr_get("crrc2_fdelay_samples"))
 
     def set_crrc2_Fdelay(self, val: int) -> None:
-        self._pp_attr_set("crrc2_fdelay", str(val))
+        self._pp_attr_set("crrc2_fdelay_samples", str(val))
 
     def get_crrc2_pzc_coeff(self) -> int:
         return int(self._pp_attr_get("crrc2_pzc_raw"))
@@ -3022,89 +3093,41 @@ class IIODigitizerBackend(DigitizerBackend):
     def get_trapezoid_reciprocal_raw(self) -> int:
         """Read the driver shadow of 0x0110, derived when trapezoid_r is set.
 
-        vdpp-pulse-processor.c computes floor(32768 / (R_ns / 8 - 1)) under
-        the configuration mutex. Read the advertised value, without issuing
-        another write or guessing a value for older drivers.
+        Optional readback is distinct from the ABI2 calculated 32768/(R/4).
+        The current reference does not export this optional attribute.
         """
         if not self.supports_trapezoid_reciprocal_raw():
             raise NotImplementedError("update vdpp-mca: driver lacks trapezoid_1r_raw")
         return int(self._pp_attr_get("trapezoid_1r_raw"))
 
     def get_trapez_R(self) -> int:
-        """PP_FMT_TRAPEZOID_R -- (raw + 1) * 8, same formula as PLUS1_X8
-        (pp_field_to_user()'s switch shares the case) -- but that
-        conversion happens inside pp_field_show()/pp_field_store()
-        already; the sysfs value is the physical value, confirmed live
-        (writing "16" reads back "16", not a re-converted "136"). No
-        client-side conversion here.
-
-        Per mca-architecture.md, writing trapezoid_r also writes the
-        dependent trapezoid_1r register kernel-side (Rdelay/1Rdelay) --
-        newer drivers expose its shadow as read-only trapezoid_1r_raw.
-        The kernel's real minimum is 16 (8 would make Rdelay
-        zero, per the same doc). ``mca.py`` and the GUI use the same
-        16..4088 step-8 range, so invalid values are rejected before I/O.
-        """
-        return int(self._pp_attr_get("trapezoid_r"))
+        """ABI2 native value; kernel owns register encoding."""
+        return int(self._pp_attr_get("trapezoid_r_samples"))
 
     def set_trapez_R(self, val: int) -> None:
-        self._pp_attr_set("trapezoid_r", str(val))
+        self._pp_attr_set("trapezoid_r_samples", str(val))
 
     def get_trapez_M(self) -> int:
-        """PP_FMT_X8 -- already converted by the kernel, see
-        get_trapez_R()'s docstring. No client-side conversion.
-        """
-        return int(self._pp_attr_get("trapezoid_m"))
+        """ABI2 native value; kernel owns register encoding."""
+        return int(self._pp_attr_get("trapezoid_m_samples"))
 
     def set_trapez_M(self, val: int) -> None:
-        self._pp_attr_set("trapezoid_m", str(val))
+        self._pp_attr_set("trapezoid_m_samples", str(val))
 
     def get_trapez_T(self) -> int:
-        """Return the trapezoid pole-zero time constant in ns.
-
-        ``trapezoid_beta_raw`` is intentionally a raw IIO coefficient. Per
-        the current user-api.md and the legacy VDPP API, userspace restores
-        the physical value with ``T = -8 / log(beta / 2^31)``. A zero
-        coefficient is retained as the legacy zero/unconfigured sentinel.
-        """
-        beta = int(self._pp_attr_get("trapezoid_beta_raw"))
-        if beta == 0:
-            return 0
-        if beta < 0 or beta >= _TRAPEZOID_BETA_SCALE:
-            raise RuntimeError(
-                "trapezoid_beta_raw cannot represent a positive pole-zero "
-                f"time: {beta}"
-            )
-        return round(
-            -_MCA_DECIMATED_TICK_NS
-            / math.log(beta / _TRAPEZOID_BETA_SCALE)
-        )
+        """ABI2 native value; kernel owns register encoding."""
+        return int(self._pp_attr_get("trapezoid_beta_raw"))
 
     def set_trapez_T(self, val: int) -> None:
-        if val < 0:
-            raise ValueError("trapezoid pole-zero time cannot be negative")
-        beta = (
-            0
-            if val == 0
-            else round(
-                math.exp(-_MCA_DECIMATED_TICK_NS / val)
-                * _TRAPEZOID_BETA_SCALE
-            )
-        )
-        self._pp_attr_set("trapezoid_beta_raw", str(beta))
+        validate_parameters({"trapezoid_beta_raw": val})
+        self._pp_attr_set("trapezoid_beta_raw", str(val))
 
     def get_trapez_E(self) -> int:
-        """Maps to the driver's "trapezoid_time" attribute (PP_FMT_X8) --
-        see get_trapez_T()'s docstring for why the naming and the legacy
-        ABC method names diverge here; this pairing is what the numeric
-        ranges (0..16376 step 8) actually confirm. The kernel already
-        applies the x8 conversion (see get_trapez_R()'s docstring), so
-        this is a plain passthrough like every other X2/X8/PLUS1_X8 field.
-        """
-        return int(self._pp_attr_get("trapezoid_time"))
+        """ABI2 native value; kernel owns register encoding."""
+        return int(self._pp_attr_get("trapezoid_start_offset_samples"))
 
     def set_trapez_E(self, val: int) -> None:
-        self._pp_attr_set("trapezoid_time", str(val))
+        self._pp_attr_set("trapezoid_start_offset_samples", str(val))
 
     def get_trapez_FT(self) -> int:
         return int(self._pp_attr_get("trapezoid_flat_top_window"))
@@ -3119,7 +3142,7 @@ class IIODigitizerBackend(DigitizerBackend):
         self._pp_attr_set("cfd_enable", "1" if val else "0")
 
     def get_cfd_factor(self) -> float:
-        """cfd_factor_raw (u16, PP_FMT_RAW -- the register is NOT scaled by
+        """cfd_factor_raw (0..32767; the register is NOT scaled by
         the driver itself) x cfd_factor_scale (0.000030517578125 = 2^-15,
         read live, same reasoning as get_time_limit()'s scale read).
         """
@@ -3132,25 +3155,23 @@ class IIODigitizerBackend(DigitizerBackend):
         self._pp_attr_set("cfd_factor_raw", str(round(val / scale)))
 
     def get_cfd_delay(self) -> int:
-        """PP_FMT_X2 -- already converted by the kernel, see
-        get_trapez_R()'s docstring. No client-side conversion.
-        """
-        return int(self._pp_attr_get("cfd_delay"))
+        """ABI2 native value; kernel owns register encoding."""
+        return int(self._pp_attr_get("cfd_delay_samples"))
 
     def set_cfd_delay(self, val: int) -> None:
-        self._pp_attr_set("cfd_delay", str(val))
+        self._pp_attr_set("cfd_delay_samples", str(val))
 
     def get_cfd_time_window_low(self) -> int:
-        return int(self._pp_attr_get("cfd_time_walk_low"))
+        return int(self._pp_attr_get("cfd_window_low_samples"))
 
     def set_cfd_time_window_low(self, val: int) -> None:
-        self._pp_attr_set("cfd_time_walk_low", str(val))
+        self._pp_attr_set("cfd_window_low_samples", str(val))
 
     def get_cfd_time_window_high(self) -> int:
-        return int(self._pp_attr_get("cfd_time_walk_high"))
+        return int(self._pp_attr_get("cfd_window_high_samples"))
 
     def set_cfd_time_window_high(self, val: int) -> None:
-        self._pp_attr_set("cfd_time_walk_high", str(val))
+        self._pp_attr_set("cfd_window_high_samples", str(val))
 
     def get_cc_enable(self) -> bool:
         return bool(int(self._pp_attr_get("charge_comparison_enable")))
@@ -3159,13 +3180,11 @@ class IIODigitizerBackend(DigitizerBackend):
         self._pp_attr_set("charge_comparison_enable", "1" if val else "0")
 
     def get_cc_time(self) -> int:
-        """PP_FMT_X2 -- already converted by the kernel, see
-        get_trapez_R()'s docstring. No client-side conversion.
-        """
-        return int(self._pp_attr_get("charge_comparison_time"))
+        """ABI2 native ADC samples (2 ns each); kernel owns register encoding."""
+        return int(self._pp_attr_get("charge_comparison_samples"))
 
     def set_cc_time(self, val: int) -> None:
-        self._pp_attr_set("charge_comparison_time", str(val))
+        self._pp_attr_set("charge_comparison_samples", str(val))
 
     def get_psd_zc_enable(self) -> bool:
         return bool(int(self._pp_attr_get("psd_zero_crossing_enable")))
@@ -3180,19 +3199,17 @@ class IIODigitizerBackend(DigitizerBackend):
         self._pp_attr_set("psd_zero_crossing_mode", str(val))
 
     def get_psd_zc_time_window_low(self) -> int:
-        """PP_FMT_X2 -- already converted by the kernel, see
-        get_trapez_R()'s docstring. No client-side conversion.
-        """
-        return int(self._pp_attr_get("psd_time_walk_low"))
+        """ABI2 native ADC samples (2 ns each); kernel owns register encoding."""
+        return int(self._pp_attr_get("psd_window_low_samples"))
 
     def set_psd_zc_time_window_low(self, val: int) -> None:
-        self._pp_attr_set("psd_time_walk_low", str(val))
+        self._pp_attr_set("psd_window_low_samples", str(val))
 
     def get_psd_zc_time_window_high(self) -> int:
-        return int(self._pp_attr_get("psd_time_walk_high"))
+        return int(self._pp_attr_get("psd_window_high_samples"))
 
     def set_psd_zc_time_window_high(self, val: int) -> None:
-        self._pp_attr_set("psd_time_walk_high", str(val))
+        self._pp_attr_set("psd_window_high_samples", str(val))
 
     def get_mem1_sig_select(self) -> int:
         return int(self._pp_attr_get("debug_signal1"))
@@ -3283,6 +3300,10 @@ class IIODigitizerBackend(DigitizerBackend):
         return samples[:_PP_MEM_DEBUG_ENTRIES].copy(), samples[_PP_MEM_DEBUG_ENTRIES:].copy()
 
     def read_histogram(self) -> np.ndarray:
+        with self.mca_configuration_lock:
+            return self._read_histogram_serialized()
+
+    def _read_histogram_serialized(self) -> np.ndarray:
         """Reads the 65536-byte, 16384-bin u32 histogram via self._mca_pp.
 
         The updated board ABI exposes four ordered 16384-byte attributes,
@@ -3294,10 +3315,10 @@ class IIODigitizerBackend(DigitizerBackend):
 
         The current driver source explicitly permits live reads: it copies
         bins while hardware may be updating them, so a running snapshot is
-        informational rather than atomic. After enable=0, the same path
-        returns the stable final histogram. This matches user-api.md and
-        supersedes an earlier driver revision/docstring that described an
-        EBUSY guard while running.
+        informational rather than atomic. STOP clears ownership but A07
+        downstream-completion acknowledgement is deferred: no final snapshot
+        guarantee is implied, including after enable=0. The shared lock covers
+        every part and every application configuration/START/STOP write.
         """
         device = self._require_mca_pp()
         if all(name in device.attrs for name in _PP_HISTOGRAM_CHUNK_NAMES):

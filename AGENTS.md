@@ -84,8 +84,11 @@ Additional rules:
 - Do not rely on Python destructors for native buffer cleanup.
 - Persistent `EINVAL` or `EIO` ends and latches a session. Require the existing recovery
   acknowledgement before rearming rather than recreating a buffer mid-file.
-- Scope refills must equal `frame_samples * 2` bytes. Scope NDMA headers store an int16
-  sample count, not a byte count; reject trailing partial frames during conversion.
+- Use complete advertised Scope geometry: raw waveform, mean4, and periodic-sum
+  layouts differ. Mode 5 is structured 4096-byte data / 2048 IIO scans with zero
+  waveform samples/decimation; never route it into waveform consumers or NDMA v1.
+- Healthy sum STOP drains through a terminal timeout with pending/invalid status
+  clear before close. Poison requires reboot, not recovery acknowledgement.
 - Current MCA list mode transports one unchanged 16 KiB frame containing 1024 opaque
   16-byte records. Keep the IIO record layout distinct from the same-sized legacy NDMA
   v1 event record and preserve the NDMA version distinction.
@@ -93,14 +96,17 @@ Additional rules:
 ## MCA configuration and snapshots
 
 - Pulse-processor measurement-configuration writes are rejected while acquisition or
-  list DMA owns the core. For non-DMA acquisition, use the existing synchronized
-  stop/write/restart helper and shared lock.
+  list DMA owns the core. ABI2 requires explicit stop/configure/start until the
+  deferred A07 completion policy is qualified. Failed writes stay stopped.
+- Discover parameter ABI2 and adc_samples, validate a complete native candidate,
+  then acknowledge 2 while stopped/list-closed before configuration or arm.
+  Never infer old preset semantics or repeat kernel register encoding.
 - Debug-memory selectors are viewer muxes, explicitly exempt in
   `vdpp-pulse-processor.c` (`pp_field_store()`, PetaLinux `167e90f`). Write them
   directly during acquisition or DMA; never restart accumulation for debug routing.
   Keep replay and connection-loss protection.
-- Reconfiguration while running begins a new accumulation. Clear stale histogram and
-  elapsed-time presentation state accordingly.
+- Shared START disable selects external bypass, not STOP. Change routing only
+  with both MCAs stopped/list-closed; arm both readers/cores before asserting HIGH.
 - Do not reconfigure the MCA during list-mode DMA; that requires the complete worker
   stop/drain/close/rearm lifecycle.
 - Preserve support for both the current split histogram attributes and the earlier
