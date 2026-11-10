@@ -12,10 +12,11 @@ import struct
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from queue import Empty, Full, Queue
 from typing import NotRequired, Protocol, TypedDict
 
 import h5py
@@ -52,6 +53,7 @@ class ScopeSumBackend(Protocol):
     def stop_scope_sum_from_reader(self) -> None: ...
     def scope_sum_status(self) -> tuple[int, int]: ...
     def scope_sum_identity(self) -> dict[str, object]: ...
+    def get_scope_dma_runtime_metadata(self) -> dict[str, object]: ...
 
 
 @dataclass(frozen=True)
@@ -188,57 +190,212 @@ class ScopeSumContinuity:
 
 
 class ScopeSumWriter:
-    """Append original packets and exact u64 records; incomplete until clean close."""
+    """Single-threaded HDF5 sink; cache handles and resize once per batch."""
 
     def __init__(self, path: Path, metadata: dict[str, object]) -> None:
         self._file = h5py.File(path, "x")
-        self._file.attrs.update(
-            format="nlab-scope-sums",
-            format_version=1,
-            signal_origin="measurement",
-            created_utc=datetime.now(UTC).isoformat(),
-            timestamp_unit="8 ns",
-            sum_unit="offset-binary ADC code sum",
-            complete=False,
-            metadata_json=json.dumps(metadata, sort_keys=True),
-        )
-        self._file.create_dataset(
-            "packets", shape=(0, 4096), maxshape=(None, 4096), chunks=(16, 4096), dtype="u1"
-        )
-        for name in ("timestamps", "sums"):
-            self._file.create_dataset(
-                name, shape=(0,), maxshape=(None,), chunks=(8192,), dtype="<u8"
-            )
-        self._file.create_dataset(
-            "valid_counts", shape=(0,), maxshape=(None,), chunks=(512,), dtype="<u2"
-        )
         self._closed = False
+        try:
+            self._file.attrs.update(
+                format="nlab-scope-sums",
+                format_version=1,
+                signal_origin="measurement",
+                created_utc=datetime.now(UTC).isoformat(),
+                timestamp_unit="8 ns",
+                sum_unit="offset-binary ADC code sum",
+                complete=False,
+                metadata_json=json.dumps(
+                    {k: v for k, v in metadata.items() if k != "configuration_yaml"},
+                    sort_keys=True,
+                ),
+            )
+            configuration = metadata.get("configuration_yaml", "")
+            if configuration:
+                # Use a dataset rather than an HDF5 attribute: full settings can
+                # exceed attribute size limits and other capture tools use this key.
+                self._file.create_dataset(
+                    "configuration_yaml", data=str(configuration), dtype=h5py.string_dtype("utf-8")
+                )
+            self._packets = self._file.create_dataset(
+                "packets", shape=(0, 4096), maxshape=(None, 4096), chunks=(16, 4096), dtype="u1"
+            )
+            self._records = tuple(
+                self._file.create_dataset(
+                    name, shape=(0,), maxshape=(None,), chunks=(8192,), dtype="<u8"
+                )
+                for name in ("timestamps", "sums")
+            )
+            self._counts = self._file.create_dataset(
+                "valid_counts", shape=(0,), maxshape=(None,), chunks=(512,), dtype="<u2"
+            )
+        except Exception:
+            self._file.close()
+            raise
 
     def append(self, packet: ScopeSumPacket) -> None:
-        packets = self._file["packets"]
-        row = packets.shape[0]
-        packets.resize(row + 1, axis=0)
-        packets[row] = np.frombuffer(packet.raw, dtype="u1")
-        counts = self._file["valid_counts"]
-        counts.resize(row + 1, axis=0)
-        counts[row] = len(packet.records)
-        for index, name in enumerate(("timestamps", "sums")):
-            data = self._file[name]
-            start = data.shape[0]
-            data.resize(start + len(packet.records), axis=0)
-            data[start:] = np.asarray([record[index] for record in packet.records], dtype="<u8")
+        self.append_many([packet])
 
-    def close(self, *, complete: bool, error: str = "", missed_windows: int = 0) -> None:
+    def append_many(self, packets: Sequence[ScopeSumPacket]) -> None:
+        if self._closed:
+            raise RuntimeError("Scope sum writer is closed")
+        if not packets:
+            return
+        raw = np.frombuffer(b"".join(packet.raw for packet in packets), dtype="u1")
+        counts = np.asarray([len(packet.records) for packet in packets], dtype="<u2")
+        records = np.fromiter(
+            (value for packet in packets for record in packet.records for value in record),
+            dtype="<u8",
+            count=2 * sum(len(packet.records) for packet in packets),
+        ).reshape(-1, 2)
+        row = self._packets.shape[0]
+        self._packets.resize(row + len(packets), axis=0)
+        self._packets[row:] = raw.reshape(-1, 4096)
+        self._counts.resize(row + len(packets), axis=0)
+        self._counts[row:] = counts
+        for index, data in enumerate(self._records):
+            start = data.shape[0]
+            data.resize(start + len(records), axis=0)
+            data[start:] = records[:, index]
+
+    def close(
+        self, *, complete: bool, error: str = "", missed_windows: int = 0,
+        runtime_metadata: dict[str, object] | None = None,
+    ) -> None:
         if self._closed:
             return
         self._closed = True
         try:
             self._file.attrs.update(
-                complete=complete, cleanup_error=error, final_missed_windows=missed_windows
+                complete=False, cleanup_error=error, final_missed_windows=missed_windows
             )
-            self._file.flush()
+            if runtime_metadata is not None:
+                self._file.attrs["runtime_metadata_json"] = json.dumps(
+                    runtime_metadata, sort_keys=True
+                )
+            self._file.flush()  # Flush all data before advertising completion.
+            if complete:
+                self._file.attrs["complete"] = True
+                self._file.flush()
+        except Exception as exc:
+            # Best effort only: storage failures cannot provide transactional HDF5.
+            try:
+                self._file.attrs.update(
+                    complete=False,
+                    cleanup_error="; ".join(
+                        part for part in (error, f"HDF5 flush: {type(exc).__name__}: {exc}") if part
+                    ),
+                )
+                self._file.flush()
+            except Exception:
+                pass
+            raise
         finally:
             self._file.close()
+
+
+class ScopeSumRecorder:
+    """Bounded asynchronous sink; all HDF5 operations stay on one joined thread.
+
+    The DMA reader only enqueues immutable decoded packets. A full queue is a
+    recording error, never blocking backpressure or silent packet loss. STOP
+    drains the queue and joins the writer before the capture worker can exit.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        metadata: dict[str, object],
+        *,
+        queue_packets: int = 256,
+        batch_packets: int = 16,
+        batch_seconds: float = 0.1,
+    ) -> None:
+        if queue_packets < 1 or batch_packets < 1 or not 0 < batch_seconds <= 1:
+            raise ValueError("Invalid Scope sum recording queue/batch limits")
+        self._queue: Queue[ScopeSumPacket] = Queue(maxsize=queue_packets)
+        self._batch_packets = batch_packets
+        self._batch_seconds = batch_seconds
+        self._closing = threading.Event()
+        self._ready = threading.Event()
+        self._error = ""
+        self._complete = False
+        self._cleanup_error = ""
+        self._missed = 0
+        self._runtime_metadata: dict[str, object] | None = None
+        self._thread = threading.Thread(
+            target=self._run, args=(path, metadata), name="Scope sum HDF5 writer", daemon=False
+        )
+        self._thread.start()
+        self._ready.wait()  # Create/validate the destination before acquisition is armed.
+        if self._error:
+            self._thread.join()
+            raise RuntimeError(self._error)
+
+    def append(self, packet: ScopeSumPacket) -> None:
+        if self._error:
+            raise RuntimeError(self._error)
+        if self._closing.is_set():
+            raise RuntimeError("Scope sum recorder is closed")
+        try:
+            self._queue.put_nowait(packet)
+        except Full:
+            raise RuntimeError(
+                "HDF5 recording queue is full; storage cannot keep up. "
+                "Acquisition stopped; the saved prefix is incomplete."
+            ) from None
+
+    def _run(self, path: Path, metadata: dict[str, object]) -> None:
+        writer = None
+        try:
+            writer = ScopeSumWriter(path, metadata)
+            self._ready.set()
+            while not self._closing.is_set() or not self._queue.empty():
+                batch: list[ScopeSumPacket] = []
+                deadline = time.monotonic() + self._batch_seconds
+                while len(batch) < self._batch_packets:
+                    if self._closing.is_set() and self._queue.empty():
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        batch.append(self._queue.get(timeout=remaining))
+                    except Empty:
+                        break
+                if batch:
+                    writer.append_many(batch)
+        except Exception as exc:
+            self._error = f"HDF5 recording: {type(exc).__name__}: {exc}"
+        finally:
+            if writer is not None:
+                error = "; ".join(part for part in (self._cleanup_error, self._error) if part)
+                try:
+                    writer.close(
+                        complete=self._complete and not error,
+                        error=error,
+                        missed_windows=self._missed,
+                        runtime_metadata=self._runtime_metadata,
+                    )
+                except Exception as exc:
+                    self._error = "; ".join(
+                        part for part in (self._error, f"HDF5 close: {type(exc).__name__}: {exc}")
+                        if part
+                    )
+            self._ready.set()
+
+    def close(
+        self, *, complete: bool, error: str = "", missed_windows: int = 0,
+        runtime_metadata: dict[str, object] | None = None,
+    ) -> None:
+        if not self._closing.is_set():
+            self._complete = complete
+            self._cleanup_error = error
+            self._missed = missed_windows
+            self._runtime_metadata = runtime_metadata
+            self._closing.set()
+        self._thread.join()
+        if self._error:
+            raise RuntimeError(self._error)
 
 
 def read_sum_capture(path: Path) -> Iterator[ScopeSumPacket]:
@@ -328,9 +485,12 @@ class ScopeSumCapture:
     clears the acquisition gate; it never cancels a healthy tail drain.
     """
 
-    def __init__(self, backend: ScopeSumBackend, channel: int) -> None:
+    def __init__(
+        self, backend: ScopeSumBackend, channel: int, *, configuration_yaml: str = "",
+    ) -> None:
         self.backend = backend
         self.channel = channel
+        self.configuration_yaml = configuration_yaml
         self.analysis = ScopeSumAnalysis()
         self._stop = threading.Event()
         self._started = False
@@ -351,6 +511,7 @@ class ScopeSumCapture:
         complete = False
         missed = 0
         prepared = False
+        runtime_metadata = None
         try:
             self.backend.prepare_dma_capture()
             prepared = True
@@ -368,8 +529,11 @@ class ScopeSumCapture:
                     calibration=None,
                     current_conversion="unqualified; ADC codes only",
                     producer=self.backend.scope_sum_identity(),
+                    configuration_yaml=self.configuration_yaml,
+                    configuration_snapshot="before acquisition"
+                    if self.configuration_yaml else "not supplied",
                 )
-                writer = ScopeSumWriter(path, metadata)
+                writer = ScopeSumRecorder(path, metadata)
             deadline = None
             self._started = True
             while True:
@@ -391,6 +555,10 @@ class ScopeSumCapture:
                             raise RuntimeError(
                                 f"Sum tail did not finish: status=0x{status:x}"
                             ) from None
+                        if writer is not None:
+                            # Snapshot after drain, on the DMA context's owner
+                            # thread. Never add control RPCs to the running reader.
+                            runtime_metadata = self.backend.get_scope_dma_runtime_metadata()
                         complete = True
                         break
                     raise
@@ -415,7 +583,14 @@ class ScopeSumCapture:
                     complete = False
             self._started = False
             if writer is not None:
-                writer.close(complete=complete and not error, error=error, missed_windows=missed)
+                try:
+                    writer.close(
+                        complete=complete and not error, error=error, missed_windows=missed,
+                        runtime_metadata=runtime_metadata,
+                    )
+                except Exception as exc:
+                    error = (error + "; " if error else "") + str(exc)
+                    complete = False
         if error:
             raise RuntimeError(error)
         return self.analysis.snapshot() | {"complete": complete, "final_missed_windows": missed}

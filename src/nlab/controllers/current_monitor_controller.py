@@ -5,6 +5,7 @@ import math
 import statistics
 import time
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,7 @@ from nlab.hardware.digitizer.scope import (
     ScopeParam,
 )
 from nlab.ui.ui_current_monitor_view import Ui_CurrentMonitorView
+from nlab.views.current_capture_dialog import CurrentCaptureDialog
 from nlab.views.numeric_controls import (
     bind_numeric_control,
     nearest_step_value,
@@ -34,6 +36,7 @@ from nlab.views.numeric_controls import (
 )
 from nlab.views.panel_status import PanelStatus
 from nlab.views.plot_viewbox import WAVEFORM_STEP_MODE
+from nlab.views.time_axis import time_axis_scale
 from nlab.workers.current_monitor_worker import (
     CurrentMonitorWorker,
     CurrentSample,
@@ -78,9 +81,12 @@ class CurrentMonitorController(QWidget):
         auto_start: bool = False,
         scope_controller: ScopeController | None = None,
         scope_current_accumulator: ScopeCurrentAccumulator | None = None,
+        capture_viewer: Callable[[Path], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self._mca = mca
+        self._capture_viewer = capture_viewer
+        self._capture_dialog: CurrentCaptureDialog | None = None
         self._channel = channel
         self._scope_controller = scope_controller
         self._scope_current_accumulator = scope_current_accumulator
@@ -153,12 +159,26 @@ class CurrentMonitorController(QWidget):
         plot.setLabel("bottom", "Time before newest sample", units="s")
         plot.setLabel("left", "IIR output", units="raw")
         self._plot = plot
+        for side in ("bottom", "top"):
+            plot.getAxis(side).enableAutoSIPrefix(False)
+        plot.getViewBox().sigXRangeChanged.connect(self._update_time_axis)
+        self._update_time_axis()
         self._curve = plot.plot(
             pen=pg.mkPen("#277da1", width=1.5),
             autoDownsample=True,
             downsampleMethod="peak",
             clipToView=True,
         )
+
+    def _update_time_axis(self, *_args: object) -> None:
+        """Keep seconds as plot coordinates; select display units by zoom span."""
+        low, high = self._plot.viewRange()[0]
+        scale = time_axis_scale((high - low) * 1_000_000_000)
+        bottom = self._plot.getAxis("bottom")
+        if bottom.labelUnits != scale.unit:
+            bottom.setLabel("Time before newest sample", units=scale.unit)
+        for side in ("bottom", "top"):
+            self._plot.getAxis(side).setScale(1_000_000_000 / scale.ns_per_unit)
 
     def _connect_signals(self) -> None:
         self.ui.btnStart.clicked.connect(self.start_monitor)
@@ -202,7 +222,7 @@ class CurrentMonitorController(QWidget):
         )
         for record_widget in (self.ui.cbRecordSums, self.ui.editSumFile, self.ui.btnSumFile):
             record_widget.setEnabled(record_enabled)
-        self.ui.btnOpenSums.setEnabled(not running)
+        self.ui.btnOpenSums.setEnabled(True)
         self.ui.spinSumSamples.setEnabled(record_enabled)
         self.ui.btnStop.setText("Stop and drain" if self._sum_active else "Stop")
         if self._replay_hardware_interlocked:
@@ -516,20 +536,14 @@ class CurrentMonitorController(QWidget):
             self.open_sum_capture(Path(filename))
 
     def open_sum_capture(self, path: Path) -> None:
-        """Replay exact recorded windows in this plot, without a hardware client."""
-        self.stop_monitor_sync()
-        if self.ui.comboMode.count() <= _MODE_PERIODIC_SUM:
-            self.ui.comboMode.addItem("Periodic sums")
-        self.ui.comboMode.setCurrentIndex(_MODE_PERIODIC_SUM)
-        self._reset_measurement_state()
-        self._sum_worker = ScopeSumWorker(replay=path)
-        self._sum_worker.start()
-        self._sum_replay_active = True
-        self._stop_requested = False
-        self._set_running_controls(True)
-        self.status.setText("Reading recorded sums; hardware is not used for replay.")
-        self._next_display_ns = time.perf_counter_ns() + self._display_period_ns
-        self._schedule_display()
+        """Open a dedicated offline viewer without disturbing live acquisition."""
+        if self._capture_viewer is not None:
+            self._capture_viewer(path)
+            return
+        if self._capture_dialog is None:
+            self._capture_dialog = CurrentCaptureDialog(self)
+        self._capture_dialog.show_workspace()
+        self._capture_dialog.open_path(path)
 
     def _finish_sum_monitor(self) -> None:
         worker = self._sum_worker
@@ -555,8 +569,12 @@ class CurrentMonitorController(QWidget):
         points, mean = snapshot["points"], snapshot["mean"]
         if points and mean is not None:
             data = np.asarray(points)
+            connect = np.zeros(len(data), dtype=bool)
+            # Adjacent accepted windows differ by one scheduled interval. Allow
+            # float display rounding, but never bridge a missing native window.
+            connect[:-1] = np.diff(data[:, 0]) < snapshot["interval_ns"] * 1.5e-9
             self._curve.setData(
-                data[:, 0] - data[-1, 0], data[:, 1], stepMode=None, connect="auto"
+                data[:, 0] - data[-1, 0], data[:, 1], stepMode=None, connect=connect
             )
             self.ui.lblCurrent.setText(f"{self._format_value(points[-1][1])} ADC codes")
             self.ui.lblRaw.setText(self._format_value(points[-1][1]))
@@ -1106,4 +1124,6 @@ class CurrentMonitorController(QWidget):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self.stop_monitor_sync()
+        if self._capture_dialog is not None:
+            self._capture_dialog.close_without_prompt()
         super().closeEvent(event)

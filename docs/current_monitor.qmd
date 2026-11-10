@@ -56,8 +56,33 @@ channel/DC-path calibration.
 
 Use **Stop and drain** to retain accepted tail windows. After the reader exits,
 the waveform trigger, frame size, pretrigger, and gap are restored; the final plot stays visible. Existing
-HDF5 sum files can be opened in the same plot using **Open sum capture** or
-**File > Open Scope sum capture** without hardware. See the [sum file specification](scope-sum-format.md).
+HDF5 sum files open in a dedicated offline tool using **Open sum capture** or
+**Tools > Current Capture Analysis**, without disturbing the live monitor.
+Choose a **View size** in µs; the first chunk loads automatically. Navigate with
+**First / Previous / Next / Last**, or enter a **Start** time in µs. The plot
+preserves acquisition gaps and the statistics/distribution cover every window
+mean in the selected interval, even if the plotted preview is sampled.
+
+Enable **Moving average** for an orange curve over the blue raw trace.
+**Kernel size** selects 1–1,000,000 samples (default 16); each sample is one
+recorded window mean. The trailing mean requires K consecutive samples and
+resets at gaps and chunk
+boundaries; its first K−1 points are omitted. It uses full-resolution data
+before preview sampling. Raw statistics and the histogram stay unchanged.
+
+The distribution appears on the right as a filled step outline sharing the
+signal plot's amplitude Y axis, with **Counts** on its horizontal axis. A red
+dashed reference line marks the raw
+chunk mean on both plots, with its value labeled on the signal plot.
+
+Read chunk mean, population standard deviation, RMS, extrema, and exposure.
+Adjacent noise is `sqrt(mean(diff(y)**2)/2)` using only consecutive scheduled
+windows. It assumes stationary, uncorrelated window means; signal variations
+also contribute, and noise within a window cannot be recovered from sums.
+The full connected digitizer configuration is saved before acquisition in new
+GUI recordings. View or export its YAML in **Digitizer configuration**; readback
+does not apply settings to hardware. Older files explicitly report missing
+configuration. See the [sum file specification](scope-sum-format.md).
 
 ## First measurement with IIR polling
 

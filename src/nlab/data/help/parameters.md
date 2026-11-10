@@ -50,10 +50,14 @@ Each DMA path has one owner. Current waveform DMA uses the Scope path;
 Coincidence owns both selected MCA streams. Stop the current owner and allow
 its worker to drain and release the buffer before starting a conflicting task.
 
-Stop and close list-mode DMA before configuring its measurement. ABI2 also
-requires an explicit stop/configure/start for ordinary histogram acquisition.
-Debug selector changes remain live without resetting accumulation. A disabled control may indicate this
-ownership interlock, not a missing feature.
+Stop and close list-mode DMA before configuring its measurement. During ordinary
+non-DMA histogram acquisition, MCA controls remain editable, including ABI2.
+Committing a measurement setting automatically stops acquisition, applies the
+setting, then starts a fresh accumulation with reset counts and elapsed time.
+Failed writes stay stopped. DMA locks settings throughout arming and draining,
+until the buffer closes. The DMA recording checkbox stays fixed during a run.
+Debug selector changes remain live without resetting accumulation. A disabled
+control may indicate an ownership, replay, or connection-loss interlock.
 
 The client validates complete frames. A clean plot alone does not establish
 continuity: review final run diagnostics and target-side errors. Hardware faults
@@ -248,9 +252,11 @@ unsupported settings should not be interpreted as active hardware behavior.
 
 ## MCA — debug window and pretrigger offset {#mca-window}
 
-MCA ABI2 timings use **ADC samples**, each 2 ns. **Window length** is 4..4096
-samples in steps of four. **Pretrigger offset** is 0..2044 in steps of four.
-The debug plot retains its physical ns axis and one displayed point per 8 ns.
+MCA timing editors and sliders use **nanoseconds**. **Window length** is
+8..8192 ns and **Pretrigger offset** is 0..4088 ns, both in 8 ns steps.
+The GUI converts these durations to native 2 ns ADC samples at the API
+boundary. Saved hardware settings retain the ABI2 `adc_samples` contract.
+The debug plot uses physical time and one displayed point per 8 ns.
 
 The green line shows the configured offset. Different filter/logic paths can
 have different latency; it does not prove the analogue threshold-crossing time.
@@ -307,12 +313,14 @@ this fixed response; calibrations made with another response may be stale.
 ## MCA — CR-RC² shaping {#mca-crrc}
 
 **C delay** is an exponent e=0..6. Its averaging window is $8\times 2^e$ ns:
-selector 3 means 64 ns. **F delay** is 4..508 ADC samples in steps of four.
+selector 3 means 64 ns. **F delay** is 8..1016 ns in 8 ns steps.
 **PZC coefficient** is a signed raw pole-zero correction coefficient.
 
-The current driver does not export an editable **1/C (raw)** attribute, so
-that control is disabled. An explicitly advertised optional attribute retains
-raw unsigned 16-bit editing and persistence, with no assumed fixed-point scale.
+CR-RC2 normalizes its moving average by the selected $2^e$ beats in HLS.
+The current driver does not update or export a separate editable **1/C**
+coefficient, so that control is hidden. An explicitly advertised optional
+raw attribute retains unsigned 16-bit editing and persistence, with no
+assumed fixed-point scale.
 
 Scope observes the raw ADC branch. MCA sees temperature correction, the optional
 DC blocker, and FIR shaping. **Bypass DC blocker** maps to disable=1; unchecked
@@ -321,35 +329,37 @@ maps to disable=0. The MCA FIR response remains fixed at 70 MHz.
 ## MCA — constant-fraction discriminator {#mca-cfd}
 
 The constant-fraction multiplier is raw/32768 with raw=0..32767: its maximum
-is 0.999969482421875. **Delay** is 5..132 native ADC samples, including the
-kernel's phase encoding; the application does not encode it again.
+is 0.999969482421875. **Delay** is 10..264 ns in 2 ns steps.
+The GUI passes 5..132 native ADC samples to the API; the kernel owns
+the phase encoding, so the application does not encode it again.
 
-The inclusive low/high window boundaries use ADC samples in steps of four.
-When enabled, low<=high<frame_samples and delay<frame_samples. Low=0 and
-high=12 admit four beats, or 16 original ADC positions.
+The inclusive low/high boundaries use ns in 8 ns steps. When enabled,
+low<=high<window length and delay<window length. Low=0 ns and high=24 ns
+admit four beats, or 16 original ADC positions.
 
 ## MCA — trapezoidal shaping and energy {#mca-trapezoid}
 
-**R**, **M**, and **Energy time** use ADC samples (2 ns each). R is 8..2044,
-M is 0..2044, and the averaging start is 0..8188, all in steps of four. **FT**
-is exponent 0..6. With the algorithm enabled, start + $4\times 2^{FT}$ must
-fit within the pulse length.
+**R**, **M**, and **Energy time** use nanoseconds. R is 16..4088 ns,
+M is 0..4088 ns, and the averaging start is 0..16376 ns, all in 8 ns steps.
+**FT** displays 8..512 ns (hardware exponent 0..6). With the algorithm
+enabled, the start plus the FT window must fit within the pulse length.
 
 **Beta (raw)** is an unsigned 32-bit coefficient. The current contract does
 not establish the previous editable exponential time-law adapter.
 
-**1/R (calculated)** is $\lfloor32768/(R_{samples}/4)\rfloor$ from accepted R
-readback. R=16 samples gives 8192. Reset R=4 is unconfigured. This is not an
-independent FPGA measurement. If an actual driver advertises an optional raw
-readback, the label identifies that shadow separately.
+The driver writes **1/R** automatically whenever R changes:
+$1/R_{raw}=\lfloor32768/(R_{samples}/4)\rfloor$. GUI R=32 ns
+(16 samples) produces raw 8192. This derived coefficient has no separate
+panel readout or editor; optional raw readback remains available through
+the hardware API.
 
 Shaping changes noise, pileup behavior, and energy calibration. Recheck a
 calibration after material changes; saved fingerprints include ABI and units.
 
 ## MCA — charge comparison {#mca-charge}
 
-**Charge comparison time** is 4..32768 ADC samples in steps of four (2 ns
-per sample). When enabled it must not exceed the pulse length. The guide on
+**Charge comparison time** is 8..65536 ns in 8 ns steps. The API receives
+native ADC samples. When enabled the time must not exceed the pulse length. The guide on
 the debug plot uses ns and is schematic, not a measured FPGA integration gate.
 
 Stop acquisition before changing the measurement. Offline integration and the
@@ -359,8 +369,8 @@ their equivalence.
 ## MCA — PSD zero crossing {#mca-zerocross}
 
 This block enables hardware zero-crossing analysis. **Mode** selects hardware
-mode 0 or 1; **Window low/high** are inclusive ADC-sample positions in steps
-of four (2 ns per ADC sample), with low<=high<frame when enabled.
+mode 0 or 1; **Window low/high** are inclusive positions in nanoseconds,
+with 8 ns steps and low<=high<frame duration when enabled.
 Interpret mode-specific results using the matching firmware/record schema;
 the application does not infer a particle identity from the mode number.
 
@@ -1154,7 +1164,11 @@ counts and errors. A poisoned DMA channel requires a board reboot.
 
 **Record HDF5 sums** creates a new versioned sum file with original packets,
 lossless uint64 columns, settings, producer/channel/clock identity, and completion
-status. **File > Open Scope sum capture** reopens it without hardware. An
+status. **Tools > Current Capture Analysis** opens a dedicated offline browser
+with µs-sized chunks, navigation, statistics and a window-mean histogram. New
+GUI captures embed the complete digitizer settings for readback/YAML export
+in its **Digitizer configuration** tab. Adjacent noise is RMS(Δ)/sqrt(2) for
+consecutive windows; it cannot recover within-window ADC noise. An
 incomplete recording remains marked incomplete. The plot cannot recover pulse
 shapes, waveform extrema, or noise spectra. Physical current conversion needs
 qualified channel/DC-path calibration; this view reports ADC codes.

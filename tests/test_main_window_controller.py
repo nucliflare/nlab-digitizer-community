@@ -1726,6 +1726,7 @@ def test_startup_builds_mca_features_only_for_capable_channels(
         auto_start=False,
         scope_controller=scopes[0],
         scope_current_accumulator=current_accumulator,
+        capture_viewer=controller.show_scope_sums,
     )
     assert controller._current_monitor_controllers == [current_factory.return_value]
     assert controller._current_monitor_controller_by_device == {
@@ -2306,17 +2307,14 @@ def test_peak_analysis_workbench_is_modeless_and_reused(
     assert dialog.show_workspace.call_count == 2
 
 
-def test_saved_sums_are_routed_to_current_workspace() -> None:
-    current, dock = Mock(), Mock()
-    dock.widget.return_value = current
-    host = Mock()
-    host.findChildren.return_value = [dock]
-    window = SimpleNamespace(ui=SimpleNamespace(mainTabs=Mock(), tabCurrent=object()))
-    controller = SimpleNamespace(
-        _current_monitor_controllers=[current], _current_dock_host=host, _window=window
-    )
+def test_saved_sums_open_independent_tool_without_current_or_device(monkeypatch) -> None:
+    dialog = Mock()
+    factory = Mock(return_value=dialog)
+    monkeypatch.setattr(main_window_module, "CurrentCaptureDialog", factory)
+    controller = SimpleNamespace(_current_capture_dialog=None, _window=Mock())
     path = Path("recorded-sums.h5")
+    MainWindowController.show_scope_sums(controller)
     MainWindowController.show_scope_sums(controller, path)
-    current.open_sum_capture.assert_called_once_with(path)
-    window.ui.mainTabs.setCurrentWidget.assert_called_once_with(window.ui.tabCurrent)
-    dock.raise_.assert_called_once()
+    factory.assert_called_once_with(parent=controller._window)
+    assert dialog.show_workspace.call_count == 2
+    dialog.open_path.assert_called_once_with(path)

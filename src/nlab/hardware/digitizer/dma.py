@@ -426,9 +426,11 @@ class IIOScopeDmaStreamer:
         """Stop the acquisition gate and cancel a blocked backend refill."""
         self._backend.request_dma_stop()
 
-    def create_sum_capture(self) -> ScopeSumCapture:
-        """Create a distinct sum session; never dispatch sums into waveform consumers."""
-        return ScopeSumCapture(self._backend, self._channel)
+    def create_sum_capture(self, *, configuration_yaml: str = "") -> ScopeSumCapture:
+        """Create a distinct sum session with an optional full configuration snapshot."""
+        return ScopeSumCapture(
+            self._backend, self._channel, configuration_yaml=configuration_yaml,
+        )
 
     def capture_geometry(self) -> ScopeDmaGeometry:
         """Return the configured record layout, with a v121 fallback."""

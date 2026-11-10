@@ -852,6 +852,10 @@ class IIODigitizerBackend(DigitizerBackend):
         self._dma_set_enable(False)
 
     def scope_sum_status(self) -> tuple[int, int]:
+        # A failed transport may already have disarmed/reset the FPGA. Its
+        # now-clear pending bit cannot certify that the old tail was drained.
+        if self._dma_fault_latched or self._dma_buf is None:
+            raise RuntimeError("Cannot confirm sum drain after a DMA fault or closed buffer")
         return (int(self._dma_attr_get("sum_status")),
                 int(self._dma_attr_get("sum_missed_windows")))
 
@@ -2229,11 +2233,16 @@ class IIODigitizerBackend(DigitizerBackend):
             failure_text = str(exc)
 
         if refill_failed:
+            server_timeout = not batched_iiod or getattr(buf, "server_timed_out", False)
             del buf
-            if (isinstance(getattr(self, "_dma_capture_geometry", None), ScopeSumGeometry)
-                    and getattr(self, "_sum_draining", False)
-                    and failure_errno in _LIBIIO_TIMEOUT_ERRNOS):
-                # Terminal transport timeout: inspect sum status before destroying the buffer.
+            if (
+                isinstance(getattr(self, "_dma_capture_geometry", None), ScopeSumGeometry)
+                and getattr(self, "_sum_draining", False)
+                and failure_errno in _LIBIIO_TIMEOUT_ERRNOS
+                and server_timeout
+            ):
+                # Inspect pending/invalid status before closing a drained sum
+                # buffer. Socket timeouts do not establish a complete tail.
                 raise OSError(errno.ETIMEDOUT, failure_text) from None
             if self._dma_stop_requested.is_set():
                 self._close_dma_buffer(drain=False)
@@ -2483,9 +2492,10 @@ class IIODigitizerBackend(DigitizerBackend):
         buffer_samples = geometry.buffer_samples
 
         kernel_buffers = self._scope_dma_kernel_buffers()
+        # PetaLinux bb8c57e reference arm_capture(): queued remote Scope
+        # READBUF batching applies to raw, mean4 and structured sum packets.
         use_batched_iiod = (
-            not isinstance(geometry, ScopeSumGeometry)
-            and self._uri.startswith("ip:")
+            self._uri.startswith("ip:")
             and "dma_queue_mode" in self._dma_scope.attrs
             and self._dma_attr_get("dma_queue_mode") == "dmaengine"
         )
@@ -2510,6 +2520,7 @@ class IIODigitizerBackend(DigitizerBackend):
                 buffer_samples,
                 kernel_buffers,
                 _SCOPE_IIOD_BATCH_FRAMES,
+                timeout_ms=2000 if isinstance(geometry, ScopeSumGeometry) else 3000,
             )
             self._dma_capture_transport = "iiod-batched"
         else:

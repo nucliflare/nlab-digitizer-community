@@ -621,18 +621,17 @@ class MultiChannelAnalyzer:
             return self._b.get_measurement_in_progress()
 
     def reconfigure_while_running(self, write: Callable[[], None]) -> bool:
-        """Apply while idle; ABI2 requires an explicit stop/configure/start.
+        """Apply a non-DMA edit under serialized stop/configure/start.
 
-        A07 downstream-completion fencing is deferred by the driver contract.
-        Legacy test/offline surfaces retain successful stop/write/start behavior,
-        but a failed write always leaves the core stopped.
+        PetaLinux docs/user-api.md requires enable=0 and a closed list buffer
+        for measurement writes. START clears the histogram. STOP is not the
+        deferred A07 downstream-completion fence; no delay substitutes for it.
+        A failed write always leaves the core stopped.
         """
         with self._configuration_lock:
             if self._b.mca_dma_active():
                 raise RuntimeError("Stop list-mode DMA before configuring MCA")
             running = self._b.get_global_enable()
-            if running and self.parameter_contract().get("parameter_abi_version") == 2:
-                raise RuntimeError("Stop MCA before changing measurement settings (ABI2)")
             if running:
                 self._b.set_global_enable(False)
             write()

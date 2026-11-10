@@ -117,6 +117,36 @@ The complete sessions and reference figures are published on
   to supported steps and apply on release. The periodic-gap slider is enabled
   only in Periodic trigger mode on supported hardware.
 - Persistence and raw display modes
+- **View > Accumulated Scope Distribution** adds a filled amplitude histogram
+  beside each Scope plot, sharing its amplitude axis. It accumulates samples
+  from received live waveforms in either display mode, with bounded memory.
+  Sample and peak bins span **100 ADC codes** at every zoom level. Right-click
+  the histogram to choose **Sample distribution** (all received sample values),
+  **Peak amplitude** (one raw minimum for falling/any-below triggers; one
+  maximum otherwise), or **Pulse integral** (one positive area per waveform).
+  Integral baseline is the mean of complete pretrigger sample bins; only the
+  post-trigger signal below that baseline is integrated for falling/any-below
+  triggers, or above it otherwise. Integration uses the sample-hold sum times
+  native dt; opposite-polarity samples are excluded. Rectified noise adds
+  positive area. Frames without usable pretrigger/post-trigger samples are
+  skipped and reported. A sample bin crossing the trigger is excluded.
+  Integral values stay positive, and the vertical axis follows the selected
+  pulse direction in Scope (larger areas downward for falling/below triggers
+  with the normal Scope orientation).
+  Integral mode has its own vertical axis in **ADC codes·ns**, with initial
+  bins of 100 ADC codes times dt; adjacent bins merge if more range is needed
+  to keep memory bounded. Sample/peak modes share the Scope amplitude axis.
+  Mode changes clear this channel; peak/integral definitions also reset when
+  polarity or waveform length changes, and integral timing/baseline changes
+  start new counts. The mode is included in saved digitizer configurations.
+  The context menu also offers clear, reset zoom, and logarithmic counts.
+  Hover and press **L** to toggle linear/log counts; zero-count bins lie at
+  a 0.5-count plotting boundary in log view. Stored counts stay unchanged.
+  Hiding pauses accumulation; Stop/Start preserves counts. Use **View > Clear
+  Scope Distribution** to reset all channels. Changing viewer/DMA representation
+  or entering/leaving replay clears counts; replay does not accumulate. These
+  are viewer-received samples, not every hardware event: polling and latest
+  DMA previews can omit frames. The View preference is saved with settings.
 - Full-resolution IIO DMA recording with capability-gated queued buffers,
   batched remote reads, bounded stop, tail drain, and recovery
 - Independent viewing while a DMA capture is active
@@ -132,6 +162,10 @@ monitor** is pressed.
 | **IIR polling** | Signed FPGA input-filter output | Lightweight continuous scalar monitoring | Host-timed reads; the requested 1 kHz spacing is not a hardware-time grid |
 | **Scope DMA** | Complete timestamped Scope waveforms | Raw waveform inspection and sample-weighted interval statistics | Direct IIO only; owns Scope DMA while running |
 | **Periodic sums** | All-sample window sums | Window means, exposure, and lossless HDF5 recording | IP123/IP124; uses the Current plot with raw ADC-code readings |
+
+The Current plot selects its time-axis unit from the visible zoom span: seconds,
+milliseconds, microseconds (µs), or nanoseconds. Top and bottom ticks use the same
+scale, including when panning into older data; sample timestamps are unchanged.
 
 IIR polling and Scope DMA retain a rolling ten-second numeric history and support the saved
 linear calibration `(raw - zero) * scale`. IIR and DMA expose different raw
@@ -170,24 +204,77 @@ Waveform persistence, single-frame viewing, and pulse analysis do not apply.
 **Stop and drain** retains accepted tail windows before closing the buffer.
 Optional HDF5 recording preserves original 4096-byte packets, exact uint64
 sums/timestamps, valid counts, geometry, identity, and cleanup/completion status.
-Use **Open sum capture** in Current or **File > Open Scope sum capture** for inline offline replay. Existing files are
-preserved. This is a separate format from NDMA waveforms and MCA list mode; see the
+HDF5 writes run in batches on a separate writer thread with a bounded queue;
+Stop drains the accepted DMA tail and queued writes before finishing. Storage
+errors or a full recording queue stop the capture with an explicit error and
+incomplete status. This reduces recording-induced read stalls; hardware missed
+windows and native timestamp gaps remain the measures of acquisition loss.
+The plot breaks the trace at missing windows rather than joining across gaps.
+Remote sum acquisition uses batched network reads on provider-qualified queued
+DMA, requesting up to 64 complete packets per READBUF while retaining each
+packet's native timestamp and validity. Local/unqualified DMA keeps libiio.
+Stop consumes the complete tail through an explicit server timeout and checks
+FPGA pending/invalid status before closing. Socket/protocol failures remain
+capture errors; batching does not guarantee loss-free acquisition. New clean
+recordings retain the selected transport, READBUF batch size and queue snapshot
+in optional HDF5 runtime metadata collected after STOP drain.
+Use **Tools > Current Capture Analysis** or **Open sum capture** in Current for
+the dedicated offline viewer. Set **View size** in microseconds; the first chunk
+loads initially, then use **Next**, **Previous**, **First**, **Last**, or edit
+**Start** to browse by time. Missing windows remain gaps. Loading a file does not
+replace the live plot or interrupt acquisition.
+
+The distribution sits to the right of the signal plot as a filled step outline,
+with **Counts** horizontally and a shared amplitude Y axis that stays aligned
+during zoom and pan. Adjacent bins have no separate bar outlines.
+A labeled red dashed line marks the raw chunk mean across both plots and
+updates when the selected chunk changes.
+
+The viewer reports chunk mean, population standard deviation (ddof=0), RMS,
+extrema, peak-to-peak range, measured exposure, and a histogram of all window
+means in the selected half-open time interval. **Adjacent noise** is
+`sqrt(mean(diff(y)**2) / 2)` for consecutive scheduled windows only. This estimates
+noise for stationary, uncorrelated window means; pulses, drift, and correlations
+affect it. It cannot recover noise within an individual ADC window. Large chunks
+use a bounded, sampled trace preview; statistics and histogram still use all
+selected windows. Only loaded packets and their neighbors are validated against
+raw data; opening a file does not scan or certify the entire capture.
+
+The **Moving average** control overlays an orange trailing arithmetic mean
+on the blue raw trace. Select **Kernel size** in samples (1–1,000,000; default
+16), or turn the overlay off. Each sample is one recorded window mean. A full kernel is required: the first K−1
+points after the chunk starts or after any acquisition gap have no average.
+Averaging uses all native window means before preview sampling, and never
+bridges gaps or borrows data from outside the viewed chunk. Raw statistics,
+histogram, timestamps and saved data are unchanged.
+
+New GUI recordings embed the complete **Save Settings** YAML document after sum
+timing is configured and before acquisition starts, including all connected
+channels, hardware, application settings, and connection topology. The viewer's
+**Digitizer configuration** tab provides readback and YAML export. Opening or
+exporting settings does not apply them to hardware. Older files without an
+embedded configuration remain readable and explicitly show its absence.
+This is a separate format from NDMA waveforms and MCA list mode; see the
 [sum file specification](docs/scope-sum-format.md).
 
 ### MCA and PSD
 
 - The current MCA interface requires **parameter ABI2 / adc_samples** before
-  startup configuration. Timing editors show native ADC samples (2 ns each);
-  debug plots retain ns axes. C delay is exponent 0..6; beta is a raw u32.
-  **1/R (calculated)** uses `32768 // (R_samples // 4)`; R=16 gives 8192.
-  An optional driver-advertised raw readback is labelled separately.
+  startup configuration. Sample-based timing editors and sliders display **ns**,
+  converting at the GUI boundary to the backend's native 2 ns ADC samples.
+  Debug plots and timing guides use the same physical durations; saved hardware
+  settings and calibration fingerprints retain native sample units. C delay
+  is exponent 0..6; beta is a raw u32.
+  The driver updates trapezoid 1/R automatically when R changes, so no
+  reciprocal readout is shown in the panel.
 - Applied MCA temperature coefficients are limited to signed Q1.15:
   **-1.0 through 0.999969482421875**, with rounding to the nearest register
   value. Out-of-range values (including +1.0) are rejected before writes.
   The Global panel keeps the base calibration coefficient's precision;
   the worker multiplies it by `temperature - 67` before applying this limit.
-- The current driver exposes no editable 1/C attribute; its optional control
-  stays disabled. The DC-blocker bypass is available independently, with explicit
+- CR-RC2 uses a power-of-two moving average selected by C delay. The current
+  driver exposes no editable 1/C attribute, so its optional control is hidden
+  unless a driver explicitly advertises it. The DC-blocker bypass has explicit
   input-path semantics. Scope sees raw ADC before MCA correction/filtering.
 - The MCA input low-pass filter is fixed at **70 MHz** for every channel. It is
   applied during initialization and reconnect; loading older settings cannot
@@ -242,8 +329,12 @@ preserved. This is a separate format from NDMA waveforms and MCA list mode; see 
   These viewer selectors remain available while measurement settings are locked;
   replay and connection-loss protection still applies. Older drivers that reject
   a change report an error without restarting acquisition.
-- ABI2 requires explicit stop/configure/start for measurement settings; debug
-  selector changes remain live. A rejected/partial write stays stopped.
+- MCA measurement settings remain editable during non-DMA acquisition, including
+  ABI2. Each committed edit automatically stops acquisition, applies the setting,
+  and restarts with fresh counts and elapsed time. Settings are locked during
+  list-mode DMA, including arming and stop/drain/close. DMA recording selection
+  stays locked during any measurement. Debug selector changes remain live and
+  preserve accumulation. A rejected/partial measurement write stays stopped.
   Histogram assemblies and measurement writes share one session lock. STOP does
   not establish the deferred FPGA downstream-completion acknowledgement.
 - Numeric input widgets across the application, including dialogs, clamp

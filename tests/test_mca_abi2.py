@@ -133,17 +133,36 @@ def test_unversioned_presets_and_fractional_values_are_not_migrated():
         validate_document(document)
 
 
-def test_explicit_stop_policy_and_failed_legacy_write_stays_stopped():
+def test_non_dma_abi2_edit_stops_configures_and_restarts():
     b = backend(ack="2")
     b._pp.attrs["enable"].value = "1"
     mca = MultiChannelAnalyzer(b)
+
+    def write():
+        assert not b.get_global_enable()
+        b.set_dpp_frame_samples(256)
+
+    assert mca.reconfigure_while_running(write) is True
+    assert b.get_global_enable()
+    assert b.get_dpp_frame_samples() == 256
+
+
+def test_abi2_dma_edit_is_rejected_before_stop_or_write():
+    b = backend(ack="2")
+    b._pp.attrs["enable"].value = "1"
+    b.mca_dma_active = lambda: True
+    mca = MultiChannelAnalyzer(b)
     write = Mock()
-    with pytest.raises(RuntimeError, match="Stop MCA"):
+    with pytest.raises(RuntimeError, match="Stop list-mode DMA"):
         mca.reconfigure_while_running(write)
     write.assert_not_called()
     assert b.get_global_enable()
-    b.mca_dma_active = lambda: False
-    b.mca_parameter_contract = lambda: {}
+
+
+def test_failed_abi2_live_edit_stays_stopped():
+    b = backend(ack="2")
+    b._pp.attrs["enable"].value = "1"
+    mca = MultiChannelAnalyzer(b)
     with pytest.raises(ValueError):
         mca.reconfigure_while_running(lambda: (_ for _ in ()).throw(ValueError("injected")))
     assert not b.get_global_enable()
@@ -172,16 +191,17 @@ def test_histogram_holds_shared_lock_across_complete_read(monkeypatch):
     assert written.is_set() and not reader.is_alive() and not writer.is_alive()
 
 
-def test_gui_native_timing_and_calculated_reciprocal(qtbot):
+def test_gui_ns_timing_and_native_driver_derived_reciprocal(qtbot):
     device = create_offline_digitizer(0)
     view = MCAController(device.mca)
     qtbot.addWidget(view)
     try:
-        assert view.ui.spinFrameSamples.suffix() == " samples"
-        assert view.ui.spinFrameSamples.minimum() == 4
-        assert view.ui.spinFrameSamples.singleStep() == 4
-        view._set_trapezoid_r(16)
-        assert view.ui.lblTrapReciprocal.text() == "8192"
+        assert view.ui.spinFrameSamples.suffix() == " ns"
+        assert view.ui.spinFrameSamples.minimum() == 8
+        assert view.ui.spinFrameSamples.singleStep() == 8
+        view.ui.spinTrapR.setValue(32)
+        view.ui.spinTrapR.editingFinished.emit()
+        assert device.mca.filters.trapezoid.get_reciprocal_raw() == 8192
         assert view.ui.spinCrrc2Cdelay.value() == 3
         assert view.ui.spinTrapT.maximum() == 0xFFFFFFFF
         device.mca.apply_gate_timing(McaGateTiming(24, 256, 16, True))

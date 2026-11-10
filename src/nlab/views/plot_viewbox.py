@@ -5,7 +5,7 @@ from typing import Any
 from pyqtgraph import PlotCurveItem, PlotWidget, ViewBox
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPalette
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QMenu, QWidget
 
 _PLOT_AREA_BACKGROUND = "#f8f9fa"
 
@@ -37,6 +37,16 @@ class ModifierZoomViewBox(ViewBox):  # type: ignore[misc]
         elif mods & Qt.KeyboardModifier.ControlModifier:
             axis = 1
         super().wheelEvent(ev, axis=axis)
+
+
+class HistogramViewBox(ModifierZoomViewBox):
+    """Histogram canvas with its own menu rather than generic plot transforms."""
+
+    def set_histogram_menu(self, menu: QMenu) -> None:
+        self._histogram_menu = menu
+
+    def raiseContextMenu(self, ev: Any) -> None:  # noqa: N802
+        self._histogram_menu.popup(ev.screenPos().toPoint())
 
 
 class NLabPlotWidget(PlotWidget):  # type: ignore[misc]

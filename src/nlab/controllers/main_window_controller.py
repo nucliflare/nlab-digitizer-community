@@ -47,6 +47,7 @@ from nlab.session.replay import (
     SessionReplay,
     TelemetryReplayEvent,
 )
+from nlab.views.current_capture_dialog import CurrentCaptureDialog
 from nlab.views.dose_calibration_dialog import (
     DoseCalibrationChannelSource,
     DoseCalibrationDialog,
@@ -214,6 +215,7 @@ class MainWindowController:
         self._mca_peak_analysis_dialog: McaPeakAnalysisDialog | None = None
         self._psd_readback_dialog: PsdReadbackDialog | None = None
         self._waveform_analysis_dialog: WaveformAnalysisDialog | None = None
+        self._current_capture_dialog: CurrentCaptureDialog | None = None
         self._external_devices = ExternalDevices()
         self._thread: QThread | None = None
         self._session_recorder: SessionRecorder | None = None
@@ -563,6 +565,7 @@ class MainWindowController:
                 channel=ch,
                 dma_frame_buffer=scope_frame_buffer,
                 current_accumulator=scope_current_accumulator,
+                measurement_configuration=self.configuration_document,
             )
             self._set_controller_channel_label(scope_ctrl, ch_label)
             self._connect_optional_signal(
@@ -584,6 +587,7 @@ class MainWindowController:
                     auto_start=False,
                     scope_controller=scope_ctrl,
                     scope_current_accumulator=scope_current_accumulator,
+                    capture_viewer=self.show_scope_sums,
                 )
                 self._set_controller_channel_label(current_ctrl, ch_label)
                 self._connect_optional_signal(
@@ -1208,6 +1212,16 @@ class MainWindowController:
 
         log.info("Dock layout reset to default (tabbed)")
 
+    def set_scope_distribution_enabled(self, enabled: bool) -> None:
+        """Show and accumulate amplitude distributions on every Scope channel."""
+        for controller in self._scope_controllers:
+            controller.set_scope_distribution_enabled(enabled)
+
+    def clear_scope_distributions(self) -> None:
+        """Clear all per-channel received-waveform amplitude histograms."""
+        for controller in self._scope_controllers:
+            controller.clear_scope_distribution()
+
     def set_roi_visible(self, visible: bool) -> None:
         """Toggle the ROI selection tool + stats panel on every MCA histogram."""
         for ctrl in self._mca_controllers:
@@ -1228,6 +1242,13 @@ class MainWindowController:
         for ctrl in self._mca_controllers:
             ctrl.set_log_y(enabled)
         log.info("Histogram Y-axis set to %s", "log" if enabled else "linear")
+
+    def toggle_scope_distribution_log_under_mouse(self) -> bool:
+        """Toggle count scaling on the Scope distribution under the pointer."""
+        return any(
+            controller.toggle_scope_distribution_log_under_mouse()
+            for controller in self._scope_controllers
+        )
 
     def mca_histogram_under_mouse(self) -> bool:
         """Return whether the pointer is over any live MCA histogram."""
@@ -2521,22 +2542,13 @@ class MainWindowController:
         if path is not None:
             self._psd_readback_dialog.open_path(path)
 
-    def show_scope_sums(self, path: Path) -> None:
-        """Display a recorded sum capture in the Current workspace."""
-        if not self._current_monitor_controllers:
-            QMessageBox.information(
-                self._window, "Scope sums",
-                "Connect a device or open offline analysis to use Current."
-            )
-            return
-        controller = self._current_monitor_controllers[0]
-        controller.open_sum_capture(path)
-        self._window.ui.mainTabs.setCurrentWidget(self._window.ui.tabCurrent)
-        for dock in self._current_dock_host.findChildren(QDockWidget):
-            if dock.widget() is controller:
-                dock.show()
-                dock.raise_()
-                break
+    def show_scope_sums(self, path: Path | None = None) -> None:
+        """Open the hardware-independent Current capture analysis tool."""
+        if self._current_capture_dialog is None:
+            self._current_capture_dialog = CurrentCaptureDialog(parent=self._window)
+        self._current_capture_dialog.show_workspace()
+        if path is not None:
+            self._current_capture_dialog.open_path(path)
 
     def show_waveform_analysis(self, path: Path | None = None) -> None:
         """Open the waveform browser and offline PSD reconstruction workbench."""
@@ -2700,6 +2712,9 @@ class MainWindowController:
         if self._psd_readback_dialog is not None:
             self._psd_readback_dialog.close_without_prompt()
             self._psd_readback_dialog = None
+        if self._current_capture_dialog is not None:
+            self._current_capture_dialog.close_without_prompt()
+            self._current_capture_dialog = None
         if self._waveform_analysis_dialog is not None:
             self._waveform_analysis_dialog.close_without_prompt()
             self._waveform_analysis_dialog = None

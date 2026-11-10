@@ -27,8 +27,8 @@ def test_cc_guide_is_black_dashed_stepped_and_only_present_when_enabled(qtbot: Q
     view = _view(qtbot)
     guide, legend = view._debug_cc_guide, view._debug_plot.legend
     assert not guide.isVisible() and len(legend.items) == 2
-    view.ui.spinPretrigger.setValue(16)
-    view.ui.spinCcTime.setValue(24)
+    view.ui.spinPretrigger.setValue(32)
+    view.ui.spinCcTime.setValue(48)
     view.ui.cbCcEnable.setChecked(True)
     view._debug_plot.setYRange(-1000, 1000, padding=0)
     assert guide.isVisible()
@@ -52,16 +52,16 @@ def test_cc_guide_is_black_dashed_stepped_and_only_present_when_enabled(qtbot: Q
 def test_cc_guide_tracks_units_and_clipping_independently_of_pretrigger(qtbot: QtBot) -> None:
     view = _view(qtbot)
     view.ui.cbCcEnable.setChecked(True)
-    view.ui.spinFrameSamples.setValue(1024)
-    view.ui.spinPretrigger.setValue(40)
-    view.ui.spinCcTime.setValue(50)
+    view.ui.spinFrameSamples.setValue(2048)
+    view.ui.spinPretrigger.setValue(80)
+    view.ui.spinCcTime.setValue(100)
     assert view._debug_time_scale.unit == "µs"
     np.testing.assert_allclose(view._debug_cc_guide.getData()[0], [0, 0, .1, 2.048])
-    view.ui.spinCcTime.setValue(32768)
+    view.ui.spinCcTime.setValue(65536)
     np.testing.assert_allclose(view._debug_cc_guide.getData()[0], [0, 0, 2.048, 2.048])
-    view.ui.spinCcTime.setValue(4)
+    view.ui.spinCcTime.setValue(8)
     np.testing.assert_allclose(view._debug_cc_guide.getData()[0], [0, 0, .008, 2.048])
-    view.ui.spinPretrigger.setValue(2044)
+    view.ui.spinPretrigger.setValue(4088)
     assert view._debug_cc_guide.isVisible()
     assert len(view._debug_plot.legend.items) == 3
     np.testing.assert_allclose(view._debug_cc_guide.getData()[0], [0, 0, .008, 2.048])
@@ -93,7 +93,7 @@ def test_cc_timing_preview_does_not_write_hardware_until_existing_commit(
     view.ui.cbCcEnable.setChecked(True)
     write = Mock(wraps=view._mca.filters.charge_comparison.set_time)
     monkeypatch.setattr(view._mca.filters.charge_comparison, "set_time", write)
-    view.ui.spinCcTime.setValue(24)
+    view.ui.spinCcTime.setValue(48)
     view._update_cc_integration_guide()
     write.assert_not_called()
     view.ui.spinCcTime.editingFinished.emit()
@@ -109,15 +109,15 @@ def test_transferred_timings_refresh_guide_with_widget_signals_blocked(qtbot: Qt
 
 def test_cc_short_window_includes_pretrigger_and_does_not_shift_with_marker(qtbot: QtBot) -> None:
     view = _view(qtbot)
-    view.ui.spinFrameSamples.setValue(2048)
-    view.ui.spinPretrigger.setValue(88)
-    view.ui.spinCcTime.setValue(360)
+    view.ui.spinFrameSamples.setValue(4096)
+    view.ui.spinPretrigger.setValue(176)
+    view.ui.spinCcTime.setValue(720)
     view.ui.cbCcEnable.setChecked(True)
     guide = view._debug_cc_guide
     np.testing.assert_allclose(guide.getData()[0], [0, 0, .720, 4.096])
     assert "pretrigger included" in guide.toolTip()
     before = guide.getData()[0].copy()
-    view.ui.spinPretrigger.setValue(140)
+    view.ui.spinPretrigger.setValue(280)
     np.testing.assert_array_equal(guide.getData()[0], before)
     assert view._debug_pretrigger_line.value() == .280
 
@@ -162,9 +162,9 @@ def test_legend_hidden_cc_guide_stays_hidden_through_measurement_refreshes(qtbot
         assert not guide.isVisible()
         assert len(view._debug_plot.legend.items) == 3
     view._set_measurement_active(False)
-    view.ui.spinCcTime.setValue(50)
-    view.ui.spinPretrigger.setValue(40)
-    view.ui.spinFrameSamples.setValue(1024)
+    view.ui.spinCcTime.setValue(100)
+    view.ui.spinPretrigger.setValue(80)
+    view.ui.spinFrameSamples.setValue(2048)
     assert not guide.isVisible()
     assert view.ui.cbCcEnable.isChecked()
     assert view._mca.filters.charge_comparison.get_enable()

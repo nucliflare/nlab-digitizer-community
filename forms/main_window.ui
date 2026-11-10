@@ -179,7 +179,10 @@
      <addaction name="actionDifferentialHistogram"/>
      <addaction name="actionLogY"/>
      <addaction name="separator"/>
-    <addaction name="actionResetZoom"/>
+     <addaction name="actionScopeDistribution"/>
+     <addaction name="actionClearScopeDistribution"/>
+     <addaction name="separator"/>
+     <addaction name="actionResetZoom"/>
     <addaction name="actionResetDocks"/>
    </widget>
    <widget class="QMenu" name="menuSettings">
@@ -223,6 +226,15 @@
    <property name="checkable"><bool>true</bool></property>
    <property name="text"><string>Differential MCA Histogram</string></property>
    <property name="toolTip"><string>Display only counts added since the previous rendered MCA histogram</string></property>
+  </action>
+  <action name="actionScopeDistribution">
+   <property name="checkable"><bool>true</bool></property>
+   <property name="text"><string>Accumulated Scope Distribution</string></property>
+   <property name="toolTip"><string>Accumulate received waveform amplitudes beside each Scope plot; uncheck to pause and hide</string></property>
+  </action>
+  <action name="actionClearScopeDistribution">
+   <property name="text"><string>Clear Scope Distribution</string></property>
+   <property name="toolTip"><string>Clear accumulated amplitude counts on all Scope channels</string></property>
   </action>
   <action name="actionResetZoom">
    <property name="text"><string>Reset Zoom (All Plots)</string></property>
@@ -283,8 +295,8 @@
    <property name="text"><string>PSD Event Readback...</string></property>
   </action>
   <action name="actionOpenScopeSums">
-   <property name="text"><string>Open Scope sum capture...</string></property>
-   <property name="toolTip"><string>Replay measured periodic window sums from a versioned HDF5 capture without connecting hardware.</string></property>
+   <property name="text"><string>Current Capture Analysis...</string></property>
+   <property name="toolTip"><string>Browse saved Current chunks, statistics, distribution and digitizer configuration without connecting hardware.</string></property>
   </action>
   <action name="actionOpenWaveformFile">
    <property name="text"><string>Waveform Analysis Workbench...</string></property>

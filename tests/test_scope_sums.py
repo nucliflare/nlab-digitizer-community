@@ -1,17 +1,21 @@
 """Independent wire fixtures; these checks do not qualify detector response."""
 
 import errno
+import json
 import struct
+import threading
 
 import h5py
 import pytest
 
+from nlab.hardware.digitizer import scope_sums
 from nlab.hardware.digitizer.scope_sums import (
     MASK64,
     ScopeSumAnalysis,
     ScopeSumCapture,
     ScopeSumContinuity,
     ScopeSumGeometry,
+    ScopeSumRecorder,
     ScopeSumWriter,
     decode_sum_packet,
     read_sum_capture,
@@ -184,6 +188,10 @@ class Backend:
     def scope_sum_identity(self):
         return {"uri": "fixture", "channel": 0}
 
+    def get_scope_dma_runtime_metadata(self):
+        self.events.append("runtime")
+        return {"transport": "fixture", "kernel_buffers": 4, "readbuf_batch_frames": 64}
+
 
 def test_stop_keeps_tail_until_terminal_timeout_then_closes(tmp_path):
     backend = Backend(
@@ -196,6 +204,12 @@ def test_stop_keeps_tail_until_terminal_timeout_then_closes(tmp_path):
     assert backend.events[-2:] == ["stop", "close"]
     assert backend.events.index("status") < backend.events.index("close")
     assert len(list(read_sum_capture(path))) == 2
+    assert backend.events.index("status") < backend.events.index("runtime")
+    assert backend.events.index("runtime") < backend.events.index("close")
+    with h5py.File(path, "r") as source:
+        assert json.loads(source.attrs["runtime_metadata_json"]) == {
+            "transport": "fixture", "kernel_buffers": 4, "readbuf_batch_frames": 64,
+        }
 
 
 @pytest.mark.parametrize("status,close_error", [(2, False), (8, False), (0, True)])
@@ -235,3 +249,249 @@ def test_cancel_before_arm_still_reports_cleanup_failure():
     with pytest.raises(RuntimeError, match="Cleanup: release fault"):
         capture.run()
     assert "read" not in backend.events
+
+
+@pytest.mark.parametrize("version,capacity", [(123, 254), (124, 508)])
+def test_batch_writer_preserves_wrap_partial_tail_and_exact_columns(tmp_path, version, capacity):
+    first = MASK64 - 100
+    originals = [
+        decode_sum_packet(packet(
+            version, first=(first + i * capacity * 7) & MASK64,
+            sequence=(0xFFFFFFFE + i) & 0xFFFFFFFF,
+            count=3 if i == 2 else capacity, stopped=i == 2, total=123456 + i,
+        ))
+        for i in range(3)
+    ]
+    path = tmp_path / "batch.h5"
+    writer = ScopeSumWriter(path, {"channel": 0})
+    writer.append_many(originals[:2])
+    writer.append_many([])
+    writer.append_many(originals[2:])
+    writer.close(complete=True)
+    assert list(read_sum_capture(path)) == originals
+    with pytest.raises(RuntimeError, match="closed"):
+        writer.append(originals[0])
+
+
+def test_recorder_keeps_hdf5_off_producer_and_joins_queued_tail(tmp_path, monkeypatch):
+    entered, release, closing = threading.Event(), threading.Event(), threading.Event()
+    io_threads, batches = [], []
+    original = ScopeSumWriter
+
+    class HeldWriter(original):
+        def __init__(self, *args, **kwargs):
+            io_threads.append(threading.get_ident())
+            super().__init__(*args, **kwargs)
+
+        def append_many(self, packets):
+            io_threads.append(threading.get_ident())
+            batches.append(len(packets))
+            entered.set()
+            assert release.wait(5)
+            super().append_many(packets)
+
+        def close(self, **kwargs):
+            io_threads.append(threading.get_ident())
+            super().close(**kwargs)
+
+    monkeypatch.setattr(scope_sums, "ScopeSumWriter", HeldWriter)
+    path = tmp_path / "async.h5"
+    recorder = ScopeSumRecorder(path, {}, queue_packets=8, batch_packets=2)
+    packets = [
+        decode_sum_packet(packet(first=10 + i * 508 * 7, sequence=i,
+                                 count=3 if i == 5 else 508, stopped=i == 5, total=i))
+        for i in range(6)
+    ]
+    closer = None
+    errors = []
+
+    def close():
+        closing.set()
+        try:
+            recorder.close(complete=True, missed_windows=7)
+        except Exception as exc:
+            errors.append(str(exc))
+
+    try:
+        for p in packets[:2]:
+            recorder.append(p)
+        assert entered.wait(2)
+        # Producer continues while the HDF5 sink is deliberately blocked.
+        for p in packets[2:]:
+            recorder.append(p)
+        closer = threading.Thread(target=close)
+        closer.start()
+        assert closing.wait(2) and closer.is_alive()
+    finally:
+        release.set()
+        if closer:
+            closer.join(5)
+        recorder.close(complete=False)
+    assert not errors and not closer.is_alive() and not recorder._thread.is_alive()
+    assert len(set(io_threads)) == 1 and io_threads[0] != threading.get_ident()
+    assert batches == [2, 2, 2]
+    assert list(read_sum_capture(path)) == packets
+    with h5py.File(path, "r") as source:
+        assert source.attrs["complete"] and source.attrs["final_missed_windows"] == 7
+    with pytest.raises(RuntimeError, match="closed"):
+        recorder.append(packets[0])
+
+
+def test_low_rate_recorder_flushes_partial_batch_before_stop(tmp_path, monkeypatch):
+    written = threading.Event()
+
+    class NotifyingWriter(ScopeSumWriter):
+        def append_many(self, packets):
+            super().append_many(packets)
+            written.set()
+
+    monkeypatch.setattr(scope_sums, "ScopeSumWriter", NotifyingWriter)
+    recorder = ScopeSumRecorder(tmp_path / "low-rate.h5", {}, batch_seconds=0.01)
+    try:
+        recorder.append(decode_sum_packet(packet()))
+        assert written.wait(2)
+    finally:
+        recorder.close(complete=False)
+
+
+def test_recording_queue_overflow_stops_capture_keeps_prefix_and_joins(tmp_path, monkeypatch):
+    entered, release, closed = threading.Event(), threading.Event(), threading.Event()
+
+    class HeldWriter(ScopeSumWriter):
+        def append_many(self, packets):
+            entered.set()
+            assert release.wait(5)
+            super().append_many(packets)
+
+    class SmallRecorder(ScopeSumRecorder):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs, queue_packets=1, batch_packets=1)
+
+    class ObservedBackend(Backend):
+        def read_dma_raw_frame(self):
+            if "read" in self.events:
+                assert entered.wait(2)
+            return super().read_dma_raw_frame()
+
+        def close_scope_sum_capture(self):
+            super().close_scope_sum_capture()
+            closed.set()
+
+    monkeypatch.setattr(scope_sums, "ScopeSumWriter", HeldWriter)
+    monkeypatch.setattr(scope_sums, "ScopeSumRecorder", SmallRecorder)
+    raws = [packet(sequence=i, first=10 + i * 508 * 7) for i in range(3)]
+    backend = ObservedBackend(raws)
+    capture = ScopeSumCapture(backend, 0)
+    path, errors = tmp_path / "overflow.h5", []
+
+    def run():
+        try:
+            capture.run(path)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+
+    reader = threading.Thread(target=run)
+    reader.start()
+    try:
+        assert closed.wait(2)
+        assert reader.is_alive()  # Capture cannot finish while its writer is held.
+    finally:
+        release.set()
+        reader.join(5)
+    assert not reader.is_alive() and len(errors) == 1 and "queue is full" in errors[0]
+    assert backend.events[-2:] == ["stop", "close"]
+    assert [p.raw for p in read_sum_capture(path)] == raws[:2]
+    with h5py.File(path, "r") as source:
+        assert not source.attrs["complete"]
+        assert "queue is full" in source.attrs["cleanup_error"]
+
+
+def test_async_write_failure_is_reported_and_file_is_incomplete(tmp_path, monkeypatch):
+    class FailingWriter(ScopeSumWriter):
+        def append_many(self, packets):
+            super().append_many(packets)
+            raise OSError("injected disk failure")
+
+    monkeypatch.setattr(scope_sums, "ScopeSumWriter", FailingWriter)
+    path = tmp_path / "failed.h5"
+    recorder = ScopeSumRecorder(path, {}, batch_packets=1)
+    original = decode_sum_packet(packet())
+    recorder.append(original)
+    recorder._thread.join(2)
+    assert not recorder._thread.is_alive()
+    with pytest.raises(RuntimeError, match="injected disk failure"):
+        recorder.append(original)
+    with pytest.raises(RuntimeError, match="injected disk failure"):
+        recorder.close(complete=True)
+    assert list(read_sum_capture(path)) == [original]
+    with h5py.File(path, "r") as source:
+        assert not source.attrs["complete"]
+        assert "injected disk failure" in source.attrs["cleanup_error"]
+
+
+def test_capture_propagates_async_close_failure_after_dma_cleanup(tmp_path, monkeypatch):
+    class FailingCloseWriter(ScopeSumWriter):
+        def close(self, **kwargs):
+            super().close(**(kwargs | {"complete": False, "error": "injected flush failure"}))
+            raise OSError("injected flush failure")
+
+    monkeypatch.setattr(scope_sums, "ScopeSumWriter", FailingCloseWriter)
+    backend = Backend([packet()])
+    path = tmp_path / "close-failure.h5"
+    with pytest.raises(RuntimeError, match="injected flush failure"):
+        ScopeSumCapture(backend, 0).run(path, max_packets=1)
+    assert backend.events[-2:] == ["stop", "close"]
+    with h5py.File(path, "r") as source:
+        assert not source.attrs["complete"]
+
+
+def test_recorder_open_failure_is_joined_and_existing_file_is_preserved(tmp_path):
+    path = tmp_path / "existing.h5"
+    path.write_bytes(b"original measurement")
+    threads = {t.ident for t in threading.enumerate()}
+    with pytest.raises(RuntimeError, match="HDF5 recording"):
+        ScopeSumRecorder(path, {})
+    assert path.read_bytes() == b"original measurement"
+    assert {t.ident for t in threading.enumerate()} == threads
+
+
+def test_flush_failure_is_reported_and_completion_is_retracted(tmp_path, monkeypatch):
+    class FailingFlushWriter(ScopeSumWriter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            flush = self._file.flush
+            self.calls = 0
+
+            def failing_flush():
+                self.calls += 1
+                # Fail the completion-marker flush after the data flush succeeded.
+                if self.calls == 2:
+                    raise OSError("injected completion flush failure")
+                flush()
+
+            self._file.flush = failing_flush
+
+    monkeypatch.setattr(scope_sums, "ScopeSumWriter", FailingFlushWriter)
+    backend = Backend([packet()])
+    path = tmp_path / "flush-failure.h5"
+    with pytest.raises(RuntimeError, match="injected completion flush failure"):
+        ScopeSumCapture(backend, 0).run(path, max_packets=1)
+    assert backend.events[-2:] == ["stop", "close"]
+    assert len(list(read_sum_capture(path))) == 1
+    with h5py.File(path, "r") as source:
+        assert not source.attrs["complete"]
+        assert "injected completion flush failure" in source.attrs["cleanup_error"]
+
+
+def test_full_configuration_roundtrips_through_async_capture_before_first_read(tmp_path):
+    configuration = "format_version: 5\nhardware:\n  channels:\n    '0': {scope: {edge_mode: 5}}\n"
+    backend = Backend([packet()])
+    capture = ScopeSumCapture(backend, 0, configuration_yaml=configuration)
+    path = tmp_path / "full-config.h5"
+    assert capture.run(path, max_packets=1)["complete"]
+    with h5py.File(path, "r") as source:
+        assert source["configuration_yaml"][()].decode("utf-8") == configuration
+        metadata = json.loads(source.attrs["metadata_json"])
+        assert metadata["configuration_snapshot"] == "before acquisition"
+        assert "configuration_yaml" not in metadata
+    assert list(read_sum_capture(path)) == [decode_sum_packet(packet())]

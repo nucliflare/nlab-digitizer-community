@@ -63,7 +63,6 @@ FORM_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
         "CfdEnable": "mca-cfd", "CfdFactor": "mca-cfd", "CfdDelay": "mca-cfd",
         "CfdTwLow": "mca-cfd", "CfdTwHigh": "mca-cfd",
         "TrapezEnable": "mca-trapezoid", "TrapR": "mca-trapezoid",
-        "TrapReciprocal": "mca-trapezoid",
         "TrapM": "mca-trapezoid", "TrapT": "mca-trapezoid",
         "TrapE": "mca-trapezoid", "TrapFt": "mca-trapezoid",
         "CcEnable": "mca-charge", "CcTime": "mca-charge",

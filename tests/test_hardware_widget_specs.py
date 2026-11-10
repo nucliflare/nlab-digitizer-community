@@ -676,11 +676,12 @@ def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> No
     for parameter, controls in integer_controls.items():
         spec = MCA_PARAMETER_SPECS[parameter]
         assert isinstance(spec, RangeSpec)
+        scale = 2 if controls[0].suffix() == " ns" else 1
         for control in controls:
             assert (control.minimum(), control.maximum(), control.singleStep()) == (
-                int(spec.min_val),
-                int(spec.max_val),
-                int(spec.step),
+                int(spec.min_val) * scale,
+                int(spec.max_val) * scale,
+                int(spec.step) * scale,
             )
 
     double_controls = {
@@ -738,7 +739,7 @@ def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> No
         ui.spinPsdZcLow,
         ui.spinPsdZcHigh,
     ):
-        assert control.suffix() == " samples"
+        assert control.suffix() == " ns"
     assert ui.labelTrapT.text() == "Beta (raw):"
     assert ui.spinTrapT.suffix() == ""
     assert ui.spinCrrc2Cdelay.suffix() == " (exponent)"
