@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4] — 2026-11-10
+
+### Added
+
+- Optional accumulated Scope amplitude distribution beside the waveform,
+  with a shared Y axis, filled outline, per-channel bounded ADC-code counts,
+  100-code display bins, and View-menu show/pause/clear controls.
+- Scope histogram context menu selects all-sample, trigger-directed peak,
+  or pretrigger-baselined pulse-integral accumulation, with per-channel
+  clear/zoom/log controls and explicit integral units and skipped-frame counts.
+- Current capture distribution uses a filled step outline beside the signal
+  plot with a shared amplitude Y axis and red chunk-mean reference lines.
+- Current capture analysis overlays a trailing moving average on the raw
+  trace, with selectable kernel size, native-window computation before
+  preview sampling, and resets at acquisition gaps.
+- Dedicated offline Current capture analysis with microsecond-sized chunks,
+  first/previous/next/last navigation, aggregate statistics, adjacent-window
+  noise estimate, signal distribution, and cancellable bounded file reads.
+- GUI periodic-sum HDF5 recordings embed the complete pre-acquisition digitizer
+  configuration, with readback and YAML export in the offline tool. Older
+  captures remain readable without an embedded configuration.
+
+### Fixed
+
+- MCA omits the automatically derived trapezoid 1/R readout and hides the
+  optional CR-RC2 1/C row when the driver has no editable coefficient.
+- MCA parameters remain editable during non-DMA measurements, including ABI2,
+  using serialized stop/apply/restart with a fresh accumulation. DMA settings
+  stay locked through buffer close; failed edits stay stopped and restore a
+  retryable UI.
+- MCA sample-based timing editors and sliders again display nanoseconds, with
+  native-sample conversion on read/write and consistent markers, diagnostic
+  waveform windows, charge-comparison guides, and calibration fingerprints.
+- Integral histogram orientation follows the selected pulse direction in Scope,
+  while preserving positive integral values and normal sample/peak axes.
+- Scope distributions use 100 ADC codes per displayed bin at every zoom level.
+  Hover and press L to toggle linear/log counts while preserving the
+  shared linear amplitude axis and accumulated sample counts.
+- Current capture kernel sizes use samples, and the distribution axis uses
+  Counts; its filled outline omits individual bin borders.
+- Current time axes select s, ms, µs, or ns from the visible zoom span, keeping
+  top and bottom ticks synchronized without changing sample timestamps.
+- Remote periodic-sum DMA uses capability-gated batched iiod READBUF requests,
+  retaining exact 4096-byte packets and STOP tail draining. Only an explicit
+  server timeout can finish a batched sum drain; socket/protocol failures stay
+  incomplete and latch the session fault. Clean recordings save the actual
+  transport, batch size and queue snapshot in optional HDF5 runtime metadata.
+- Periodic-sum HDF5 recording uses a bounded asynchronous writer and batched
+  dataset appends instead of resizing/writing on the DMA reader thread. Stop
+  joins the writer after queued data is written; storage/queue failures stop
+  capture explicitly and preserve incomplete status.
+- Current sum plots break the trace at missing native windows instead of
+  drawing lines through acquisition gaps.
+
 ## [0.8.3] — 2026-11-09
 
 ### Added
@@ -1081,7 +1135,8 @@ Initial open-source release of the Nuclear Lab Digitizer Community Edition.
 
 ---
 
-[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.8.3...main
+[Unreleased]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/compare/v0.8.4...main
+[0.8.4]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.8.4
 [0.8.3]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.8.3
 [0.8.2]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.8.2
 [0.8.1]: https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases/tag/v0.8.1

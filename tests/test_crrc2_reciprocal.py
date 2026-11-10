@@ -143,6 +143,10 @@ def test_gui_initialization_and_driver_capability(
     assert spinbox.suffix() == ""
     assert spinbox.isEnabled() is supported
     assert view.ui.sliderCrrc2Reciprocal.isEnabled() is supported
+    assert view.ui.formCrRc2.isRowVisible(view.ui.labelCrrc2Reciprocal) is supported
+    assert view.ui.labelCrrc2Reciprocal.isHidden() is not supported
+    assert spinbox.isHidden() is not supported
+    assert view.ui.sliderCrrc2Reciprocal.isHidden() is not supported
     assert resolve_context(spinbox).topic == "mca-crrc"
     hardware = collect_channel_hardware(device.scope, device.mca, None)
     snapshot = {entry["id"]: entry["value"] for entry in device.mca.get_settings()}
@@ -175,11 +179,7 @@ def test_gui_commits_spinbox_and_slider_without_linking_cdelay(
         assert slider.value() == 4096
         assert device.mca.filters.crrc2.get_reciprocal_raw() == 0
         spinbox.editingFinished.emit()
-        if running:
-            assert device.mca.filters.crrc2.get_reciprocal_raw() == 0
-            assert "Stop MCA" in view.status.text()
-            return
-        assert transaction.call_count == 0
+        assert transaction.call_count == int(running)
         assert device.mca.filters.crrc2.get_reciprocal_raw() == 4096
         view.ui.spinCrrc2Cdelay.setValue(4)
         view.ui.spinCrrc2Cdelay.editingFinished.emit()

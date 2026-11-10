@@ -54,6 +54,9 @@ class IiodScopeStream:
         self.remaining = 0
         self.first_chunk = False
         self.failed = False
+        # Only an explicit Linux -ETIMEDOUT READBUF reply proves the server
+        # reached an empty tail. A local socket timeout can truncate a packet.
+        self.server_timed_out = False
         self.closed = False
         self.payload: bytes | None = None
         host = match.group(1)
@@ -112,6 +115,7 @@ class IiodScopeStream:
                 )
             size = self._integer()
             if size < 0:
+                self.server_timed_out = size == -110  # Target Linux errno, also on Windows.
                 raise OSError(
                     -size,
                     "iiod READBUF (earlier complete frames remain valid)",

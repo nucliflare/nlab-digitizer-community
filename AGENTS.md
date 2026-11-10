@@ -96,8 +96,10 @@ Additional rules:
 ## MCA configuration and snapshots
 
 - Pulse-processor measurement-configuration writes are rejected while acquisition or
-  list DMA owns the core. ABI2 requires explicit stop/configure/start until the
-  deferred A07 completion policy is qualified. Failed writes stay stopped.
+  list DMA owns the core. GUI edits during non-DMA measurements use serialized
+  stop/configure/start, including ABI2; START resets accumulation. List DMA locks
+  settings through buffer close. Failed writes stay stopped. STOP does not provide
+  the deferred A07 downstream-completion fence.
 - Discover parameter ABI2 and adc_samples, validate a complete native candidate,
   then acknowledge 2 while stopped/list-closed before configuration or arm.
   Never infer old preset semantics or repeat kernel register encoding.

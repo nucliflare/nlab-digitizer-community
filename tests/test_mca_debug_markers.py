@@ -48,14 +48,14 @@ def test_debug_markers_match_hardware_ranges_widgets_and_colors(
     assert controller.ui.labelPretrigger.text() == "Pretrigger offset:"
 
     controller.ui.spinTriggerLevel.setValue(-300)
-    controller.ui.sliderPretrigger.setValue(40)
+    controller.ui.sliderPretrigger.setValue(80)
     assert threshold.value() == -300
     assert offset.value() == 80
     assert "80 ns" in offset.label.format
     mca.set_trigger_level.assert_not_called()
     mca.set_pretrigger_samples.assert_not_called()
 
-    controller.ui.spinFrameSamples.setValue(2048)
+    controller.ui.spinFrameSamples.setValue(4096)
     assert controller._debug_time_scale.unit == "\N{MICRO SIGN}s"
     assert offset.value() == 0.08
     assert offset.bounds() == (0.0, 4.088)
@@ -112,8 +112,8 @@ def test_offset_marker_previews_both_debug_traces_and_commits_once(
 
     line.moving = True
     line.setValue(29.2)
-    assert controller.ui.spinPretrigger.value() == 16
-    assert controller.ui.sliderPretrigger.value() == 16
+    assert controller.ui.spinPretrigger.value() == 32
+    assert controller.ui.sliderPretrigger.value() == 32
     assert line.value() == 32
     for curve, (x, y) in zip((first, second), original):
         preview_x, preview_y = curve.getData()
@@ -149,7 +149,7 @@ def test_marker_drag_cancels_when_controls_disable(
 
     controller._set_controls_enabled(False)
 
-    assert controller.ui.spinPretrigger.value() == 12
+    assert controller.ui.spinPretrigger.value() == 24
     assert controller.ui.spinTriggerLevel.value() == -512
     assert not offset.movable
     assert not threshold.movable
@@ -172,10 +172,10 @@ def test_frame_length_change_cancels_offset_preview(
     line.setValue(30)
     assert controller._pretrigger_line_drag is not None
 
-    controller.ui.spinFrameSamples.setValue(2048)
+    controller.ui.spinFrameSamples.setValue(4096)
 
     assert controller._pretrigger_line_drag is None
-    assert controller.ui.spinPretrigger.value() == 12
+    assert controller.ui.spinPretrigger.value() == 24
     assert line.value() == 0.024
     np.testing.assert_allclose(curve.getData()[0][:3], [0, 0.008, 0.016])
     mca.set_pretrigger_samples.assert_not_called()
@@ -212,7 +212,7 @@ def test_offset_marker_failed_write_restores_hardware_value(
     line.sigPositionChangeFinished.emit(line)
 
     mca.set_pretrigger_samples.assert_called_once_with(16)
-    assert controller.ui.spinPretrigger.value() == 12
+    assert controller.ui.spinPretrigger.value() == 24
     assert line.value() == 24
     assert "busy" in controller.status.text()
 

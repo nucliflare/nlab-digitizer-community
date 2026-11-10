@@ -152,6 +152,42 @@ def test_controller_renders_calibrated_latest_and_interval_values(qtbot: QtBot) 
     assert controller.status.text() == "Monitor stopped."
 
 
+def test_current_time_axes_follow_zoom_without_changing_sample_times(qtbot: QtBot) -> None:
+    controller = CurrentMonitorController(cast(MultiChannelAnalyzer, SimpleNamespace()), 0)
+    qtbot.addWidget(controller)
+    controller.resize(1000, 700)
+    controller.show()
+    timestamps_s = np.array([-2.0, -0.04002, -20e-6, 0.0])
+    amplitudes = np.array([1.0, 2.0, 3.0, 4.0])
+    controller._curve.setData(timestamps_s, amplitudes)
+    plot = controller.ui.plotCurrent.getPlotItem()
+
+    # Zoom in, pan away from zero, and zoom out again. Axis scaling must follow
+    # the visible duration rather than the absolute age of the samples.
+    for low, high, unit, tick_values, expected in (
+        (-2.0, 0.0, "s", [-1.0, 0.0], ["-1", "0"]),
+        (-0.004, 0.0, "ms", [-0.003, -0.001], ["-3", "-1"]),
+        (-40e-6, 0.0, "\N{MICRO SIGN}s", [-30e-6, -10e-6], ["-30", "-10"]),
+        (-400e-9, 0.0, "ns", [-300e-9, -100e-9], ["-300", "-100"]),
+        (-0.04004, -0.04, "\N{MICRO SIGN}s", [-0.04003, -0.04001], ["-40030", "-40010"]),
+        (-2.0, 0.0, "s", [-1.0, 0.0], ["-1", "0"]),
+    ):
+        plot.setXRange(low, high, padding=0)
+        qtbot.waitUntil(lambda: plot.getAxis("bottom").labelUnits == unit)
+        # Paint the linked axes so their tick generation uses the active scale.
+        assert not controller.ui.plotCurrent.grab().isNull()
+        bottom = plot.getAxis("bottom")
+        assert bottom.labelText == "Time before newest sample"
+        assert bottom.labelUnitPrefix == ""
+        for side in ("bottom", "top"):
+            axis = plot.getAxis(side)
+            assert axis.tickStrings(
+                tick_values, axis.scale * axis.autoSIPrefixScale, tick_values[1] - tick_values[0]
+            ) == expected
+        np.testing.assert_array_equal(controller._curve.xData, timestamps_s)
+        np.testing.assert_array_equal(controller._curve.yData, amplitudes)
+
+
 def test_controller_starts_stopped_by_default(qtbot: QtBot) -> None:
     mca = cast(MultiChannelAnalyzer, SimpleNamespace())
 

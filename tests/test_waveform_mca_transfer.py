@@ -196,9 +196,9 @@ def test_controller_refreshes_both_sliders_without_duplicate_hardware_writes(
         writes.append(spy)
     view.apply_gate_timing(McaGateTiming(32, 504, 56, True))
     assert [spy.call_count for spy in writes] == [1, 1]
-    assert view.ui.spinPretrigger.value() == view.ui.sliderPretrigger.value() == 16
-    assert view.ui.spinFrameSamples.value() == view.ui.sliderFrameSamples.value() == 252
-    assert view.ui.spinCcTime.value() == 28 and view.ui.cbCcEnable.isChecked()
+    assert view.ui.spinPretrigger.value() == view.ui.sliderPretrigger.value() == 32
+    assert view.ui.spinFrameSamples.value() == view.ui.sliderFrameSamples.value() == 504
+    assert view.ui.spinCcTime.value() == 56 and view.ui.cbCcEnable.isChecked()
     assert (device.mca.get_trigger_level(), device.mca.get_baseline_window()) == before
     assert not device.mca.get_global_enable()
 

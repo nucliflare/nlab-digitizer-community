@@ -21,8 +21,10 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtWidgets import QFileDialog, QSlider, QSpinBox, QWidget
+from PySide6.QtGui import QAction, QActionGroup, QCursor
+from PySide6.QtWidgets import QFileDialog, QMenu, QSlider, QSpinBox, QWidget
 
+from nlab.analysis.scope_distribution import AccumulatedAmplitudeHistogram, HistogramMode
 from nlab.hardware.digitizer.current_monitor import (
     ScopeCurrentAccumulator,
     ScopeCurrentPreview,
@@ -45,7 +47,11 @@ from nlab.hardware.digitizer.scope import (
 from nlab.ui.ui_scope_view import Ui_ScopeView
 from nlab.views.numeric_controls import bind_numeric_control, normalize_numeric_control
 from nlab.views.panel_status import PanelStatus
-from nlab.views.plot_viewbox import DraggableScopeCurve, ModifierZoomViewBox
+from nlab.views.plot_viewbox import (
+    DraggableScopeCurve,
+    HistogramViewBox,
+    ModifierZoomViewBox,
+)
 from nlab.views.responsive_layout import configure_scope_layout
 from nlab.views.time_axis import format_duration_ns, time_axis_scale
 from nlab.workers.dma_workers import IIOScopeDmaWorker
@@ -140,9 +146,11 @@ class ScopeController(QWidget):
         *,
         dma_frame_buffer: ScopeFrameBuffer | None = None,
         current_accumulator: ScopeCurrentAccumulator | None = None,
+        measurement_configuration: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         super().__init__(parent)
         self._scope = scope
+        self._measurement_configuration = measurement_configuration
         self._scope_dma = scope_dma
         self._sum_worker: ScopeSumWorker | None = None
         self._sum_previous_settings: tuple[TriggerMode, int, int, int] | None = None
@@ -188,6 +196,8 @@ class ScopeController(QWidget):
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(250)
         self._elapsed_timer.timeout.connect(self._update_elapsed_time)
+        self._distribution_enabled = False
+        self._amplitude_histogram = AccumulatedAmplitudeHistogram()
         self._session_replay_active = False
         self._session_replay_display_mode: int | None = None
         self._replay_hardware_interlocked = False
@@ -386,7 +396,7 @@ class ScopeController(QWidget):
         s.setValue(self._settings_key("persistence"), self.ui.dialPersistence.value())
         s.setValue(self._settings_key("refresh_rate"), self.ui.spinRefreshRate.value())
 
-    def configuration_settings(self) -> dict[str, int | bool]:
+    def configuration_settings(self) -> dict[str, int | bool | str]:
         """Return settings owned by this view rather than by scope hardware."""
         return {
             "display_mode": self.ui.comboDisplayMode.currentIndex(),
@@ -394,6 +404,7 @@ class ScopeController(QWidget):
             "refresh_rate_hz": self.ui.spinRefreshRate.value(),
             "measurement_time_s": self.ui.spinTime.value(),
             "dma_enabled": self.ui.cbDmaEnable.isChecked(),
+            "histogram_mode": self._amplitude_histogram.mode.value,
         }
 
     def apply_configuration_settings(self, settings: object) -> None:
@@ -410,11 +421,18 @@ class ScopeController(QWidget):
             self.ui.spinTime.setValue(int(settings["measurement_time_s"]))
         if "dma_enabled" in settings:
             self.ui.cbDmaEnable.setChecked(bool(settings["dma_enabled"]))
+        if "histogram_mode" in settings:
+            try:
+                self.set_scope_distribution_mode(HistogramMode(settings["histogram_mode"]))
+            except ValueError:
+                log.warning("Ignoring unknown Scope histogram mode %r", settings["histogram_mode"])
         self.save_display_settings()
 
     def reset_zoom(self) -> None:
         """Reset the waveform plot to its default fixed range."""
         self._update_axis_ranges()
+        if self._amplitude_histogram.mode == HistogramMode.INTEGRAL:
+            self._reset_distribution_zoom()
 
     @property
     def session_replay_active(self) -> bool:
@@ -424,6 +442,7 @@ class ScopeController(QWidget):
         """Stop live acquisition and isolate this view for recorded playback."""
         if getattr(self, "_session_replay_active", False):
             self.end_session_replay()
+        self.clear_scope_distribution()
         self._session_replay_active = True
         self._stop_live_for_replay()
         self._session_replay_display_mode = self.ui.comboDisplayMode.currentIndex()
@@ -560,6 +579,7 @@ class ScopeController(QWidget):
         if not self._session_replay_active:
             return
         self._session_replay_active = False
+        self.clear_scope_distribution()
         self._restore_controls_after_session_replay()
         self.status.setText(
             "Session replay unloaded; Scope acquisition remains stopped"
@@ -1077,7 +1097,17 @@ class ScopeController(QWidget):
             self._scope.set_frame_samples(selected_frame)
             self._scope.set_trigger_mode(TriggerMode.PERIODIC_SUM)
             self._scope.set_frame_period_cycles(gap_cycles)
-            worker = ScopeSumWorker(capture=self._scope_dma.create_sum_capture())
+            from nlab.utils.settings_io import configuration_yaml
+
+            # Snapshot the effective sum settings after configuration, before the
+            # DMA worker/enable. Never collect full settings in the reader loop.
+            snapshot = (
+                configuration_yaml(self._measurement_configuration())
+                if output is not None and self._measurement_configuration is not None else ""
+            )
+            worker = ScopeSumWorker(
+                capture=self._scope_dma.create_sum_capture(configuration_yaml=snapshot)
+            )
             self._sum_worker = worker
             self._set_sum_controls_busy(True)
             worker.start(output)
@@ -1720,6 +1750,10 @@ class ScopeController(QWidget):
             count=geometry.waveform_samples,
             offset=8,
         )
+        self._accumulate_scope_distribution(
+            frame, source=f"DMA preview ({geometry.sample_period_ns} ns/sample)",
+            sample_period_ns=geometry.sample_period_ns,
+        )
         x_time = np.arange(frame.size) * geometry.sample_period_ns
         if self._display_mode == DisplayMode.RAW:
             self._raw_curve.setData(x_time / self._time_scale.ns_per_unit, frame)
@@ -1775,6 +1809,10 @@ class ScopeController(QWidget):
             self.status.setText(pending_status)
             self._waveform_pending_status = None
         x_time, y_voltage = data
+        self._accumulate_scope_distribution(
+            y_voltage, source="Scope viewer (8 ns mean4)",
+            sample_period_ns=self._VIEWER_POINT_PERIOD_NS,
+        )
         expected = self._frame_samples_from_ui() // 4
         if len(y_voltage) < expected:
             self.status.setText(
@@ -1830,6 +1868,10 @@ class ScopeController(QWidget):
                 log.exception("Scope ch%d: failed to disarm after viewer read", self._channel)
         frame_samples = self._frame_samples_from_ui()
         frame = raw_frame[: frame_samples // 4]
+        self._accumulate_scope_distribution(
+            frame, source="Scope viewer (8 ns mean4)",
+            sample_period_ns=self._VIEWER_POINT_PERIOD_NS,
+        )
         signal = getattr(self, "session_viewer_frame", None)
         if signal is not None:
             signal.emit(
@@ -1887,6 +1929,7 @@ class ScopeController(QWidget):
 
     def _setup_graph(self) -> None:
         self._setup_plot_layout()
+        self._setup_distribution_plot()
         self._setup_persistence_layer()
         self._setup_raw_layer()
         self._setup_threshold_line()
@@ -1896,6 +1939,7 @@ class ScopeController(QWidget):
 
     def _setup_plot_layout(self) -> None:
         layout = pg.GraphicsLayout()
+        self._scope_plot_layout = layout
         layout.setContentsMargins(10, 10, 10, 10)
         self.ui.plotWaveform.setCentralItem(layout)
         self.ui.plotWaveform.setBackground("#f8f9fa")
@@ -1907,6 +1951,241 @@ class ScopeController(QWidget):
         self._plot_item.showGrid(x=True, y=True, alpha=0.2)
         layout.nextRow()
         self._time_axis_label = layout.addLabel("Time [ns]", col=1)
+
+    def _setup_distribution_plot(self) -> None:
+        distribution_view = HistogramViewBox()
+        self._distribution_plot = pg.PlotItem(viewBox=distribution_view)
+        self._distribution_plot.setParentItem(self._scope_plot_layout)
+        self._distribution_plot.hideAxis("left")
+        self._distribution_plot.showAxis("top")
+        self._distribution_plot.showGrid(x=True, y=True, alpha=0.2)
+        self._distribution_plot.setYLink(self._plot_item)
+        self._distribution_curve = pg.PlotDataItem(
+            fillLevel="enclosed",
+            fillBrush=pg.mkBrush(39, 125, 161, 60),
+            pen=pg.mkPen("#277da1"),
+        )
+        self._distribution_plot.addItem(self._distribution_curve)
+        self._distribution_plot.ctrl.logXCheck.toggled.connect(
+            self._on_distribution_scale_changed
+        )
+        self._distribution_plot.ctrl.logYCheck.setEnabled(False)
+        self._distribution_plot.ctrl.logYCheck.setToolTip(
+            "Amplitude stays linear and shares the Scope Y axis."
+        )
+        self._setup_distribution_menu(distribution_view)
+        self._distribution_label = pg.LabelItem("Counts")
+        self._distribution_label.setParentItem(self._scope_plot_layout)
+        self._distribution_plot.hide()
+        self._distribution_label.hide()
+        self._plot_item.getViewBox().sigYRangeChanged.connect(self._refresh_scope_distribution)
+        self.ui.comboTriggerMode.currentIndexChanged.connect(self._sync_distribution_direction)
+
+    def _setup_distribution_menu(self, view: HistogramViewBox) -> None:
+        self._distribution_keep_auto_y = False
+        self._distribution_menu = QMenu(self)
+        self._distribution_mode_group = QActionGroup(self)
+        self._distribution_mode_actions: dict[HistogramMode, QAction] = {}
+        for mode, text in (
+            (HistogramMode.SAMPLES, "Sample distribution (all samples)"),
+            (HistogramMode.AMPLITUDE, "Peak amplitude (one per waveform)"),
+            (HistogramMode.INTEGRAL, "Pulse integral (one per waveform)"),
+        ):
+            action = self._distribution_menu.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(mode == self._amplitude_histogram.mode)
+            action.setToolTip("Changing mode clears this channel's accumulated histogram.")
+            self._distribution_mode_group.addAction(action)
+            action.triggered.connect(
+                lambda _checked=False, selected=mode: self.set_scope_distribution_mode(selected)
+            )
+            self._distribution_mode_actions[mode] = action
+        self._distribution_menu.addSeparator()
+        self._distribution_log_action = self._distribution_menu.addAction("Logarithmic counts (L)")
+        self._distribution_log_action.setCheckable(True)
+        self._distribution_log_action.toggled.connect(self._set_distribution_log_counts)
+        self._distribution_menu.addAction("Reset histogram zoom", self._reset_distribution_zoom)
+        self._distribution_menu.addAction("Clear histogram", self.clear_scope_distribution)
+        self._distribution_menu.aboutToShow.connect(self._sync_distribution_menu)
+        view.set_histogram_menu(self._distribution_menu)
+
+    def _sync_distribution_menu(self) -> None:
+        blocked = self._distribution_log_action.blockSignals(True)
+        self._distribution_log_action.setChecked(self._distribution_plot.getAxis("bottom").logMode)
+        self._distribution_log_action.blockSignals(blocked)
+
+    def set_scope_distribution_mode(self, mode: HistogramMode) -> None:
+        """Choose this channel's histogram observable and start new counts."""
+        mode = HistogramMode(mode)
+        if self._amplitude_histogram.mode == mode:
+            return
+        self._amplitude_histogram.set_mode(mode)
+        self._distribution_mode_actions[mode].setChecked(True)
+        if mode == HistogramMode.INTEGRAL:
+            self._distribution_plot.setYLink(None)
+            self._distribution_plot.showAxis("left")
+            self._distribution_plot.setLabel("left", "Pulse integral [ADC codes·ns]")
+            self._distribution_plot.getAxis("left").enableAutoSIPrefix(False)
+        else:
+            self._distribution_plot.hideAxis("left")
+            self._distribution_plot.setYLink(self._plot_item)
+        self._reset_distribution_zoom()
+
+    def _reset_distribution_zoom(self) -> None:
+        if self._amplitude_histogram.mode == HistogramMode.INTEGRAL:
+            self._distribution_plot.enableAutoRange(axis="y", enable=True)
+        else:
+            self._plot_item.setYRange(self._Y_MIN, self._Y_MAX, padding=0)
+        self._refresh_scope_distribution()
+
+    def set_scope_distribution_enabled(self, enabled: bool) -> None:
+        """Show and accumulate received live waveforms; hiding pauses counting."""
+        if self._distribution_enabled == enabled:
+            return
+        self._distribution_enabled = enabled
+        layout = self._scope_plot_layout
+        if enabled:
+            layout.addItem(self._distribution_plot, row=0, col=2)
+            layout.addItem(self._distribution_label, row=1, col=2)
+            layout.layout.setColumnStretchFactor(1, 4)
+            layout.layout.setColumnStretchFactor(2, 1)
+            self._distribution_plot.show()
+            self._distribution_label.show()
+            self._refresh_scope_distribution()
+        else:
+            for item in (self._distribution_plot, self._distribution_label):
+                layout.removeItem(item)
+                item.setParentItem(layout)
+                item.hide()
+            layout.layout.setColumnStretchFactor(2, 0)
+
+    def toggle_scope_distribution_log_under_mouse(self) -> bool:
+        """Toggle count scale only while the pointer is over this distribution."""
+        if not self._distribution_enabled or not self.isVisible():
+            return False
+        widget = self.ui.plotWaveform
+        if not widget.viewport().underMouse():
+            return False
+        position = widget.mapToScene(widget.viewport().mapFromGlobal(QCursor.pos()))
+        if not self._distribution_plot.sceneBoundingRect().contains(position):
+            return False
+        logarithmic = self._distribution_plot.getAxis("bottom").logMode
+        self._set_distribution_log_counts(not logarithmic)
+        return True
+
+    def _set_distribution_log_counts(self, enabled: bool) -> None:
+        self._distribution_keep_auto_y = bool(
+            self._distribution_plot.getViewBox().autoRangeEnabled()[1]
+        )
+        self._distribution_plot.setLogMode(x=enabled, y=False)
+
+    def _on_distribution_scale_changed(self, _enabled: bool) -> None:
+        # PlotItem's log toggle enables both auto ranges. Preserve both
+        # amplitude and integral zoom while changing only the count scale.
+        main_range = self._plot_item.getViewBox().viewRange()[1][:]
+        side_range = self._distribution_plot.getViewBox().viewRange()[1][:]
+        integral = self._amplitude_histogram.mode == HistogramMode.INTEGRAL
+        self._distribution_plot.disableAutoRange()
+        self._plot_item.setYRange(*main_range, padding=0)
+        if integral:
+            self._distribution_plot.setYRange(*side_range, padding=0)
+            if self._distribution_keep_auto_y:
+                self._distribution_plot.enableAutoRange(axis="y", enable=True)
+        self._refresh_scope_distribution()
+
+    def clear_scope_distribution(self) -> None:
+        """Start a new live amplitude distribution on this channel."""
+        self._amplitude_histogram.clear()
+        if self._amplitude_histogram.mode == HistogramMode.INTEGRAL:
+            self._distribution_plot.enableAutoRange(axis="y", enable=True)
+        self._refresh_scope_distribution()
+
+    def _distribution_negative_polarity(self) -> bool:
+        trigger = self.ui.comboTriggerMode.currentData()
+        return trigger in (int(TriggerMode.ANY_BELOW), int(TriggerMode.FALLING_EDGE))
+
+    def _sync_distribution_direction(self, *_args: object) -> None:
+        inverted = self._plot_item.getViewBox().yInverted()
+        if (
+            self._amplitude_histogram.mode == HistogramMode.INTEGRAL
+            and self._distribution_negative_polarity()
+        ):
+            inverted = not inverted
+        self._distribution_plot.getViewBox().invertY(inverted)
+
+    def _accumulate_scope_distribution(
+        self, samples: np.ndarray, *, source: str, sample_period_ns: float
+    ) -> None:
+        if not self._distribution_enabled or self._session_replay_active:
+            return
+        negative = self._distribution_negative_polarity()
+        self._amplitude_histogram.add(
+            samples, source=source, negative=negative,
+            sample_period_ns=sample_period_ns,
+            pretrigger_ns=self.ui.spinPretrigger.value(),
+        )
+        self._refresh_scope_distribution()
+
+    def _refresh_scope_distribution(self, *_args: object) -> None:
+        self._sync_distribution_direction()
+        if not self._distribution_enabled:
+            return
+        histogram = self._amplitude_histogram
+        lower, upper = self._plot_item.getViewBox().viewRange()[1]
+        edges, counts = histogram.projected_bins(lower, upper)
+        logarithmic = self._distribution_plot.getAxis("bottom").logMode
+        if histogram.sample_count and counts.size:
+            count_path = np.concatenate(([0], np.repeat(counts, 2), [0, 0]))
+            if logarithmic:
+                # Zero has no logarithm; clip only for rendering. Positive
+                # integer counts keep their exact values, including ones.
+                count_path = np.maximum(count_path, 0.5)
+            amplitude_path = np.concatenate(
+                ([edges[0]], np.repeat(edges, 2)[1:-1], [edges[-1], edges[0]])
+            )
+            self._distribution_curve.setData(count_path, amplitude_path)
+        else:
+            self._distribution_curve.clear()
+        maximum = float(counts.max()) if counts.size else 0.0
+        if logarithmic:
+            self._distribution_plot.setXRange(
+                np.log10(0.5), np.log10(max(1.0, maximum)) + 0.05, padding=0
+            )
+        else:
+            self._distribution_plot.setXRange(0, max(1.0, maximum * 1.05), padding=0)
+        mode_name = {
+            HistogramMode.SAMPLES: "Sample distribution",
+            HistogramMode.AMPLITUDE: "Peak amplitude",
+            HistogramMode.INTEGRAL: "Pulse integral",
+        }[histogram.mode]
+        entry_unit = "samples" if histogram.mode == HistogramMode.SAMPLES else "entries"
+        self._distribution_label.setText(
+            f"{mode_name} — Counts{' (log)' if logarithmic else ''}<br>"
+            f"<span style='font-size:8pt'>{histogram.sample_count:,} {entry_unit} / "
+            f"{histogram.frame_count:,} frames; skipped {histogram.rejected_frames:,}</span>"
+        )
+        self._distribution_plot.setToolTip(
+            f"{histogram.source or 'Live Scope distribution; waiting for waveforms'}. "
+            "Counts received waveform samples, not all hardware events. "
+            "Viewer polling / DMA preview can omit frames. "
+            "Sample/peak display bins span 100 ADC codes at every zoom level. "
+            "Peak mode counts one raw minimum for falling/any-below triggers, "
+            "one maximum otherwise. Integral mode uses the mean of complete "
+            "pretrigger bins and the post-trigger area on the selected side only, "
+            "reported positive in ADC codes·ns (sample-hold sum times native dt). "
+            "Integral axis direction follows the selected pulse polarity in Scope. "
+            "Rectified noise contributes positive area. Missing baselines skip a frame. "
+            f"Integral bin width: {histogram.integral_bin_width:g} ADC codes·ns; "
+            "adjacent bins merge if more range is needed. "
+            "Right-click to change mode, reset zoom or clear this histogram. "
+            "Hover and press L to toggle linear/log counts. "
+            "Log view clips zero-count bins to a 0.5-count plotting boundary. "
+            f"Rejected samples: {histogram.rejected_count:,}; "
+            f"skipped frames: {histogram.rejected_frames:,}. "
+            f"{histogram.last_rejection} "
+            "Hidden: accumulation paused. Replay: no accumulation. "
+            "Use View > Clear Scope Distribution to reset."
+        )
 
     def _setup_persistence_layer(self) -> None:
         self._display_nx = self._frame_samples_from_ui() // 4

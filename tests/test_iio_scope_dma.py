@@ -29,6 +29,7 @@ from nlab.hardware.digitizer.dma import (
     ScopeDmaGeometry,
     ScopeFrameBuffer,
 )
+from nlab.hardware.digitizer.scope_sums import ScopeSumGeometry
 from nlab.utils.dma_converter import convert_scope
 from nlab.workers.dma_workers import IIOScopeDmaWorker
 
@@ -477,7 +478,7 @@ def test_backend_uses_batched_iiod_for_qualified_remote_scope(
     monkeypatch.setattr(backend, "_dma_get_dma_enable", lambda: False)
     monkeypatch.setattr(backend, "_dma_get_frame_samples", lambda: 1024)
     monkeypatch.setattr(backend, "_dma_attr_get", values.__getitem__)
-    created: list[tuple[str, str, int, int, int]] = []
+    created: list[tuple[str, str, int, int, int, int]] = []
     fake_buffer = object()
 
     def create_stream(
@@ -486,8 +487,9 @@ def test_backend_uses_batched_iiod_for_qualified_remote_scope(
         samples: int,
         buffers: int,
         batch_frames: int,
+        *, timeout_ms: int,
     ) -> object:
-        created.append((uri, device, samples, buffers, batch_frames))
+        created.append((uri, device, samples, buffers, batch_frames, timeout_ms))
         return fake_buffer
 
     monkeypatch.setattr(iio_backend_module, "IiodScopeStream", create_stream)
@@ -496,7 +498,7 @@ def test_backend_uses_batched_iiod_for_qualified_remote_scope(
 
     assert selected == [4]
     assert created == [
-        ("ip:192.168.10.128:30431", "iio:device15", 1024, 4, 64),
+        ("ip:192.168.10.128:30431", "iio:device15", 1024, 4, 64, 3000),
     ]
     assert backend._dma_buf is fake_buffer
     assert backend._dma_capture_transport == "iiod-batched"
@@ -750,3 +752,58 @@ def test_scope_converter_rejects_partial_frame(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="not aligned"):
         convert_scope(source, destination)
+
+
+@pytest.mark.parametrize("version", [123, 124])
+@pytest.mark.parametrize(
+    "uri,qualified", [("ip:board", True), ("ip:board", False), ("local:", True)]
+)
+def test_sum_transport_batches_only_qualified_remote_dma(monkeypatch, version, uri, qualified):
+    backend = object.__new__(IIODigitizerBackend)
+    backend._ch = 0
+    backend._uri = uri
+    backend._dma_fault_latched = False
+    backend._dma_stop_requested = threading.Event()
+    backend._dma_buf = None
+    geometry = ScopeSumGeometry(1024, version, 625)
+    selected, streams, native, timeouts = [], [], [], []
+    attrs = {
+        "dma_queue_mode": object(), "dma_kernel_buffers_max": object(),
+        "dma_kernel_buffers_recommended": object(),
+    } if qualified else {}
+    backend._dma_scope = SimpleNamespace(
+        id="iio:device13", attrs=attrs, set_kernel_buffers_count=selected.append,
+    )
+    backend._dma_ctx = SimpleNamespace(set_timeout=timeouts.append)
+    values = {
+        "dma_queue_mode": "dmaengine", "dma_kernel_buffers_max": "4",
+        "dma_kernel_buffers_recommended": "4", "dma_buffer_active": "0",
+    }
+    monkeypatch.setattr(backend, "_close_dma_buffer", lambda: None)
+    monkeypatch.setattr(backend, "_dma_get_enable", lambda: False)
+    monkeypatch.setattr(backend, "_dma_get_dma_enable", lambda: False)
+    monkeypatch.setattr(backend, "get_scope_dma_geometry", lambda: geometry)
+    monkeypatch.setattr(backend, "_dma_attr_get", values.__getitem__)
+    buffer = object()
+
+    def stream(*args, **kwargs):
+        streams.append((*args, kwargs["timeout_ms"]))
+        return buffer
+
+    def native_buffer(_device, samples, cyclic):
+        native.append((samples, cyclic))
+        return buffer
+
+    monkeypatch.setattr(iio_backend_module, "IiodScopeStream", stream)
+    monkeypatch.setattr(iio, "Buffer", native_buffer)
+    backend._create_dma_buffer(1024)
+    assert selected == [4 if qualified else 1]
+    assert backend._dma_buf_frame_samples == 2048
+    assert backend._dma_capture_geometry == geometry
+    assert timeouts == [2000]
+    if qualified and uri.startswith("ip:"):
+        assert streams == [(uri, "iio:device13", 2048, 4, 64, 2000)]
+        assert not native and backend._dma_capture_transport == "iiod-batched"
+    else:
+        assert not streams and native == [(2048, False)]
+        assert backend._dma_capture_transport == "libiio"

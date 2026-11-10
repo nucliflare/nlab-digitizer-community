@@ -75,7 +75,7 @@
       <item><widget class="QCheckBox" name="cbRecordSums"><property name="text"><string>Record HDF5 sums</string></property><property name="toolTip"><string>Record original sum packets and exact timestamps to a new HDF5 file.</string></property></widget></item>
       <item><widget class="QLineEdit" name="editSumFile"><property name="placeholderText"><string>New .h5 file</string></property><property name="toolTip"><string>Output filename; existing files are preserved.</string></property></widget></item>
       <item><widget class="QPushButton" name="btnSumFile"><property name="text"><string>Browse...</string></property><property name="toolTip"><string>Choose a new sum recording file.</string></property></widget></item>
-      <item><widget class="QPushButton" name="btnOpenSums"><property name="text"><string>Open sum capture...</string></property><property name="toolTip"><string>Replay recorded sums in this plot without accessing hardware.</string></property></widget></item>
+      <item><widget class="QPushButton" name="btnOpenSums"><property name="text"><string>Open sum capture...</string></property><property name="toolTip"><string>Open the dedicated Current capture analysis tool without interrupting live acquisition.</string></property></widget></item>
      </layout>
     </widget>
    </item>

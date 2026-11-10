@@ -4,6 +4,8 @@ import struct
 import threading
 from unittest.mock import Mock
 
+import h5py
+import numpy as np
 import pytest
 from PySide6.QtWidgets import QApplication, QDialog
 
@@ -43,7 +45,9 @@ class _Capture:
                 raise RuntimeError("injected capture failure")
             assert self.cancelled.wait(3)
             if path is not None:
-                writer = ScopeSumWriter(path, {"channel": 0})
+                writer = ScopeSumWriter(path, {
+                    "channel": 0, "configuration_yaml": getattr(self, "configuration_yaml", ""),
+                })
                 writer.append(_packet())
                 writer.close(complete=True)
             return {"complete": True}
@@ -84,14 +88,15 @@ def test_sums_use_existing_current_plot_and_restore_scope_after_stop(qtbot, monk
         current.ui.spinDmaGap.setValue(0.080)
         viewer = Mock(side_effect=AssertionError("structured sums are not waveforms"))
         monkeypatch.setattr(scope, "_viewer_scope_for_worker", viewer)
-        dialogs = [w for w in QApplication.topLevelWidgets() if isinstance(w, QDialog)]
+        dialogs = {id(w) for w in QApplication.topLevelWidgets() if isinstance(w, QDialog)}
         original_plot = current.ui.plotCurrent
         current.start_monitor()  # Returns immediately; no modal event loop.
         assert capture.entered.wait(1)
         qtbot.waitUntil(lambda: current._curve.yData is not None)
         assert current.ui.plotCurrent is original_plot
         assert current.ui.plotCurrent.isEnabled()
-        assert [w for w in QApplication.topLevelWidgets() if isinstance(w, QDialog)] == dialogs
+        remaining = {id(w) for w in QApplication.topLevelWidgets() if isinstance(w, QDialog)}
+        assert not remaining - dialogs
         assert current._curve.yData[-1] == 7
         assert current._curve.xData[-1] == 0
         assert "7 ADC codes" in current.ui.lblCurrent.text()
@@ -216,7 +221,7 @@ def test_sums_cannot_preempt_scope_and_configuration_failure_restores(qtbot, mon
         _close(device, scope, current)
 
 
-def test_inline_recording_and_replay_use_same_plot(qtbot, monkeypatch, tmp_path):
+def test_recording_opens_in_dedicated_tool_without_changing_live_plot(qtbot, monkeypatch, tmp_path):
     device, scope, current, capture = _views(qtbot, monkeypatch)
     try:
         current.ui.cbRecordSums.setChecked(True)
@@ -228,16 +233,29 @@ def test_inline_recording_and_replay_use_same_plot(qtbot, monkeypatch, tmp_path)
         current.start_monitor()
         assert capture.entered.wait(1)
         assert not current.ui.editSumFile.isEnabled()
+        assert current.ui.btnOpenSums.isEnabled()
+        previous_path = tmp_path / "previous-capture.h5"
+        writer = ScopeSumWriter(previous_path, {"channel": 1})
+        writer.append(_packet())
+        writer.close(complete=True)
+        active_worker = current._sum_worker
+        current.open_sum_capture(previous_path)
+        qtbot.waitUntil(lambda: current._capture_dialog._chunk is not None)
+        assert current._is_running()
+        assert current._sum_worker is active_worker
+        assert not capture.cancelled.is_set()
         current.stop_monitor_sync()
         assert capture.output == path and path.exists()
+        current._curve.setData([0, 1], [2, 3])
         current.open_sum_capture(path)
-        qtbot.waitUntil(lambda: not current._is_running())
-        assert current._curve.yData[-1] == 7
-        assert "Recorded measurement" in current.status.text()
-        assert "Complete=True" in current.status.text()
-        assert current.ui.groupReading.title() == "Recorded window means"
+        qtbot.waitUntil(lambda: current._capture_dialog._chunk is not None)
+        assert current._capture_dialog._chunk.mean == 7
+        assert current._curve.yData[-1] == 3
+        assert not current._is_running()
         assert current.ui.btnStart.isEnabled()
     finally:
+        if current._capture_dialog is not None:
+            current._capture_dialog.close_without_prompt()
         _close(device, scope, current)
 
 
@@ -246,18 +264,20 @@ def test_replay_preserves_incomplete_status_without_hardware(qtbot, tmp_path):
     writer = ScopeSumWriter(path, {"channel": 1})
     writer.append(_packet())
     writer.close(complete=False, error="injected incomplete capture")
-    current = CurrentMonitorController(Mock(), 0)
+    mca = Mock()
+    current = CurrentMonitorController(mca, 0)
     qtbot.addWidget(current)
     try:
         current.open_sum_capture(path)
-        qtbot.waitUntil(lambda: not current._is_running())
-        assert current._curve.yData[-1] == 7
-        assert "Complete=False" in current.status.text()
-        assert "source channel 1" in current.status.text()
-        assert "incomplete capture" in current.status.text()
-        assert not current.ui.btnStart.isEnabled()
+        dialog = current._capture_dialog
+        qtbot.waitUntil(lambda: dialog._chunk is not None)
+        assert dialog._chunk.mean == 7
+        assert "Complete=False" in dialog.capture_status.text()
+        assert "source channel 1" in dialog.capture_status.text()
+        assert "incomplete capture" in dialog.capture_status.text()
+        mca.assert_not_called()
     finally:
-        current.stop_monitor_sync()
+        current.close()
 
 
 def test_mode_change_clears_old_trace_and_sum_settings_remain_saved(qtbot, monkeypatch):
@@ -349,5 +369,86 @@ def test_invalid_sum_window_is_rejected_before_hardware_writes(qtbot, monkeypatc
         assert writes.mock_calls == []
         assert scope._sum_previous_settings is None
         assert not capture.entered.is_set()
+    finally:
+        _close(device, scope, current)
+
+
+def test_sum_plot_breaks_at_missing_windows_including_timestamp_wrap(qtbot, monkeypatch):
+    device, scope, current, _ = _views(qtbot, monkeypatch)
+    try:
+        analysis = ScopeSumAnalysis()
+        first = (1 << 64) - 10
+        for i in range(2):
+            raw = bytearray(_packet().raw)
+            struct.pack_into(
+                "<4Q", raw, 0, (first + i * 510 * 4) & ((1 << 64) - 1),
+                0x32534D5553504456, 16 | ((3 if i else 508) << 48), i | (i << 63),
+            )
+            analysis.append(decode_sum_packet(bytes(raw)))
+        current._sum_worker = Mock(analysis=analysis, capture=object(), done=False)
+        current._render_sum_snapshot()
+        connections = current._curve.opts["connect"]
+        expected = np.ones(511, dtype=bool)
+        expected[507] = expected[-1] = False
+        np.testing.assert_array_equal(connections, expected)
+        assert len(current._curve.yData) == 511
+        assert "gaps (timestamps): 2" in current.status.text()
+    finally:
+        current._sum_worker = None
+        _close(device, scope, current)
+
+
+def test_configuration_snapshot_after_sum_setup_before_worker(qtbot, monkeypatch, tmp_path):
+    import yaml
+    device, scope, current, capture = _views(qtbot, monkeypatch)
+    snapshots = []
+
+    def snapshot():
+        assert not capture.entered.is_set()
+        assert device.scope.get_trigger_mode() == TriggerMode.PERIODIC_SUM
+        assert device.scope.get_frame_samples() == 2048
+        assert device.scope.get_pretrigger_samples() == 0
+        document = {"format_version": 5, "hardware": {"channels": {
+            "0": {"scope": {"edge_mode": device.scope.get_trigger_mode().value}},
+            "1": {"mca": {"fixture": "other channel"}},
+        }}, "connection": {"ip": "fixture"}, "application": {"fixture": True}}
+        snapshots.append(document)
+        return document
+
+    scope._measurement_configuration = snapshot
+    factory = scope._scope_dma.create_sum_capture
+
+    def create(**kwargs):
+        capture.configuration_yaml = kwargs["configuration_yaml"]
+        return factory(**kwargs)
+
+    monkeypatch.setattr(scope._scope_dma, "create_sum_capture", create)
+    try:
+        current.ui.spinSumSamples.setValue(2048)
+        current.ui.cbRecordSums.setChecked(True)
+        path = tmp_path / "configured.h5"
+        current.ui.editSumFile.setText(str(path))
+        current.start_monitor()
+        assert capture.entered.wait(1)
+        current.stop_monitor_sync()
+        with h5py.File(path, "r") as source:
+            assert yaml.safe_load(source["configuration_yaml"][()].decode()) == snapshots[0]
+        assert len(snapshots) == 1
+    finally:
+        _close(device, scope, current)
+
+
+def test_configuration_read_failure_never_arms_and_restores_scope(qtbot, monkeypatch, tmp_path):
+    device, scope, current, capture = _views(qtbot, monkeypatch)
+    scope._measurement_configuration = Mock(side_effect=RuntimeError("snapshot failed"))
+    try:
+        original = device.scope.get_trigger_mode()
+        current.ui.cbRecordSums.setChecked(True)
+        current.ui.editSumFile.setText(str(tmp_path / "failed.h5"))
+        current.start_monitor()
+        assert "snapshot failed" in current.status.text()
+        assert not capture.entered.is_set()
+        assert device.scope.get_trigger_mode() == original
+        assert scope._sum_worker is None
     finally:
         _close(device, scope, current)

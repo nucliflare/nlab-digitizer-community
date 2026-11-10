@@ -68,6 +68,7 @@ _KEY_MCA_DMA_OUTPUT_MODE = MCA_DMA_OUTPUT_MODE_KEY
 _KEY_SHOW_ROI = "view/show_roi"
 _KEY_DIFFERENTIAL_HISTOGRAM = "view/differential_histogram"
 _KEY_LOG_Y = "view/log_y"
+_KEY_SCOPE_DISTRIBUTION = "view/scope_distribution"
 _KEY_TIMING_OFFSET_NS = "timing/channel_b_offset_ns"
 _KEY_SESSION_FOLDER = "session/last_folder"
 _GENERAL_CONTROLLER_KEYS = {
@@ -175,10 +176,25 @@ class MainAppWindow(QMainWindow):
         super().closeEvent(event)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
-        """Handle the MCA log shortcut only while an MCA histogram is hovered."""
+        """Route log shortcuts to the histogram under the pointer."""
+        if self._try_scope_distribution_log_shortcut(event):
+            return True
         if self._try_mca_log_shortcut(event):
             return True
         return super().eventFilter(watched, event)
+
+    def _try_scope_distribution_log_shortcut(self, event: QEvent) -> bool:
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and self.isVisible()
+            and isinstance(event, QKeyEvent)
+            and event.key() == Qt.Key.Key_L
+            and event.modifiers()
+            in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.ShiftModifier)
+            and not event.isAutoRepeat()
+        ):
+            return self._controller.toggle_scope_distribution_log_under_mouse()
+        return False
 
     def _try_mca_log_shortcut(self, event: QEvent) -> bool:
         if (
@@ -236,6 +252,12 @@ class MainAppWindow(QMainWindow):
         self.ui.actionShowRoi.toggled.connect(self._on_show_roi_toggled)
         self.ui.actionDifferentialHistogram.toggled.connect(
             self._on_differential_histogram_toggled
+        )
+        self.ui.actionScopeDistribution.toggled.connect(
+            self._on_scope_distribution_toggled
+        )
+        self.ui.actionClearScopeDistribution.triggered.connect(
+            lambda: self._controller.clear_scope_distributions()
         )
         self.ui.actionLogY.toggled.connect(self._on_log_y_toggled)
         self.ui.actionSaveSettings.triggered.connect(self._on_save_settings)
@@ -496,6 +518,9 @@ class MainAppWindow(QMainWindow):
             ),
         )
         log_y = settings.value(_KEY_LOG_Y, False, type=bool)
+        scope_distribution = cast(
+            bool, settings.value(_KEY_SCOPE_DISTRIBUTION, False, type=bool)
+        )
 
         # Suppress intermediate toggled signals while restoring state.
         self.ui.actionShowSystemLog.blockSignals(True)
@@ -503,12 +528,14 @@ class MainAppWindow(QMainWindow):
         self.ui.actionShowRoi.blockSignals(True)
         self.ui.actionDifferentialHistogram.blockSignals(True)
         self.ui.actionLogY.blockSignals(True)
+        self.ui.actionScopeDistribution.blockSignals(True)
 
         self.ui.actionShowSystemLog.setChecked(show_log)
         self.ui.actionDebugMode.setChecked(debug_mode)
         self.ui.actionShowRoi.setChecked(show_roi)
         self.ui.actionDifferentialHistogram.setChecked(differential_histogram)
         self.ui.actionLogY.setChecked(log_y)
+        self.ui.actionScopeDistribution.setChecked(scope_distribution)
         self._set_log_tab_visible(show_log)
         if debug_mode:
             logging.getLogger().setLevel(logging.DEBUG)
@@ -518,6 +545,7 @@ class MainAppWindow(QMainWindow):
         self.ui.actionShowRoi.blockSignals(False)
         self.ui.actionDifferentialHistogram.blockSignals(False)
         self.ui.actionLogY.blockSignals(False)
+        self.ui.actionScopeDistribution.blockSignals(False)
 
     def _save_developer_settings(self) -> None:
         settings = QSettings()
@@ -529,6 +557,7 @@ class MainAppWindow(QMainWindow):
             self.ui.actionDifferentialHistogram.isChecked(),
         )
         settings.setValue(_KEY_LOG_Y, self.ui.actionLogY.isChecked())
+        settings.setValue(_KEY_SCOPE_DISTRIBUTION, self.ui.actionScopeDistribution.isChecked())
 
     def configuration_settings(self) -> dict[str, object]:
         """Return top-level controls that are owned only by the application."""
@@ -538,6 +567,7 @@ class MainAppWindow(QMainWindow):
             "show_roi": self.ui.actionShowRoi.isChecked(),
             "differential_histogram": self.ui.actionDifferentialHistogram.isChecked(),
             "log_y": self.ui.actionLogY.isChecked(),
+            "scope_distribution": self.ui.actionScopeDistribution.isChecked(),
             "dma_save_folder": str(QSettings().value(_KEY_DMA_FOLDER, "measurements")),
             "mca_dma_output_mode": str(
                 QSettings().value(
@@ -561,6 +591,7 @@ class MainAppWindow(QMainWindow):
             "show_roi": self.ui.actionShowRoi,
             "differential_histogram": self.ui.actionDifferentialHistogram,
             "log_y": self.ui.actionLogY,
+            "scope_distribution": self.ui.actionScopeDistribution,
         }
         for name, action in actions.items():
             if name in settings:
@@ -610,12 +641,15 @@ class MainAppWindow(QMainWindow):
         self._controller.refresh_dma_output_settings()
 
     def _apply_view_state(self) -> None:
-        """Re-apply persisted view toggles to the (re)built MCA controllers."""
+        """Re-apply persisted view toggles to the rebuilt plot controllers."""
         self._controller.set_roi_visible(self.ui.actionShowRoi.isChecked())
         self._controller.set_differential_histogram(
             self.ui.actionDifferentialHistogram.isChecked()
         )
         self._controller.set_log_y(self.ui.actionLogY.isChecked())
+        self._controller.set_scope_distribution_enabled(
+            self.ui.actionScopeDistribution.isChecked()
+        )
 
     def _general_settings_values(self) -> dict[str, object]:
         getter = getattr(self._controller, "general_configuration_settings", None)
@@ -853,11 +887,7 @@ class MainAppWindow(QMainWindow):
         self.statusBar().showMessage("Session replay unloaded", 5_000)
 
     def _on_open_scope_sums(self) -> None:
-        filename, _ = QFileDialog.getOpenFileName(
-            self, "Open Scope sum capture", "", "Scope sum capture (*.h5)",
-        )
-        if filename:
-            self._controller.show_scope_sums(Path(filename))
+        self._controller.show_scope_sums()
 
     def _on_open_waveform_file(self) -> None:
         self._controller.show_waveform_analysis()
@@ -1258,6 +1288,9 @@ class MainAppWindow(QMainWindow):
 
     def _on_differential_histogram_toggled(self, checked: bool) -> None:
         self._controller.set_differential_histogram(checked)
+
+    def _on_scope_distribution_toggled(self, checked: bool) -> None:
+        self._controller.set_scope_distribution_enabled(checked)
 
     def _on_log_y_toggled(self, checked: bool) -> None:
         self._controller.set_log_y(checked)

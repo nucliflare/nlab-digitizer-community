@@ -61,8 +61,8 @@ def controller(qtbot: QtBot, monkeypatch: pytest.MonkeyPatch):
             7,
             6,
         ),
-        ("spinTrapR", "sliderTrapR", "filters.trapezoid.set_R", MCAParam.TRAPEZ_R, 19, 20),
-        ("spinTrapR", "sliderTrapR", "filters.trapezoid.set_R", MCAParam.TRAPEZ_R, 20, 20),
+        ("spinTrapR", "sliderTrapR", "filters.trapezoid.set_R", MCAParam.TRAPEZ_R, 19, 16),
+        ("spinTrapR", "sliderTrapR", "filters.trapezoid.set_R", MCAParam.TRAPEZ_R, 20, 24),
         (
             "spinTriggerLevel",
             "sliderTriggerLevel",
@@ -77,7 +77,7 @@ def controller(qtbot: QtBot, monkeypatch: pytest.MonkeyPatch):
             "set_frame_samples",
             MCAParam.FRAME_SAMPLES,
             -20,
-            4,
+            8,
         ),
         (
             "spinFrameSamples",
@@ -85,7 +85,7 @@ def controller(qtbot: QtBot, monkeypatch: pytest.MonkeyPatch):
             "set_frame_samples",
             MCAParam.FRAME_SAMPLES,
             99999,
-            4096,
+            8192,
         ),
     ],
 )
@@ -101,7 +101,8 @@ def test_setting_commit_snaps_and_synchronizes_once(
     (slider if slider_release else spinbox).setValue(requested)
     setter.assert_not_called()
     (slider.sliderReleased if slider_release else spinbox.editingFinished).emit()
-    setter.assert_called_once_with(expected)
+    raw = expected // 2 if spinbox.suffix() == " ns" else expected
+    setter.assert_called_once_with(raw)
     assert spinbox.value() == slider.value() == expected
 
 
@@ -127,7 +128,8 @@ def test_standalone_and_double_spinbox_timings_snap_before_writing(
     spinbox.setValue(requested)
     setter.assert_not_called()
     spinbox.editingFinished.emit()
-    setter.assert_called_once_with(expected)
+    raw = expected // 2 if spinbox.suffix() == " ns" else expected
+    setter.assert_called_once_with(raw)
     assert spinbox.value() == expected
 
 
@@ -141,7 +143,7 @@ def test_running_setting_snaps_before_one_stop_write_restart(controller):
     view.ui.spinFrameSamples.setValue(409)
     view.ui.spinFrameSamples.editingFinished.emit()
     mca.reconfigure_while_running.assert_called_once()
-    mca.set_frame_samples.assert_called_once_with(408)
+    mca.set_frame_samples.assert_called_once_with(204)
     assert view.ui.sliderFrameSamples.value() == 408
 
 
@@ -186,8 +188,8 @@ def test_pretrigger_marker_uses_same_nearest_step_without_double_rounding(
 ):
     view, mca = controller
     view._debug_pretrigger_line.setValue(position)
-    assert view.ui.spinPretrigger.value() == expected
-    assert view.ui.sliderPretrigger.value() == expected
+    assert view.ui.spinPretrigger.value() == expected * 2
+    assert view.ui.sliderPretrigger.value() == expected * 2
     assert view._debug_pretrigger_line.value() == expected * 2
     mca.set_pretrigger_samples.assert_not_called()
 
