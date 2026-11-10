@@ -92,14 +92,44 @@ def test_marker_hardware_readback_and_default_reset_update_sliders(scope):
     assert scope.ui.sliderFrameGap.value() == 0
 
 
-@pytest.mark.parametrize("supported", [False, True])
-def test_periodic_gap_slider_follows_trigger_mode_and_capability(scope, monkeypatch, supported):
-    monkeypatch.setattr(scope._scope, "frame_period_cycles_supported", lambda: supported)
-    scope.ui.comboTriggerMode.setCurrentIndex(TriggerMode.TIMED)
-    assert scope.ui.sliderFrameGap.isEnabled() == supported
-    assert scope.ui.spinFrameGap.isEnabled() == supported
-    scope.ui.comboTriggerMode.setCurrentIndex(TriggerMode.RISING_EDGE)
-    assert not scope.ui.sliderFrameGap.isEnabled()
+@pytest.mark.parametrize("mode", [TriggerMode.TIMED, TriggerMode.PERIODIC_SUM])
+def test_loaded_periodic_setting_cannot_start_scope_or_acquire_frame(scope, monkeypatch, mode):
+    # Legacy settings may still contain a periodic driver mode. Readback must
+    # not silently select a different waveform mode or start that hidden mode.
+    monkeypatch.setattr(scope._scope, "get_trigger_mode", lambda: mode)
+    start = Mock()
+    acquire = Mock()
+    monkeypatch.setattr(scope._scope, "start", start)
+    monkeypatch.setattr(scope._scope, "acquire_frame", acquire)
+    scope._load_hardware_state()
+    assert scope.ui.comboTriggerMode.currentIndex() == -1
+    assert scope.ui.comboTriggerMode.currentData() is None
+
+    scope._on_start()
+    assert not scope.ui.btnStart.isChecked()
+    assert "belongs to Current" in scope.status.text()
+    scope._on_acquire_frame()
+    scope._request_frame()
+    start.assert_not_called()
+    acquire.assert_not_called()
+    assert not scope._refresh_timer.isActive()
+
+
+def test_current_periodic_dma_still_passes_the_scope_start_guard(scope, monkeypatch):
+    monkeypatch.setattr(scope._scope, "get_trigger_mode", lambda: TriggerMode.TIMED)
+    scope._dma_online_current = True
+    scope._scope_dma = Mock()
+    scope._set_dma_checkbox_without_write(True)
+    start = Mock()
+    monkeypatch.setattr(scope, "_start_with_dma", start)
+    try:
+        scope._on_start()
+        start.assert_called_once_with()
+    finally:
+        scope._dma_online_current = False
+        scope._scope_dma = None
+        scope._set_dma_checkbox_without_write(False)
+        scope.ui.btnStart.setChecked(False)
 
 
 @pytest.mark.parametrize("replay", [False, True])

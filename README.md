@@ -91,7 +91,7 @@ The complete sessions and reference figures are published on
 
 ### Scope
 
-- Live waveform viewer with level, edge, and periodic trigger modes
+- Live waveform viewer with level and edge trigger modes; periodic acquisition belongs to Current
 - An elapsed-time indicator in Acquisition for continuous viewer/DMA runs, using
   a monotonic host clock from start/DMA-ready. It freezes on stop and resets on
   the next run; excludes arming, single-frame reads and replay, and is not
@@ -111,11 +111,11 @@ The complete sessions and reference figures are published on
 - Scope Auto Setup recognizes narrow, randomly arriving detector pulses and
   performs a bounded provisional-trigger search when its initial forced-frame
   survey contains only baseline.
-- Configurable frame length, pretrigger position, frame gap, and analogue offset
-- Paired sliders for pretrigger, frame length, and periodic gap. Sliders
-  follow the spin boxes' units and limits; hardware timings snap
-  to supported steps and apply on release. The periodic-gap slider is enabled
-  only in Periodic trigger mode on supported hardware.
+- Configurable frame length, pretrigger position, and analogue offset
+- Paired sliders for pretrigger and frame length follow the spin boxes' units
+  and limits; hardware timings snap to supported steps and apply on release.
+  Periodic triggers and their gap controls are absent from Scope; use Current
+  for supported periodic monitoring and sum recording.
 - Persistence and raw display modes
 - **View > Accumulated Scope Distribution** adds a filled amplitude histogram
   beside each Scope plot, sharing its amplitude axis. It accumulates samples

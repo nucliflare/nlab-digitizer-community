@@ -82,10 +82,11 @@ display resolution; steps do not reconstruct the analogue waveform.
 
 ## Scope — trigger level and mode {#scope-trigger}
 
-**Mode** uses the selectors advertised by the connected Scope. Level and edge
-modes capture individual waveforms. **Periodic** uses the IP122+ mean4 waveform
-format where supported. Structured **Periodic sums** are available only in
-[Current](#scope-sums) on IP123/IP124; they are not a Scope waveform trigger.
+**Mode** offers the connected Scope's level and edge triggers for individual
+waveforms. Periodic acquisition is available only through [Current](#current-mode),
+including structured [Periodic sums](#scope-sums) on IP123/IP124. No periodic
+trigger is selectable in Scope. If loaded settings contain a periodic mode,
+select a level/edge trigger before starting Scope or acquiring a frame.
 
 **Level (raw)** is an ADC-code threshold, not volts or the MCA threshold.
 A negative-going pulse has a falling leading edge. Select a crossing that is
@@ -124,12 +125,10 @@ Use the application's readers or [conversion tools](#conversion).
 
 ## Scope — periodic frame gap {#scope-gap}
 
-**Periodic gap** sets the post-frame gap in nanoseconds for the applicable periodic
-acquisition mode. It is not an inter-event time measured from the detector and
-does not make pulse-triggered events uniformly spaced.
-
-The control is enabled only where supported by the current mode and backend.
-Current DMA can apply its own [qualified Scope preset](#current-mode).
+Periodic timing is configured in [Current](#current-mode); the gap control is
+hidden in Scope. It is not an inter-event time measured from the detector and
+does not make pulse-triggered events uniformly spaced. Current DMA retains
+its qualified preset and the driver-supported periodic modes.
 
 ## Scope — Start, Stop, and Acquire Frame {#scope-run}
 

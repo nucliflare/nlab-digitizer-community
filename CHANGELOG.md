@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.8.4] — 2026-11-10
 
+### Changed
+
+- Remove all periodic triggers and gap controls from the Scope panel. Scope
+  offers only level/edge waveform triggers. Current retains driver-supported
+  periodic DMA and sums. Legacy periodic settings cannot start a hidden
+  periodic Scope measurement or single-frame acquisition.
+
 ### Added
 
 - Optional accumulated Scope amplitude distribution beside the waveform,

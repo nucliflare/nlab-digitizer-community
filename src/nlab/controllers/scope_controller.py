@@ -290,11 +290,12 @@ class ScopeController(QWidget):
         self.ui.labelFrameGap.setText("Periodic gap:")
 
         self.ui.comboTriggerMode.clear()
+        self.ui.comboTriggerMode.setPlaceholderText("Select a level/edge trigger")
         for mode in self._scope.supported_trigger_modes():
-            if mode == TriggerMode.PERIODIC_SUM:
-                continue  # Structured current measurements are not Scope waveforms.
+            if mode in (TriggerMode.TIMED, TriggerMode.PERIODIC_SUM):
+                continue  # Periodic acquisition is owned by the Current workspace.
             label = {0: "Any above", 1: "Any below", 2: "Falling edge",
-                     3: "Rising edge", 4: "Periodic"}[int(mode)]
+                     3: "Rising edge"}[int(mode)]
             self.ui.comboTriggerMode.addItem(label, int(mode))
         spec = specs[ScopeParam.EDGE_MODE]
         assert isinstance(spec, ListSpec)
@@ -1184,11 +1185,11 @@ class ScopeController(QWidget):
         )
 
     def _update_frame_gap_enabled(self) -> None:
-        periodic = self.ui.comboTriggerMode.currentData() == int(TriggerMode.TIMED)
-        enabled = periodic and self._scope.frame_period_cycles_supported()
-        self.ui.labelFrameGap.setEnabled(enabled)
-        self.ui.spinFrameGap.setEnabled(enabled)
-        self.ui.sliderFrameGap.setEnabled(enabled)
+        # Retain the backing widgets for Current presets/configuration readback,
+        # but periodic timing is no longer a Scope control.
+        for control in (self.ui.labelFrameGap, self.ui.spinFrameGap, self.ui.sliderFrameGap):
+            control.setEnabled(False)
+            control.hide()
 
     def _wire_slider_spinbox(
         self,
@@ -1333,7 +1334,7 @@ class ScopeController(QWidget):
         set_without_signal(
             self.ui.comboTriggerMode,
             self.ui.comboTriggerMode.setCurrentIndex,
-            TriggerMode.TIMED.value,
+            self.ui.comboTriggerMode.findData(int(TriggerMode.TIMED)),
         )
         self._set_dma_checkbox_without_write(True)
         self._update_frame_gap_enabled()
@@ -1395,9 +1396,11 @@ class ScopeController(QWidget):
         if (
             self._sum_worker is not None
             or self._scope.get_trigger_mode() == TriggerMode.PERIODIC_SUM
+            or (self._scope.get_trigger_mode() == TriggerMode.TIMED
+                and not self._dma_online_current)
         ):
             self.status.setText(
-                "Stop Current periodic sums and select a waveform trigger to use Scope."
+                "Periodic acquisition belongs to Current. Select a level/edge trigger to use Scope."
             )
             return
         self._raw_curve.cancelDrag()
@@ -1717,8 +1720,11 @@ class ScopeController(QWidget):
             self._refresh_timer.setInterval(1000 // value)
 
     def _request_frame(self) -> None:
-        if self._scope.get_trigger_mode() == TriggerMode.PERIODIC_SUM:
-            return  # Viewer memory is unsupported for structured sums.
+        mode = self._scope.get_trigger_mode()
+        if mode == TriggerMode.PERIODIC_SUM or (
+            mode == TriggerMode.TIMED and not self._dma_online_current
+        ):
+            return  # Current owns periodic acquisition and its DMA preview.
         if getattr(self, "_session_replay_active", False):
             return
         if self._dma_online_current and self._current_accumulator is not None:
@@ -1850,6 +1856,11 @@ class ScopeController(QWidget):
         if getattr(self, "_replay_hardware_interlocked", False):
             self.status.setText(
                 "Exit session replay before acquiring a live Scope frame"
+            )
+            return
+        if self._scope.get_trigger_mode() in (TriggerMode.TIMED, TriggerMode.PERIODIC_SUM):
+            self.status.setText(
+                "Periodic acquisition belongs to Current. Select a level/edge trigger to use Scope."
             )
             return
         self._raw_curve.cancelDrag()

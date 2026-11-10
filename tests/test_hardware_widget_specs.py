@@ -86,12 +86,11 @@ def test_scope_widgets_are_driven_from_hardware_specs(qapp: QApplication) -> Non
     assert ui.labelFrameSamples.text() == "Frame:"
     assert ui.labelFrameGap.text() == "Periodic gap:"
     assert (ui.spinDacValue.minimum(), ui.spinDacValue.maximum()) == (0, 1023)
-    assert [ui.comboTriggerMode.itemText(i) for i in range(5)] == [
+    assert [ui.comboTriggerMode.itemText(i) for i in range(ui.comboTriggerMode.count())] == [
         "Any above",
         "Any below",
         "Falling edge",
         "Rising edge",
-        "Periodic",
     ]
     assert ui.labelDacValue.text() == "DAC baseline:"
     assert ui.btnAutoSetup.text() == "Auto Setup"
@@ -155,7 +154,8 @@ def test_current_dma_start_configures_v122_periodic_scope(qtbot: QtBot) -> None:
     scope.set_frame_period_cycles.assert_called_once_with(12_500)
     assert controller.ui.spinFrameSamples.value() == 16_376
     assert controller.ui.spinFrameGap.value() == 100_000
-    assert controller.ui.comboTriggerMode.currentIndex() == TriggerMode.TIMED
+    assert controller.ui.comboTriggerMode.currentIndex() == -1
+    assert controller.ui.comboTriggerMode.findData(int(TriggerMode.TIMED)) == -1
     assert controller.ui.cbDmaEnable.isChecked()
     snapshot = accumulator.snapshot()
     assert snapshot.runtime is not None
@@ -433,25 +433,20 @@ def test_scope_status_message_cannot_widen_controls_panel(qtbot: QtBot) -> None:
     assert "truncated above 4656 ns (2328 ADC samples)" in status.text()
 
 
-def test_scope_frame_gap_is_enabled_only_for_periodic_trigger(qtbot: QtBot) -> None:
+def test_scope_hides_periodic_controls_and_only_offers_level_edge_triggers(qtbot: QtBot) -> None:
     scope = _scope_model_for_controller()
+    scope.supported_trigger_modes.return_value = tuple(TriggerMode)
     controller = ScopeController(scope, scope_dma=None, channel=0)
     qtbot.addWidget(controller)
 
-    assert not controller.ui.spinFrameGap.isHidden()
-    assert not controller.ui.spinFrameGap.isEnabled()
-    assert not controller.ui.labelFrameGap.isEnabled()
-
-    controller.ui.comboTriggerMode.setCurrentIndex(TriggerMode.TIMED)
-
-    scope.set_trigger_mode.assert_called_with(TriggerMode.TIMED)
-    assert controller.ui.spinFrameGap.isEnabled()
-    assert controller.ui.labelFrameGap.isEnabled()
-
-    controller.ui.comboTriggerMode.setCurrentIndex(TriggerMode.RISING_EDGE)
-
-    assert not controller.ui.spinFrameGap.isEnabled()
-    assert not controller.ui.labelFrameGap.isEnabled()
+    assert [controller.ui.comboTriggerMode.itemData(i) for i in range(4)] == [0, 1, 2, 3]
+    assert controller.ui.comboTriggerMode.count() == 4
+    for mode in (TriggerMode.TIMED, TriggerMode.PERIODIC_SUM):
+        assert controller.ui.comboTriggerMode.findData(int(mode)) == -1
+    for control in (controller.ui.spinFrameGap, controller.ui.labelFrameGap,
+                    controller.ui.sliderFrameGap):
+        assert control.isHidden()
+        assert not control.isEnabled()
 
 
 def test_iio_viewer_limit_is_separate_from_dma_hardware_limit() -> None:

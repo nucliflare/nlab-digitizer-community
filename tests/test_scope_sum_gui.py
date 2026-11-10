@@ -78,7 +78,7 @@ def _close(device, scope, current):
 def test_sums_use_existing_current_plot_and_restore_scope_after_stop(qtbot, monkeypatch):
     device, scope, current, capture = _views(qtbot, monkeypatch)
     try:
-        assert [scope.ui.comboTriggerMode.itemData(i) for i in range(5)] == list(range(5))
+        assert [scope.ui.comboTriggerMode.itemData(i) for i in range(4)] == list(range(4))
         assert scope.ui.comboTriggerMode.findData(5) == -1
         scope.ui.comboTriggerMode.setCurrentIndex(3)
         device.scope.set_pretrigger_samples(16)
