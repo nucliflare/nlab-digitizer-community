@@ -346,7 +346,8 @@ class ScopeController(QWidget):
         # geometry; trigger_mode_store() also requires sum acquisition stopped.
         self._scope.set_trigger_mode(TriggerMode(int(specs[ScopeParam.EDGE_MODE].default)))
         self._scope.set_trigger_level(int(specs[ScopeParam.TRIGGER_LEVEL].default))
-        self._scope.set_dac_value(int(specs[ScopeParam.DAC_VALUE].default))
+        if self._scope.dac_available():
+            self._scope.set_dac_value(int(specs[ScopeParam.DAC_VALUE].default))
         self._scope.set_pretrigger_samples(int(specs[ScopeParam.PRETRIGGER_SAMPLES].default))
         self._scope.set_frame_samples(int(specs[ScopeParam.FRAME_SAMPLES].default))
         self._scope.set_frame_period_cycles(
@@ -356,8 +357,15 @@ class ScopeController(QWidget):
     def _load_hardware_state(self) -> None:
         self.ui.spinTriggerLevel.setValue(self._scope.get_trigger_level())
         self.ui.sliderTriggerLevel.setValue(self._scope.get_trigger_level())
-        self.ui.spinDacValue.setValue(self._scope.get_dac_value())
-        self.ui.sliderDacValue.setValue(self._scope.get_dac_value())
+        dac_available = self._scope.dac_available()
+        self.ui.spinDacValue.setEnabled(dac_available)
+        self.ui.sliderDacValue.setEnabled(dac_available)
+        self.ui.btnAutoSetup.setEnabled(dac_available)
+        if dac_available:
+            self.ui.spinDacValue.setValue(self._scope.get_dac_value())
+            self.ui.sliderDacValue.setValue(self._scope.get_dac_value())
+        else:
+            self.ui.spinDacValue.setToolTip("No AFE DAC output is available for this channel")
         self.ui.spinPretrigger.setValue(
             self._scope.get_pretrigger_samples() * self._SAMPLE_PERIOD_NS
         )
@@ -610,7 +618,7 @@ class ScopeController(QWidget):
         self.ui.btnStop.setEnabled(False)
         self.ui.btnAcquireFrame.setEnabled(True)
         self.ui.btnDmaFile.setEnabled(True)
-        self.ui.btnAutoSetup.setEnabled(True)
+        self.ui.btnAutoSetup.setEnabled(self._scope.dac_available())
         self._update_axis_ranges()
 
     # ------------------------------------------------------------------
@@ -908,6 +916,7 @@ class ScopeController(QWidget):
         self._pretrigger_line.setMovable(marker_enabled)
         enabled = (
             self._display_mode == DisplayMode.RAW
+            and self._scope.dac_available()
             and self.ui.groupTrigger.isEnabled()
             and self.ui.groupTiming.isEnabled()
             and self._dma_worker is None
@@ -1041,8 +1050,11 @@ class ScopeController(QWidget):
     def _configure_sum_controls(self) -> None:
         is_sum = self._scope.get_trigger_mode() == TriggerMode.PERIODIC_SUM
         for control in (self.ui.spinPretrigger, self.ui.sliderPretrigger,
-                        self.ui.btnAcquireFrame, self.ui.btnAutoSetup):
+                        self.ui.btnAcquireFrame):
             control.setEnabled(not is_sum and not self._replay_hardware_interlocked)
+        self.ui.btnAutoSetup.setEnabled(
+            not is_sum and not self._replay_hardware_interlocked and self._scope.dac_available()
+        )
         self.ui.cbDmaEnable.setEnabled(not is_sum and not self._replay_hardware_interlocked)
         if is_sum:
             self._raw_curve.clear()
@@ -1299,7 +1311,8 @@ class ScopeController(QWidget):
         # returns to a threshold/edge mode. The DAC baseline remains active for
         # every mode and therefore directly affects the Current waveform mean.
         self._scope.set_trigger_level(trigger_level)
-        self._scope.set_dac_value(dac_value)
+        if self._scope.dac_available():
+            self._scope.set_dac_value(dac_value)
         self._scope.set_pretrigger_samples(0)
         self._scope.set_frame_samples(frame_samples)
         self._scope.set_trigger_mode(TriggerMode.TIMED)
@@ -1571,7 +1584,7 @@ class ScopeController(QWidget):
         self.ui.btnAcquireFrame.setEnabled(True)
         self.ui.cbDmaEnable.setEnabled(True)
         self.ui.btnDmaFile.setEnabled(True)
-        self.ui.btnAutoSetup.setEnabled(True)
+        self.ui.btnAutoSetup.setEnabled(self._scope.dac_available())
         log.info("Scope ch%d: acquisition stopped", self._channel)
 
     # ------------------------------------------------------------------
@@ -1579,6 +1592,9 @@ class ScopeController(QWidget):
     # ------------------------------------------------------------------
 
     def _on_auto_setup(self) -> None:
+        if not self._scope.dac_available():
+            self.status.setText("Auto Setup requires an available AFE DAC output")
+            return
         if getattr(self, "_replay_hardware_interlocked", False):
             self.status.setText(
                 "Exit session replay before running Scope Auto Setup"
@@ -1629,7 +1645,7 @@ class ScopeController(QWidget):
         self.ui.btnStop.setEnabled(False)
         self.ui.btnAcquireFrame.setEnabled(not busy)
         self.ui.btnDmaFile.setEnabled(not busy)
-        self.ui.btnAutoSetup.setEnabled(True)
+        self.ui.btnAutoSetup.setEnabled(self._scope.dac_available())
         self.ui.btnAutoSetup.setText("Cancel Auto" if busy else "Auto Setup")
 
     def _on_auto_setup_succeeded(self, result: ScopeAutoSetupResult) -> None:
@@ -2419,7 +2435,7 @@ class ScopeController(QWidget):
             self.ui.btnAcquireFrame.setEnabled(True)
             self.ui.cbDmaEnable.setEnabled(True)
             self.ui.btnDmaFile.setEnabled(True)
-            self.ui.btnAutoSetup.setEnabled(True)
+            self.ui.btnAutoSetup.setEnabled(self._scope.dac_available())
 
             if self._scope.dma_fault_is_latched():
                 # A genuine EIO blocks rearm until the passive recovery check.

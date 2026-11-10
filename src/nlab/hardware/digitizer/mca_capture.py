@@ -19,6 +19,28 @@ from nlab.hardware.digitizer.iio_listmode import VDPP_ZC_CALC_SCHEMA
 log = logging.getLogger(__name__)
 
 
+def zc_timing_units(schema: str) -> dict[str, object]:
+    if schema != VDPP_ZC_CALC_SCHEMA:
+        return {"interpretation": "unqualified; no physical correction units asserted"}
+    return {
+        "precedence": (
+            "PSD (marker & 0x08), then CFD (marker & 0x02), otherwise no valid correction"
+        ),
+        "psd": {"unit_ns": 8, "offset": "whole beats", "fraction": "signed Q2.14 beat"},
+        "cfd": {"unit_ns": 2, "offset": "whole ADC samples",
+                "fraction": "signed Q2.14 ADC sample"},
+        "psd_offset_integrity": "8-bit narrowing unresolved; physical timing unqualified",
+    }
+
+
+class McaWriterError(RuntimeError):
+    """A scalar copy of a file worker error, without its native-resource traceback."""
+
+    def __init__(self, message: str, number: int | None) -> None:
+        super().__init__(message)
+        self.errno = number
+
+
 class McaDmaOutputMode(StrEnum):
     BINARY = "binary"
     ROOT = "root"
@@ -51,7 +73,7 @@ class McaRunSummary:
     duration_s: float
     records: int
     continuity: str
-    diagnostics: dict[str, int | bool]
+    diagnostics: dict[str, object]
     error: str | None = None
     metadata_error: str | None = None
 
@@ -68,8 +90,8 @@ class McaRunSummary:
             self.continuity
         ]
         detail = f"{label}: {self.records:,} records, {self.rate_hz:,.0f}/s avg"
-        dropped = int(self.diagnostics.get("list_deadtime_raw", 0))
-        fault = int(self.diagnostics.get("dma_fault", 0))
+        dropped = int(str(self.diagnostics.get("list_deadtime_raw", 0)))
+        fault = int(str(self.diagnostics.get("dma_fault", 0)))
         if dropped:
             detail += f"; {dropped:,} dropped"
         if fault:
@@ -227,11 +249,17 @@ class _Hdf5Sink(_BufferedStructuredSink):
             compression_opts=1,
             shuffle=True,
         )
-        self._events.attrs["timestamp_unit"] = "8 ns ticks"
+        self._events.attrs["timestamp_unit"] = (
+            "8 ns ticks" if client_record_schema == VDPP_ZC_CALC_SCHEMA
+            else "unqualified raw uint64"
+        )
         self._events.attrs["gate_unit"] = "raw uint16"
         self._events.attrs["client_record_schema"] = client_record_schema
-        self._events.attrs["zc_offset_format"] = "unsigned uint8; 2 ns ADC samples"
-        self._events.attrs["zc_estimation_format"] = "signed Q2.14 ADC-sample fraction"
+        # PetaLinux c546f14 user-application-iio-audit U12: PSD takes
+        # precedence and uses decimated beats; CFD uses original ADC samples.
+        self._events.attrs["zc_offset_format"] = "unsigned uint8; marker-selected units"
+        self._events.attrs["zc_estimation_format"] = "signed Q2.14; marker-selected units"
+        self._events.attrs["zc_timing_units"] = json.dumps(zc_timing_units(client_record_schema))
         self._committed = self._file.create_dataset("committed_events", data=np.uint64(0))
         self._complete = self._file.create_dataset("capture_complete", data=np.bool_(False))
         self._file.attrs["format"] = "nlab-mca-listmode"
@@ -249,13 +277,30 @@ class _Hdf5Sink(_BufferedStructuredSink):
         self._count = new_count
 
     def close(self, complete: bool) -> None:
+        failure: BaseException | None = None
         try:
             self._flush_pending()
             self._complete[()] = np.bool_(complete)
             self._complete.flush()
             self._file.flush()
+        except BaseException as exc:
+            failure = exc
+            try:
+                self._complete[()] = np.bool_(False)
+                self._complete.flush()
+                self._file.flush()
+            except Exception as cleanup:
+                exc.add_note(f"Retracting capture completion: {cleanup}")
         finally:
-            self._file.close()
+            try:
+                self._file.close()
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+                else:
+                    failure.add_note(f"File close: {exc}")
+        if failure is not None:
+            raise failure
 
 
 class _RootSink(_BufferedStructuredSink):
@@ -276,13 +321,16 @@ class _RootSink(_BufferedStructuredSink):
 
         self._file = uproot.create(path)
         self._file["configuration_yaml"] = configuration_yaml
-        self._file["event_schema"] = (
-            f'{{"client_record_schema":"{client_record_schema}",'
-            '"timestamp":"uint64, 8 ns ticks","long_gate":"uint16, raw",'
-            '"short_gate":"uint16, raw","marker":"uint8",'
-            '"zc_offset":"uint8, 2 ns ADC samples",'
-            '"zc_estimation":"int16, signed Q2.14 ADC-sample fraction"}'
-        )
+        self._file["event_schema"] = json.dumps({
+            "client_record_schema": client_record_schema,
+            "timestamp": ("uint64, 8 ns ticks" if client_record_schema == VDPP_ZC_CALC_SCHEMA
+                          else "unqualified raw uint64"),
+            "long_gate": "uint16, raw",
+            "short_gate": "uint16, raw", "marker": "uint8",
+            "zc_offset": "uint8, marker-selected units",
+            "zc_estimation": "int16, signed Q2.14, marker-selected units",
+            "zc_timing_units": zc_timing_units(client_record_schema),
+        })
         self._tree = self._file.mktree(
             "events",
             {
@@ -338,7 +386,7 @@ class McaCaptureWriter:
         self._queue: queue.Queue[object] = queue.Queue(maxsize=_WRITER_QUEUE_BATCHES)
         self._ready = threading.Event()
         self._done = threading.Event()
-        self._error: BaseException | None = None
+        self._error: tuple[int | None, str] | None = None
         self._thread = threading.Thread(
             target=self._run,
             name=f"mca-{mode.value}-writer",
@@ -346,7 +394,11 @@ class McaCaptureWriter:
         )
         self._thread.start()
         self._ready.wait()
-        self._raise_if_failed()
+        try:
+            self._raise_if_failed()
+        except Exception:
+            self._thread.join()
+            raise
 
     def _make_sink(self) -> _CaptureSink:
         if self._mode is McaDmaOutputMode.BINARY:
@@ -383,13 +435,13 @@ class McaCaptureWriter:
             sink = None
             closing_sink.close(complete)
         except BaseException as exc:
-            self._error = exc
-            log.exception("MCA %s writer failed for %s", self._mode.value, self._path)
+            self._error = (getattr(exc, "errno", None), str(exc))
+            log.error("MCA %s writer failed for %s: %s", self._mode.value, self._path, exc)
             if sink is not None:
                 try:
                     sink.close(False)
-                except BaseException:
-                    log.exception("MCA writer also failed while closing %s", self._path)
+                except BaseException as cleanup:
+                    self._error = (self._error[0], f"{self._error[1]}; File cleanup: {cleanup}")
         finally:
             self._ready.set()
             self._done.set()
@@ -408,23 +460,26 @@ class McaCaptureWriter:
                 continue
 
     def close(self, *, complete: bool) -> None:
-        if not self._done.is_set():
-            while True:
-                self._raise_if_failed()
-                try:
-                    self._queue.put(_Finish(complete), timeout=_QUEUE_POLL_SECONDS)
-                    break
-                except queue.Full:
-                    continue
-            self._done.wait()
-        self._thread.join()
+        try:
+            if not self._done.is_set():
+                while True:
+                    self._raise_if_failed()
+                    try:
+                        self._queue.put(_Finish(complete), timeout=_QUEUE_POLL_SECONDS)
+                        break
+                    except queue.Full:
+                        continue
+                self._done.wait()
+        finally:
+            self._thread.join()
         self._raise_if_failed()
 
     def _raise_if_failed(self) -> None:
         if self._error is not None:
-            raise RuntimeError(
-                f"MCA {self._mode.value} writer failed for {self._path}: {self._error}"
-            ) from self._error
+            number, message = self._error
+            raise McaWriterError(
+                f"MCA {self._mode.value} writer failed for {self._path}: {message}", number
+            ) from None
 
 
 @dataclass(frozen=True)

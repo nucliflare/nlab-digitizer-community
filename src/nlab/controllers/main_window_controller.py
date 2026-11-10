@@ -30,6 +30,7 @@ from nlab.controllers.psd_controller import PSDController
 from nlab.controllers.psu_controller import PSUController
 from nlab.controllers.scope_controller import ScopeController
 from nlab.hardware.digitizer.current_monitor import ScopeCurrentAccumulator
+from nlab.hardware.digitizer.device_information import DigitizerInformation, InformationSection
 from nlab.hardware.digitizer.digitizer import Digitizer
 from nlab.hardware.digitizer.dma import McaEventBuffer, ScopeFrameBuffer
 from nlab.hardware.digitizer.mca import McaGateTiming
@@ -388,6 +389,26 @@ class MainWindowController:
     @property
     def channel_count(self) -> int:
         return len(self._devices)
+
+    def digitizer_information(self) -> tuple[tuple[str, DigitizerInformation], ...]:
+        """Supply About with cached scalar metadata, never live IIO handles."""
+        if self._offline:
+            return ()
+        result = []
+        for index, device in enumerate(self._devices):
+            information = device.get_device_information()
+            if information is None:
+                address = self._physical_channel(index)
+                endpoint = self._endpoints[address.digitizer]
+                information = DigitizerInformation(
+                    f"ip:{endpoint.host}:{endpoint.port}", address.channel,
+                    (InformationSection("Connection", (
+                        ("Device metadata", "Unknown / unavailable"),
+                    )),),
+                    (),
+                )
+            result.append((self._channel_label(index), information))
+        return tuple(result)
 
     def energy_calibrated_channel_labels(self) -> tuple[str, ...]:
         """Return display labels for MCAs with an applied energy calibration."""

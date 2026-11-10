@@ -113,6 +113,20 @@ remembers the last successful connection. It scans local DNS-SD/mDNS services
 and directly probes the USB-network endpoint at `192.168.3.1:30431`; **Rescan**
 repeats both checks.
 
+Discovered entries show the advertised hostname beside its IP, for example
+`nucliflare-xxxxx.local (192.168.10.128)`. Connections and saved history use
+the associated address. No additional wiring, firmware, or decoder choices
+are required for a standard connection.
+
+Open **Help → About** for read-only digitizer details grouped by board and
+channel: target-reported firmware/image and board metadata, IIO/core versions,
+MCA ABI, list-mode geometry/decoder, selected DAC output, and detected IIO
+devices. **Copy Digitizer Details** copies the complete connection snapshot
+for support. Reconnect to refresh it. Missing build identity appears as
+unknown; the MCA hardware/software ID registers are shown separately and do
+not establish physical qualification of a deployed image. Opening About
+performs no additional hardware polling.
+
 After one board is live, **Connection -> Add Digitizer...** appends another
 independent endpoint. Channel labels include their physical source (`D1:CH0`,
 `D1:CH1`, `D2:CH0`, and so on), and each board keeps separate Global controls.

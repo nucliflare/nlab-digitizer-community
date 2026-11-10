@@ -1608,7 +1608,9 @@ class MainAppWindow(QMainWindow):
         self._controller.reset_dock_layout()
 
     def _on_about(self) -> None:
-        AboutDialog(_ABOUT_TEXT, self).exec()
+        controller = getattr(self, "_controller", None)
+        digitizers = controller.digitizer_information() if controller is not None else ()
+        AboutDialog(_ABOUT_TEXT, self, digitizers=digitizers).exec()
 
     def _on_third_party_licenses(self) -> None:
         LicenseDialog(self).exec()

@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from .acquisition_profile import AcquisitionProfile
 from .backends.base import DigitizerBackend, IDSBackend
+from .device_information import DigitizerInformation
 from .diagnostics import GlobalDiagnosticReading
 from .dma import IIOMcaDmaStreamer, IIOScopeDmaStreamer
 from .hv import HVSupply
@@ -91,6 +93,11 @@ class Digitizer:
             return []
         return self.hv.get_global_diagnostics()
 
+    def get_device_information(self) -> DigitizerInformation | None:
+        """Return immutable connection-time identity; never poll hardware here."""
+        information = getattr(self._backend, "get_device_information", lambda: None)()
+        return information if isinstance(information, DigitizerInformation) else None
+
     @classmethod
     def from_iio(
         cls,
@@ -98,6 +105,8 @@ class Digitizer:
         uri: str = "ip:192.168.10.128:30431",
         *,
         with_ids: bool = True,
+        profile: AcquisitionProfile | None = None,
+        dac_channel: int | None = None,
     ) -> Digitizer:
         """Create a Digitizer backed by the on-FPGA IIO device tree.
 
@@ -126,7 +135,7 @@ class Digitizer:
         from .backends.iio_backend import IIODigitizerBackend
         from .backends.iio_ids_backend import IIOIDSBackend, IIOIDSUnavailableError
 
-        backend = IIODigitizerBackend(channel, uri)
+        backend = IIODigitizerBackend(channel, uri, dac_channel=dac_channel, profile=profile)
         ids = None
         if with_ids:
             try:

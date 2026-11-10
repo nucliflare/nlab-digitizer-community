@@ -492,10 +492,10 @@ def test_converter_understands_iio_listmode_version(tmp_path: Path) -> None:
         np.testing.assert_array_equal(
             h5["trapezoid_energy"][:1024], backend.first["trapezoid_energy"]
         )
-        np.testing.assert_allclose(h5["cfd_interpolation_samples"][:1024], -0.25)
-        np.testing.assert_array_equal(h5["cfd_valid"][:1024], True)
+        assert "cfd_interpolation_samples" not in h5
+        assert "cfd_valid" not in h5
         assert h5["events"].attrs["zc_estimation_format"] == (
-            "signed Q2.14 ADC-sample fraction"
+            "signed Q2.14; marker-selected units"
         )
 
 

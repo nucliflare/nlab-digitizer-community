@@ -42,7 +42,7 @@ def _finish_mca_run(
     started_utc: datetime,
     started_monotonic: float,
     records: int,
-    diagnostics: dict[str, int | bool] | None,
+    diagnostics: dict[str, object] | None,
     error: str | None,
 ) -> McaRunSummary:
     if error is not None or (diagnostics is not None and not diagnostics.get("continuity_valid")):

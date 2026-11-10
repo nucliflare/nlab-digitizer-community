@@ -7,10 +7,24 @@ from ..diagnostics import GlobalDiagnosticReading
 
 if TYPE_CHECKING:
     from ..current_monitor import CurrentMonitorClient
+    from ..device_information import DigitizerInformation
 
 
 class ScopeBackend(ABC):
     """Scope hardware access in hardware-native samples and ADC counts."""
+
+    def get_device_information(self) -> "DigitizerInformation | None":
+        """Return cached connection metadata, without hardware I/O."""
+        return None
+
+    def supports_dac(self) -> bool:
+        return True
+
+    def acquisition_profile(self) -> dict[str, object]:
+        return {}
+
+    def apply_acquisition_profile(self, values: dict[str, object]) -> None:
+        raise NotImplementedError("This backend cannot select wiring/producer provenance")
 
     def create_isolated_scope_backend(self) -> "ScopeBackend":
         """Return a new connection suitable for a background scope operation.
@@ -79,6 +93,9 @@ class ScopeBackend(ABC):
 
 class MCABackend(ABC):
     """Abstract interface for MCA / DPP hardware access."""
+
+    def get_psd_zc_modes(self) -> tuple[int, ...]:
+        return (0, 1)
 
     def create_current_monitor_client(self) -> "CurrentMonitorClient":
         """Return an independent connection for background IIR polling.

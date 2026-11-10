@@ -397,6 +397,13 @@ This is a separate format from NDMA waveforms and MCA list mode; see the
 
 ### Application workflow
 
+- **Help → About** includes read-only digitizer details grouped by board and
+  channel: reported firmware/image and board metadata, IIO/core versions, MCA
+  ABI, list-mode geometry and decoder, DAC output, and detected devices. **Copy Digitizer
+  Details** copies the complete snapshot. Values are captured when connecting;
+  reconnect to refresh them. Missing firmware/build identity is shown as unknown,
+  separately from the pulse processor's hardware/software ID registers. Opening
+  About adds no hardware polling and requires no metadata entry.
 - **Help → About → Check for Updates** compares the installed version with the
   latest published stable release on GitHub. The check runs only on request,
   keeps the interface responsive, and offers a release-page link when an update
@@ -618,6 +625,39 @@ channel. Current MCA and list-mode drivers expose `channel_index` for stable
 pairing. Scope and input-filter instances without that attribute use sorted
 `iio:deviceN` order as a compatibility fallback, so verify physical A/B mapping
 after a firmware or device-tree change.
+
+Select scanned boards by their `hostname.local (IP address)` entries; the application
+connects using the associated address. Manual hostname/IP entry remains available.
+Connecting requires only the existing address, port, and channel count. The
+standard Scope/DAC mapping and supported-producer list-mode decoder remain the
+application defaults; no manual wiring or firmware metadata is required. Missing
+image identity is recorded as unknown, and the default decoder is source-derived,
+not physically qualified by register-version equality. Unrecognized producer
+versions still permit raw binary capture only. Optional deployment overrides
+remain available through `AcquisitionProfile` and saved hardware settings.
+
+MCA PSD source **Trapezoid** (mode 2) appears only when the driver advertises
+`psd_zero_crossing_mode_available`. It needs valid trapezoid R/M/beta and PSD
+windows even with integration energy selected; selecting it does not force
+trapezoid energy. The driver derives 1/R. The documented upstream **8-bit PSD
+offset narrowing affects every PSD mode** and remains a release gate; selecting
+a decoder or passing host tests does not qualify physical PSD timing.
+
+Failed DMA cancellation/join retains the reader, buffer, and connection until
+the reader exits. MCA failures require **Acknowledge recovery** after validating
+the target's recovery; the button only checks stopped ownership/status and never
+resets hardware. `dma_poisoned=1` requires a target reboot. Persistent
+`measurement_in_progress=1` after STOP blocks further configuration/rearm.
+Cleared status and bounded drain inactivity do not establish the deferred A07
+downstream completion fence or certify a final histogram.
+
+MCA run summaries retain incomplete status, the first errno, additional cleanup
+errors, available DMA/queue/poison diagnostics, effective native parameters, and
+producer provenance on failure as well as success. Structured timing metadata
+uses PSD-first marker precedence: PSD offsets/fractions use 8 ns beat units;
+CFD offsets/fractions use 2 ns ADC-sample units. Native uint64 timestamps remain
+exact. Modern mean4 waveform export still requires a future versioned waveform
+file format; the NDMA v1 guard remains in place.
 
 ### List-mode firmware compatibility
 

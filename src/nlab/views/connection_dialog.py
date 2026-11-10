@@ -4,9 +4,9 @@ import logging
 import threading
 from typing import cast
 
-from PySide6.QtCore import QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QSettings, QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtGui import QShowEvent
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QWidget
+from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QWidget
 
 from nlab.hardware.digitizer.discovery import (
     USB_GADGET_HOST,
@@ -53,6 +53,7 @@ class ConnectionDialog(QDialog):
         super().__init__(parent)
         self._ui = Ui_ConnectionDialog()
         self._ui.setupUi(self)  # type: ignore[no-untyped-call]
+        self._ui.comboIp.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self._ui.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setText("Connect")
         self._ui.buttonBox.accepted.connect(self._on_accept)
         self._ui.buttonBox.rejected.connect(self.reject)
@@ -71,8 +72,7 @@ class ConnectionDialog(QDialog):
         self._startup_scan_started = False
         self._address_edited_since_scan = False
         self._explicit_ip = ip is not None
-        self._recent_ips: set[str] = set()
-        self._discovered_hosts: set[str] = set()
+        self._recent_ips: list[str] = []
         self._offline = False
         apply_taskbar_icon(self)
         self._load_settings()
@@ -94,7 +94,14 @@ class ConnectionDialog(QDialog):
 
     @property
     def ip(self) -> str:
-        return self._ui.comboIp.currentText().strip()
+        combo = self._ui.comboIp
+        text = combo.currentText().strip()
+        endpoint = combo.currentData(_DISCOVERY_ROLE)
+        # An editable combo retains its selected item's data while the user
+        # types another address. Only an unchanged label denotes that endpoint.
+        if isinstance(endpoint, DiscoveredDigitizer) and text == endpoint.display_name:
+            return endpoint.host
+        return text
 
     @property
     def port(self) -> int:
@@ -195,45 +202,47 @@ class ConnectionDialog(QDialog):
     def _replace_discovered_addresses(self, digitizers: tuple[DiscoveredDigitizer, ...]) -> None:
         combo = self._ui.comboIp
         current_text = combo.currentText()
+        current_host, current_port = self.ip, self.port
+        previous = combo.currentData(_DISCOVERY_ROLE)
+        selected_discovery = (
+            isinstance(previous, DiscoveredDigitizer) and current_text == previous.display_name
+        )
         preserve_current = self._explicit_ip or self._address_edited_since_scan
-
-        for index in range(combo.count() - 1, -1, -1):
-            host = combo.itemText(index)
-            if host in self._discovered_hosts and host not in self._recent_ips:
-                combo.removeItem(index)
-            else:
-                combo.setItemData(index, None, _DISCOVERY_ROLE)
-                combo.setItemData(index, None, Qt.ItemDataRole.ToolTipRole)
-
-        self._discovered_hosts = {endpoint.host for endpoint in digitizers}
-        by_host = {endpoint.host: endpoint for endpoint in digitizers}
-        for endpoint in digitizers:
-            index = combo.findText(endpoint.host, Qt.MatchFlag.MatchFixedString)
-            if index < 0:
-                combo.addItem(endpoint.host)
-                index = combo.count() - 1
-            combo.setItemData(index, endpoint, _DISCOVERY_ROLE)
-            combo.setItemData(
-                index,
-                f"{endpoint.description} ({endpoint.source}, port {endpoint.port})",
-                Qt.ItemDataRole.ToolTipRole,
-            )
-
-        if preserve_current:
-            combo.setEditText(current_text)
-            return
-        selected = by_host.get(current_text)
-        if selected is None and digitizers:
+        current_hostname = previous.hostname if selected_discovery else None
+        aliases = {value for endpoint in digitizers for value in (endpoint.host, endpoint.hostname)}
+        selected = next((endpoint for endpoint in digitizers
+                         if (current_host in (endpoint.host, endpoint.hostname)
+                             or (current_hostname and current_hostname == endpoint.hostname))
+                         and endpoint.port == current_port), None)
+        if selected is None and not preserve_current and digitizers:
             selected = digitizers[0]
-        if selected is not None:
-            index = combo.findText(selected.host, Qt.MatchFlag.MatchFixedString)
-            combo.setCurrentIndex(index)
+
+        # Rebuilding labels must not trigger intermediate address/port changes.
+        with QSignalBlocker(combo):
+            combo.clear()
+            for host in self._recent_ips:
+                if host not in aliases:
+                    combo.addItem(host)
+            for endpoint in digitizers:
+                combo.addItem(endpoint.display_name, endpoint)
+                combo.setItemData(
+                    combo.count() - 1,
+                    f"{endpoint.description} ({endpoint.source}, port {endpoint.port})",
+                    Qt.ItemDataRole.ToolTipRole,
+                )
+            if selected is not None and (not preserve_current or selected_discovery):
+                combo.setCurrentIndex(combo.findData(selected, _DISCOVERY_ROLE))
+            else:
+                combo.setEditText(current_host if selected_discovery else current_text)
+
+        if selected is not None and not preserve_current:
+            index = combo.currentIndex()
             self._on_address_selected(index)
 
     def _load_settings(self) -> None:
         settings = QSettings()
         recent = cast(list[str], settings.value(_KEY_RECENT_IPS, [], type=list))
-        self._recent_ips = set(recent)
+        self._recent_ips = recent
         self._ui.comboIp.addItems(recent)
         if recent:
             self._ui.comboIp.setCurrentIndex(0)

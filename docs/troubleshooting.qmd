@@ -14,6 +14,12 @@ channel mapping, and advertised geometry. If a transport problem can be
 reproduced with `iio_info` or `iio_readdev`, include that result; it separates a
 target/libiio failure from the GUI.
 
+**Help → About → Copy Digitizer Details** provides the cached endpoint,
+firmware/image metadata when reported, board attributes, per-channel core
+versions, MCA ABI, list-mode layout/decoder, DAC output, and IIO device list.
+It does not poll active hardware. Reconnect to refresh the snapshot; an unknown
+build identity is different from a missing or unsupported hardware IP version.
+
 ## Connection succeeds but a workspace is missing
 
 The application enables workspaces by detected capability. Check for the
@@ -62,6 +68,13 @@ After MCA list-mode Stop, Start and configuration controls remain disabled
 until the reader drains, destroys its native buffer, and releases the hardware
 gate. Do not interpret this short interlock as a frozen GUI or try to rearm from
 another path.
+
+If cancellation or joining fails, the reader retains its native buffer and
+connection until it exits. After a failed MCA session, **Acknowledge recovery**
+performs a passive ownership/status check after externally validated recovery;
+it never resets hardware. A poisoned DMA channel requires a target reboot.
+Persistent `measurement_in_progress=1` after STOP blocks configuration and
+rearm. A cleared progress bit is still not A07's final completion fence.
 
 Do not force `dma_enable` or list ownership gates. Buffer setup/teardown owns
 them, and direct writes can break the required reader-before-enable order.

@@ -58,10 +58,23 @@ ROOT stores the same canonical fields in an `events` TTree. HDF5 and ROOT embed
 the YAML configuration and the client record schema. They do not reinterpret
 raw channels as calibrated energy.
 
+Timing metadata follows the marker-selected branch: PSD (`marker & 0x08`)
+takes precedence and uses 8 ns beat offsets/fractions; CFD (`marker & 0x02`)
+uses 2 ns ADC-sample offsets/fractions. Fractions retain signed Q2.14 meaning,
+and uint64 timestamps remain exact. An unrecognized producer retains raw fields
+without derived CFD timing during binary-to-HDF5 conversion. The upstream
+8-bit PSD offset narrowing remains unresolved in every PSD mode; decoder
+selection does not qualify physical PSD timing.
+
 Every file-producing MCA run writes a same-stem `.run.json` summary containing
 channel, format, start/end time, record count, average rate, continuity state,
 and transport diagnostics. A missing summary after a crash means the run was
 not finalized; it is not evidence that the capture is complete.
+
+Failed runs retain the primary errno and available additional cleanup errors,
+poison/queue status, effective ABI2 parameters, and decoder/image provenance.
+An unreported firmware/image identity is recorded as unknown. Failed final
+HDF5 flush retracts the completion flag where storage remains writable.
 
 ## IIO list-mode sidecars
 
@@ -86,6 +99,11 @@ For current IIO list mode, a valid run requires all of the following:
 - list deadtime is zero;
 - only complete 16 KiB frames were accepted;
 - the buffer stopped, drained, and closed successfully.
+
+Uncertain reader ownership, reset quarantine, or persistent MCA progress after
+STOP keeps a run incomplete and blocks rearm. Matching transport counters and
+cleared software enable do not establish the deferred A07 downstream completion
+fence or certify a final histogram.
 
 `dma_error_count` is cumulative since driver initialization; interpret it with
 the current fault and run-local counters. IIO record counts include all slots

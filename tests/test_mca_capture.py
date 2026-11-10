@@ -98,8 +98,12 @@ def test_hdf5_writer_appends_events_and_embeds_configuration(tmp_path: Path) -> 
         assert int(capture.attrs["format_version"]) == 2
         assert capture["events"].attrs["client_record_schema"] == VDPP_ZC_CALC_SCHEMA
         assert capture["events"].attrs["zc_offset_format"] == (
-            "unsigned uint8; 2 ns ADC samples"
+            "unsigned uint8; marker-selected units"
         )
+        units = json.loads(capture["events"].attrs["zc_timing_units"])
+        assert units["psd"]["unit_ns"] == 8
+        assert units["cfd"]["unit_ns"] == 2
+        assert units["precedence"].startswith("PSD")
         np.testing.assert_array_equal(capture["events"]["marker"], 0x82)
         np.testing.assert_array_equal(capture["events"]["zc_estimation"], -8192)
 

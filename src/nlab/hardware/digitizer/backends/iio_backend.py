@@ -1,6 +1,6 @@
 """Direct IIO control and DMA for Digitizer 4.0.
 
-MCA uses parameter ABI2 (PetaLinux bb8c57e): ADC samples are native 2 ns
+MCA uses parameter ABI2 (PetaLinux c546f14): ADC samples are native 2 ns
 positions, C delay is an exponent, and trapezoid beta is a raw u32.
 Register encoding belongs to the kernel. Historical ABI1 live checks do not
 qualify ABI2. Scope raw/mean4 and structured periodic sums remain distinct.
@@ -19,15 +19,21 @@ from collections.abc import Callable
 import iio
 import numpy as np
 
+from ..acquisition_profile import AcquisitionProfile
 from ..current_monitor import CurrentMonitorClient
+from ..device_information import DigitizerInformation, collect_device_information
 from ..dma import ScopeDmaGeometry
-from ..iio_listmode import IIO_LM_EVENT_DTYPE
+from ..iio_listmode import IIO_LM_EVENT_DTYPE, VDPP_ZC_CALC_SCHEMA
 from ..iio_scope_stream import IiodScopeStream
 from ..mca_parameters import PARAMETERS, validate_parameters
 from ..scope_sums import ScopeSumGeometry
 from .base import DigitizerBackend
 
 log = logging.getLogger(__name__)
+
+
+class DmaReaderActiveError(RuntimeError):
+    """A native reader still owns its buffer and context after cancellation."""
 
 
 # Registers genuinely do not exist in the MCA driver sources (checked
@@ -180,6 +186,8 @@ _LM_CLOSE_INACTIVITY_SECONDS = 1.0
 _LM_CLOSE_POLL_SECONDS = 0.050
 _LM_CLOSE_JOIN_SECONDS = 1.25
 _LM_CLOSE_RELEASE_SECONDS = 3.0
+# Operational grace for a nonblocking STOP status transition, not an A07 fence.
+_MCA_STOP_STATUS_SECONDS = 0.25
 # A network refill can report either the target's Linux ETIMEDOUT=110 through
 # the iiod protocol or the local socket timeout. The latter is also 110 on
 # Linux but WSAETIMEDOUT=10060 on Windows. Both mean "no block arrived in the
@@ -337,12 +345,15 @@ class IIODigitizerBackend(DigitizerBackend):
         dac_channel: int | None = None,
         *,
         _scope_only: bool = False,
+        profile: AcquisitionProfile | None = None,
     ) -> None:
         self._ch = channel
         self._uri = uri
         self._dac_name = dac_name
         self._dac_channel = dac_channel
         self._scope_only = _scope_only
+        self._acquisition_profile = profile
+        self._device_information: DigitizerInformation | None = None
         self._ctx = iio.Context(uri)
 
         scopes = _devices_named(self._ctx, _SCOPE_DEVICE_NAME)
@@ -362,17 +373,21 @@ class IIODigitizerBackend(DigitizerBackend):
         # DAC defaults to vdpp_afe_dac (see module-level comment above
         # _DAC_DEVICE_NAME) -- one device shared by both scope channels,
         # selected by output channel index rather than by device instance
-        # like vdpp_scope. dac_channel defaults to this scope's channel
-        # index, confirmed live to be the right 1:1 mapping (voltage0 ->
-        # scope channel 0, voltage1 -> scope channel 1). Pass dac_name=None
+        # like vdpp_scope. The legacy API defaults to the sorted scope index;
+        # this does not prove physical wiring. Keep the application's established
+        # mapping; an optional profile can override it for a different deployment.
+        # Pass dac_name=None
         # to disable DAC support entirely (e.g. against a board without
         # this device yet).
         self._dac_dev = self._ctx.find_device(dac_name) if dac_name else None
+        selected_output = profile.dac_output if profile is not None else (
+            dac_channel if dac_channel is not None else channel
+        )
         self._dac_ch = (
             self._dac_dev.find_channel(
-                f"voltage{dac_channel if dac_channel is not None else channel}", True,
+                f"voltage{selected_output}", True,
             )
-            if self._dac_dev is not None else None
+            if self._dac_dev is not None and selected_output is not None else None
         )
 
         # DMA capture buffer -- created lazily on first read_dma_frame()
@@ -404,6 +419,7 @@ class IIODigitizerBackend(DigitizerBackend):
         # a close-time Buffer.cancel() produces) -- see its docstring and
         # acknowledge_dma_recovery()/dma_fault_is_latched().
         self._dma_fault_latched = False
+        self._scope_dma_reader: threading.Thread | None = None
 
         # Auto Setup and the live Scope viewer need worker-owned connections
         # but no DMA or MCA devices. Returning here avoids opening the
@@ -534,7 +550,12 @@ class IIODigitizerBackend(DigitizerBackend):
         self._mca_dma_control_lock = threading.RLock()
         self._mca_dma_pp: iio.Device | None = None
         self._lm_frame: iio.Device | None = None
+        self._lm_status_device: iio.Device | None = None
         self._mca_dma_buf: iio.Buffer | None = None
+        self._mca_dma_reader: threading.Thread | None = None
+        self._mca_dma_fault_latched = False
+        self._mca_stop_uncertain = False
+        self._mca_cleanup_errors: list[dict[str, int | str]] = []
         self._mca_dma_stop_requested = threading.Event()
         self._mca_dma_lifecycle_lock = threading.RLock()
         self._mca_dma_cancel_timer: threading.Timer | None = None
@@ -564,6 +585,9 @@ class IIODigitizerBackend(DigitizerBackend):
                 self._mca_dma_control_ctx = mca_dma_control_ctx
                 self._mca_dma_pp = mca_dma_pp
                 self._lm_frame = lm_frame
+                self._lm_status_device = _device_for_channel(
+                    mca_dma_control_ctx, _LM_FRAME_DEVICE_NAME, channel,
+                )
 
         log.info("IIO backend: connected ch%d (%s) to %s", channel, _SCOPE_DEVICE_NAME, uri)
         if self._pp is None:
@@ -593,6 +617,34 @@ class IIODigitizerBackend(DigitizerBackend):
                 channel,
                 _SYNC_TRIGGER_DEVICE_NAME,
             )
+        # Capture identity before GUI/poll/DMA workers can use these handles.
+        # About must never borrow an active worker's context or block the GUI
+        # on a new remote request. Failure here cannot make acquisition unusable.
+        try:
+            producer_identity = None
+            if self._mca_dma_pp is not None and self._lm_frame is not None:
+                try:
+                    producer_identity = self.mca_producer_identity()
+                except Exception as exc:
+                    producer_identity = {"decoder_selection": f"Unavailable: {exc}"}
+            self._device_information = collect_device_information(
+                self._ctx, uri=uri, channel=channel,
+                devices={
+                    "Scope": self._scope, "Pulse processor": self._pp,
+                    "List mode": self._lm_frame, "Input filter": self._input_filter,
+                    "AFE DAC": self._dac_dev, "Shared START": self._sync_trigger,
+                },
+                dac_output=str(self._dac_ch.id) if self._dac_ch is not None else None,
+                configured_image=profile.firmware_id if profile is not None else "",
+                producer_identity=producer_identity,
+            )
+        except Exception as exc:
+            self._device_information = None
+            log.warning("IIO ch%d: device information unavailable: %s", channel, exc)
+
+    def get_device_information(self) -> DigitizerInformation | None:
+        information = getattr(self, "_device_information", None)
+        return information if isinstance(information, DigitizerInformation) else None
 
     def close(self) -> None:
         log.info("IIO backend: closing ch%d", self._ch)
@@ -614,6 +666,7 @@ class IIODigitizerBackend(DigitizerBackend):
             dac_name=self._dac_name,
             dac_channel=self._dac_channel,
             _scope_only=True,
+            profile=self._acquisition_profile,
         )
 
     def create_current_monitor_client(self) -> CurrentMonitorClient:
@@ -637,6 +690,26 @@ class IIODigitizerBackend(DigitizerBackend):
         n = iio._d_read_attr(self._scope._device, name.encode("ascii"), buf, size)
         return buf.raw[:n]
 
+    def _join_dma_reader(self, attribute: str, timeout: float) -> None:
+        """Retain the native owner until join proves it has exited.
+
+        PetaLinux c546f14 application-migration-guide.md, sections 4/5:
+        cancellation and a bounded wait do not transfer buffer ownership.
+        """
+        worker = getattr(self, attribute, None)
+        if worker is None:
+            return
+        worker.join(timeout)
+        if worker.is_alive():
+            if attribute == "_scope_dma_reader":
+                self._dma_fault_latched = True
+            else:
+                self._mca_dma_fault_latched = True
+            raise DmaReaderActiveError(
+                "DMA reader did not stop; native buffer and context remain owned"
+            )
+        setattr(self, attribute, None)
+
     def _drain_for_close(self, buf: iio.Buffer | IiodScopeStream) -> int:
         """Keep refilling *buf* for a short window before cancelling it,
         instead of cancelling immediately.
@@ -656,7 +729,7 @@ class IIODigitizerBackend(DigitizerBackend):
         """
         stop = threading.Event()
         entered = threading.Event()
-        errors: list[Exception] = []
+        errors: list[tuple[int, str]] = []
         drained: list[None] = []
 
         def refill_until_cancelled() -> None:
@@ -668,8 +741,9 @@ class IIODigitizerBackend(DigitizerBackend):
                     # cancel() is expected to interrupt the final
                     # blocking refill -- only an earlier failure is a
                     # real error.
-                    if not stop.is_set():
-                        errors.append(exc)
+                    if not (stop.is_set() and getattr(exc, "errno", None)
+                            in _LM_EXPECTED_CANCEL_ERRNOS):
+                        errors.append((getattr(exc, "errno", None) or errno.EIO, str(exc)))
                     return
                 drained.append(None)
 
@@ -678,30 +752,20 @@ class IIODigitizerBackend(DigitizerBackend):
             name=f"vdpp-scope-ch{self._ch}-dma-drain",
             daemon=True,
         )
+        self._scope_dma_reader = worker
         worker.start()
         try:
             if not entered.wait(_DMA_CLOSE_JOIN_SECONDS):
-                log.warning(
-                    "IIO backend ch%d: DMA close-drain thread did not "
-                    "start", self._ch,
-                )
-                return 0
+                raise RuntimeError("Scope DMA drain reader did not enter refill")
             time.sleep(_DMA_CLOSE_DRAIN_SECONDS)
         finally:
             stop.set()
-            buf.cancel()
-            worker.join(_DMA_CLOSE_JOIN_SECONDS)
-
-        if worker.is_alive():
-            log.warning(
-                "IIO backend ch%d: DMA close-drain thread did not stop "
-                "after cancellation", self._ch,
-            )
+            try:
+                buf.cancel()
+            finally:
+                self._join_dma_reader("_scope_dma_reader", _DMA_CLOSE_JOIN_SECONDS)
         if errors:
-            log.warning(
-                "IIO backend ch%d: DMA close-drain refill failed: %s",
-                self._ch, errors[0],
-            )
+            raise OSError(*errors[0]) from None
         log.debug(
             "IIO backend ch%d: DMA close-drain consumed %d frame(s)",
             self._ch, len(drained),
@@ -728,25 +792,38 @@ class IIODigitizerBackend(DigitizerBackend):
         # dma_enable board-side), then wait -- never write -- for that to
         # become visible.
         log.debug("IIO backend ch%d: closing DMA buffer", self._ch)
+        errors: list[tuple[int, str]] = []
         try:
             if self._dma_get_enable():
                 self._dma_set_enable(False)
-        except OSError:
-            pass
+        except Exception as exc:
+            errors.append((getattr(exc, "errno", None) or errno.EIO, f"Stop: {exc}"))
+            drain = False
+
+        # A failed first refill can still own this buffer. Never create a
+        # second reader, or destroy storage, until the old reader has exited.
+        if getattr(self, "_scope_dma_reader", None) is not None:
+            try:
+                buf.cancel()
+            finally:
+                self._join_dma_reader("_scope_dma_reader", _DMA_CLOSE_JOIN_SECONDS)
+            drain = False
 
         if drain and not isinstance(getattr(self, "_dma_capture_geometry", None), ScopeSumGeometry):
             try:
                 self._drain_for_close(buf)
-            except Exception:
-                log.warning(
-                    "IIO backend ch%d: DMA close-drain failed",
-                    self._ch, exc_info=True,
-                )
+            except DmaReaderActiveError:
+                raise
+            except Exception as exc:
+                errors.append((getattr(exc, "errno", None) or errno.EIO, f"Drain: {exc}"))
         else:
             # A requested cancellation or failed normal refill has no
             # trustworthy tail to drain. Cancel the existing descriptor and
             # proceed directly to buffer destruction.
-            buf.cancel()
+            try:
+                buf.cancel()
+            except Exception as exc:
+                errors.append((getattr(exc, "errno", None) or errno.EIO, f"Cancel: {exc}"))
 
         self._dma_buf = None
         self._dma_buf_frame_samples = None
@@ -769,15 +846,16 @@ class IIODigitizerBackend(DigitizerBackend):
 
         try:
             self._wait_for_dma_release()
-        except RuntimeError:
+            scope = getattr(self, "_dma_scope", None)
+            if scope is not None and "dma_poisoned" in scope.attrs and int(
+                self._dma_attr_get("dma_poisoned")
+            ):
+                raise RuntimeError("Scope DMA poisoned during close; reboot required")
+        except Exception as exc:
+            errors.append((getattr(exc, "errno", None) or errno.EIO, f"Release: {exc}"))
+        if errors:
             self._dma_fault_latched = True
-            log.error(
-                "IIO backend ch%d: DMA buffer close did not release the "
-                "hardware gate in time -- may indicate a genuine channel "
-                "fault (check dmesg for xilinx-vdma errors), not something "
-                "a client-side retry can fix", self._ch, exc_info=True,
-            )
-            raise
+            raise OSError(errors[0][0], "; ".join(message for _, message in errors))
         log.debug("IIO backend ch%d: DMA gate released after close", self._ch)
 
     def _wait_for_dma_release(self) -> None:
@@ -996,8 +1074,13 @@ class IIODigitizerBackend(DigitizerBackend):
                 self._require_mca_contract(self._pp)
                 if name in PARAMETERS:
                     validate_parameters({name: int(value)})
+                    if name == "psd_zero_crossing_mode":
+                        self._validate_psd_mode(int(value))
                 if name == "enable" and value == "1":
                     validate_parameters(self.mca_parameter_snapshot(), complete=True)
+                    self._validate_psd_mode(int(self._pp_attr_get("psd_zero_crossing_mode")))
+                if name in PARAMETERS or (name == "enable" and value == "1"):
+                    self._assert_mca_idle(self._pp)
             self._pp.attrs[name].value = value
 
     def _if_attr_get(self, name: str) -> str:
@@ -1109,15 +1192,26 @@ class IIODigitizerBackend(DigitizerBackend):
     def _lm_attr_get(self, name: str) -> str:
         return str(self._require_lm_frame().attrs[name].value)
 
+    def _lm_status_attr_get(self, name: str) -> str:
+        # Status remains readable even when a cancelled native reader has not
+        # exited. Never reuse its stream context to collect failure metadata.
+        device = getattr(self, "_lm_status_device", None) or self._require_lm_frame()
+        with self._mca_dma_control_lock:
+            return str(device.attrs[name].value)
+
     def _mca_dma_pp_attr_get(self, name: str) -> str:
         with self._mca_dma_control_lock:
             return str(self._require_mca_dma_pp().attrs[name].value)
 
     def _mca_dma_pp_attr_set(self, name: str, value: str) -> None:
-        with self._mca_dma_control_lock:
+        # Whole histogram assemblies and control transitions share ownership,
+        # but READBUF keeps its independent connection and never holds this lock.
+        with self.mca_configuration_lock, self._mca_dma_control_lock:
             pp = self._require_mca_dma_pp()
             if not (name == "enable" and value == "0"):
                 self._require_mca_contract(pp)
+                if name == "enable" and value == "1":
+                    self._assert_mca_idle(pp)
             pp.attrs[name].value = value
 
     def _validate_lm_geometry(self) -> None:
@@ -1221,10 +1315,13 @@ class IIODigitizerBackend(DigitizerBackend):
             name=f"vdpp-lm-frame-ch{self._ch}-first-refill",
             daemon=True,
         )
+        self._mca_dma_reader = thread
         thread.start()
         if not entered.wait(_DMA_FIRST_REFILL_ENTER_SECONDS):
-            self._cancel_mca_dma_refill(buf, "reader thread did not enter refill")
-            thread.join(_LM_CLOSE_JOIN_SECONDS)
+            try:
+                self._cancel_mca_dma_refill(buf, "reader thread did not enter refill")
+            finally:
+                self._join_dma_reader("_mca_dma_reader", _LM_CLOSE_JOIN_SECONDS)
             raise RuntimeError(
                 "MCA list-mode reader did not start within "
                 f"{_DMA_FIRST_REFILL_ENTER_SECONDS:.2f} seconds -- refusing "
@@ -1240,7 +1337,7 @@ class IIODigitizerBackend(DigitizerBackend):
             # the polling worker to observe a false completed measurement.
             if on_started is not None:
                 on_started()
-        except BaseException:
+        except BaseException as primary:
             try:
                 self._mca_dma_pp_attr_set("enable", "0")
             except OSError:
@@ -1249,11 +1346,18 @@ class IIODigitizerBackend(DigitizerBackend):
                     self._ch,
                     exc_info=True,
                 )
-            self._cancel_mca_dma_refill(buf, "MCA start failed")
-            thread.join(_LM_CLOSE_JOIN_SECONDS)
+            try:
+                try:
+                    self._cancel_mca_dma_refill(buf, "MCA start failed")
+                finally:
+                    self._join_dma_reader("_mca_dma_reader", _LM_CLOSE_JOIN_SECONDS)
+            except Exception as cleanup:
+                self._record_mca_cleanup_error("Startup reader", cleanup)
+                primary.add_note(f"Startup cleanup: {cleanup}")
             raise
 
         thread.join()
+        self._mca_dma_reader = None
         if errors:
             error_errno, error_text = errors[0]
             if error_errno is not None:
@@ -1263,7 +1367,10 @@ class IIODigitizerBackend(DigitizerBackend):
 
     def _create_mca_dma_buffer(self) -> None:
         """Arm the fixed 1024-record list-mode buffer while stopped."""
+        if getattr(self, "_mca_dma_fault_latched", False):
+            raise RuntimeError("MCA DMA fault is latched; acknowledge_mca_dma_recovery() required")
         self._close_mca_dma_buffer()
+        self._mca_cleanup_errors = []
         self._mca_dma_stop_requested.clear()
         self._mca_dma_cancel_explained = False
 
@@ -1401,8 +1508,18 @@ class IIODigitizerBackend(DigitizerBackend):
                 and isinstance(exc, OSError)
                 and exc.errno in _LM_EXPECTED_CANCEL_ERRNOS
             )
-            self._close_mca_dma_buffer(drain=False)
+            if not expected_stop:
+                self._mca_dma_fault_latched = True
+            try:
+                self._close_mca_dma_buffer(drain=False)
+            except Exception as cleanup:
+                self._record_mca_cleanup_error("Capture close", cleanup)
+                exc.add_note(f"Capture cleanup: {cleanup}")
+                if expected_stop:
+                    raise
             if expected_stop:
+                if self._mca_dma_buf is not None:
+                    raise
                 return np.empty(0, dtype=_LM_EVENT_DTYPE)
             raise
 
@@ -1434,7 +1551,15 @@ class IIODigitizerBackend(DigitizerBackend):
                 and isinstance(exc, OSError)
                 and exc.errno in _LM_EXPECTED_CANCEL_ERRNOS
             )
-            self._close_mca_dma_buffer(drain=False)
+            if not expected_stop:
+                self._mca_dma_fault_latched = True
+            try:
+                self._close_mca_dma_buffer(drain=False)
+            except Exception as cleanup:
+                self._record_mca_cleanup_error("Capture close", cleanup)
+                exc.add_note(f"Capture cleanup: {cleanup}")
+                if expected_stop:
+                    raise
             if expected_stop:
                 return np.empty(0, dtype=_LM_EVENT_DTYPE)
             raise
@@ -1493,7 +1618,13 @@ class IIODigitizerBackend(DigitizerBackend):
                     drained += 1
                     last_activity[0] = time.monotonic()
                 except BaseException as exc:
-                    if not stop.is_set():
+                    if getattr(exc, "errno", None) in (*_LIBIIO_TIMEOUT_ERRNOS, errno.EAGAIN):
+                        # Inactivity is bounded by the owner, not by one
+                        # server timeout. Final latched faults are checked too.
+                        stop.wait(0.01)
+                        continue
+                    if not (stop.is_set() and getattr(exc, "errno", None)
+                            in _LM_EXPECTED_CANCEL_ERRNOS):
                         # Do not retain a traceback that owns this closure and
                         # its Buffer reference across native buffer teardown.
                         errors.append((getattr(exc, "errno", None) or errno.EIO, str(exc)))
@@ -1504,23 +1635,19 @@ class IIODigitizerBackend(DigitizerBackend):
             name=f"vdpp-lm-frame-ch{self._ch}-drain",
             daemon=True,
         )
+        self._mca_dma_reader = worker
         worker.start()
         try:
             if not entered.wait(_LM_CLOSE_JOIN_SECONDS):
-                log.warning(
-                    "IIO backend ch%d: MCA list-mode drain thread did not start",
-                    self._ch,
-                )
-                return 0
+                raise RuntimeError("MCA drain reader did not enter refill")
             while time.monotonic() - last_activity[0] < _LM_CLOSE_INACTIVITY_SECONDS:
                 time.sleep(_LM_CLOSE_POLL_SECONDS)
         finally:
             stop.set()
-            self._cancel_mca_dma_refill(buf, "tail-drain inactivity window elapsed")
-            worker.join(_LM_CLOSE_JOIN_SECONDS)
-
-        if worker.is_alive():
-            raise RuntimeError("MCA drain reader did not stop; native buffer remains owned")
+            try:
+                self._cancel_mca_dma_refill(buf, "tail-drain inactivity window elapsed")
+            finally:
+                self._join_dma_reader("_mca_dma_reader", _LM_CLOSE_JOIN_SECONDS)
         if errors:
             raise OSError(*errors[0]) from None
         return drained
@@ -1528,7 +1655,7 @@ class IIODigitizerBackend(DigitizerBackend):
     def _wait_for_mca_dma_release(self) -> None:
         deadline = time.monotonic() + _LM_CLOSE_RELEASE_SECONDS
         while True:
-            frame_active = bool(int(self._lm_attr_get("buffer_active")))
+            frame_active = bool(int(self._lm_status_attr_get("buffer_active")))
             list_active = bool(int(self._mca_dma_pp_attr_get("list_buffer_active")))
             if not frame_active and not list_active:
                 return
@@ -1545,7 +1672,7 @@ class IIODigitizerBackend(DigitizerBackend):
         *,
         drain: bool = True,
     ) -> int:
-        """Stop/drain/destroy/join; retain primary errno and report cleanup failures."""
+        """Stop/drain/join/destroy; retain primary errno and report cleanup failures."""
         with self._mca_dma_lifecycle_lock:
             timer = self._mca_dma_cancel_timer
             self._mca_dma_cancel_timer = None
@@ -1562,14 +1689,20 @@ class IIODigitizerBackend(DigitizerBackend):
             errors.append((getattr(exc, "errno", None) or errno.EIO, f"Stop: {exc}"))
             drain = False
         try:
+            if getattr(self, "_mca_dma_reader", None) is not None:
+                try:
+                    self._cancel_mca_dma_refill(buf, "joining retained DMA reader")
+                finally:
+                    self._join_dma_reader("_mca_dma_reader", _LM_CLOSE_JOIN_SECONDS)
+                drain = False
             if drain:
                 drained = self._drain_mca_for_close(buf, on_frame)
             else:
                 self._cancel_mca_dma_refill(buf, "capture cleanup without tail drain")
+        except DmaReaderActiveError as exc:
+            self._record_mca_cleanup_error("Reader", exc)
+            raise
         except Exception as exc:
-            # A live reader may still own this native buffer: do not destroy it.
-            if "reader did not stop" in str(exc):
-                raise
             errors.append((getattr(exc, "errno", None) or errno.EIO, f"Drain: {exc}"))
         self._mca_dma_buf = None
         native = buf._buffer
@@ -1579,6 +1712,8 @@ class IIODigitizerBackend(DigitizerBackend):
         del buf
         try:
             self._wait_for_mca_dma_release()
+            with self.mca_configuration_lock, self._mca_dma_control_lock:
+                self._assert_mca_idle(self._mca_dma_pp, check_fault=False)
             if "dma_poisoned" in self._require_lm_frame().attrs and int(
                 self._lm_attr_get("dma_poisoned")
             ):
@@ -1589,8 +1724,71 @@ class IIODigitizerBackend(DigitizerBackend):
             for channel in self._require_lm_frame().channels:
                 channel.enabled = False
         if errors:
+            self._mca_dma_fault_latched = True
+            for number, message in errors:
+                self._record_mca_cleanup_error("Close", OSError(number, message))
             raise OSError(errors[0][0], "; ".join(message for _, message in errors))
         return drained
+
+    def _record_mca_cleanup_error(self, phase: str, error: BaseException) -> None:
+        if not hasattr(self, "_mca_cleanup_errors"):
+            self._mca_cleanup_errors = []
+        self._mca_cleanup_errors.append({
+            "phase": phase, "errno": getattr(error, "errno", None) or errno.EIO,
+            "message": str(error),
+        })
+
+    def _assert_mca_idle(self, pp: iio.Device | None, *, check_fault: bool = True) -> None:
+        """Reject uncertain rearm; progress=0 still supplies no completion fence.
+
+        PetaLinux c546f14 digitizer-128-verification-2026-11-07.md records
+        persistent progress=1 after STOP. The bounded poll only tolerates the
+        normal nonblocking transition; it never certifies final histogram data.
+        """
+        if check_fault and self.mca_recovery_required():
+            raise RuntimeError(
+                "MCA recovery required; verify target state and acknowledge recovery"
+            )
+        if pp is None or "measurement_in_progress" not in pp.attrs:
+            return
+        if int(pp.attrs["enable"].value):
+            return  # The kernel retains its EBUSY check for live configuration.
+        deadline = time.monotonic() + _MCA_STOP_STATUS_SECONDS
+        while int(pp.attrs["measurement_in_progress"].value):
+            if time.monotonic() >= deadline:
+                self._mca_stop_uncertain = True
+                raise RuntimeError(
+                    "MCA remains measurement_in_progress=1 after STOP; "
+                    "rearm blocked, final data unverified; target recovery required"
+                )
+            time.sleep(0.01)
+
+    def ensure_mca_stopped(self) -> None:
+        with self.mca_configuration_lock:
+            if self._pp is not None and int(self._pp.attrs["enable"].value):
+                raise RuntimeError("Stop MCA before checking stopped state")
+            self._assert_mca_idle(self._pp)
+
+    def mca_recovery_required(self) -> bool:
+        return bool(getattr(self, "_mca_dma_fault_latched", False)
+                    or getattr(self, "_mca_stop_uncertain", False))
+
+    def acknowledge_mca_dma_recovery(self) -> None:
+        """Passive acknowledgement after externally validated recovery; never reset hardware."""
+        with self.mca_configuration_lock:
+            if self._mca_dma_buf is not None or getattr(self, "_mca_dma_reader", None) is not None:
+                raise RuntimeError("Close the owned MCA reader/buffer before recovery")
+            if self._lm_frame is not None and "dma_poisoned" in self._lm_frame.attrs:
+                if int(self._lm_attr_get("dma_poisoned")):
+                    raise RuntimeError("MCA DMA poisoned; reboot required")
+            if self._pp is None or int(self._pp.attrs["enable"].value):
+                raise RuntimeError("Stop MCA before recovery")
+            if int(self._pp.attrs["list_buffer_active"].value):
+                raise RuntimeError("Close list DMA before recovery")
+            self._wait_for_mca_dma_release()
+            self._assert_mca_idle(self._pp, check_fault=False)
+            self._mca_dma_fault_latched = False
+            self._mca_stop_uncertain = False
 
     def close_mca_dma_capture(
         self,
@@ -1598,6 +1796,11 @@ class IIODigitizerBackend(DigitizerBackend):
     ) -> int:
         """Public stop/drain/close wrapper used by IIOMcaDmaStreamer."""
         return self._close_mca_dma_buffer(on_frame)
+
+    def abort_mca_dma_capture(self) -> int:
+        """A failed session has no trustworthy healthy-drain operation."""
+        self._mca_dma_fault_latched = True
+        return self._close_mca_dma_buffer(drain=False)
 
     def request_mca_dma_stop(self) -> None:
         """Stop the producer without cancelling the list-mode reader.
@@ -1652,11 +1855,40 @@ class IIODigitizerBackend(DigitizerBackend):
         it is not by itself grounds for rejecting the just-finished capture.
         """
         return (
-            int(self._lm_attr_get("dma_fault")),
-            int(self._lm_attr_get("dma_error_count")),
-            int(self._lm_attr_get("completed_frames")),
-            int(self._lm_attr_get("list_deadtime_raw")),
+            int(self._lm_status_attr_get("dma_fault")),
+            int(self._lm_status_attr_get("dma_error_count")),
+            int(self._lm_status_attr_get("completed_frames")),
+            int(self._lm_status_attr_get("list_deadtime_raw")),
         )
+
+    def get_mca_dma_capture_status(self) -> dict[str, object]:
+        """Best-effort final status, including failures; never retain tracebacks."""
+        status: dict[str, object] = {
+            "dma_fault_kind": "lm_category",
+            "recovery_required": self.mca_recovery_required(),
+            "reader_active": bool(getattr(self, "_mca_dma_reader", None)),
+            "cleanup_errors": list(getattr(self, "_mca_cleanup_errors", [])),
+            "final_histogram_verified": False,  # A07 remains deferred.
+        }
+        errors: list[str] = []
+        device = getattr(self, "_lm_status_device", None) or self._lm_frame
+        for name in ("dma_fault", "dma_error_count", "completed_frames", "list_deadtime_raw",
+                     "dma_poisoned", "queued_blocks", "kernel_buffer_blocks", "dma_queue_mode"):
+            if device is not None and name in device.attrs:
+                try:
+                    value = self._lm_status_attr_get(name)
+                    status[name] = int(value) if value.strip().isdecimal() else value
+                except Exception as exc:
+                    errors.append(f"{name}: {exc}")
+        try:
+            status["measurement_in_progress"] = int(
+                self._mca_dma_pp_attr_get("measurement_in_progress")
+            )
+        except Exception as exc:
+            errors.append(f"measurement_in_progress: {exc}")
+        if errors:
+            status["status_errors"] = errors
+        return status
 
     # ------------------------------------------------------------------
     # ScopeBackend
@@ -2392,10 +2624,13 @@ class IIODigitizerBackend(DigitizerBackend):
             name=f"vdpp-scope-ch{self._ch}-dma-first-refill",
             daemon=True,
         )
+        self._scope_dma_reader = thread
         thread.start()
         if not entered.wait(_DMA_FIRST_REFILL_ENTER_SECONDS):
-            buf.cancel()
-            thread.join()
+            try:
+                buf.cancel()
+            finally:
+                self._join_dma_reader("_scope_dma_reader", _DMA_CLOSE_JOIN_SECONDS)
             raise RuntimeError(
                 "DMA reader did not enter its first refill; acquisition remains stopped"
             )
@@ -2409,11 +2644,17 @@ class IIODigitizerBackend(DigitizerBackend):
                 raise InterruptedError(errno.ECANCELED, "scope DMA stop requested before enable")
             if not self._dma_get_enable():
                 self._dma_set_enable(True)
-        except BaseException:
-            buf.cancel()
-            thread.join()
+        except BaseException as primary:
+            try:
+                try:
+                    buf.cancel()
+                finally:
+                    self._join_dma_reader("_scope_dma_reader", _DMA_CLOSE_JOIN_SECONDS)
+            except Exception as cleanup:
+                primary.add_note(f"Scope startup cleanup: {cleanup}")
             raise
         thread.join()
+        self._scope_dma_reader = None
         if errors:
             raise OSError(*errors[0]) from None
         return result[0]
@@ -2653,6 +2894,7 @@ class IIODigitizerBackend(DigitizerBackend):
 
     def prepare_mca_configuration(self, values: dict[str, int]) -> None:
         validate_parameters(values, complete=True)
+        self._validate_psd_mode(values["psd_zero_crossing_mode"])
         with self.mca_configuration_lock:
             pp = self._pp
             self._require_mca_contract(pp, acknowledged=False)
@@ -2675,6 +2917,7 @@ class IIODigitizerBackend(DigitizerBackend):
         with self.mca_configuration_lock:
             candidate = self.mca_parameter_snapshot() | values
             self.prepare_mca_configuration(candidate)
+            self._assert_mca_idle(self._pp)
             # Disable algorithms first; final admission uses the complete candidate.
             enables = [name for name in PARAMETERS if name.endswith("_enable")]
             for name in enables:
@@ -2701,24 +2944,85 @@ class IIODigitizerBackend(DigitizerBackend):
     def mca_producer_identity(self) -> dict[str, int | str]:
         """Bind the selected event decoder to a source-derived producer identity.
 
-        Matching versions establish the record contract, not detector calibration
-        or physical channel wiring. Unknown producers remain opaque captures.
+        Keep the existing application decoder for its supported producer family.
+        PetaLinux c546f14 coincidence-frontend-contract.md distinguishes this
+        source-derived interpretation from physical qualification of an image.
+        Missing image identity is recorded as unknown, never invented or required
+        merely to connect. An optional deployment profile overrides the default.
         """
-        contract = self.mca_parameter_contract()
-        identity: dict[str, int | str] = {
-            "pulse_hw_version": self.get_hw_version(),
-            "pulse_sw_version": self.get_sw_version(),
-            "ip_version": self.get_lm_ip_version(),
-            "parameter_abi_version": int(str(contract.get("parameter_abi_version", 0))),
-            "parameter_units": str(contract.get("parameter_units", "unknown")),
-        }
-        known = (identity["pulse_hw_version"], identity["pulse_sw_version"],
-                 identity["ip_version"], identity["parameter_abi_version"],
-                 identity["parameter_units"]) == (101, 103023, 121, 2, "adc_samples")
-        if known:
-            identity["qualified_record_schema"] = "vdpp-zc-calc-q2.14-v1"
+        with self._mca_dma_control_lock:
+            pp = self._require_mca_dma_pp()
+            identity: dict[str, int | str] = {
+                "pulse_hw_version": int(pp.attrs["hw_version"].value),
+                "pulse_sw_version": int(pp.attrs["sw_version"].value),
+                "ip_version": int(self._lm_status_attr_get("ip_version")),
+                "parameter_abi_version": int(pp.attrs["parameter_abi_version"].value),
+                "parameter_units": str(pp.attrs["parameter_units"].value).strip(),
+            }
+        profile = getattr(self, "_acquisition_profile", None)
+        if profile is not None:
+            identity["firmware_id"] = profile.firmware_id
+            if profile.record_schema:
+                # Retain the public selector key; this is source-derived
+                # interpretation, not a claim of live physical qualification.
+                identity["qualified_record_schema"] = profile.record_schema
+                identity["decoder_selection"] = (
+                    "explicit firmware profile; physical qualification unverified"
+                )
+        elif (
+            identity["pulse_hw_version"], identity["pulse_sw_version"],
+            identity["ip_version"], identity["parameter_abi_version"], identity["parameter_units"]
+        ) == (101, 103023, 121, 2, "adc_samples"):
+            # Preserve the pre-migration application default without treating
+            # matching register versions as proof of deployed producer packing.
+            # The historical selector key is retained for existing consumers.
+            identity["qualified_record_schema"] = VDPP_ZC_CALC_SCHEMA
+            identity["firmware_id"] = "unknown"
+            identity["decoder_selection"] = (
+                "application default; source-derived; deployment unverified"
+            )
         identity["energy_field"] = "selected estimator; not universally trapezoid energy"
         return identity
+
+    def mca_capture_provenance(self) -> dict[str, object]:
+        """Record effective settings through the session control connection."""
+        with self.mca_configuration_lock, self._mca_dma_control_lock:
+            pp = self._require_mca_dma_pp()
+            return {
+                "uri": self._uri, "channel_index": self._ch,
+                "producer_identity": self.mca_producer_identity(),
+                "parameters": {name: int(pp.attrs[name].value) for name in PARAMETERS},
+                "parameter_abi_version": 2, "parameter_units": "adc_samples",
+                "acquisition_profile": self.acquisition_profile(),
+                "timebase": "nominal 500 MSPS ADC / 125 MHz processing; physically unverified",
+            }
+
+    def supports_dac(self) -> bool:
+        return self._dac_ch is not None
+
+    def acquisition_profile(self) -> dict[str, object]:
+        profile = getattr(self, "_acquisition_profile", None)
+        return profile.to_dict() if profile is not None else {}
+
+    def apply_acquisition_profile(self, values: dict[str, object]) -> None:
+        profile = AcquisitionProfile.from_mapping(values)
+        with self.mca_configuration_lock:
+            if self.get_enable() or self.scope_dma_active():
+                raise RuntimeError(
+                    "Stop Scope and close DMA before changing its hardware profile"
+                )
+            if self._pp is not None and (self.get_global_enable() or self.mca_dma_active()):
+                raise RuntimeError(
+                    "Stop MCA and close list DMA before changing its hardware profile"
+                )
+            selected = None
+            if profile.dac_output is not None:
+                if self._dac_dev is not None:
+                    selected = self._dac_dev.find_channel(f"voltage{profile.dac_output}", True)
+                if selected is None:
+                    raise ValueError("Selected verified DAC output is absent")
+            self._dac_ch = selected
+            self._acquisition_profile = profile
 
     def mca_dma_hardware_present(self) -> bool:
         """Whether the dedicated context found both paired DMA devices."""
@@ -2726,13 +3030,13 @@ class IIODigitizerBackend(DigitizerBackend):
 
     def get_lm_ip_version(self) -> int:
         """vdpp_lm_frame diagnostic extension; expected value is 121."""
-        return int(self._lm_attr_get("ip_version"))
+        return int(self._lm_status_attr_get("ip_version"))
 
     def get_lm_frame_records(self) -> int:
-        return int(self._lm_attr_get("frame_records"))
+        return int(self._lm_status_attr_get("frame_records"))
 
     def get_lm_frame_bytes(self) -> int:
-        return int(self._lm_attr_get("frame_bytes"))
+        return int(self._lm_status_attr_get("frame_bytes"))
 
     def get_list_deadtime_raw(self) -> int:
         """Records dropped while lm_frame's output was full (user-api.md)."""
@@ -3205,6 +3509,18 @@ class IIODigitizerBackend(DigitizerBackend):
 
     def get_psd_zc_mode(self) -> int:
         return int(self._pp_attr_get("psd_zero_crossing_mode"))
+
+    def get_psd_zc_modes(self) -> tuple[int, ...]:
+        # Additive ABI2 capability, PetaLinux c546f14 pp_*_mode_available.
+        # An older ABI2 driver without this attribute establishes only 0/1.
+        if self._pp is None or "psd_zero_crossing_mode_available" not in self._pp.attrs:
+            return (0, 1)
+        tokens = self._pp_attr_get("psd_zero_crossing_mode_available").split()
+        return tuple(int(token) for token in tokens if token in ("0", "1", "2"))
+
+    def _validate_psd_mode(self, value: int) -> None:
+        if value not in self.get_psd_zc_modes():
+            raise ValueError(f"PSD mode {value} is not advertised by this driver")
 
     def set_psd_zc_mode(self, val: int) -> None:
         self._pp_attr_set("psd_zero_crossing_mode", str(val))

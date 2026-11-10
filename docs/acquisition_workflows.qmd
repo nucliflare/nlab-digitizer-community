@@ -41,15 +41,15 @@ buffer has already been destroyed.
 ## Scope
 
 The Scope workspace supports live raw and persistence views, trigger-level and
-pretrigger markers, periodic/level/edge trigger modes, frame length and gap,
-and analogue DAC baseline control.
+pretrigger markers, level/edge trigger modes, frame length, and analogue DAC
+baseline control. Periodic acquisition and gap controls belong to Current.
 
 Recommended workflow:
 
 1. With acquisition stopped, run **Auto Setup** or load known trigger and DAC
    calibration values.
 2. Confirm polarity and channel identity in the live raw view.
-3. Set frame length, pretrigger, trigger mode, and frame gap.
+3. Set frame length, pretrigger, and level/edge trigger mode.
 4. Use the draggable trace/markers for preview, then verify the next hardware
    frame after the setting is committed.
 5. For a file capture, choose a new destination and start DMA. Existing files
@@ -85,8 +85,10 @@ state is cleared. Do not reconfigure the pulse processor during list-mode DMA,
 because that requires the complete buffer stop/drain/close/rearm lifecycle.
 
 Histogram chunks are transferred sequentially and are not an atomic snapshot
-while acquisition is running. Stop acquisition before using a final histogram
-as a stable result.
+while acquisition is running. STOP does not provide the deferred A07 downstream
+completion fence, so it cannot establish a final, fully completed histogram.
+Persistent progress after STOP blocks configuration and rearming until the
+passive recovery check succeeds; that check also does not prove final completion.
 
 Use the **View** menu to switch between the accumulated histogram and the
 non-negative counts added since the previous refresh. This differential view

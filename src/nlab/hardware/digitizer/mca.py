@@ -104,7 +104,7 @@ MCA_PARAMETER_SPECS: dict[MCAParam, ParameterSpec] = {
     MCAParam.EXT_TRIG_ENABLE: ListSpec(items=(False, True), default=False),
     MCAParam.EDGE_DET_COEFF: RangeSpec(min_val=0, max_val=4294967295, step=1, default=1),
     MCAParam.PSD_ZC_ENABLE: ListSpec(items=(False, True), default=False),
-    MCAParam.PSD_ZC_MODE: ListSpec(items=(0, 1), default=0),
+    MCAParam.PSD_ZC_MODE: ListSpec(items=(0, 1, 2), default=0),
     MCAParam.PSD_ZC_LOW: RangeSpec(0, 32764, 4, 0),
     MCAParam.PSD_ZC_HIGH: RangeSpec(0, 32764, 4, 8),
     MCAParam.LP_PRESET: ListSpec(items=(0, 1, 2), default=0),
@@ -296,10 +296,15 @@ class PSDZeroCrossing:
     def get_mode(self) -> int:
         return self._b.get_psd_zc_mode()
 
+    def available_modes(self) -> tuple[int, ...]:
+        return getattr(self._b, "get_psd_zc_modes", lambda: (0, 1))()
+
     def set_mode(self, val: int) -> None:
         MCA_PARAMETER_SPECS[MCAParam.PSD_ZC_MODE].validate(
             val, "psd_zero_crossing_mode"
         )
+        if val not in self.available_modes():
+            raise ValueError(f"PSD mode {val} is not advertised by this driver")
         self._b.set_psd_zc_mode(val)
 
     def get_time_window_low(self) -> int:
@@ -634,6 +639,7 @@ class MultiChannelAnalyzer:
             running = self._b.get_global_enable()
             if running:
                 self._b.set_global_enable(False)
+            self.ensure_stopped()
             write()
             if running:
                 self._b.set_global_enable(True)
@@ -642,6 +648,16 @@ class MultiChannelAnalyzer:
     def parameter_contract(self) -> dict[str, object]:
         reader = getattr(self._b, "mca_parameter_contract", None)
         return reader() if reader is not None else {}
+
+    def ensure_stopped(self) -> None:
+        """Check for uncertain STOP without asserting final-data completion."""
+        getattr(self._b, "ensure_mca_stopped", lambda: None)()
+
+    def recovery_required(self) -> bool:
+        return bool(getattr(self._b, "mca_recovery_required", lambda: False)())
+
+    def acknowledge_dma_recovery(self) -> None:
+        getattr(self._b, "acknowledge_mca_dma_recovery", lambda: None)()
 
     def prepare_configuration(self, values: dict[str, int] | None = None) -> None:
         candidate = dict(DEFAULT_PARAMETERS if values is None else values)

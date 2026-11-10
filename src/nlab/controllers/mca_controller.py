@@ -317,6 +317,10 @@ class MCAController(QWidget):
         self.ui.comboTriggerSource.clear()
         self.ui.comboTriggerSource.addItems(_TRIGGER_SOURCE_LABELS)
         self.ui.comboTrapFt.addItems(_WINDOW_LABELS)
+        self.ui.comboPsdZcMode.clear()
+        names = {0: "CR-RC2", 1: "CR-RC", 2: "Trapezoid"}
+        for mode in self._mca.filters.psd_zc.available_modes():
+            self.ui.comboPsdZcMode.addItem(names[mode], mode)
 
     # ------------------------------------------------------------------
     # Hardware range application
@@ -608,7 +612,9 @@ class MCAController(QWidget):
 
         # PSD zero-crossing
         self.ui.cbPsdZcEnable.setChecked(self._mca.filters.psd_zc.get_enable())
-        self.ui.comboPsdZcMode.setCurrentIndex(self._mca.filters.psd_zc.get_mode())
+        self.ui.comboPsdZcMode.setCurrentIndex(
+            self.ui.comboPsdZcMode.findData(self._mca.filters.psd_zc.get_mode())
+        )
         self.ui.spinPsdZcLow.setValue(self._mca.filters.psd_zc.get_time_window_low() * 2)
         self.ui.spinPsdZcHigh.setValue(self._mca.filters.psd_zc.get_time_window_high() * 2)
 
@@ -623,7 +629,7 @@ class MCAController(QWidget):
             getattr(self, "_replay_hardware_interlocked", False)
             or getattr(self, "_connection_lost", False)
         )
-        enabled = enabled and available and not (
+        enabled = enabled and available and not self._mca.recovery_required() and not (
             self._dma_worker is not None or self._dma_thread is not None
         )
         if not enabled:
@@ -651,6 +657,43 @@ class MCAController(QWidget):
         self.ui.spinRefreshRate.setEnabled(enabled)
         self._debug_threshold_line.setMovable(enabled)
         self._debug_pretrigger_line.setMovable(enabled)
+        self._sync_recovery_controls()
+
+    def _sync_recovery_controls(self) -> None:
+        required = self._mca.recovery_required()
+        button = getattr(self.ui, "btnRecover", None)
+        if button is not None:
+            button.setVisible(required)
+            button.setEnabled(
+                required and self._dma_worker is None and self._dma_thread is None
+                and not self._replay_hardware_interlocked and not self._connection_lost
+            )
+        if required:
+            self.ui.btnStart.setEnabled(False)
+
+    def _on_acknowledge_recovery(self) -> None:
+        if self._replay_hardware_interlocked or self._connection_lost:
+            return
+        try:
+            self._mca.acknowledge_dma_recovery()
+        except Exception as exc:
+            self.status.setText(f"Recovery blocked: {exc}")
+        else:
+            self._set_controls_enabled(True)
+            self.ui.btnStart.setEnabled(True)
+            self.status.setText(
+                "Recovery acknowledged; final histogram completion remains unverified"
+            )
+        self._sync_recovery_controls()
+
+    def _check_stopped_health(self) -> None:
+        if self._dma_worker is not None:
+            return
+        try:
+            self._mca.ensure_stopped()
+        except Exception as exc:
+            self.status.setText(f"Stopped state unverified: {exc}")
+        self._sync_recovery_controls()
 
     def refresh_dma_output_settings(self) -> None:
         """Reflect the application-wide output choice in this channel view."""
@@ -1628,6 +1671,7 @@ class MCAController(QWidget):
             self._hist_curve.setData([], [])
 
     def _connect_signals(self) -> None:
+        self.ui.btnRecover.clicked.connect(self._on_acknowledge_recovery)
         self.ui.comboPulsePolarity.currentIndexChanged.connect(
             lambda i: (
                 log.debug("MCA ch%d: polarity=%d", self._channel, i),
@@ -1819,7 +1863,9 @@ class MCAController(QWidget):
             )
         )
         self.ui.comboPsdZcMode.currentIndexChanged.connect(
-            lambda i: self._commit_hardware_setting(lambda: self._mca.filters.psd_zc.set_mode(i))
+            lambda i: self._commit_hardware_setting(
+                lambda: self._mca.filters.psd_zc.set_mode(self.ui.comboPsdZcMode.itemData(i))
+            )
         )
         self.ui.spinPsdZcLow.editingFinished.connect(
             lambda: self._commit_hardware_setting(
@@ -1894,7 +1940,7 @@ class MCAController(QWidget):
                 self._start_with_dma()
             else:
                 self._start_polling_only()
-        except Exception:
+        except Exception as exc:
             # Qt prints an uncaught slot exception and leaves Start disabled.
             # Restore a retryable, definitely-disarmed state instead.  The
             # driver accepts enable=0 even when a configuration write has
@@ -1918,6 +1964,8 @@ class MCAController(QWidget):
             self.ui.cbDmaEnable.setEnabled(True)
             MCAController.refresh_dma_output_settings(self)
             self._finish_psd_capture()
+            self.status.setText(f"Measurement start failed: {exc}")
+            self._sync_recovery_controls()
 
     def _start_polling_only(self) -> None:
         # A completed timed measurement clears measurement_in_progress but
@@ -1968,6 +2016,7 @@ class MCAController(QWidget):
         self.ui.cbDmaEnable.setEnabled(self._dma_worker is None)
         MCAController.refresh_dma_output_settings(self)
         log.info("MCA ch%d: measurement stopped", self._channel)
+        self._check_stopped_health()
 
     def _on_measurement_done(self) -> None:
         """Called when the hardware stops the measurement (time limit reached).
@@ -1996,6 +2045,8 @@ class MCAController(QWidget):
         self.ui.btnStop.setEnabled(False)
         self.ui.cbDmaEnable.setEnabled(self._dma_worker is None)
         MCAController.refresh_dma_output_settings(self)
+
+        self._check_stopped_health()
 
     def _on_clear_spectrum(self) -> None:
         if getattr(self, "_replay_hardware_interlocked", False):
@@ -2476,6 +2527,7 @@ class MCAController(QWidget):
                         "Connection lost; use Connection -> Reconnect Device."
                     )
             log.info("MCA ch%d: DMA worker cleanup complete", self._channel)
+            self._sync_recovery_controls()
         finally:
             thread.deleteLater()
             del worker

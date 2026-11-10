@@ -27,7 +27,7 @@ def backend(version="2", units="adc_samples", ack="0"):
         "list_buffer_active": "0",
         "debug_signal1": "0",
         "debug_signal2": "1",
-        "measurement_in_progress": "1",
+        "measurement_in_progress": "0",
         "cfd_factor_scale": str(1 / 32768),
     }
     result._pp = SimpleNamespace(
@@ -54,6 +54,7 @@ def test_unknown_contract_refuses_before_configuration(version, units):
 
 def test_ack_requires_idle_ownership_not_progress_status():
     b = backend()
+    b._pp.attrs["measurement_in_progress"].value = "1"
     b.prepare_mca_configuration(dict(DEFAULT_PARAMETERS))
     assert b._pp.attrs["parameter_abi_ack"].value == "2"
     assert b._pp.attrs["measurement_in_progress"].value == "1"

@@ -634,7 +634,10 @@ def test_mca_widgets_and_enums_match_v101_iio_metadata(qapp: QApplication) -> No
         dc_blocker_supported=lambda: False,
         edge_det_coeff_is_hardware_backed=lambda: False,
         get_debug_signal_selectors=lambda: tuple(range(9)),
-        filters=SimpleNamespace(crrc2=SimpleNamespace(supports_reciprocal_raw=lambda: True)),
+        filters=SimpleNamespace(
+            crrc2=SimpleNamespace(supports_reciprocal_raw=lambda: True),
+            psd_zc=SimpleNamespace(available_modes=lambda: (0, 1)),
+        ),
     )
     controller = SimpleNamespace(
         ui=ui,
@@ -811,7 +814,10 @@ def test_old_debug_capability_uses_corrected_hardware_labels(qapp: QApplication)
     ui.setupUi(widget)
     controller = SimpleNamespace(
         ui=ui,
-        _mca=SimpleNamespace(get_debug_signal_selectors=lambda: tuple(range(8))),
+        _mca=SimpleNamespace(
+            get_debug_signal_selectors=lambda: tuple(range(8)),
+            filters=SimpleNamespace(psd_zc=SimpleNamespace(available_modes=lambda: (0, 1))),
+        ),
     )
 
     MCAController._populate_combos(controller)

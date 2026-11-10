@@ -1,17 +1,34 @@
-"""Application information and an explicit GitHub update check."""
+"""Application/device information and an explicit GitHub update check."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from html import escape
+
 from PySide6.QtCore import Qt, QUrl, Slot
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QGroupBox,
+    QLabel,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from nlab import __version__
+from nlab.hardware.digitizer.device_information import DigitizerInformation, InformationSection
 from nlab.utils.github_releases import GitHubRelease, GitHubReleaseChecker, release_version
 
 
 class AboutDialog(QDialog):
-    def __init__(self, about_text: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, about_text: str, parent: QWidget | None = None, *,
+        digitizers: Sequence[tuple[str, DigitizerInformation]] = (),
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("About Nuclear Lab Digitizer")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -25,6 +42,19 @@ class AboutDialog(QDialog):
         info.setTextFormat(Qt.TextFormat.RichText)
         info.setOpenExternalLinks(True)
         layout.addWidget(info)
+        hardware = QGroupBox("Digitizer information")
+        hardware_layout = QVBoxLayout(hardware)
+        note = QLabel("Read-only connection snapshot. Reconnect to refresh device details.")
+        note.setWordWrap(True)
+        hardware_layout.addWidget(note)
+        self.device_tree = QTreeWidget()
+        self.device_tree.setHeaderLabels(["Information", "Value"])
+        self.device_tree.setColumnWidth(0, 270)
+        self.device_tree.setMinimumSize(650, 280)
+        self.device_tree.setAlternatingRowColors(True)
+        self._populate_digitizers(digitizers)
+        hardware_layout.addWidget(self.device_tree)
+        layout.addWidget(hardware)
         self.status = QLabel("Check GitHub for a newer published version.")
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
@@ -35,6 +65,11 @@ class AboutDialog(QDialog):
         self.check_button = buttons.addButton(
             "Check for Updates", QDialogButtonBox.ButtonRole.ActionRole
         )
+        self.copy_button = buttons.addButton(
+            "Copy Digitizer Details", QDialogButtonBox.ButtonRole.ActionRole
+        )
+        self.copy_button.setEnabled(bool(digitizers))
+        self.copy_button.clicked.connect(self._copy_digitizer_details)
         self.release_button = buttons.addButton(
             "View Release on GitHub", QDialogButtonBox.ButtonRole.ActionRole
         )
@@ -43,6 +78,55 @@ class AboutDialog(QDialog):
         self.release_button.clicked.connect(self._open_release)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    @staticmethod
+    def _add_sections(parent: QTreeWidgetItem, sections: tuple[InformationSection, ...]) -> None:
+        for section in sections:
+            values = dict(section.rows)
+            summary = ", ".join(f"{label} {values[key]}" for key, label in (
+                ("ip_version", "IP"), ("hw_version", "HW"), ("sw_version", "SW"),
+                ("id_number", "ID"), ("parameter_abi_version", "ABI"),
+                ("frame_bytes", "Frame bytes"), ("record_layout", "Layout"),
+                ("Selected output", "Output"),
+            ) if key in values)
+            group = QTreeWidgetItem(parent, [section.title, summary])
+            for key, value in section.rows or (("Status", "Not reported by target"),):
+                row = QTreeWidgetItem(group, [key, value])
+                row.setToolTip(1, f"<qt>{escape(value)}</qt>")
+
+    def _populate_digitizers(self, digitizers: Sequence[tuple[str, DigitizerInformation]]) -> None:
+        groups: dict[tuple[str, str], QTreeWidgetItem] = {}
+        for label, information in digitizers:
+            board = label.split(":CH", 1)[0]
+            key = (board, information.uri)
+            if key not in groups:
+                root = QTreeWidgetItem(self.device_tree, [board, information.uri])
+                self._add_sections(root, information.board_sections)
+                root.setExpanded(True)
+                if root.childCount():
+                    root.child(0).setExpanded(True)
+                groups[key] = root
+            channel = QTreeWidgetItem(groups[key], [label])
+            self._add_sections(channel, information.channel_sections)
+            channel.setExpanded(True)
+        if not digitizers:
+            QTreeWidgetItem(self.device_tree, ["No connected digitizers (offline mode)"])
+
+    @Slot()
+    def _copy_digitizer_details(self) -> None:
+        lines: list[str] = []
+
+        def append(item: QTreeWidgetItem, depth: int) -> None:
+            value = f": {item.text(1)}" if item.text(1) else ""
+            lines.append(f"{'  ' * depth}{item.text(0)}{value}")
+            for index in range(item.childCount()):
+                append(item.child(index), depth + 1)
+
+        for index in range(self.device_tree.topLevelItemCount()):
+            item = self.device_tree.topLevelItem(index)
+            if item is not None:
+                append(item, 0)
+        QApplication.clipboard().setText("\n".join(lines))
 
     @Slot()
     def _check_for_updates(self) -> None:

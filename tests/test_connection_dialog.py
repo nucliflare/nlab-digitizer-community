@@ -34,8 +34,68 @@ def isolated_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(connection_dialog_module, "QSettings", _Settings)
 
 
+def test_connect_needs_only_the_existing_address_fields(qtbot):
+    dialog = ConnectionDialog(ip="board.local", port=30431)
+    qtbot.addWidget(dialog)
+    for removed in ("comboDacMapping", "editFirmwareId", "comboProducer"):
+        assert not hasattr(dialog._ui, removed)
+    dialog._on_accept()
+    assert dialog.result() == dialog.DialogCode.Accepted
+    assert dialog.ip == "board.local"
+    assert _Settings.values["connection/recent_ips"] == ["board.local"]
+
+
 def _digitizer(host: str, *, source: str = "mDNS/Avahi") -> DiscoveredDigitizer:
     return DiscoveredDigitizer(host, 30431, f"Digitizer at {host}", source)
+
+
+def test_named_scan_entry_uses_numeric_address_for_connection_and_history(qtbot):
+    endpoint = DiscoveredDigitizer(
+        "192.168.10.128", 31000, "Scanned board", "mDNS/Avahi", "nucliflare-abc.local"
+    )
+    dialog = ConnectionDialog()
+    qtbot.addWidget(dialog)
+    dialog._replace_discovered_addresses((endpoint,))
+    assert dialog._ui.comboIp.currentText() == "nucliflare-abc.local (192.168.10.128)"
+    assert dialog.ip == "192.168.10.128" and dialog.port == 31000
+    dialog._save_settings()
+    assert _Settings.values["connection/recent_ips"] == ["192.168.10.128"]
+
+
+def test_manual_edit_overrides_selected_scan_data_and_survives_rescan(qtbot):
+    endpoint = DiscoveredDigitizer(
+        "192.168.10.128", 30431, "Scanned board", "mDNS/Avahi", "nucliflare-abc.local"
+    )
+    dialog = ConnectionDialog()
+    qtbot.addWidget(dialog)
+    dialog._replace_discovered_addresses((endpoint,))
+    dialog._ui.comboIp.setEditText("manual.local")
+    dialog._ui.comboIp.lineEdit().textEdited.emit("manual.local")
+    dialog._ui.spinPort.setValue(31000)
+    dialog._ui.spinChannels.setValue(1)
+    assert dialog.ip == "manual.local"
+    dialog._replace_discovered_addresses((endpoint,))
+    assert dialog.ip == "manual.local"
+    assert dialog.port == 31000 and dialog.channels == 1
+
+
+def test_rescan_updates_hostname_ip_pair_and_keeps_recent_hostname(qtbot):
+    _Settings.values["connection/recent_ips"] = ["nucliflare-abc.local"]
+    dialog = ConnectionDialog()
+    qtbot.addWidget(dialog)
+    endpoint = DiscoveredDigitizer(
+        "192.168.10.128", 30431, "Scanned board", "mDNS/Avahi", "nucliflare-abc.local"
+    )
+    dialog._replace_discovered_addresses((endpoint,))
+    assert dialog._ui.comboIp.count() == 1
+    updated = DiscoveredDigitizer(
+        "192.168.10.130", 30431, "Scanned board", "mDNS/Avahi", "nucliflare-abc.local"
+    )
+    dialog._replace_discovered_addresses((_digitizer("other.local"), updated))
+    assert dialog._ui.comboIp.currentText() == "nucliflare-abc.local (192.168.10.130)"
+    assert dialog.ip == "192.168.10.130"
+    dialog._replace_discovered_addresses(())
+    assert dialog._ui.comboIp.findText("nucliflare-abc.local") >= 0
 
 
 def _wait_for_scan(qtbot: QtBot, dialog: ConnectionDialog) -> None:

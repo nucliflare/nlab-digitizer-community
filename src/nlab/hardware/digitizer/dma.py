@@ -372,6 +372,8 @@ def _write_iio_mca_metadata(
     completed_frames: int,
     deadtime_records: int,
     client_record_schema: str,
+    final_status: dict[str, object] | None = None,
+    identity: dict[str, int | str] | None = None,
 ) -> Path:
     """Write the auditable sidecar used by the reference capture workflow."""
     metadata_path = path.with_suffix(".json")
@@ -400,6 +402,11 @@ def _write_iio_mca_metadata(
         "list_deadtime_raw": deadtime_records,
         "continuity_valid": continuity_valid,
     }
+    if final_status is not None:
+        metadata["final_status"] = final_status
+        metadata["continuity_valid"] = bool(final_status.get("continuity_valid", False))
+    if identity is not None:
+        metadata["producer_identity"] = identity
     with metadata_path.open("w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2, sort_keys=True)
         handle.write("\n")
@@ -731,7 +738,7 @@ class IIOMcaDmaStreamer:
     def __init__(self, backend: _IIOMcaBackend, channel: int) -> None:
         self._backend = backend
         self._channel = channel
-        self.last_capture_diagnostics: dict[str, int | bool] | None = None
+        self.last_capture_diagnostics: dict[str, object] | None = None
 
     def transport_identity(self) -> dict[str, int | str]:
         """Return read-only list-mode identity available from the bound backend."""
@@ -806,6 +813,9 @@ class IIOMcaDmaStreamer:
                     raise ValueError("Selected MCA decoder differs from the identified producer")
                 capture_schema = qualified
 
+        provenance_reader = getattr(self._backend, "mca_capture_provenance", None)
+        provenance = provenance_reader() if callable(provenance_reader) else {}
+
         if filepath is not None:
             writer = McaCaptureWriter(
                 path=filepath,
@@ -837,7 +847,20 @@ class IIOMcaDmaStreamer:
             if on_progress is not None:
                 on_progress(total_records)
 
-        capture_failed = False
+        failure: BaseException | None = None
+        cleanup_errors: list[dict[str, int | str]] = []
+
+        def retain_failure(phase: str, error: BaseException) -> None:
+            nonlocal failure
+            if failure is None:
+                failure = error
+            else:
+                cleanup_errors.append({
+                    "phase": phase, "errno": getattr(error, "errno", None) or 0,
+                    "message": str(error),
+                })
+                failure.add_note(f"{phase}: {error}")
+
         try:
             # Backend readiness is a hardware lifecycle boundary, not merely
             # worker-thread startup: arm all eight kernel blocks, enter the
@@ -857,46 +880,30 @@ class IIOMcaDmaStreamer:
                 # refill that could block forever with the producer stopped.
                 if not self._backend.mca_dma_measurement_in_progress():
                     break
-        except BaseException:
-            capture_failed = True
-            raise
-        finally:
-            # Keep the file/event callback alive while close drains the
-            # final complete blocks; destroying the buffer first would lose
-            # that tail by construction.
-            drained = 0
-            try:
-                drained = self._backend.close_mca_dma_capture(on_frame=consume)
-            except BaseException:
-                if capture_failed:
-                    log.exception(
-                        "IIO MCA DMA: buffer close also failed while handling the capture error"
-                    )
-                else:
-                    if writer is not None:
-                        writer.close(complete=False)
-                    raise
-            if capture_failed and writer is not None:
-                writer.close(complete=False)
-            log.info(
-                "IIO MCA DMA: finished -- %d records in %d frames "
-                "(%d frame(s) received during close drain)",
-                total_records,
-                frame_count,
-                drained,
-            )
+        except BaseException as exc:
+            retain_failure("Capture", exc)
+        # Healthy STOP preserves accepted tail frames. Fault cleanup must not
+        # refill a failed descriptor or expose its contents as new payload.
+        try:
+            abort = getattr(self._backend, "abort_mca_dma_capture", None)
+            if failure is not None and callable(abort):
+                abort()
+            else:
+                self._backend.close_mca_dma_capture(
+                    on_frame=consume if failure is None else None
+                )
+        except BaseException as exc:
+            retain_failure("DMA close", exc)
 
+        dma_fault = dma_error_count = completed_frames = deadtime_records = 0
+        diagnostics_available = False
         try:
             dma_fault, dma_error_count, completed_frames, deadtime_records = (
                 self._backend.get_mca_dma_capture_diagnostics()
             )
-        except BaseException:
-            if writer is not None:
-                writer.close(complete=False)
-            raise
-        continuity_valid = (
-            dma_fault == 0 and completed_frames == frame_count and deadtime_records == 0
-        )
+            diagnostics_available = True
+        except BaseException as exc:
+            retain_failure("Diagnostics", exc)
         # vdpp-lm-frame.c exposes completed_frames, dma_fault,
         # dma_error_count (cumulative since driver initialization), and
         # list_deadtime_raw directly through its IIO attributes.
@@ -909,58 +916,81 @@ class IIOMcaDmaStreamer:
             "completed_frames": completed_frames,
             "streamed_frames": frame_count,
             "list_deadtime_raw": deadtime_records,
-            "continuity_valid": continuity_valid,
         }
-        if writer is not None:
-            writer.close(complete=continuity_valid)
-        if filepath is not None and output_mode is McaDmaOutputMode.BINARY:
-            metadata_path = _write_iio_mca_metadata(
-                filepath,
-                channel=self._channel,
-                started_utc=started_utc,
-                frame_count=frame_count,
-                dma_fault=dma_fault,
-                dma_error_count=dma_error_count,
-                completed_frames=completed_frames,
-                deadtime_records=deadtime_records,
-                client_record_schema=capture_schema,
-            )
-            log.info("IIO MCA DMA: capture metadata written to %s", metadata_path)
-        if dma_fault:
+        if isinstance(provenance, dict):
+            self.last_capture_diagnostics.update(provenance)
+        status_reader = getattr(self._backend, "get_mca_dma_capture_status", None)
+        if callable(status_reader):
+            try:
+                self.last_capture_diagnostics.update(status_reader())
+            except BaseException as exc:
+                retain_failure("Final status", exc)
+        if dma_fault and failure is None:
             detail = (
                 "the capture file was retained for diagnostics"
                 if writer is not None
                 else "online capture continuity is invalid"
             )
-            raise RuntimeError(
+            retain_failure("DMA fault", RuntimeError(
                 f"MCA list-mode driver latched DMA fault reason {dma_fault}; {detail}"
-            )
-        if completed_frames != frame_count:
+            ))
+        if diagnostics_available and completed_frames != frame_count and failure is None:
             detail = (
                 "the retained capture is incomplete"
                 if writer is not None
                 else "online capture continuity is invalid"
             )
-            raise RuntimeError(
+            retain_failure("Frame accounting", RuntimeError(
                 f"MCA list-mode capture contains {frame_count} complete frames, "
                 f"but the driver completed {completed_frames}; {detail}"
-            )
-        if deadtime_records:
+            ))
+        if deadtime_records and failure is None:
             detail = (
                 "the capture file was retained, but continuity is invalid"
                 if writer is not None
                 else "online capture continuity is invalid"
             )
-            raise RuntimeError(
+            retain_failure("Producer loss", RuntimeError(
                 f"MCA list-mode IP reports {deadtime_records} dropped records; {detail}"
+            ))
+        status = self.last_capture_diagnostics
+        if failure is None and any(status.get(key) for key in (
+            "dma_poisoned", "reader_active", "recovery_required", "status_errors", "cleanup_errors"
+        )):
+            retain_failure(
+                "Final status", RuntimeError("MCA cleanup/recovery status is incomplete")
             )
-        log.info(
-            "IIO MCA DMA: continuity verified -- %d driver frames, "
-            "dma_fault=0, dma_error_count=%d, list_deadtime_raw=0",
-            completed_frames,
-            dma_error_count,
-        )
-
+        continuity_valid = failure is None and diagnostics_available
+        if writer is not None:
+            try:
+                writer.close(complete=continuity_valid)
+            except BaseException as exc:
+                retain_failure("File close", exc)
+                continuity_valid = False
+        status["continuity_valid"] = continuity_valid
+        if failure is not None:
+            status["primary_errno"] = getattr(failure, "errno", None) or 0
+            status["primary_error"] = str(failure)
+        if cleanup_errors:
+            previous_errors = status.get("cleanup_errors", [])
+            status["cleanup_errors"] = (
+                previous_errors if isinstance(previous_errors, list) else []
+            ) + cleanup_errors
+        if filepath is not None and output_mode is McaDmaOutputMode.BINARY:
+            try:
+                _write_iio_mca_metadata(
+                    filepath, channel=self._channel, started_utc=started_utc,
+                    frame_count=frame_count, dma_fault=dma_fault,
+                    dma_error_count=dma_error_count, completed_frames=completed_frames,
+                    deadtime_records=deadtime_records, client_record_schema=capture_schema,
+                    final_status=status, identity=self.transport_identity(),
+                )
+            except BaseException as exc:
+                retain_failure("Metadata", exc)
+                status["continuity_valid"] = False
+                status["metadata_error"] = str(exc)
+        if failure is not None:
+            raise failure
         return total_records
 
     @staticmethod

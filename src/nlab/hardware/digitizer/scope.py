@@ -223,6 +223,15 @@ class Scope:
 
     # ---- DC offset ----
 
+    def dac_available(self) -> bool:
+        return bool(getattr(self._b, "supports_dac", lambda: True)())
+
+    def acquisition_profile(self) -> dict[str, object]:
+        return getattr(self._b, "acquisition_profile", lambda: {})()
+
+    def apply_acquisition_profile(self, values: dict[str, object]) -> None:
+        self._b.apply_acquisition_profile(values)
+
     def get_dac_value(self) -> int:
         return self._b.get_dac_value()
 

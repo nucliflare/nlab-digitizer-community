@@ -184,9 +184,13 @@ def collect_channel_hardware(
                 scope.get_frame_period_cycles() * SCOPE_DATAPATH_CLOCK_PERIOD_NS
             ),
             "edge_mode": scope.get_trigger_mode().value,
-            "dac_value": scope.get_dac_value(),
         }
     }
+    if scope.dac_available():
+        settings["scope"]["dac_value"] = scope.get_dac_value()
+    profile = scope.acquisition_profile()
+    if profile:
+        settings["acquisition_profile"] = profile
     if mca is not None:
         mca_settings: dict[str, Any] = {
             "parameter_abi_version": 2,
@@ -345,8 +349,18 @@ def apply_channel_hardware(
     """Apply one channel's hardware values; missing keys are ignored."""
     # Reject unidentified MCA semantics before writing any other hardware.
     if mca is not None and isinstance(settings.get("mca"), Mapping):
-        validate_document(_mapping(settings, "mca"))
+        parameters = validate_document(_mapping(settings, "mca"))
+        if (parameters["psd_zero_crossing_mode"] == 2
+                and 2 not in mca.filters.psd_zc.available_modes()):
+            raise ValueError("PSD mode 2 is not advertised by this driver")
+    if "acquisition_profile" in settings:
+        profile = settings["acquisition_profile"]
+        if not isinstance(profile, dict):
+            raise ValueError("Acquisition profile must be a mapping")
+        scope.apply_acquisition_profile(profile)
     scope_settings = _mapping(settings, "scope")
+    if "dac_value" in scope_settings and not scope.dac_available():
+        raise ValueError("Select verified DAC wiring before applying baseline settings")
     _apply_ints(
         scope_settings,
         (

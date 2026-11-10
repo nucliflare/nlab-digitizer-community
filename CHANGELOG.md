@@ -20,6 +20,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- About displays read-only firmware/image metadata when reported by the target,
+  board/context attributes, per-channel core versions, MCA ABI and list-mode
+  geometry, and the detected IIO device inventory. Information is cached at
+  connection time and can be copied for support without polling active hardware.
+- Scanned connection entries pair the advertised hostname with its IP, for
+  example `nucliflare-xxxxx.local (192.168.10.yyy)`, while connections, saved
+  history, and board profiles use the separate endpoint address.
+- Optional deployment profiles can record Scope/DAC wiring and list-mode
+  producer provenance. Standard connections retain the existing defaults and
+  require no new selections or firmware identity; missing identity is recorded
+  as unknown. Unrecognized producer versions permit raw capture only.
+- Discoverable MCA PSD mode 2 (trapezoid) on drivers advertising it, including
+  integration-energy operation with a valid driver-derived trapezoid reciprocal.
+- Explicit MCA recovery acknowledgement after failed DMA or an uncertain STOP.
+  The passive check never resets hardware or establishes A07 final completion.
 - Optional accumulated Scope amplitude distribution beside the waveform,
   with a shared Y axis, filled outline, per-channel bounded ADC-code counts,
   100-code display bins, and View-menu show/pause/clear controls.
@@ -40,6 +55,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Retain native buffers, contexts, and reader ownership after failed cancellation
+  or join, including Scope drains and MCA first-refill/START failures. Native
+  destruction waits for successful reader termination; failed sessions cannot rearm.
+- Serialize DMA START/STOP with complete histogram reads while retaining separate
+  blocking-stream and control connections.
+- Preserve primary errno, additional cleanup failures, poison/queue status,
+  effective parameters, and firmware/decoder provenance in MCA run diagnostics,
+  including failed captures. Scope waveform close also checks reset quarantine.
+- Refuse configuration/rearm after persistent MCA progress following STOP; keep
+  failed acquisitions incomplete and preserve the deferred completion-fence limit.
+- HDF5/ROOT and binary-to-HDF5 metadata distinguish PSD 8 ns beat corrections
+  from CFD 2 ns sample corrections using PSD-first marker precedence. Unknown
+  producer conversion retains raw fields without deriving CFD timing.
 - MCA omits the automatically derived trapezoid 1/R readout and hides the
   optional CR-RC2 1/C row when the driver has no editable coefficient.
 - MCA parameters remain editable during non-DMA measurements, including ABI2,
@@ -69,6 +97,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture explicitly and preserve incomplete status.
 - Current sum plots break the trace at missing native windows instead of
   drawing lines through acquisition gaps.
+
+These changes are host-tested/source-derived. The upstream PSD 8-bit offset
+overflow remains unresolved in all PSD modes; final-image hardware qualification
+and A07 downstream completion remain outstanding.
 
 ## [0.8.3] — 2026-11-09
 

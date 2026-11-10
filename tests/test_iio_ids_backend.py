@@ -280,7 +280,7 @@ def test_factory_can_disable_iio_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         iio_backend,
         "IIODigitizerBackend",
-        lambda channel, uri: fake_backend,
+        lambda channel, uri, **_kwargs: fake_backend,
     )
     monkeypatch.setattr(
         iio_ids_backend,
@@ -304,7 +304,7 @@ def test_factory_enables_iio_ids_by_default(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(
         iio_backend,
         "IIODigitizerBackend",
-        lambda channel, uri: fake_backend,
+        lambda channel, uri, **_kwargs: fake_backend,
     )
     monkeypatch.setattr(
         iio_ids_backend,
@@ -332,7 +332,7 @@ def test_factory_continues_when_channel_ids_devices_are_absent(
     monkeypatch.setattr(
         iio_backend,
         "IIODigitizerBackend",
-        lambda channel, uri: fake_backend,
+        lambda channel, uri, **_kwargs: fake_backend,
     )
 
     def unavailable(channel: int, uri: str) -> IDSBackend:
@@ -376,7 +376,9 @@ def test_factory_disables_psu_when_required_hv_readback_fails(
         mca_dma_hardware_present=lambda: True,
         close=Mock(),
     )
-    monkeypatch.setattr(iio_backend, "IIODigitizerBackend", lambda ch, uri: fake_backend)
+    monkeypatch.setattr(
+        iio_backend, "IIODigitizerBackend", lambda ch, uri, **_kwargs: fake_backend
+    )
 
     result = digitizer.Digitizer.from_iio(channel, "ip:test")
     result.close()

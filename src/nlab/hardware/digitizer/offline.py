@@ -70,6 +70,20 @@ class _OfflineDigitizerBackend:
     def get_scope_trigger_modes(self) -> tuple[int, ...]:
         return tuple(range(5))
 
+    def get_psd_zc_modes(self) -> tuple[int, ...]:
+        return (0, 1, 2)
+
+    def supports_dac(self) -> bool:
+        return True
+
+    def acquisition_profile(self) -> dict[str, object]:
+        return dict(self._values.get("acquisition_profile", {}))
+
+    def apply_acquisition_profile(self, values: dict[str, object]) -> None:
+        from .acquisition_profile import AcquisitionProfile
+
+        self._values["acquisition_profile"] = AcquisitionProfile.from_mapping(values).to_dict()
+
     def mca_parameter_contract(self) -> dict[str, object]:
         return {"supported": True, "parameter_abi_version": 2, "parameter_units": "adc_samples"}
 

@@ -263,7 +263,7 @@ def test_help_about_opens_update_capable_dialog(
     factory = Mock()
     monkeypatch.setattr(app_module, "AboutDialog", factory)
     MainAppWindow._on_about(cast(MainAppWindow, window))
-    factory.assert_called_once_with(app_module._ABOUT_TEXT, window)
+    factory.assert_called_once_with(app_module._ABOUT_TEXT, window, digitizers=())
     factory.return_value.exec.assert_called_once_with()
     assert GITHUB_REPOSITORY_URL in app_module._ABOUT_TEXT
 

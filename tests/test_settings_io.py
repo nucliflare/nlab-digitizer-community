@@ -140,6 +140,7 @@ def test_scope_settings_reject_time_not_aligned_to_hardware_step() -> None:
 
 def test_nanosecond_settings_survive_yaml_save_and_load(tmp_path: Path) -> None:
     source_scope = Mock()
+    source_scope.acquisition_profile.return_value = {}
     source_scope.get_trigger_level.return_value = -12
     source_scope.get_pretrigger_samples.return_value = 24
     source_scope.get_frame_samples.return_value = 1024

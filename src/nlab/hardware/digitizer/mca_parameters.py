@@ -1,4 +1,4 @@
-"""MCA parameter ABI2 domains from PetaLinux bb8c57e; no transport access.
+"""MCA parameter ABI2 domains from PetaLinux c546f14; no transport access.
 
 Sample fields are original ADC positions (2 ns each), not encoded registers.
 This module validates requests; it does not infer detector calibration.
@@ -38,7 +38,7 @@ PARAMETERS: dict[str, tuple[int, int, int]] = {
     "trapezoid_start_offset_samples": (0, 8188, 4),
     "trapezoid_flat_top_window": (0, 6, 1),
     "psd_zero_crossing_enable": (0, 1, 1),
-    "psd_zero_crossing_mode": (0, 1, 1),
+    "psd_zero_crossing_mode": (0, 2, 1),
     "psd_window_low_samples": (0, 32764, 4),
     "psd_window_high_samples": (0, 32764, 4),
 }

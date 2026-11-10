@@ -18,6 +18,12 @@ from nlab.hardware.digitizer.mca_capture import McaDmaOutputMode, McaRunSummary
 from nlab.workers.mca_worker import MCAReadback
 
 
+def _controller(**kwargs):
+    return SimpleNamespace(
+        _sync_recovery_controls=Mock(), _check_stopped_health=Mock(), **kwargs
+    )
+
+
 class _Backend:
     def __init__(self) -> None:
         self.enabled = True
@@ -67,7 +73,7 @@ def test_dma_final_status_keeps_run_health_instead_of_stopped() -> None:
     label = Mock()
     events: list[str] = []
     thread = _ThreadProbe(events)
-    controller = SimpleNamespace(
+    controller = _controller(
         _dma_summary=None,
         _dma_error=None,
         _dma_worker=object(),
@@ -118,7 +124,7 @@ def test_dma_finish_retries_without_releasing_live_thread(
     def callback() -> None:
         pass
 
-    controller = SimpleNamespace(
+    controller = _controller(
         _dma_thread=thread,
         _dma_worker=object(),
         _channel=1,
@@ -142,7 +148,7 @@ def test_dma_finish_retries_without_releasing_live_thread(
 def test_polling_finish_waits_before_releasing_thread_wrappers() -> None:
     events: list[str] = []
     thread = _ThreadProbe(events)
-    controller = SimpleNamespace(
+    controller = _controller(
         _worker_thread=thread,
         _worker=object(),
         _channel=0,
@@ -157,7 +163,7 @@ def test_polling_finish_waits_before_releasing_thread_wrappers() -> None:
 
 def test_dma_stop_keeps_start_interlocked_until_worker_finishes() -> None:
     worker = Mock()
-    controller = SimpleNamespace(
+    controller = _controller(
         _channel=0,
         _coincidence_session=False,
         _dma_worker=worker,
@@ -183,7 +189,7 @@ def test_dma_stop_keeps_start_interlocked_until_worker_finishes() -> None:
 
 
 def test_start_is_ignored_while_dma_thread_is_closing() -> None:
-    controller = SimpleNamespace(
+    controller = _controller(
         _replay_hardware_interlocked=False,
         _dma_worker=object(),
         _dma_thread=object(),
@@ -198,7 +204,7 @@ def test_start_is_ignored_while_dma_thread_is_closing() -> None:
 
 def test_connection_loss_keeps_controls_interlocked_after_dma_cleanup() -> None:
     label = Mock()
-    controller = SimpleNamespace(
+    controller = _controller(
         _dma_summary=None,
         _dma_error="connection reset",
         _dma_worker=object(),
@@ -236,7 +242,7 @@ def test_dma_finish_unlocks_file_button_after_psd_session(
         staticmethod(lambda: McaDmaOutputMode.BINARY),
     )
     capture = Mock()
-    controller = SimpleNamespace(
+    controller = _controller(
         _dma_summary=None,
         _dma_error=None,
         _dma_worker=object(),
@@ -317,7 +323,7 @@ def test_controller_routes_running_write_through_reconfiguration() -> None:
     mca = Mock()
     mca.reconfigure_while_running.side_effect = lambda fn: (fn(), True)[1]
     histogram_curve = Mock()
-    controller = SimpleNamespace(
+    controller = _controller(
         _dma_worker=None,
         _worker=object(),
         _channel=0,
@@ -341,7 +347,7 @@ def test_controller_routes_running_write_through_reconfiguration() -> None:
 
 def test_controller_initialization_unconditionally_clears_stale_enable() -> None:
     mca = Mock()
-    controller = SimpleNamespace(_mca=mca, _channel=0)
+    controller = _controller(_mca=mca, _channel=0)
 
     MCAController._disarm_before_initialization(controller)
 
@@ -374,7 +380,7 @@ def test_controller_initialization_fixes_low_pass_and_records_it(
 def test_shutdown_stops_externally_armed_channel_even_when_not_in_progress() -> None:
     mca = Mock()
     mca.get_measurement_in_progress.return_value = False
-    controller = SimpleNamespace(_mca=mca, _channel=0)
+    controller = _controller(_mca=mca, _channel=0)
 
     MCAController._ensure_disarmed(controller)
 
@@ -389,7 +395,7 @@ def test_polling_start_clears_enable_before_writing_time_limit() -> None:
     mca.set_time_limit.side_effect = lambda value: events.append(("limit", value))
     mca.start.side_effect = lambda: events.append("start")
     start_worker = Mock(side_effect=lambda: events.append("worker"))
-    controller = SimpleNamespace(
+    controller = _controller(
         _set_controls_enabled=Mock(),
         _mca=mca,
         _channel=0,
@@ -411,7 +417,7 @@ def test_psd_interception_requires_charge_comparison(
 ) -> None:
     capture = Mock()
     event_buffer = McaEventBuffer()
-    controller = SimpleNamespace(
+    controller = _controller(
         _psd_capture=capture,
         _psd_capture_enabled=False,
         _event_buffer=event_buffer,
@@ -431,7 +437,7 @@ def test_psd_interception_requires_charge_comparison(
 def test_coincidence_can_receive_online_events_without_feeding_disabled_psd() -> None:
     psd_buffer = McaEventBuffer()
     coincidence_buffer = McaEventBuffer()
-    controller = SimpleNamespace(
+    controller = _controller(
         _psd_capture=Mock(),
         _psd_capture_enabled=False,
         _event_buffer=psd_buffer,
@@ -447,7 +453,7 @@ def test_coincidence_can_receive_online_events_without_feeding_disabled_psd() ->
 
 def test_session_capture_publishes_events_without_enabling_psd() -> None:
     event_buffer = McaEventBuffer()
-    controller = SimpleNamespace(
+    controller = _controller(
         _psd_capture=Mock(),
         _psd_capture_enabled=False,
         _session_capture_enabled=True,
@@ -481,7 +487,7 @@ def test_dma_output_and_psd_interception_are_independent(
     event_buffer = McaEventBuffer()
     destination = tmp_path / f"measurement{mode.extension or '.bin'}"
     label = Mock()
-    controller = SimpleNamespace(
+    controller = _controller(
         _active_dma_mode=McaDmaOutputMode.BINARY,
         _dma_error=None,
         _dma_filepath=None,
@@ -534,7 +540,7 @@ def test_hardware_completion_releases_enable_before_rearming_gui() -> None:
     events: list[str] = []
     mca = Mock()
     mca.stop.side_effect = lambda: events.append("stop")
-    controller = SimpleNamespace(
+    controller = _controller(
         _mca=mca,
         _mca_dma=None,
         _dma_worker=None,
@@ -557,7 +563,7 @@ def test_hardware_completion_releases_enable_before_rearming_gui() -> None:
 
 def test_roi_statistics_are_deferred_until_drag_finishes() -> None:
     update_stats = Mock()
-    controller = SimpleNamespace(
+    controller = _controller(
         _roi_dragging=False,
         _update_roi_stats=update_stats,
     )
@@ -582,7 +588,7 @@ def test_histogram_readback_skips_roi_statistics_during_drag() -> None:
     histogram = np.arange(16, dtype=np.uint32)
     update_stats = Mock()
     histogram_curve = Mock()
-    controller = SimpleNamespace(
+    controller = _controller(
         _last_histogram=None,
         _display_histogram=None,
         _differential_histogram_enabled=False,
@@ -606,7 +612,7 @@ def test_histogram_readback_skips_roi_statistics_during_drag() -> None:
 
 def test_differential_histogram_displays_non_negative_per_refresh_counts() -> None:
     histogram_curve = Mock()
-    controller = SimpleNamespace(
+    controller = _controller(
         _last_histogram=None,
         _display_histogram=None,
         _differential_histogram_enabled=True,
@@ -640,7 +646,7 @@ def test_histogram_display_switch_rebases_without_changing_accumulated_counts() 
     y_label = Mock()
     roi_stats = Mock()
     accumulated = np.array([10, 20], dtype=np.uint32)
-    controller = SimpleNamespace(
+    controller = _controller(
         _last_histogram=accumulated,
         _display_histogram=accumulated,
         _differential_histogram_enabled=False,
@@ -691,7 +697,7 @@ def test_readbacks_are_coalesced_and_gui_render_rate_is_capped() -> None:
     timer.isActive.side_effect = [False, True]
     first = _readback(1)
     latest = _readback(2)
-    controller = SimpleNamespace(
+    controller = _controller(
         _pending_readback=None,
         _render_timer=timer,
         ui=SimpleNamespace(
@@ -709,7 +715,7 @@ def test_readbacks_are_coalesced_and_gui_render_rate_is_capped() -> None:
 def test_pending_readback_renders_only_latest_snapshot() -> None:
     latest = _readback(3)
     calls = Mock()
-    controller = SimpleNamespace(
+    controller = _controller(
         _pending_readback=latest,
         _update_debug_plot=calls.debug,
         _update_statistics=calls.statistics,

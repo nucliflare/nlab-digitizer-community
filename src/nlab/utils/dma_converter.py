@@ -23,7 +23,12 @@ from nlab.hardware.digitizer.dma import (
     IIO_LM_UNQUALIFIED_SCHEMA,
     SCOPE_TIMESTAMP_WORDS,
 )
-from nlab.hardware.digitizer.iio_listmode import cfd_interpolation_samples, cfd_valid
+from nlab.hardware.digitizer.iio_listmode import (
+    VDPP_ZC_CALC_SCHEMA,
+    cfd_interpolation_samples,
+    cfd_valid,
+)
+from nlab.hardware.digitizer.mca_capture import zc_timing_units
 
 log = logging.getLogger(__name__)
 
@@ -197,8 +202,9 @@ def convert_listmode(src: Path, dst: Path) -> int:
                 "marker, zc_offset, zc_estimation, charge_energy, "
                 "trapezoid_energy, timestamp"
             )
-            ds.attrs["zc_offset_format"] = "unsigned uint8, 2 ns ADC samples"
-            ds.attrs["zc_estimation_format"] = "signed Q2.14 ADC-sample fraction"
+            ds.attrs["zc_offset_format"] = "unsigned uint8; marker-selected units"
+            ds.attrs["zc_estimation_format"] = "signed Q2.14; marker-selected units"
+            ds.attrs["zc_timing_units"] = json.dumps(zc_timing_units(client_record_schema))
             h5.create_dataset(
                 "charge_energy",
                 data=events["charge_energy"],
@@ -211,6 +217,9 @@ def convert_listmode(src: Path, dst: Path) -> int:
                 compression="gzip",
                 compression_opts=4,
             )
+            if client_record_schema != VDPP_ZC_CALC_SCHEMA:
+                log.info("Opaque producer: retaining raw fields without CFD interpretation")
+                return n_events
             cfd_interpolation = h5.create_dataset(
                 "cfd_interpolation_samples",
                 data=cfd_interpolation_samples(events),
