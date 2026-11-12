@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Replace the long README with a concise quick-start guide covering release and
+  source launches, native IIO installation, connection, first Scope/MCA runs,
+  and links to built-in help, use cases, and the wiki.
+
 ## [0.8.4] — 2026-11-10
 
 ### Changed
