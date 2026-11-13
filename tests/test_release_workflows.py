@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from fnmatch import fnmatch
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -91,3 +92,38 @@ def test_github_windows_installs_pinned_libiio_runtime() -> None:
     verify = next(step for step in steps if step.get("name") == "Verify native libiio runtime")
     assert "if" not in verify
     assert "import iio" in verify["run"]
+
+
+def test_github_release_collects_lmde_artifact_from_same_run() -> None:
+    """A separate build must finish before its archive is collected for release."""
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load(
+        (root / ".github/workflows/build.yaml").read_text(encoding="utf-8")
+    )
+    jobs = workflow["jobs"]
+    lmde_job = jobs["build-lmde7"]
+    lmde_workflow = yaml.safe_load(
+        (root / lmde_job["uses"].removeprefix("./")).read_text(encoding="utf-8")
+    )
+    lmde_steps = lmde_workflow["jobs"]["build"]["steps"]
+    upload = next(step for step in lmde_steps if "upload-artifact" in step.get("uses", ""))
+    archive_path = Path(upload["with"]["path"])
+    assert archive_path.name == "nlab-lmde7-x86_64.tar.gz"
+
+    release = jobs["release"]
+    assert {"build", "build-lmde7"} <= set(release["needs"])
+    download = next(
+        step for step in release["steps"] if "download-artifact" in step.get("uses", "")
+    )
+    assert "run-id" not in download["with"]
+    assert "name" not in download["with"]
+    downloaded_archive = (
+        Path(download["with"]["path"]) / upload["with"]["name"] / archive_path.name
+    )
+    publish = next(
+        step for step in release["steps"] if "action-gh-release" in step.get("uses", "")
+    )
+    assert any(
+        fnmatch(downloaded_archive.as_posix(), pattern)
+        for pattern in publish["with"]["files"].splitlines()
+    )

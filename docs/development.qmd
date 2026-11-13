@@ -157,7 +157,16 @@ builds:
 python scripts/build_nuitka.py
 ```
 
-Tagged releases trigger Windows and Ubuntu builds through GitHub Actions.
+Tagged releases trigger Windows, Ubuntu, and LMDE 7 / Debian 13 x86_64 builds
+through GitHub Actions. The GitHub-only `build-lmde7.yaml` workflow builds in
+the official `python:3.12-trixie` container, runs the offscreen tests, and uses
+the reviewed PyInstaller build with its frozen ROOT-conversion check. The
+main workflow waits for all builds before publishing the release, including
+`nlab-lmde7-x86_64.tar.gz`. The LMDE workflow can also be run manually to
+download an Actions artifact without publishing a release.
+
+The container checks Debian 13 userspace; an LMDE Cinnamon desktop session
+and live digitizer operation still require validation on the target system.
 
 ## Change completion
 

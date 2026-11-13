@@ -107,8 +107,11 @@ jobs:
           path: ${{ matrix.package }}
           if-no-files-found: error
 
+  build-lmde7:
+    uses: ./.github/workflows/build-lmde7.yaml
+
   release:
-    needs: build
+    needs: [build, build-lmde7]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

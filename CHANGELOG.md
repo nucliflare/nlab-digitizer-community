@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.5] — 2026-11-13
+
+### Added
+
+- GitHub-only LMDE 7 / Debian 13 x86_64 release build in a Debian trixie
+  container with Python 3.12. Tagged releases include
+  `nlab-lmde7-x86_64.tar.gz`; the dedicated workflow also supports manual builds.
+
 ### Fixed
 
 - Current periodic-sum recordings ask before overwriting an existing HDF5 file

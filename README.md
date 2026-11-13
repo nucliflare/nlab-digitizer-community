@@ -11,8 +11,9 @@ runtime** on your computer.
 **Windows:** Download [Analog Devices libiio v0.26](https://github.com/analogdevicesinc/libiio/releases/tag/v0.26),
 install `libiio-0.26.ga0eca0d2-setup.exe`, then restart the app if it was open.
 
-**Ubuntu:** Install the [IIO runtime](https://packages.ubuntu.com/noble/libiio0)
-and command-line tools:
+**Ubuntu / LMDE 7 (Debian 13):** Install the IIO runtime
+([Ubuntu](https://packages.ubuntu.com/noble/libiio0),
+[Debian 13](https://packages.debian.org/trixie/libiio0)) and command-line tools:
 
 ```bash
 sudo apt update
@@ -31,6 +32,14 @@ A separate Python installation is unnecessary.
 
   ```bash
   tar -xzf nlab-ubuntu.tar.gz
+  chmod +x nlab
+  ./nlab
+  ```
+
+- **LMDE 7 / Debian 13 (x86_64):** Extract and launch from a terminal:
+
+  ```bash
+  tar -xzf nlab-lmde7-x86_64.tar.gz
   chmod +x nlab
   ./nlab
   ```
