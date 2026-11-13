@@ -432,8 +432,12 @@ def test_offset_checkbox_invalidates_fit_and_controls_continuous_model(
     function_name = "fit_psd_fom_lm" if mode == "double" else "fit_psd_fom_separate_lm"
     fitter = Mock(side_effect=ValueError("Test routing only"))
     monkeypatch.setattr(f"nlab.views.psd_fom_widget.{function_name}", fitter)
-    widget._continuous_timer.setInterval(20)
     widget.continuous_checkbox.setChecked(True)
-    qtbot.waitUntil(lambda: fitter.call_count == 1, timeout=1500)
+    assert widget._continuous_timer.isActive()
+    # Exercise model routing without depending on GUI timer scheduling.
+    widget._continuous_timer.timeout.emit()
+    fitter.assert_called_once()
     assert fitter.call_args.kwargs["use_background"] is False
+    assert fitter.call_args.kwargs["max_nfev"] == 400
     widget.continuous_checkbox.setChecked(False)
+    assert not widget._continuous_timer.isActive()

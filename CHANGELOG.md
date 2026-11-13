@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Make the PSD offset-model regression test independent of Qt timer scheduling
+  while preserving coverage of continuous-fit model selection.
+
 ## [0.8.5] — 2026-11-13
 
 ### Added
