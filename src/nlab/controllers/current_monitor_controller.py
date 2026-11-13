@@ -13,7 +13,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QLocale, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QFileDialog, QWidget
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget
 
 from nlab.hardware.digitizer.current_monitor import (
     ScopeCurrentAccumulator,
@@ -376,10 +376,10 @@ class CurrentMonitorController(QWidget):
             return
         if self._is_running():
             return
-        self._reset_measurement_state()
         if self.ui.comboMode.currentIndex() == _MODE_PERIODIC_SUM:
             self._start_sum_monitor()
             return
+        self._reset_measurement_state()
         if self.ui.comboMode.currentIndex() == _MODE_SCOPE_DMA:
             self._start_dma_monitor()
             return
@@ -501,12 +501,29 @@ class CurrentMonitorController(QWidget):
         output = (
             Path(self.ui.editSumFile.text().strip()) if self.ui.cbRecordSums.isChecked() else None
         )
+        overwrite = False
+        if output is not None and output.is_file():
+            answer = QMessageBox.question(
+                self,
+                "Overwrite sum recording?",
+                f'"{output}" already exists.\n\nOverwrite it with a new recording?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            overwrite = True
+        # The confirmation runs a nested event loop; replay or another acquisition
+        # can begin while it is open. Scope also rechecks its ownership below.
+        if self._replay_hardware_interlocked or self._is_running():
+            return
+        self._reset_measurement_state()
         self._normalize_dma_gap()
         normalize_numeric_control(self.ui.spinSumSamples)
         try:
             self._sum_worker = scope_controller.start_current_sum_monitor(
                 frame_samples=self._sum_frame_samples(),
-                gap_cycles=self._dma_gap_cycles(), output=output
+                gap_cycles=self._dma_gap_cycles(), output=output, overwrite=overwrite
             )
         except Exception as exc:
             self._monitor_error = f"Could not start periodic sums: {exc}"
@@ -522,7 +539,8 @@ class CurrentMonitorController(QWidget):
 
     def _choose_sum_output(self) -> None:
         filename, _ = QFileDialog.getSaveFileName(
-            self, "New sum recording", "", "Scope sum capture (*.h5)"
+            self, "Sum recording", "", "Scope sum capture (*.h5)",
+            options=QFileDialog.Option.DontConfirmOverwrite,
         )
         if filename:
             self.ui.editSumFile.setText(filename if filename.endswith(".h5") else filename + ".h5")

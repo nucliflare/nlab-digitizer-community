@@ -1071,7 +1071,8 @@ class ScopeController(QWidget):
         )
 
     def start_current_sum_monitor(
-        self, *, gap_cycles: int, frame_samples: int | None = None, output: Path | None = None
+        self, *, gap_cycles: int, frame_samples: int | None = None, output: Path | None = None,
+        overwrite: bool = False,
     ) -> ScopeSumWorker:
         """Reserve/configure Scope DMA; Current renders its bounded analysis."""
         if self._replay_hardware_interlocked or self._session_replay_active:
@@ -1123,7 +1124,7 @@ class ScopeController(QWidget):
             )
             self._sum_worker = worker
             self._set_sum_controls_busy(True)
-            worker.start(output)
+            worker.start(output, overwrite=overwrite)
             self._set_measurement_active(True)
             return worker
         except Exception:

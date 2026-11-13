@@ -9,8 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Current periodic-sum recordings ask before overwriting an existing HDF5 file
+  on Start. Cancel preserves the file and plot; approval applies to that run
+  only. File replacement happens in the writer after capture setup succeeds.
+
 ### Changed
 
+- Point README downloads and wiki documentation only to the public GitHub
+  repository.
+- Clarify that periodic-sum recording saves in the background and keeps
+  acquisition controls locked until the file is closed. GUI regression tests
+  cover slow file creation, writes, and final flush, including overwrites.
 - Replace the long README with a concise quick-start guide covering release and
   source launches, native IIO installation, connection, first Scope/MCA runs,
   and links to built-in help, use cases, and the wiki.

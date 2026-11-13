@@ -48,7 +48,7 @@ Important focused DMA tests include:
 
 ## Documentation and wiki
 
-Quarto sources live in `docs/`; rendered GitHub/Gitea wiki pages live in the
+Quarto sources live in `docs/`; rendered GitHub wiki pages live in the
 separate `wiki/` checkout. Render all documentation with:
 
 ```bash
@@ -157,8 +157,7 @@ builds:
 python scripts/build_nuitka.py
 ```
 
-Tagged releases trigger Windows and Ubuntu workflows for the configured GitHub
-and Gitea remotes.
+Tagged releases trigger Windows and Ubuntu builds through GitHub Actions.
 
 ## Change completion
 

@@ -192,8 +192,10 @@ class ScopeSumContinuity:
 class ScopeSumWriter:
     """Single-threaded HDF5 sink; cache handles and resize once per batch."""
 
-    def __init__(self, path: Path, metadata: dict[str, object]) -> None:
-        self._file = h5py.File(path, "x")
+    def __init__(
+        self, path: Path, metadata: dict[str, object], *, overwrite: bool = False,
+    ) -> None:
+        self._file = h5py.File(path, "w" if overwrite else "x")
         self._closed = False
         try:
             self._file.attrs.update(
@@ -306,6 +308,7 @@ class ScopeSumRecorder:
         path: Path,
         metadata: dict[str, object],
         *,
+        overwrite: bool = False,
         queue_packets: int = 256,
         batch_packets: int = 16,
         batch_seconds: float = 0.1,
@@ -323,7 +326,8 @@ class ScopeSumRecorder:
         self._missed = 0
         self._runtime_metadata: dict[str, object] | None = None
         self._thread = threading.Thread(
-            target=self._run, args=(path, metadata), name="Scope sum HDF5 writer", daemon=False
+            target=self._run, args=(path, metadata, overwrite),
+            name="Scope sum HDF5 writer", daemon=False,
         )
         self._thread.start()
         self._ready.wait()  # Create/validate the destination before acquisition is armed.
@@ -344,10 +348,10 @@ class ScopeSumRecorder:
                 "Acquisition stopped; the saved prefix is incomplete."
             ) from None
 
-    def _run(self, path: Path, metadata: dict[str, object]) -> None:
+    def _run(self, path: Path, metadata: dict[str, object], overwrite: bool) -> None:
         writer = None
         try:
-            writer = ScopeSumWriter(path, metadata)
+            writer = ScopeSumWriter(path, metadata, overwrite=overwrite)
             self._ready.set()
             while not self._closing.is_set() or not self._queue.empty():
                 batch: list[ScopeSumPacket] = []
@@ -505,7 +509,10 @@ class ScopeSumCapture:
         path: Path | None = None,
         ready: Callable[[], None] | None = None,
         max_packets: int | None = None,
+        *,
+        overwrite: bool = False,
     ) -> ScopeSumSnapshot:
+        """Record sums; replacing an existing file requires explicit opt-in."""
         writer = None
         error = ""
         complete = False
@@ -533,7 +540,7 @@ class ScopeSumCapture:
                     configuration_snapshot="before acquisition"
                     if self.configuration_yaml else "not supplied",
                 )
-                writer = ScopeSumRecorder(path, metadata)
+                writer = ScopeSumRecorder(path, metadata, overwrite=overwrite)
             deadline = None
             self._started = True
             while True:

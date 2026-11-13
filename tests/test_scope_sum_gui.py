@@ -1,5 +1,6 @@
 """Inline sum GUI and joined lifecycle using synthetic packets, not live validation."""
 
+import errno
 import struct
 import threading
 from unittest.mock import Mock
@@ -7,13 +8,21 @@ from unittest.mock import Mock
 import h5py
 import numpy as np
 import pytest
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from nlab.controllers.current_monitor_controller import CurrentMonitorController
 from nlab.controllers.scope_controller import ScopeController
+from nlab.hardware.digitizer import scope_sums
 from nlab.hardware.digitizer.offline import create_offline_digitizer
 from nlab.hardware.digitizer.scope import TriggerMode
-from nlab.hardware.digitizer.scope_sums import ScopeSumAnalysis, ScopeSumWriter, decode_sum_packet
+from nlab.hardware.digitizer.scope_sums import (
+    ScopeSumAnalysis,
+    ScopeSumCapture,
+    ScopeSumGeometry,
+    ScopeSumWriter,
+    decode_sum_packet,
+)
 
 
 def _packet():
@@ -36,7 +45,7 @@ class _Capture:
     def request_stop(self):
         self.cancelled.set()
 
-    def run(self, path):
+    def run(self, path, *, overwrite=False):
         self.output = path
         self.analysis.append(_packet())
         self.entered.set()
@@ -47,7 +56,7 @@ class _Capture:
             if path is not None:
                 writer = ScopeSumWriter(path, {
                     "channel": 0, "configuration_yaml": getattr(self, "configuration_yaml", ""),
-                })
+                }, overwrite=overwrite)
                 writer.append(_packet())
                 writer.close(complete=True)
             return {"complete": True}
@@ -167,6 +176,113 @@ def test_widget_close_stops_and_joins_sum_reader(qtbot, monkeypatch):
         _close(device, scope, current)
 
 
+@pytest.mark.parametrize("phase", ["open", "write", "close"])
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_sum_saving_keeps_gui_responsive_until_disk_finishes(
+    qtbot, monkeypatch, tmp_path, phase, overwrite,
+):
+    entered, release = threading.Event(), threading.Event()
+    read_first, stopped, dma_closed = threading.Event(), threading.Event(), threading.Event()
+    gui_thread = threading.get_ident()
+    io_threads = []
+
+    def disk_operation(name):
+        io_threads.append(threading.get_ident())
+        assert threading.get_ident() != gui_thread
+        if name == phase:
+            entered.set()
+            assert release.wait(10), "Timed out waiting to release the simulated slow disk"
+
+    class HeldWriter(ScopeSumWriter):
+        def __init__(self, *args, **kwargs):
+            disk_operation("open")
+            super().__init__(*args, **kwargs)
+
+        def append_many(self, packets):
+            disk_operation("write")
+            super().append_many(packets)
+
+        def close(self, **kwargs):
+            disk_operation("close")
+            super().close(**kwargs)
+
+    monkeypatch.setattr(scope_sums, "ScopeSumWriter", HeldWriter)
+    raw = bytearray(_packet().raw)
+    struct.pack_into("<QQ", raw, 16, 16 | (508 << 48), 0)
+
+    def read_frame():
+        if not read_first.is_set():
+            read_first.set()
+            return bytes(raw)
+        assert stopped.wait(10)
+        raise OSError(errno.ETIMEDOUT, "Simulated terminal drain timeout")
+
+    backend = Mock()
+    backend.get_scope_dma_geometry.return_value = ScopeSumGeometry(16, 124, 0)
+    backend.scope_sum_identity.return_value = {"uri": "synthetic GUI responsiveness test"}
+    backend.scope_sum_status.return_value = (0, 0)
+    backend.get_scope_dma_runtime_metadata.return_value = {}
+    backend.read_dma_raw_frame.side_effect = read_frame
+    backend.request_scope_sum_stop.side_effect = stopped.set
+    backend.stop_scope_sum_from_reader.side_effect = stopped.set
+    backend.close_scope_sum_capture.side_effect = dma_closed.set
+    capture = ScopeSumCapture(backend, 0)
+    device, scope, current, _ = _views(qtbot, monkeypatch, capture)
+    path = tmp_path / "slow-recording.h5"
+    if overwrite:
+        path.write_bytes(b"original recording")
+    question = Mock(return_value=QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(QMessageBox, "question", question)
+    heartbeats = []
+    heartbeat = QTimer(current)
+    heartbeat.setInterval(10)
+    heartbeat.timeout.connect(lambda: heartbeats.append(True))
+    try:
+        current.ui.spinSumSamples.setValue(16)
+        current.ui.cbRecordSums.setChecked(True)
+        current.ui.editSumFile.setText(str(path))
+        heartbeat.start()
+        current.ui.btnStart.click()
+        if phase == "close":
+            qtbot.waitUntil(read_first.is_set)
+            current.ui.btnStop.click()
+        qtbot.waitUntil(entered.is_set)
+        ticks = len(heartbeats)
+        qtbot.waitUntil(lambda: len(heartbeats) >= ticks + 5, timeout=2000)
+        assert not release.is_set()
+        assert current._is_running() and scope.measurement_active
+        if phase == "open":
+            backend.read_dma_raw_frame.assert_not_called()
+            if overwrite:
+                assert path.read_bytes() == b"original recording"
+        if phase != "close":
+            current.ui.btnStop.click()
+        if phase != "open":
+            qtbot.waitUntil(dma_closed.is_set)
+        # The Stop slot and GUI timers keep working while the disk is still held.
+        ticks = len(heartbeats)
+        qtbot.waitUntil(lambda: len(heartbeats) >= ticks + 5, timeout=2000)
+        assert current._sum_worker.thread.is_alive()
+        assert not current.ui.btnStart.isEnabled()
+        assert not current.ui.comboMode.isEnabled()
+        assert not scope.ui.btnStart.isEnabled()
+        assert not current.ui.btnStop.isEnabled()
+        assert question.call_count == int(overwrite)
+        release.set()
+        qtbot.waitUntil(lambda: not current._is_running())
+        assert current._sum_worker.thread is None
+        assert current.ui.btnStart.isEnabled() and scope.ui.btnStart.isEnabled()
+        assert not current._sum_worker.error
+        assert len(set(io_threads)) == 1
+        with h5py.File(path, "r") as source:
+            assert bool(source.attrs["complete"]) == (phase != "open")
+            assert len(source["packets"]) == (0 if phase == "open" else 1)
+    finally:
+        heartbeat.stop()
+        release.set()
+        _close(device, scope, current)
+
+
 def test_capture_failure_restores_controls_and_reports_error(qtbot, monkeypatch):
     device, scope, current, capture = _views(qtbot, monkeypatch, _Capture(fail=True))
     try:
@@ -256,6 +372,131 @@ def test_recording_opens_in_dedicated_tool_without_changing_live_plot(qtbot, mon
     finally:
         if current._capture_dialog is not None:
             current._capture_dialog.close_without_prompt()
+        _close(device, scope, current)
+
+
+@pytest.mark.parametrize(
+    "answer", [QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.No],
+)
+def test_declining_sum_overwrite_preserves_file_and_plot(qtbot, monkeypatch, tmp_path, answer):
+    path = tmp_path / "existing.h5"
+    path.write_bytes(b"original measurement")
+    question = Mock(return_value=answer)
+    monkeypatch.setattr(QMessageBox, "question", question)
+    device, scope, current, capture = _views(qtbot, monkeypatch)
+    try:
+        current.ui.cbRecordSums.setChecked(True)
+        current.ui.editSumFile.setText(str(path))
+        current._curve.setData([0, 1], [2, 3])
+        trigger_mode = device.scope.get_trigger_mode()
+        current.start_monitor()
+        question.assert_called_once()
+        assert str(path) in question.call_args.args[2]
+        assert question.call_args.args[-1] == QMessageBox.StandardButton.Cancel
+        assert path.read_bytes() == b"original measurement"
+        assert current._curve.yData[-1] == 3
+        assert not capture.entered.is_set()
+        assert not current._is_running()
+        assert scope._sum_previous_settings is None
+        assert device.scope.get_trigger_mode() == trigger_mode
+        assert current.ui.btnStart.isEnabled()
+    finally:
+        _close(device, scope, current)
+
+
+def test_sum_overwrite_requires_confirmation_for_each_start(qtbot, monkeypatch, tmp_path):
+    path = tmp_path / "existing.h5"
+    path.write_bytes(b"original measurement")
+    question = Mock(side_effect=[QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.Cancel])
+    monkeypatch.setattr(QMessageBox, "question", question)
+    device, scope, current, capture = _views(qtbot, monkeypatch)
+    run = Mock(wraps=capture.run)
+    monkeypatch.setattr(capture, "run", run)
+    try:
+        current.ui.cbRecordSums.setChecked(True)
+        current.ui.editSumFile.setText(str(path))
+        current.start_monitor()
+        assert capture.entered.wait(1)
+        # Confirmation does not delete the file; only the writer may replace it.
+        assert path.read_bytes() == b"original measurement"
+        current.stop_monitor_sync()
+        run.assert_called_once_with(path, overwrite=True)
+        with h5py.File(path, "r") as source:
+            assert source.attrs["complete"]
+            assert source["packets"].shape == (1, 4096)
+        recorded = path.read_bytes()
+        current.start_monitor()
+        assert question.call_count == 2
+        assert run.call_count == 1
+        assert not current._is_running()
+        assert path.read_bytes() == recorded
+    finally:
+        _close(device, scope, current)
+
+
+@pytest.mark.parametrize("record", [False, True])
+def test_sum_start_without_file_conflict_does_not_prompt(qtbot, monkeypatch, tmp_path, record):
+    path = tmp_path / "sums.h5"
+    if not record:
+        path.write_bytes(b"existing file with recording disabled")
+    question = Mock(side_effect=AssertionError("No overwrite confirmation is needed"))
+    monkeypatch.setattr(QMessageBox, "question", question)
+    device, scope, current, capture = _views(qtbot, monkeypatch)
+    try:
+        current.ui.cbRecordSums.setChecked(record)
+        current.ui.editSumFile.setText(str(path))
+        current.start_monitor()
+        assert capture.entered.wait(1)
+        current.stop_monitor_sync()
+        question.assert_not_called()
+        assert capture.output == (path if record else None)
+        if record:
+            with h5py.File(path, "r") as source:
+                assert source.attrs["complete"]
+        else:
+            assert path.read_bytes() == b"existing file with recording disabled"
+    finally:
+        _close(device, scope, current)
+
+
+def test_replay_started_during_sum_confirmation_blocks_recording(qtbot, monkeypatch, tmp_path):
+    path = tmp_path / "existing.h5"
+    path.write_bytes(b"original measurement")
+    device, scope, current, capture = _views(qtbot, monkeypatch)
+
+    def confirm(*_args):
+        current.set_replay_hardware_interlock(True)
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", confirm)
+    try:
+        current.ui.cbRecordSums.setChecked(True)
+        current.ui.editSumFile.setText(str(path))
+        current.start_monitor()
+        assert path.read_bytes() == b"original measurement"
+        assert not capture.entered.is_set()
+        assert not current._is_running()
+        assert scope._sum_previous_settings is None
+    finally:
+        _close(device, scope, current)
+
+
+def test_scope_busy_after_sum_confirmation_preserves_existing_file(qtbot, monkeypatch, tmp_path):
+    path = tmp_path / "existing.h5"
+    path.write_bytes(b"original measurement")
+    device, scope, current, capture = _views(qtbot, monkeypatch)
+    monkeypatch.setattr(QMessageBox, "question", Mock(return_value=QMessageBox.StandardButton.Yes))
+    try:
+        current.ui.cbRecordSums.setChecked(True)
+        current.ui.editSumFile.setText(str(path))
+        device.scope.set_enable(True)
+        current.start_monitor()
+        assert "stop the active Scope acquisition" in current.status.text()
+        assert path.read_bytes() == b"original measurement"
+        assert not capture.entered.is_set()
+        assert not current._is_running()
+    finally:
+        device.scope.set_enable(False)
         _close(device, scope, current)
 
 

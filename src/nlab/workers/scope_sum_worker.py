@@ -36,19 +36,19 @@ class ScopeSumWorker:
     def message(self) -> str:
         return self.error or self.result
 
-    def start(self, output: Path | None = None) -> None:
+    def start(self, output: Path | None = None, *, overwrite: bool = False) -> None:
         if self._started:
             raise RuntimeError("sum workers cannot be restarted")
         self.thread = threading.Thread(
-            target=self._run, args=(output,), name="current-sums", daemon=False
+            target=self._run, args=(output, overwrite), name="current-sums", daemon=False
         )
         self.thread.start()
         self._started = True
 
-    def _run(self, output: Path | None) -> None:
+    def _run(self, output: Path | None, overwrite: bool) -> None:
         try:
             if self.capture is not None:
-                result = self.capture.run(output)
+                result = self.capture.run(output, overwrite=overwrite)
                 self.result = (
                     "Measurement stopped; tail drained and buffer closed. "
                     f"Final hardware missed windows: {result.get('final_missed_windows', 0)}."

@@ -23,8 +23,7 @@ sudo apt install libiio0 libiio-utils
 
 ### From a release
 
-Download the package for your system from [GitHub Releases](https://github.com/nucliflare/nlab-digitizer-community/releases/latest)
-or [Gitea Releases](https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/releases).
+Download the package for your system from [GitHub Releases](https://github.com/nucliflare/nlab-digitizer-community/releases/latest).
 A separate Python installation is unnecessary.
 
 - **Windows:** Extract `nlab-windows.zip` and open `nlab.exe`.
@@ -80,6 +79,8 @@ Use **Connection → Connect…** when you want to connect later.
 3. Click **Start** to accumulate a spectrum and **Stop** to finish.
 
 For a first measurement, use the live viewers before enabling DMA recording.
+Periodic-sum HDF5 recording saves in the background and asks before replacing
+an existing file.
 The [acquisition guide](https://github.com/nucliflare/nlab-digitizer-community/wiki/acquisition_workflows)
 covers recording and advanced workflows.
 
@@ -92,7 +93,6 @@ covers recording and advanced workflows.
   Find a workflow for calibration, peak analysis, PSD, coincidence, or replay.
 - **[Project wiki](https://github.com/nucliflare/nlab-digitizer-community/wiki):**
   Detailed setup, measurement guides, file formats, troubleshooting, and development.
-  Also available on [Gitea](https://apps.ewt.cloud:30008/nuclear-lab/nlab-digitizer-community-edition/wiki).
 - **[Changelog](CHANGELOG.md):** Release history and hardware-validation limitations.
 
 [MIT license](LICENSE). Copyright © 2026 Eastern Wall Technologies, Sp. z o. o.

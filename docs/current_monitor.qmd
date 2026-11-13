@@ -44,9 +44,16 @@ trigger selector. Stop any acquisition on this channel, then select
 **Current > Periodic sums**. Set **Window size** (4..8188 ADC samples, step 4)
 and **Window gap** (0..524.280 us, step 0.008 us) in the timing row. The preview
 shows window duration (N times 2 ns) and the scheduled start interval. These
-settings apply on Start and remain locked through capture and tail drain. Optionally enable **Record HDF5 sums** and select a new output
-file, then press **Start monitor**. Window means appear in the existing large
-Current plot, with the latest window mean and session statistics above it.
+settings apply on Start and remain locked through capture and tail drain.
+Optionally enable **Record HDF5 sums** and select an output file, then press
+**Start monitor**. If that file already exists, confirm replacement in the
+overwrite dialog or choose **Cancel** to preserve the recording and plot.
+Window means appear in the existing large Current plot, with the latest window
+mean and session statistics above it.
+
+File creation, data writes, and final flush run on a background writer.
+**Stop and drain** returns control to the GUI while accepted data finishes
+saving. Acquisition controls stay locked until the recording is closed.
 
 The sum monitor reports all-sample window means in ADC codes, sample-weighted
 session means, exposure, and missed windows. Its aggregate data cannot supply

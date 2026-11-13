@@ -455,6 +455,41 @@ def test_recorder_open_failure_is_joined_and_existing_file_is_preserved(tmp_path
     assert {t.ident for t in threading.enumerate()} == threads
 
 
+def test_capture_replaces_existing_recording_only_when_overwrite_is_explicit(tmp_path):
+    path = tmp_path / "existing.h5"
+    old = ScopeSumWriter(path, {"channel": 9})
+    old.append(decode_sum_packet(packet(sequence=99)))
+    old.close(complete=True)
+    original = path.read_bytes()
+    backend = Backend([packet()])
+    with pytest.raises(RuntimeError, match="HDF5 recording"):
+        ScopeSumCapture(backend, 0).run(path, max_packets=1)
+    assert path.read_bytes() == original
+    assert "read" not in backend.events
+    assert backend.events[-2:] == ["stop", "close"]
+
+    backend = Backend([packet()])
+    result = ScopeSumCapture(backend, 0).run(path, max_packets=1, overwrite=True)
+    assert result["complete"]
+    assert [p.raw for p in read_sum_capture(path)] == [packet()]
+    assert backend.events[-2:] == ["stop", "close"]
+    with h5py.File(path, "r") as source:
+        assert source.attrs["complete"]
+        assert json.loads(source.attrs["metadata_json"])["channel"] == 0
+
+
+def test_capture_setup_failure_does_not_replace_file_even_with_overwrite(tmp_path):
+    class FailingBackend(Backend):
+        def prepare_dma_capture(self):
+            raise RuntimeError("injected prepare failure")
+
+    path = tmp_path / "existing.h5"
+    path.write_bytes(b"original measurement")
+    with pytest.raises(RuntimeError, match="injected prepare failure"):
+        ScopeSumCapture(FailingBackend([]), 0).run(path, overwrite=True)
+    assert path.read_bytes() == b"original measurement"
+
+
 def test_flush_failure_is_reported_and_completion_is_retracted(tmp_path, monkeypatch):
     class FailingFlushWriter(ScopeSumWriter):
         def __init__(self, *args, **kwargs):
