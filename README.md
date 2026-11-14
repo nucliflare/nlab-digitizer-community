@@ -88,8 +88,10 @@ Use **Connection → Connect…** when you want to connect later.
 3. Click **Start** to accumulate a spectrum and **Stop** to finish.
 
 For a first measurement, use the live viewers before enabling DMA recording.
-Periodic-sum HDF5 recording saves in the background and asks before replacing
-an existing file.
+Current periodic-sum HDF5 recording uses the measurement folder in General
+Settings. Leave the filename blank for `ch0_current_<timestamp>.h5` on Start,
+or enter your own name or path. Saving runs in the background and asks before
+replacing an existing file.
 The [acquisition guide](https://github.com/nucliflare/nlab-digitizer-community/wiki/acquisition_workflows)
 covers recording and advanced workflows.
 

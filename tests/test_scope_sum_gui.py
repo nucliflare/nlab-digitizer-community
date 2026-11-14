@@ -3,14 +3,16 @@
 import errno
 import struct
 import threading
+from pathlib import Path
 from unittest.mock import Mock
 
 import h5py
 import numpy as np
 import pytest
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
+from PySide6.QtCore import QSettings, QTimer
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
 
+from nlab.controllers import current_monitor_controller as current_module
 from nlab.controllers.current_monitor_controller import CurrentMonitorController
 from nlab.controllers.scope_controller import ScopeController
 from nlab.hardware.digitizer import scope_sums
@@ -64,14 +66,14 @@ class _Capture:
             self.exited.set()
 
 
-def _views(qtbot, monkeypatch, capture=None):
-    device = create_offline_digitizer(0)
+def _views(qtbot, monkeypatch, capture=None, *, channel=0):
+    device = create_offline_digitizer(channel)
     monkeypatch.setattr(device._backend, "get_scope_trigger_modes", lambda: tuple(range(6)))
     capture = capture or _Capture()
     streamer = Mock()
     streamer.create_sum_capture = Mock(return_value=capture)
     scope = ScopeController(device.scope, scope_dma=streamer)
-    current = CurrentMonitorController(device.mca, 0, scope_controller=scope)
+    current = CurrentMonitorController(device.mca, channel, scope_controller=scope)
     qtbot.addWidget(scope)
     qtbot.addWidget(current)
     current.ui.comboMode.setCurrentIndex(2)
@@ -82,6 +84,186 @@ def _close(device, scope, current):
     current.stop_monitor_sync()
     scope.close_viewer_client()
     device.close()
+
+
+@pytest.fixture
+def sum_save_settings(monkeypatch, tmp_path):
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    settings.setValue("dma/save_folder", str(tmp_path / "measurements"))
+    monkeypatch.setattr(current_module, "QSettings", lambda: settings)
+    return settings
+
+
+@pytest.mark.parametrize("channel", [0, 1])
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_sum_filename_generates_fresh_channel_path_on_start(
+    qtbot, monkeypatch, tmp_path, sum_save_settings, channel, blank,
+):
+    clock = Mock(wraps=current_module.time)
+    clock.strftime.return_value = "20261113_140506"
+    monkeypatch.setattr(current_module, "time", clock)
+    question = Mock(side_effect=AssertionError("Automatic names must not replace existing files"))
+    monkeypatch.setattr(QMessageBox, "question", question)
+    device, scope, current, _ = _views(qtbot, monkeypatch, channel=channel)
+    folder = tmp_path / "measurements"
+    first_contents = None
+    try:
+        current.ui.cbRecordSums.setChecked(True)
+        current.ui.editSumFile.setText(blank)
+        assert not folder.exists()
+        for suffix in ("", "_001"):
+            capture = _Capture()
+            scope._scope_dma.create_sum_capture.return_value = capture
+            current.ui.btnStart.click()
+            assert capture.entered.wait(1), current.status.text()
+            current.stop_monitor_sync()
+            expected = folder / f"ch{channel}_current_20261113_140506{suffix}.h5"
+            assert capture.output == expected and expected.is_file()
+            assert current.ui.editSumFile.text() == blank
+            with h5py.File(expected, "r") as source:
+                assert source.attrs["complete"]
+            first_path = folder / f"ch{channel}_current_20261113_140506.h5"
+            if first_contents is None:
+                first_contents = first_path.read_bytes()
+            assert first_path.read_bytes() == first_contents
+        question.assert_not_called()
+    finally:
+        _close(device, scope, current)
+
+
+@pytest.mark.parametrize(
+    "filename,expected_name",
+    [
+        ("detector", "detector.h5"),
+        ("detector.h5", "detector.h5"),
+        ("detector.H5", "detector.H5"),
+        ("nested/detector.hdf5", "nested/detector.hdf5"),
+    ],
+)
+def test_named_sum_recording_uses_latest_measurement_folder(
+    qtbot, monkeypatch, tmp_path, sum_save_settings, filename, expected_name,
+):
+    device, scope, current, capture = _views(qtbot, monkeypatch)
+    folder = tmp_path / "changed-folder"
+    sum_save_settings.setValue("dma/save_folder", str(folder))
+    try:
+        current.ui.cbRecordSums.setChecked(True)
+        current.ui.editSumFile.setText(filename)
+        current.start_monitor()
+        assert capture.entered.wait(1)
+        current.stop_monitor_sync()
+        assert capture.output == folder / expected_name
+        assert capture.output.is_file()
+        assert current.ui.editSumFile.text() == filename
+        assert not (tmp_path / "measurements").exists()
+    finally:
+        _close(device, scope, current)
+
+
+def test_explicit_sum_path_keeps_selected_location(qtbot, monkeypatch, tmp_path, sum_save_settings):
+    device, scope, current, capture = _views(qtbot, monkeypatch)
+    selected = tmp_path / "elsewhere" / "custom.h5"
+    try:
+        current.ui.cbRecordSums.setChecked(True)
+        current.ui.editSumFile.setText(str(selected))
+        current.start_monitor()
+        assert capture.entered.wait(1)
+        current.stop_monitor_sync()
+        assert capture.output == selected and selected.is_file()
+        assert not (tmp_path / "measurements").exists()
+    finally:
+        _close(device, scope, current)
+
+
+@pytest.mark.parametrize("selected", ["chosen", ""])
+def test_sum_browse_starts_in_measurement_folder(
+    qtbot, monkeypatch, tmp_path, sum_save_settings, selected,
+):
+    chosen = str(tmp_path / "elsewhere" / selected) if selected else ""
+    dialog = Mock(return_value=(chosen, ""))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", dialog)
+    device, scope, current, _ = _views(qtbot, monkeypatch)
+    try:
+        current.ui.btnSumFile.click()
+        assert dialog.call_args.args[2] == str(tmp_path / "measurements")
+        assert dialog.call_args.kwargs["options"] == QFileDialog.Option.DontConfirmOverwrite
+        assert current.ui.cbRecordSums.isChecked() == bool(selected)
+        assert current.ui.editSumFile.text() == (chosen + ".h5" if selected else "")
+    finally:
+        _close(device, scope, current)
+
+
+def test_sum_monitor_without_recording_does_not_create_folder(
+    qtbot, monkeypatch, tmp_path, sum_save_settings,
+):
+    device, scope, current, capture = _views(qtbot, monkeypatch)
+    try:
+        current.start_monitor()
+        assert capture.entered.wait(1)
+        current.stop_monitor_sync()
+        assert capture.output is None
+        assert not (tmp_path / "measurements").exists()
+    finally:
+        _close(device, scope, current)
+
+
+def test_sum_output_folder_failure_does_not_enter_capture(
+    qtbot, monkeypatch, tmp_path, sum_save_settings,
+):
+    folder = tmp_path / "blocked-folder"
+    folder.write_bytes(b"preserve existing file")
+    sum_save_settings.setValue("dma/save_folder", str(folder))
+    device, scope, current, capture = _views(qtbot, monkeypatch)
+    try:
+        current.ui.cbRecordSums.setChecked(True)
+        current.start_monitor()
+        qtbot.waitUntil(lambda: not current._is_running())
+        assert not capture.entered.is_set()
+        assert current._sum_worker.error
+        assert current._sum_worker.thread is None
+        assert scope._sum_worker is None
+        assert current.ui.btnStart.isEnabled()
+        assert not device.scope.get_enable()
+        assert folder.read_bytes() == b"preserve existing file"
+    finally:
+        _close(device, scope, current)
+
+
+def test_sum_output_folder_is_created_off_gui_thread(
+    qtbot, monkeypatch, tmp_path, sum_save_settings,
+):
+    folder = tmp_path / "measurements"
+    mkdir = Path.mkdir
+    gui_thread = threading.get_ident()
+    entered, release = threading.Event(), threading.Event()
+
+    def held_mkdir(path, *args, **kwargs):
+        if path == folder:
+            assert threading.get_ident() != gui_thread
+            entered.set()
+            assert release.wait(5)
+        return mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", held_mkdir)
+    device, scope, current, capture = _views(qtbot, monkeypatch)
+    ticks = []
+    heartbeat = QTimer(current)
+    heartbeat.setInterval(10)
+    heartbeat.timeout.connect(lambda: ticks.append(True))
+    try:
+        current.ui.cbRecordSums.setChecked(True)
+        heartbeat.start()
+        current.ui.btnStart.click()
+        qtbot.waitUntil(entered.is_set)
+        qtbot.waitUntil(lambda: len(ticks) >= 3)
+        assert not capture.entered.is_set()
+        release.set()
+        assert capture.entered.wait(1)
+        current.stop_monitor_sync()
+        assert capture.output.is_file()
+    finally:
+        release.set()
+        _close(device, scope, current)
 
 
 def test_sums_use_existing_current_plot_and_restore_scope_after_stop(qtbot, monkeypatch):
@@ -341,9 +523,6 @@ def test_recording_opens_in_dedicated_tool_without_changing_live_plot(qtbot, mon
     device, scope, current, capture = _views(qtbot, monkeypatch)
     try:
         current.ui.cbRecordSums.setChecked(True)
-        current.start_monitor()
-        assert "Choose a new HDF5 file" in current.status.text()
-        assert not capture.entered.is_set()
         path = tmp_path / "sums.h5"
         current.ui.editSumFile.setText(str(path))
         current.start_monitor()
@@ -378,15 +557,19 @@ def test_recording_opens_in_dedicated_tool_without_changing_live_plot(qtbot, mon
 @pytest.mark.parametrize(
     "answer", [QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.No],
 )
-def test_declining_sum_overwrite_preserves_file_and_plot(qtbot, monkeypatch, tmp_path, answer):
+@pytest.mark.parametrize("relative", [False, True])
+def test_declining_sum_overwrite_preserves_file_and_plot(
+    qtbot, monkeypatch, tmp_path, sum_save_settings, answer, relative,
+):
     path = tmp_path / "existing.h5"
     path.write_bytes(b"original measurement")
+    sum_save_settings.setValue("dma/save_folder", str(tmp_path))
     question = Mock(return_value=answer)
     monkeypatch.setattr(QMessageBox, "question", question)
     device, scope, current, capture = _views(qtbot, monkeypatch)
     try:
         current.ui.cbRecordSums.setChecked(True)
-        current.ui.editSumFile.setText(str(path))
+        current.ui.editSumFile.setText(path.stem if relative else str(path))
         current._curve.setData([0, 1], [2, 3])
         trigger_mode = device.scope.get_trigger_mode()
         current.start_monitor()

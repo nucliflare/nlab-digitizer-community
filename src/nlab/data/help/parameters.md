@@ -1163,8 +1163,13 @@ counts and errors. A poisoned DMA channel requires a board reboot.
 
 **Record HDF5 sums** creates a new versioned sum file with original packets,
 lossless uint64 columns, settings, producer/channel/clock identity, and completion
-status. If the selected file already exists, **Start monitor** asks before
-replacing it. **Cancel** keeps the existing recording and plot unchanged.
+status. Blank filenames generate `chN_current_<timestamp>.h5` in the measurement
+folder from **General Settings** on each **Start monitor**, with a numbered suffix
+if needed to avoid an existing file. Relative names use that folder; absolute
+paths keep their chosen location. Names without an extension gain `.h5`.
+**Browse...** starts in the configured folder, and missing folders are created
+in the background. If an explicitly named file already exists, **Start monitor**
+asks before replacing it. **Cancel** keeps the existing recording and plot unchanged.
 File creation, writes, and final flush run on a background writer. Acquisition
 controls stay locked through **Stop and drain** until the recording is closed.
 **Tools > Current Capture Analysis** opens a dedicated offline browser

@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Current HDF5 sum recordings default to the measurement folder from General
+  Settings. A blank filename generates `chN_current_<timestamp>.h5` on Start;
+  relative names use that folder and explicit absolute paths retain their location.
+  Missing folders are created in the background; existing files still require
+  overwrite confirmation.
 - Make the PSD offset-model regression test independent of Qt timer scheduling
   while preserving coverage of continuous-fit model selection.
 

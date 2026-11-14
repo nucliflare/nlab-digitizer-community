@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QLocale, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QLocale, QSettings, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget
 
@@ -495,12 +495,7 @@ class CurrentMonitorController(QWidget):
         if scope_controller is None or not self._sum_supported():
             self.status.setText("Periodic sums are unavailable on this backend/firmware.")
             return
-        if self.ui.cbRecordSums.isChecked() and not self.ui.editSumFile.text().strip():
-            self.status.setText("Choose a new HDF5 file or turn recording off.")
-            return
-        output = (
-            Path(self.ui.editSumFile.text().strip()) if self.ui.cbRecordSums.isChecked() else None
-        )
+        output = self._sum_output_path() if self.ui.cbRecordSums.isChecked() else None
         overwrite = False
         if output is not None and output.is_file():
             answer = QMessageBox.question(
@@ -537,13 +532,38 @@ class CurrentMonitorController(QWidget):
         self._next_display_ns = time.perf_counter_ns() + self._display_period_ns
         self._schedule_display()
 
+    def _sum_output_path(self) -> Path:
+        """Resolve explicit names or generate a fresh name in the measurement folder."""
+        filename = self.ui.editSumFile.text().strip()
+        if filename:
+            output = Path(filename).expanduser()
+            if not output.suffix:
+                output = output.with_suffix(".h5")
+            if output.is_absolute():
+                return output
+        folder = Path(str(QSettings().value("dma/save_folder", "measurements"))).expanduser()
+        if filename:
+            return folder / output
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        stem = f"ch{self._channel}_current_{timestamp}"
+        output = folder / f"{stem}.h5"
+        counter = 1
+        while output.exists():
+            output = folder / f"{stem}_{counter:03d}.h5"
+            counter += 1
+        return output
+
     def _choose_sum_output(self) -> None:
+        folder = str(QSettings().value("dma/save_folder", "measurements"))
         filename, _ = QFileDialog.getSaveFileName(
-            self, "Sum recording", "", "Scope sum capture (*.h5)",
+            self, "Sum recording", folder, "Scope sum capture (*.h5)",
             options=QFileDialog.Option.DontConfirmOverwrite,
         )
         if filename:
-            self.ui.editSumFile.setText(filename if filename.endswith(".h5") else filename + ".h5")
+            output = Path(filename)
+            if not output.suffix:
+                output = output.with_suffix(".h5")
+            self.ui.editSumFile.setText(str(output))
             self.ui.cbRecordSums.setChecked(True)
 
     def _choose_sum_capture(self) -> None:

@@ -73,8 +73,8 @@
       <property name="rightMargin"><number>0</number></property>
       <property name="bottomMargin"><number>0</number></property>
       <item><widget class="QCheckBox" name="cbRecordSums"><property name="text"><string>Record HDF5 sums</string></property><property name="toolTip"><string>Record original sum packets and exact timestamps to a new HDF5 file.</string></property></widget></item>
-      <item><widget class="QLineEdit" name="editSumFile"><property name="placeholderText"><string>New .h5 file</string></property><property name="toolTip"><string>Output filename; existing files are preserved.</string></property></widget></item>
-      <item><widget class="QPushButton" name="btnSumFile"><property name="text"><string>Browse...</string></property><property name="toolTip"><string>Choose a new sum recording file.</string></property></widget></item>
+      <item><widget class="QLineEdit" name="editSumFile"><property name="placeholderText"><string>Automatic filename on Start</string></property><property name="toolTip"><string>Leave blank for chN_current_&lt;timestamp&gt;.h5 on Start. Relative filenames use the measurement folder from General Settings. Existing files require overwrite confirmation.</string></property></widget></item>
+      <item><widget class="QPushButton" name="btnSumFile"><property name="text"><string>Browse...</string></property><property name="toolTip"><string>Choose a sum recording file, starting in the measurement folder from General Settings.</string></property></widget></item>
       <item><widget class="QPushButton" name="btnOpenSums"><property name="text"><string>Open sum capture...</string></property><property name="toolTip"><string>Open the dedicated Current capture analysis tool without interrupting live acquisition.</string></property></widget></item>
      </layout>
     </widget>

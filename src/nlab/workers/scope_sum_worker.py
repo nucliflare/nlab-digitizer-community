@@ -48,6 +48,8 @@ class ScopeSumWorker:
     def _run(self, output: Path | None, overwrite: bool) -> None:
         try:
             if self.capture is not None:
+                if output is not None:
+                    output.parent.mkdir(parents=True, exist_ok=True)
                 result = self.capture.run(output, overwrite=overwrite)
                 self.result = (
                     "Measurement stopped; tail drained and buffer closed. "

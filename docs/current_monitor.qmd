@@ -45,8 +45,13 @@ trigger selector. Stop any acquisition on this channel, then select
 and **Window gap** (0..524.280 us, step 0.008 us) in the timing row. The preview
 shows window duration (N times 2 ns) and the scheduled start interval. These
 settings apply on Start and remain locked through capture and tail drain.
-Optionally enable **Record HDF5 sums** and select an output file, then press
-**Start monitor**. If that file already exists, confirm replacement in the
+Optionally enable **Record HDF5 sums**, then press **Start monitor**. Leave the
+filename blank to generate `chN_current_<timestamp>.h5` in the measurement folder
+from **General Settings** on each Start. If a timestamped file already exists,
+the automatic name gains a numbered suffix. Enter a relative filename to use
+that folder, or choose an absolute path with **Browse...** to save elsewhere.
+Names without an extension gain `.h5`; missing folders are created in the
+background. If an explicitly named file already exists, confirm replacement in the
 overwrite dialog or choose **Cancel** to preserve the recording and plot.
 Window means appear in the existing large Current plot, with the latest window
 mean and session statistics above it.

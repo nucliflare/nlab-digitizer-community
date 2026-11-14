@@ -166,7 +166,7 @@ class GeneralSettingsDialog(QDialog):
         self.dma_folder = QLineEdit(str(values.get("dma_save_folder", "measurements")))
         self.dma_folder.setReadOnly(True)
         self.dma_folder.setToolTip(
-            "Default destination for Scope, MCA, PSD, and coincidence recordings."
+            "Default destination for Scope, MCA, Current, PSD, and coincidence recordings."
         )
         browse = QPushButton("Browse...")
         browse.clicked.connect(self._browse_dma_folder)
