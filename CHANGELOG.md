@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.6] — 2026-11-24
+
+The MCA Peak Analysis Workbench calibrates organic scintillators from their
+Compton edges, and energy calibrations can be labelled keVee. The Compton-edge
+Help topic cites the nine papers its model and diagnostics follow, each checked
+against its full text, including every Dietze & Klein (1982) Table 3 value.
+
 ### Added
 
 - **Compton-edge calibration for organic scintillators** — the MCA Peak Analysis
