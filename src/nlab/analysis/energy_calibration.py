@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Literal
 from uuid import uuid4
@@ -14,6 +14,12 @@ from nlab.analysis.peak_fitting import PeakFitSpec, fit_spectrum_peaks
 from nlab.analysis.spectrum import Spectrum
 
 CalibrationModel = Literal["linear", "quadratic"]
+EnergyUnit = Literal["keV", "keVee"]
+"""``keV`` for deposited photon energy; ``keVee`` for electron-equivalent light output.
+
+Organic-scintillator calibrations from Compton edges map channels to keVee.
+"""
+ENERGY_UNITS: tuple[EnergyUnit, ...] = ("keV", "keVee")
 FingerprintValue = bool | int | float | str
 
 
@@ -59,6 +65,25 @@ class SpectrumSnapshot:
             live_time_s=float(live_time_s) if live_time_s is not None else None,
             n42_instrument=dict(n42_instrument) if n42_instrument is not None else None,
             n42_detector=dict(n42_detector) if n42_detector is not None else None,
+        )
+
+    def to_spectrum(self) -> Spectrum:
+        """Return the snapshot as a raw-count spectrum with its settings fingerprint."""
+        return Spectrum.create(
+            spectrum_id=f"calibration-snapshot-{self.snapshot_id}",
+            label=self.label,
+            counts=self.counts,
+            source="mca",
+            metadata={
+                "snapshot_id": self.snapshot_id,
+                "channel": self.channel,
+                "created_utc": self.created_utc,
+                "elapsed_s": self.elapsed_s,
+                "live_time_s": self.live_time_s,
+                "live_non_atomic": self.live,
+                "settings_fingerprint": dict(self.fingerprint),
+            },
+            poisson_counts=True,
         )
 
 
@@ -119,6 +144,22 @@ class CalibrationPoint:
 
 
 @dataclass(frozen=True)
+class CalibrationPointTransfer:
+    """Calibration points fitted elsewhere, offered to the calibration workspace.
+
+    Points carry fixed channel positions (for example fitted Compton edges) and
+    are not refitted with a local Gaussian centroid.
+    """
+
+    points: tuple[CalibrationPoint, ...]
+    energy_unit: EnergyUnit
+    source_label: str
+    channel: int | None = None
+    fingerprint: dict[str, FingerprintValue] = field(default_factory=dict)
+    note: str = ""
+
+
+@dataclass(frozen=True)
 class EnergyCalibration:
     """Polynomial energy mapping with coefficients in ascending power order."""
 
@@ -129,6 +170,12 @@ class EnergyCalibration:
     max_residual_kev: float
     fingerprint: dict[str, FingerprintValue]
     updated_utc: str
+    energy_unit: EnergyUnit = "keV"
+
+    @property
+    def energy_quantity(self) -> str:
+        """Axis caption for calibrated values: energy or light output."""
+        return "Light output" if self.energy_unit == "keVee" else "Energy"
 
     def energy(self, channel: float | np.ndarray) -> float | np.ndarray:
         value = np.polynomial.polynomial.polyval(channel, self.coefficients_kev)
@@ -182,6 +229,7 @@ class EnergyCalibration:
             "max_residual_kev": self.max_residual_kev,
             "fingerprint": dict(self.fingerprint),
             "updated_utc": self.updated_utc,
+            "energy_unit": self.energy_unit,
         }
 
     @classmethod
@@ -203,10 +251,14 @@ class EnergyCalibration:
             if not isinstance(item, (bool, int, float, str)):
                 raise ValueError(f"invalid fingerprint value for {key}")
             fingerprint[str(key)] = item
+        unit = str(value.get("energy_unit", "keV"))
+        if unit not in ENERGY_UNITS:
+            raise ValueError(f"unsupported energy calibration unit: {unit}")
         fitted = fit_energy_calibration(
             points,
             model=model,  # type: ignore[arg-type]
             fingerprint=fingerprint,
+            energy_unit=unit,
         )
         updated = str(value.get("updated_utc", fitted.updated_utc))
         return replace(fitted, updated_utc=updated)
@@ -275,8 +327,15 @@ def fit_energy_calibration(
     model: CalibrationModel = "linear",
     fingerprint: Mapping[str, FingerprintValue] | None = None,
     max_channel: float = 16_383.0,
+    energy_unit: EnergyUnit = "keV",
 ) -> EnergyCalibration:
-    """Fit a monotonic channel-to-keV mapping from enabled reference points."""
+    """Fit a monotonic channel-to-energy mapping from enabled reference points.
+
+    ``energy_unit`` only labels the result: point energies are taken in that
+    unit (``keV`` or electron-equivalent ``keVee``).
+    """
+    if energy_unit not in ENERGY_UNITS:
+        raise ValueError(f"unsupported energy calibration unit: {energy_unit}")
 
     all_points = tuple(points)
     enabled = tuple(point for point in all_points if point.enabled)
@@ -317,4 +376,5 @@ def fit_energy_calibration(
         max_residual_kev=maximum,
         fingerprint=dict(fingerprint or {}),
         updated_utc=datetime.now(UTC).isoformat(),
+        energy_unit=energy_unit,
     )

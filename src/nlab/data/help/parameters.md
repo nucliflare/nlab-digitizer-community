@@ -1042,6 +1042,12 @@ fit the selected calibration model. Inspect residuals and enabled calibration
 points before applying the result. Reference lines aid identification but do
 not establish peak identity by themselves.
 
+For organic scintillators, **Analysis → Fit Compton edges in workbench...**
+opens the copied spectra in the workbench's Compton-edge tab. The fitted edges
+return as fixed points labelled keVee, and the applied calibration is shown in
+keVee everywhere ([compton-edge](#compton-edge)). keV and keVee points cannot
+be mixed in one calibration.
+
 Calibration maps raw channel to energy for the associated configuration
 fingerprint. Gain, shaping, or detector changes may invalidate it. Overlaying
 spectra is not permission to combine incompatible configurations. The status-bar
@@ -1074,9 +1080,44 @@ Select a spectrum and region, choose the peak/background model, fit, and inspect
 residuals, uncertainty, and convergence. Net area, centroid, and width depend on
 background and overlapping peaks; a visually plausible fit can still be biased.
 
+The **Compton edge** tab fits Klein–Nishina Compton edges of organic
+scintillators in keVee ([compton-edge](#compton-edge)).
+
 Energy calibration determines physical energy coordinates. Reference lines are
 identification aids, not automatic proof of an isotope. Export the fit snapshot
 and diagnostics when reporting peak measurements.
+
+## Analysis — Compton-edge calibration {#compton-edge}
+
+Use the **Compton edge** tab of the peak-analysis workbench for organic
+scintillators (EJ-309, EJ-276D, stilbene, organic glass), which show Compton
+continua without photopeaks. It fits the Klein–Nishina electron spectrum folded
+with the resolution `σ/E = sqrt(a² + b²/E + c²/E²)` and the linear map
+`x = g·E + o`. Edges are in electron-equivalent keV (keVee). Check the spectra
+that are fitted jointly. For each selected spectrum, choose sources, custom
+lines, background and the shaded fit range. **Analysis → Fit Compton edges**
+runs in the background; **Cancel Compton-edge fit** stops it. The bar at the
+bottom of the workbench shows the stage: a percentage during the starting-gain
+scan, then a busy indicator with the evaluation count while the optimizer runs.
+
+Fit Cs-137 alone together with a mixed Cs-137 + Co-60 + Na-22 spectrum to
+constrain gain and offset. With a single edge energy, fix the offset; otherwise
+the fit warns that gain and offset are degenerate. **Linked by emission yield**
+amplitudes are an approximation; free amplitudes are the reference. The table
+lists g, o, the σ terms and the Dietze–Klein FWHM terms (2.3548 × σ), each edge
+with its uncertainty from cov(g, o), and σ/E and FWHM/E at the edge.
+
+The single-scatter model ignores multiple scattering, which moves the fitted
+edge upward in finite detectors. For single-line spectra, check the measured
+Compton maximum, half-height point, Dietze–Klein resolution estimate and edge
+height. Coincidence measurements place the edge at 0.74–0.82 of the maximum;
+values outside 0.65–0.9 raise a warning. Optionally choose a Dietze–Klein cell
+size for an independent edge estimate. **Load simulated response...** replaces
+one line's shape with a Geant4/OpenGATE histogram (`energy_kev, weight`).
+**Open Compton edges in Energy Calibration...** opens the energy calibration
+([energy-calibration](#energy-calibration)) with the edges as fixed keVee
+points; review the fit there and choose **Apply calibration** to use it.
+Outside the span of the fitted edges, the keVee scale is extrapolated.
 
 ## Analysis — PSD event readback {#psd-readback}
 

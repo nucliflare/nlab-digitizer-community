@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Compton-edge calibration for organic scintillators** — the MCA Peak Analysis
+  Workbench has a **Compton edge** tab. It fits the Klein–Nishina Compton-electron
+  spectrum folded with `σ/E = sqrt(a² + b²/E + c²/E²)` and integrated over the bin
+  edges, with a Poisson deviance. Several spectra (for example Cs-137 and
+  Cs-137 + Co-60 + Na-22) are fitted jointly with a shared gain, offset and
+  resolution. Results include each edge with its uncertainty from cov(g, o), the
+  resolution in σ and Dietze–Klein FWHM conventions, and model-independent edge
+  diagnostics: Compton maximum, half height, Dietze–Klein resolution, edge height
+  and an optional Dietze & Klein (1982) Table 3 edge estimate. Warnings cover
+  single-scatter bias, degenerate gain/offset and edges outside the window.
+  Simulated deposited-energy responses (CSV) can replace the analytic shape per
+  line. While a fit runs, a progress bar at the bottom of the workbench and a busy
+  cursor show its stage (starting-gain scan, optimizer evaluations, uncertainties). Results export as JSON/CSV, and **Open Compton edges in Energy
+  Calibration...** opens MCA Energy Calibration with the edges as fixed keVee
+  points for review before you apply them; that window can also open its
+  spectra in the new tab. On the recorded EJ-309 showcase sessions it reproduces the
+  published joint fit (g = 20.04 ± 0.30 raw/keVee).
+- **keVee energy unit** — energy calibrations record `energy_unit` (`keV` or
+  `keVee`). Compton-edge calibrations are labelled keVee on MCA, coincidence and
+  workbench axes, in ROI statistics, calibration and peak reports, CSV export and
+  N42 export. Saved calibrations without the field still load as keV.
+
 ## [0.9.1] — 2026-11-17
 
 Interface reskin to the Eastern Wall Technologies design system, with EWT light,

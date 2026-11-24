@@ -1393,10 +1393,11 @@ class MCAController(QWidget):
         self._refresh_energy_axis()
         self.energy_calibration_changed.emit(self._channel, calibration)
         log.info(
-            "MCA ch%d: applied %s energy calibration, RMS residual %.4g keV",
+            "MCA ch%d: applied %s energy calibration, RMS residual %.4g %s",
             self._channel,
             calibration.model,
             calibration.rms_residual_kev,
+            calibration.energy_unit,
         )
 
     def _check_gate_transfer_idle(self) -> None:
@@ -1534,9 +1535,13 @@ class MCAController(QWidget):
                     float(self._calibrated_energy(centroid + fwhm / 2.0))
                     - float(self._calibrated_energy(centroid - fwhm / 2.0))
                 )
+                unit = calibration.energy_unit
+                centroid_caption = (
+                    "Centroid light:     " if unit == "keVee" else "Centroid energy:    "
+                )
                 calibrated_peak = (
-                    f"\n  Centroid energy:    {centroid_energy:.3f} keV"
-                    f"\n  Approx. FWHM:       {fwhm_energy:.3f} keV"
+                    f"\n  {centroid_caption}{centroid_energy:.3f} {unit}"
+                    f"\n  Approx. FWHM:       {fwhm_energy:.3f} {unit}"
                 )
             else:
                 calibrated_peak = ""
@@ -1554,9 +1559,14 @@ class MCAController(QWidget):
             peak_lines = "  No counts in ROI"
 
         calibration = self._energy_calibration
+        range_caption = (
+            "Light-output range: "
+            if calibration is not None and calibration.energy_unit == "keVee"
+            else "Energy range:       "
+        )
         calibrated_range = (
-            f"\n  Energy range:       {float(self._calibrated_energy(low_bin)):.3f}-"
-            f"{float(self._calibrated_energy(high_bin)):.3f} keV"
+            f"\n  {range_caption}{float(self._calibrated_energy(low_bin)):.3f}-"
+            f"{float(self._calibrated_energy(high_bin)):.3f} {calibration.energy_unit}"
             if calibration is not None
             else ""
         )

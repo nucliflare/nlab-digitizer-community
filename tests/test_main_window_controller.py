@@ -926,6 +926,45 @@ def test_replay_state_is_retained_until_explicitly_cleared(
     assert controller.session_replay_path is None
 
 
+def test_replay_created_workbench_still_routes_compton_edges_to_calibration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: replay used to construct the workbench itself without the
+    # Compton-edge → energy-calibration connection, so the transfer was dropped.
+    controller = _bare_controller()
+    controller._session_replayer._session_replay = None
+    controller._session_replayer._session_replay_path = None
+    controller._session_replayer._session_replay_spectrum_ids = set()
+    controller._mca_controllers = []
+    controller._window = object()
+    controller._mca_peak_analysis_dialog = None
+    spectra = [SimpleNamespace(spectrum_id="replay-a")]
+    replay = SimpleNamespace(
+        replay_mca_spectra=Mock(return_value=spectra),
+        scope_frames=Mock(return_value=[]),
+        manifest={"started_monotonic_ns": 1},
+        integrity="verified",
+    )
+    monkeypatch.setattr(replay_module, "SessionReplay", Mock(return_value=replay))
+    workbench = SimpleNamespace(
+        show_workspace=Mock(),
+        add_spectra=Mock(),
+        compton_calibration_requested=Mock(),
+    )
+    factory = Mock(return_value=workbench)
+    monkeypatch.setattr(main_window_module, "McaPeakAnalysisDialog", factory)
+
+    controller.replay_session(Path("measurement.nlab-session"))
+    controller.show_mca_peak_analysis()
+
+    factory.assert_called_once_with(controller._mca_controllers, parent=controller._window)
+    workbench.add_spectra.assert_called_once_with(spectra)
+    workbench.compton_calibration_requested.connect.assert_called_once_with(
+        controller._receive_compton_calibration_points
+    )
+    workbench.show_workspace.assert_called_once_with()
+
+
 def test_offline_replay_rejects_missing_channel_before_clearing_current_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2302,7 +2341,7 @@ def test_peak_analysis_workbench_is_modeless_and_reused(
     controller._mca_controllers = [object(), object()]
     controller._window = object()
     controller._mca_peak_analysis_dialog = None
-    dialog = SimpleNamespace(show_workspace=Mock())
+    dialog = SimpleNamespace(show_workspace=Mock(), compton_calibration_requested=Mock())
     factory = Mock(return_value=dialog)
     monkeypatch.setattr(main_window_module, "McaPeakAnalysisDialog", factory)
 
@@ -2311,6 +2350,55 @@ def test_peak_analysis_workbench_is_modeless_and_reused(
 
     factory.assert_called_once_with(controller._mca_controllers, parent=controller._window)
     assert dialog.show_workspace.call_count == 2
+    dialog.compton_calibration_requested.connect.assert_called_once_with(
+        controller._receive_compton_calibration_points
+    )
+
+
+def test_compton_edges_route_between_workbench_and_energy_calibration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nlab.analysis.energy_calibration import CalibrationPoint, CalibrationPointTransfer
+    from nlab.analysis.spectrum import Spectrum
+
+    controller = _bare_controller()
+    controller._mca_controllers = [object()]
+    controller._window = object()
+    controller._mca_peak_analysis_dialog = None
+    controller._energy_calibration_dialog = None
+    workbench = SimpleNamespace(
+        show_workspace=Mock(),
+        compton_calibration_requested=Mock(),
+        add_compton_datasets=Mock(),
+    )
+    calibration = SimpleNamespace(
+        show_workspace=Mock(),
+        compton_fit_requested=Mock(),
+        add_calibration_points=Mock(),
+    )
+    monkeypatch.setattr(main_window_module, "McaPeakAnalysisDialog", Mock(return_value=workbench))
+    monkeypatch.setattr(
+        main_window_module, "EnergyCalibrationDialog", Mock(return_value=calibration)
+    )
+    transfer = CalibrationPointTransfer(
+        points=(CalibrationPoint(2145.0, 477.334, source="compton-edge fit"),),
+        energy_unit="keVee",
+        source_label="Compton-edge fit",
+        channel=0,
+    )
+    spectrum = Spectrum.create(label="Cs-137", counts=np.arange(16.0), source="mca")
+
+    controller._receive_compton_calibration_points(transfer)
+    controller._open_compton_edge_fit([spectrum, "ignored"])
+    controller._receive_compton_calibration_points("not a transfer")
+
+    calibration.compton_fit_requested.connect.assert_called_once_with(
+        controller._open_compton_edge_fit
+    )
+    calibration.add_calibration_points.assert_called_once_with(transfer)
+    workbench.add_compton_datasets.assert_called_once_with([spectrum])
+    assert calibration.show_workspace.call_count == 1
+    assert workbench.show_workspace.call_count == 1
 
 
 def test_saved_sums_open_independent_tool_without_current_or_device(monkeypatch) -> None:

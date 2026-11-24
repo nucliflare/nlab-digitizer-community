@@ -27,7 +27,6 @@ from nlab.session.replay import (
     SessionReplay,
     TelemetryReplayEvent,
 )
-from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
 from nlab.workers.session_replay_worker import SessionAnalysisReplayThread
 
 if TYPE_CHECKING:
@@ -162,13 +161,7 @@ class SessionReplayCoordinator(QObject):
                     legacy_telemetry_events,
                 )
             if spectra:
-                if self._host._mca_peak_analysis_dialog is None:
-                    self._host._mca_peak_analysis_dialog = McaPeakAnalysisDialog(
-                        self._host._mca_controllers,
-                        parent=self._host._window,
-                    )
-                assert self._host._mca_peak_analysis_dialog is not None
-                self._host._mca_peak_analysis_dialog.add_spectra(spectra)
+                self._host._ensure_mca_peak_analysis_dialog().add_spectra(spectra)
             self._session_replay_spectrum_ids = {
                 spectrum.spectrum_id for spectrum in spectra
             }

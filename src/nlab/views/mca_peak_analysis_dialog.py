@@ -2,30 +2,38 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QSettings, Qt, QThread
+from PySide6.QtCore import QMetaMethod, QSettings, Qt, QThread, Signal
 from PySide6.QtGui import QActionGroup, QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QProgressBar,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -36,6 +44,27 @@ from PySide6.QtWidgets import (
 )
 
 from nlab import settings_keys
+from nlab.analysis import dietze_klein_table
+from nlab.analysis.compton_edge import (
+    COMPTON_EDGE_ENERGY_UNIT,
+    COMPTON_PRESET_NUCLIDES,
+    AmplitudeMode,
+    ComptonBackground,
+    ComptonEdgeDataset,
+    ComptonEdgeFitProgress,
+    ComptonEdgeFitResult,
+    ComptonEdgeFitSpec,
+    ComptonLine,
+    ResolutionTermName,
+    SimulatedResponse,
+    compton_edge_calibration_points,
+    compton_edge_summary_rows,
+    export_compton_edge_result,
+    load_simulated_response,
+    nuclide_compton_lines,
+    parse_custom_energies,
+)
+from nlab.analysis.energy_calibration import CalibrationPointTransfer, FingerprintValue
 from nlab.analysis.n42 import export_n42_peak_fit, export_n42_spectrum
 from nlab.analysis.peak_fitting import (
     BackgroundModel,
@@ -70,6 +99,7 @@ from nlab.views.plot_viewbox import ModifierZoomViewBox, set_frame_only, show_fr
 from nlab.views.tooltips import wrap_tooltip, wrap_widget_tooltips
 from nlab.views.window_flags import make_tool_window
 from nlab.views.workbench_menu import WorkbenchMenuBar
+from nlab.workers.compton_edge_fit_worker import ComptonEdgeFitWorker
 from nlab.workers.peak_fit_worker import PeakFitWorker
 
 if TYPE_CHECKING:
@@ -80,6 +110,20 @@ _COLORS = ("#1f77b4", "#d28b38", "#648b71", "#7353a6", "#a66f6f", "#2a9d8f")
 _FIT_REGION_Z = 20.0
 _REFERENCE_LINE_Z = 25.0
 _PEAK_MARKER_Z = 30.0
+_COMPTON_EDGE_Z = 28.0
+_COMPTON_COLORS = ("#9467bd", "#2ca02c", "#17becf", "#8c564b", "#e377c2", "#bcbd22")
+
+
+@dataclass
+class _ComptonDatasetConfig:
+    """Per-spectrum Compton-edge settings kept while the workbench is open."""
+
+    include: bool = False
+    nuclides: list[str] = field(default_factory=list)
+    custom_energies: str = ""
+    background: ComptonBackground = "exponential"
+    fit_range: tuple[float, float] | None = None
+    responses: dict[float, SimulatedResponse] = field(default_factory=dict)
 _REFERENCE_COLORS = ("#c23b22", "#0072b2", "#009e73", "#cc79a7", "#e69f00", "#6f4e7c")
 _REFERENCE_FAVOURITES_KEY = settings_keys.ANALYSIS_RADIONUCLIDE_FAVOURITES
 _DEFAULT_REFERENCE_FAVOURITES = (
@@ -123,7 +167,9 @@ class _SpectrumEnergyAxis(pg.AxisItem):  # type: ignore[misc]
             self._channel = spectrum.x
             self._energy = spectrum.energy_kev
             stale = bool(spectrum.metadata.get("calibration_stale", False))
-            self.setLabel(text="Energy (stale)" if stale else "Energy", units="keV")
+            unit = spectrum.energy_unit
+            quantity = "Light output" if unit == "keVee" else "Energy"
+            self.setLabel(text=f"{quantity} (stale)" if stale else quantity, units=unit)
             self.setToolTip(
                 "Calibration settings no longer match the captured MCA configuration."
                 if stale
@@ -160,6 +206,9 @@ class _SpectrumEnergyAxis(pg.AxisItem):  # type: ignore[misc]
 class McaPeakAnalysisDialog(QDialog):
     """Fit and combine frozen live or file-backed MCA spectra."""
 
+    compton_calibration_requested = Signal(object)
+    """Emits a :class:`CalibrationPointTransfer` with fitted Compton edges in keVee."""
+
     def __init__(self, controllers: list[MCAController], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         make_tool_window(self)
@@ -185,6 +234,14 @@ class McaPeakAnalysisDialog(QDialog):
         self._updating_reference_items = False
         self._rebuilding_sources = False
         self._allow_close = False
+        self._compton_configs: dict[str, _ComptonDatasetConfig] = {}
+        self._compton_result: ComptonEdgeFitResult | None = None
+        self._compton_spec: ComptonEdgeFitSpec | None = None
+        self._pending_compton_spec: ComptonEdgeFitSpec | None = None
+        self._compton_thread: QThread | None = None
+        self._compton_worker: ComptonEdgeFitWorker | None = None
+        self._updating_compton = False
+        self._programmatic_region = False
         self._build_ui()
         self._connect_signals()
         self._refresh_all(show_errors=False)
@@ -281,9 +338,17 @@ class McaPeakAnalysisDialog(QDialog):
         self.side_tabs.setMinimumWidth(390)
         self.side_tabs.setMaximumWidth(520)
         self.side_tabs.addTab(self._build_fit_tab(), "Peak fit")
+        self.compton_tab = self._build_compton_tab()
+        self.side_tabs.addTab(self.compton_tab, "Compton edge")
         self.side_tabs.addTab(self._build_reference_tab(), "Reference lines")
         self.side_tabs.addTab(self._build_operations_tab(), "Operations")
         self.side_tabs.addTab(self._build_results_tab(), "Results")
+        self.compton_export_action = self.menu_bar.command(
+            self.file_menu, "Export Compton-edge results...", enabled=False,
+        )
+        self.compton_copy_action = self.menu_bar.command(
+            self.file_menu, "Copy Compton-edge table", enabled=False,
+        )
         splitter.addWidget(self.side_tabs)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 5)
@@ -291,10 +356,18 @@ class McaPeakAnalysisDialog(QDialog):
         splitter.setSizes([290, 800, 420])
         root.addWidget(splitter, 1)
 
+        status_row = QHBoxLayout()
+        # Shown only while a background fit runs: determinate for stages with a
+        # known length, a busy indicator otherwise.
+        self.workbench_progress = QProgressBar(self)
+        self.workbench_progress.setMaximumWidth(230)
+        self.workbench_progress.setVisible(False)
+        status_row.addWidget(self.workbench_progress)
         self.workbench_status = QLabel("Ready.", self)
         self.workbench_status.setWordWrap(True)
         self.workbench_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        root.addWidget(self.workbench_status)
+        status_row.addWidget(self.workbench_status, 1)
+        root.addLayout(status_row)
         self.file_menu.addSeparator()
         self.close_action = self.menu_bar.command(
             self.file_menu, "Close workspace", shortcut="Ctrl+W",
@@ -382,6 +455,233 @@ class McaPeakAnalysisDialog(QDialog):
         self.fit_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.fit_status)
         layout.addStretch(1)
+        return tab
+
+    def _build_compton_tab(self) -> QWidget:
+        tab = QWidget(self)
+        # Every control in this tab resolves F1 help to the Compton-edge topic.
+        tab.setProperty("nlabHelpTopic", "compton-edge")
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea(tab)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget(scroll)
+        layout = QVBoxLayout(content)
+        explanation = QLabel(
+            "Forward fit of the Klein–Nishina Compton-electron spectrum folded with the "
+            "detector resolution, for organic scintillators without photopeaks. Checked "
+            "spectra are fitted jointly with a shared gain, offset and resolution. Edges "
+            "are in electron-equivalent keV (keVee).",
+            self,
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        layout.addWidget(QLabel("Datasets (checked spectra are fitted jointly):", self))
+        self.compton_dataset_list = QListWidget(self)
+        self.compton_dataset_list.setMaximumHeight(110)
+        self.compton_dataset_list.setToolTip(
+            "Check spectra of the same detector and MCA settings, for example Cs-137 "
+            "alone and Cs-137 + Co-60 + Na-22. Selecting a row selects that spectrum."
+        )
+        layout.addWidget(self.compton_dataset_list)
+        self.compton_dataset_heading = QLabel("Selected spectrum: none", self)
+        self.compton_dataset_heading.setWordWrap(True)
+        layout.addWidget(self.compton_dataset_heading)
+
+        dataset_form = QFormLayout()
+        self.compton_nuclide_list = QListWidget(self)
+        self.compton_nuclide_list.setMaximumHeight(120)
+        for nuclide in COMPTON_PRESET_NUCLIDES:
+            try:
+                lines = nuclide_compton_lines(nuclide)
+            except KeyError:
+                continue
+            if not lines:
+                continue
+            energies = ", ".join(f"{line.energy_kev:g}" for line in lines)
+            item = QListWidgetItem(f"{nuclide}  ({energies} keV)")
+            item.setData(Qt.ItemDataRole.UserRole, nuclide)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            item.setToolTip(
+                "Catalogue gamma lines at or above 150 keV with an emission probability of "
+                "at least 5 %; Na-22 includes the 511 keV annihilation line."
+            )
+            self.compton_nuclide_list.addItem(item)
+        self.compton_custom_energies = QLineEdit(self)
+        self.compton_custom_energies.setPlaceholderText("e.g. 834.8, 1460.8")
+        self.compton_custom_energies.setToolTip(
+            "Additional gamma energies in keV, separated by commas or spaces."
+        )
+        self.compton_background_combo = QComboBox(self)
+        for label, value in (
+            ("None", "none"),
+            ("Constant", "constant"),
+            ("Linear", "linear"),
+            ("Exponential", "exponential"),
+        ):
+            self.compton_background_combo.addItem(label, value)
+        self.compton_background_combo.setCurrentIndex(
+            self.compton_background_combo.findData("exponential")
+        )
+        self.compton_range_label = QLabel("Full spectrum", self)
+        self.compton_range_label.setToolTip(
+            "Drag the shaded region on the plot while this tab is open to set the fit "
+            "range of the selected spectrum."
+        )
+        dataset_form.addRow("Sources:", self.compton_nuclide_list)
+        dataset_form.addRow("Custom lines (keV):", self.compton_custom_energies)
+        dataset_form.addRow("Background:", self.compton_background_combo)
+        dataset_form.addRow("Fit range:", self.compton_range_label)
+        layout.addLayout(dataset_form)
+        self.compton_response_label = QLabel(self)
+        self.compton_response_label.setWordWrap(True)
+        layout.addWidget(self.compton_response_label)
+
+        global_form = QFormLayout()
+        self.compton_offset_free = QCheckBox("Fit offset (otherwise fixed at 0)", self)
+        self.compton_offset_free.setChecked(True)
+        self.compton_offset_free.setToolTip(
+            "x = g·E + o. A free offset needs at least two distinct edge energies."
+        )
+        resolution_grid = QGridLayout()
+        self.compton_fit_a = QCheckBox("a", self)
+        self.compton_fit_a.setChecked(True)
+        self.compton_a = QDoubleSpinBox(self)
+        self.compton_a.setRange(0.0, 0.5)
+        self.compton_a.setDecimals(4)
+        self.compton_a.setSingleStep(0.005)
+        self.compton_a.setValue(0.05)
+        self.compton_fit_b = QCheckBox("b", self)
+        self.compton_fit_b.setChecked(True)
+        self.compton_b = QDoubleSpinBox(self)
+        self.compton_b.setRange(0.0, 20.0)
+        self.compton_b.setDecimals(3)
+        self.compton_b.setSingleStep(0.1)
+        self.compton_b.setValue(1.0)
+        self.compton_fit_c = QCheckBox("c", self)
+        self.compton_c = QDoubleSpinBox(self)
+        self.compton_c.setRange(0.0, 200.0)
+        self.compton_c.setDecimals(2)
+        self.compton_c.setValue(0.0)
+        resolution_tooltip = (
+            "σ_E/E = sqrt(a² + b²/E + c²/E²) with E in keVee (b in keV^½, c in keV). "
+            "Checked terms are fitted; unchecked terms stay fixed at the entered value. "
+            "The Dietze & Klein FWHM terms α, β, γ are 2.3548 × these σ terms."
+        )
+        for column, (box, spin) in enumerate(
+            (
+                (self.compton_fit_a, self.compton_a),
+                (self.compton_fit_b, self.compton_b),
+                (self.compton_fit_c, self.compton_c),
+            )
+        ):
+            box.setToolTip(resolution_tooltip)
+            spin.setToolTip(resolution_tooltip)
+            resolution_grid.addWidget(box, 0, 2 * column)
+            resolution_grid.addWidget(spin, 0, 2 * column + 1)
+            resolution_grid.setColumnStretch(2 * column + 1, 1)
+        self.compton_statistic_combo = QComboBox(self)
+        self.compton_statistic_combo.addItem("Auto (count-aware)", "auto")
+        self.compton_statistic_combo.addItem("Poisson deviance", "poisson")
+        self.compton_statistic_combo.addItem("Weighted least squares", "weighted")
+        self.compton_statistic_combo.addItem("Unweighted least squares", "unweighted")
+        self.compton_amplitude_combo = QComboBox(self)
+        self.compton_amplitude_combo.addItem("Free per line (reference)", "free")
+        self.compton_amplitude_combo.addItem(
+            "Linked by emission yield (approximation)", "linked"
+        )
+        self.compton_amplitude_combo.setToolTip(
+            "Linked amplitudes fix the ratios within a nuclide to catalogue emission "
+            "yields. This ignores the energy dependence of the detection efficiency; the "
+            "free mode is the reference."
+        )
+        self.compton_initial_gain = QDoubleSpinBox(self)
+        self.compton_initial_gain.setRange(0.0, 1.0e6)
+        self.compton_initial_gain.setDecimals(5)
+        self.compton_initial_gain.setSpecialValueText("Automatic")
+        self.compton_initial_gain.setValue(0.0)
+        self.compton_initial_gain.setToolTip(
+            "Starting gain in x units per keVee. Automatic scans the gain at the starting "
+            "resolution before the fit."
+        )
+        self.compton_dk_combo = QComboBox(self)
+        self.compton_dk_combo.addItem("Off", None)
+        for detector in dietze_klein_table.DETECTORS:
+            self.compton_dk_combo.addItem(detector.description, detector.number)
+        self.compton_dk_combo.setToolTip(
+            "Optional independent edge estimate from the Dietze & Klein (1982) Table 3 "
+            "ratios for Cs-137 and the Na-22 511 keV line. Indicative only for other "
+            "scintillators and detector sizes."
+        )
+        global_form.addRow("Offset:", self.compton_offset_free)
+        layout.addLayout(global_form)
+        resolution_label = QLabel(
+            "Resolution σ/E = sqrt(a² + b²/E + c²/E²); checked terms are fitted:", self
+        )
+        resolution_label.setWordWrap(True)
+        resolution_label.setToolTip(resolution_tooltip)
+        layout.addWidget(resolution_label)
+        layout.addLayout(resolution_grid)
+        options_form = QFormLayout()
+        options_form.addRow("Statistic:", self.compton_statistic_combo)
+        options_form.addRow("Amplitudes:", self.compton_amplitude_combo)
+        options_form.addRow("Starting gain:", self.compton_initial_gain)
+        options_form.addRow("Dietze–Klein size:", self.compton_dk_combo)
+        layout.addLayout(options_form)
+
+        self.compton_fit_action = self.menu_bar.command(
+            self.analysis_menu, "Fit Compton edges", enabled=False,
+        )
+        self.compton_cancel_action = self.menu_bar.command(
+            self.analysis_menu, "Cancel Compton-edge fit", enabled=False,
+        )
+        self.compton_response_action = self.menu_bar.command(
+            self.analysis_menu, "Load simulated response...",
+        )
+        self.compton_response_action.setToolTip(
+            "Replace the single-scatter shape of one line with a deposited-energy "
+            "histogram (CSV: energy_kev, weight), for example from Geant4 or OpenGATE."
+        )
+        self.compton_clear_responses_action = self.menu_bar.command(
+            self.analysis_menu, "Clear simulated responses",
+        )
+        self.compton_calibration_action = self.menu_bar.command(
+            self.analysis_menu, "Open Compton edges in Energy Calibration...", enabled=False,
+        )
+        self.compton_calibration_action.setToolTip(
+            "Open MCA Energy Calibration with the fitted edges as fixed keVee points. "
+            "Nothing is applied until you review the fit there and choose Apply calibration."
+        )
+        self.analysis_menu.addSeparator()
+
+        self.compton_status = QLabel(
+            "Check one or more spectra and select their source lines.", self
+        )
+        self.compton_status.setWordWrap(True)
+        self.compton_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.compton_status)
+        self.compton_result_table = QTableWidget(0, 4, self)
+        self.compton_result_table.setHorizontalHeaderLabels(
+            ["Quantity", "Value", "Uncertainty", "Unit / note"]
+        )
+        self.compton_result_table.verticalHeader().setVisible(False)
+        self.compton_result_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.compton_result_table.setMinimumHeight(220)
+        result_header = self.compton_result_table.horizontalHeader()
+        for column in range(3):
+            result_header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        result_header.setStretchLastSection(True)
+        layout.addWidget(self.compton_result_table)
+        self.compton_summary = QLabel("No Compton-edge fit result.", self)
+        self.compton_summary.setWordWrap(True)
+        self.compton_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.compton_summary)
+        layout.addStretch(1)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        self._update_compton_response_label()
         return tab
 
     def _build_reference_tab(self) -> QWidget:
@@ -620,6 +920,20 @@ class McaPeakAnalysisDialog(QDialog):
         self.export_fit_action.triggered.connect(self._export_fit_result)
         self.report_fit_action.triggered.connect(self._download_fit_report)
         self.close_action.triggered.connect(self.reject)
+        self.compton_dataset_list.itemChanged.connect(self._compton_dataset_toggled)
+        self.compton_dataset_list.currentItemChanged.connect(self._compton_dataset_selected)
+        self.compton_nuclide_list.itemChanged.connect(self._compton_editor_changed)
+        self.compton_custom_energies.editingFinished.connect(self._compton_editor_changed)
+        self.compton_background_combo.currentIndexChanged.connect(self._compton_editor_changed)
+        self.fit_region.sigRegionChangeFinished.connect(self._compton_region_changed)
+        self.side_tabs.currentChanged.connect(self._side_tab_changed)
+        self.compton_fit_action.triggered.connect(self._start_compton_fit)
+        self.compton_cancel_action.triggered.connect(self._cancel_compton_fit)
+        self.compton_response_action.triggered.connect(self._load_compton_response)
+        self.compton_clear_responses_action.triggered.connect(self._clear_compton_responses)
+        self.compton_calibration_action.triggered.connect(self._send_compton_calibration_points)
+        self.compton_export_action.triggered.connect(self._export_compton_result)
+        self.compton_copy_action.triggered.connect(self._copy_compton_table)
 
     def _load_reference_favourites(self) -> list[str]:
         settings = QSettings()
@@ -919,6 +1233,7 @@ class McaPeakAnalysisDialog(QDialog):
             self._fit_result = None
             self._fit_spectrum_id = None
             self.export_fit_action.setEnabled(False)
+        self._forget_compton_spectra(spectrum_ids)
         self._rebuild_source_list()
         self._render()
 
@@ -948,18 +1263,29 @@ class McaPeakAnalysisDialog(QDialog):
             self.source_list.setCurrentRow(0)
         self._update_other_spectra()
         self._update_source_status()
+        self._rebuild_compton_datasets()
 
     def _selection_changed(self, *_args: object) -> None:
         spectrum = self._current_spectrum()
         if spectrum is None:
             self.fit_action.setEnabled(False)
+            self.compton_fit_action.setEnabled(False)
             self.export_spectrum_action.setEnabled(False)
             self._update_reference_candidate_filter()
+            self._load_compton_editor()
             self._render()
             return
         self.fit_action.setEnabled(self._fit_thread is None)
+        self.compton_fit_action.setEnabled(self._compton_thread is None)
         self.export_spectrum_action.setEnabled(True)
-        self.fit_region.setRegion((float(spectrum.x[0]), float(spectrum.x[-1])))
+        self._programmatic_region = True
+        try:
+            self.fit_region.setRegion((float(spectrum.x[0]), float(spectrum.x[-1])))
+            compton_range = self._compton_range_for(spectrum.spectrum_id)
+            if compton_range is not None and self._compton_tab_active():
+                self.fit_region.setRegion(compton_range)
+        finally:
+            self._programmatic_region = False
         self._fit_result = None
         self._fit_spectrum_id = None
         self.export_fit_action.setEnabled(False)
@@ -968,6 +1294,7 @@ class McaPeakAnalysisDialog(QDialog):
         self._update_other_spectra()
         self._update_source_status()
         self._update_reference_candidate_filter()
+        self._load_compton_editor()
         self._render()
 
     def _visibility_changed(self, item: QListWidgetItem) -> None:
@@ -1002,24 +1329,28 @@ class McaPeakAnalysisDialog(QDialog):
                 name=spectrum.label,
             )
             plotted += 1
-        for line in self._peak_lines:
-            self.spectrum_plot.addItem(line)
+        if not self._compton_tab_active():
+            for line in self._peak_lines:
+                self.spectrum_plot.addItem(line)
         self._render_reference_lines(selected)
         logarithmic = self.scale_combo.currentData() == "log"
         self.spectrum_plot.setLogMode(y=logarithmic)
-        self.spectrum_plot.setLabel(
-            "bottom",
-            "Energy" if selected_unit == "keV" else "MCA channel",
-            units="keV" if selected_unit == "keV" else None,
-        )
-        self.residual_plot.setLabel(
-            "bottom",
-            "Energy" if selected_unit == "keV" else "MCA channel",
-            units="keV" if selected_unit == "keV" else None,
-        )
+        axis_unit = selected.energy_unit if selected is not None else "keV"
+        axis_quantity = "Light output" if axis_unit == "keVee" else "Energy"
+        for plot in (self.spectrum_plot, self.residual_plot):
+            plot.setLabel(
+                "bottom",
+                axis_quantity if selected_unit == "keV" else "MCA channel",
+                units=axis_unit if selected_unit == "keV" else None,
+            )
         self._refresh_energy_axis(selected)
         self.residual_curve.setData([], [])
-        if self._fit_result is not None and self._fit_spectrum_id == self._current_id():
+        compton_shown = self._render_compton_overlay(selected)
+        if (
+            self._fit_result is not None
+            and self._fit_spectrum_id == self._current_id()
+            and not compton_shown
+        ):
             fit = self._fit_result
             self.spectrum_plot.plot(fit.x, fit.best_fit, pen=pg.mkPen("#d62728", width=2.0))
             component_colors = ("#9467bd", "#2ca02c", "#17becf", "#8c564b")
@@ -1035,7 +1366,8 @@ class McaPeakAnalysisDialog(QDialog):
             if incompatible
             else ""
         )
-        if selected is not None:
+        # A running Compton-edge fit owns the status line for its progress text.
+        if selected is not None and self._compton_thread is None:
             self.workbench_status.setText(f"Displayed {plotted} spectrum/spectra{suffix}.")
 
     def _render_reference_lines(self, spectrum: Spectrum | None) -> None:
@@ -1301,6 +1633,7 @@ class McaPeakAnalysisDialog(QDialog):
                 del self._live_ids[channel]
         self._fit_result = None
         self._fit_spectrum_id = None
+        self._forget_compton_spectra({spectrum_id})
         self._rebuild_source_list()
         self._render()
 
@@ -1433,6 +1766,16 @@ class McaPeakAnalysisDialog(QDialog):
             self.fit_status.setText("Cancelling fit...")
 
     def _populate_results(self, result: PeakFitResult) -> None:
+        fitted = self._spectra.get(self._fit_spectrum_id or "")
+        energy_header = self.peak_table.horizontalHeaderItem(2)
+        if energy_header is not None:
+            unit = fitted.energy_unit if fitted is not None else "keV"
+            energy_header.setText(f"E\n({unit})")
+            energy_header.setToolTip(
+                "Calibrated light output in keVee"
+                if unit == "keVee"
+                else "Calibrated peak energy in keV"
+            )
         self.peak_table.setRowCount(len(result.peaks))
         for row, peak in enumerate(result.peaks):
             values = (
@@ -1658,6 +2001,667 @@ class McaPeakAnalysisDialog(QDialog):
             f"Report and data files were saved to:\n{bundle.directory}",
         )
 
+    # ------------------------------------------------------------------
+    # Compton-edge (Klein–Nishina) fits for organic scintillators
+
+    def add_compton_datasets(self, spectra: list[Spectrum]) -> None:
+        """Add spectra, include them in the Compton-edge fit and show that tab."""
+        for spectrum in spectra:
+            self._add_spectrum(spectrum, select=False)
+            self._compton_config(spectrum.spectrum_id).include = True
+        self.side_tabs.setCurrentWidget(self.compton_tab)
+        if spectra:
+            self._rebuild_source_list(select_id=spectra[-1].spectrum_id)
+            self._selection_changed()
+        self.compton_status.setText(
+            f"Added {len(spectra)} spectrum/spectra to the Compton-edge fit. Select their "
+            "source lines and fit ranges, then choose Analysis → Fit Compton edges."
+        )
+
+    def _compton_tab_active(self) -> bool:
+        return self.side_tabs.currentWidget() is self.compton_tab
+
+    def _compton_config(self, spectrum_id: str) -> _ComptonDatasetConfig:
+        return self._compton_configs.setdefault(spectrum_id, _ComptonDatasetConfig())
+
+    def _compton_range_for(self, spectrum_id: str) -> tuple[float, float] | None:
+        config = self._compton_configs.get(spectrum_id)
+        return config.fit_range if config is not None else None
+
+    def _compton_dataset_text(
+        self, spectrum: Spectrum, config: _ComptonDatasetConfig,
+    ) -> str:
+        sources = list(config.nuclides)
+        if config.custom_energies.strip():
+            sources.append(f"custom {config.custom_energies.strip()} keV")
+        lines = ", ".join(sources) if sources else "no lines"
+        if config.fit_range is None:
+            window = "full range"
+        else:
+            window = f"{config.fit_range[0]:.6g}–{config.fit_range[1]:.6g}"
+        return f"{spectrum.label}  [{lines}; {config.background}; {window}]"
+
+    def _rebuild_compton_datasets(self) -> None:
+        current = self._current_id()
+        self._updating_compton = True
+        try:
+            self.compton_dataset_list.clear()
+            for spectrum_id in self._order:
+                spectrum = self._spectra.get(spectrum_id)
+                if spectrum is None:
+                    continue
+                config = self._compton_configs.get(spectrum_id, _ComptonDatasetConfig())
+                text = self._compton_dataset_text(spectrum, config)
+                item = QListWidgetItem(text)
+                item.setToolTip(text)
+                item.setData(Qt.ItemDataRole.UserRole, spectrum_id)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(
+                    Qt.CheckState.Checked if config.include else Qt.CheckState.Unchecked
+                )
+                self.compton_dataset_list.addItem(item)
+                if spectrum_id == current:
+                    self.compton_dataset_list.setCurrentItem(item)
+        finally:
+            self._updating_compton = False
+
+    def _compton_dataset_toggled(self, item: QListWidgetItem) -> None:
+        if self._updating_compton:
+            return
+        spectrum_id = str(item.data(Qt.ItemDataRole.UserRole))
+        self._compton_config(spectrum_id).include = item.checkState() == Qt.CheckState.Checked
+
+    def _compton_dataset_selected(self, current: QListWidgetItem | None, *_args: object) -> None:
+        if self._updating_compton or current is None:
+            return
+        spectrum_id = str(current.data(Qt.ItemDataRole.UserRole))
+        if spectrum_id == self._current_id():
+            return
+        for row in range(self.source_list.count()):
+            source = self.source_list.item(row)
+            if str(source.data(Qt.ItemDataRole.UserRole)) == spectrum_id:
+                self.source_list.setCurrentItem(source)
+                return
+
+    def _load_compton_editor(self) -> None:
+        spectrum = self._current_spectrum()
+        self._updating_compton = True
+        try:
+            if spectrum is None:
+                self.compton_dataset_heading.setText("Selected spectrum: none")
+                config = _ComptonDatasetConfig()
+            else:
+                config = self._compton_configs.get(spectrum.spectrum_id, _ComptonDatasetConfig())
+                self.compton_dataset_heading.setText(
+                    f"Selected spectrum: {spectrum.label} (x axis: {spectrum.axis_unit})"
+                )
+            for row in range(self.compton_nuclide_list.count()):
+                item = self.compton_nuclide_list.item(row)
+                nuclide = str(item.data(Qt.ItemDataRole.UserRole))
+                item.setCheckState(
+                    Qt.CheckState.Checked if nuclide in config.nuclides else Qt.CheckState.Unchecked
+                )
+            self.compton_custom_energies.setText(config.custom_energies)
+            self.compton_background_combo.setCurrentIndex(
+                self.compton_background_combo.findData(config.background)
+            )
+            self._update_compton_range_label(config)
+            for row in range(self.compton_dataset_list.count()):
+                item = self.compton_dataset_list.item(row)
+                if spectrum is not None and item.data(Qt.ItemDataRole.UserRole) == (
+                    spectrum.spectrum_id
+                ):
+                    self.compton_dataset_list.setCurrentItem(item)
+                    break
+        finally:
+            self._updating_compton = False
+        self._update_compton_response_label()
+
+    def _compton_editor_changed(self, *_args: object) -> None:
+        if self._updating_compton:
+            return
+        spectrum = self._current_spectrum()
+        if spectrum is None:
+            return
+        config = self._compton_config(spectrum.spectrum_id)
+        text = self.compton_custom_energies.text().strip()
+        try:
+            parse_custom_energies(text)
+        except ValueError as exc:
+            self.compton_status.setText(f"Invalid custom line: {exc}")
+            return
+        config.nuclides = [
+            str(item.data(Qt.ItemDataRole.UserRole))
+            for row in range(self.compton_nuclide_list.count())
+            if (item := self.compton_nuclide_list.item(row)).checkState()
+            == Qt.CheckState.Checked
+        ]
+        config.custom_energies = text
+        config.background = cast(
+            ComptonBackground, str(self.compton_background_combo.currentData())
+        )
+        if config.nuclides or config.custom_energies:
+            config.include = True
+        self._rebuild_compton_datasets()
+        self._update_compton_response_label()
+
+    def _compton_region_changed(self, *_args: object) -> None:
+        if self._programmatic_region or not self._compton_tab_active():
+            return
+        spectrum = self._current_spectrum()
+        if spectrum is None:
+            return
+        config = self._compton_config(spectrum.spectrum_id)
+        low, high = sorted(map(float, self.fit_region.getRegion()))
+        config.fit_range = (low, high)
+        self._update_compton_range_label(config)
+        self._rebuild_compton_datasets()
+
+    def _side_tab_changed(self, _index: int) -> None:
+        spectrum = self._current_spectrum()
+        if spectrum is not None and self._compton_tab_active():
+            compton_range = self._compton_range_for(spectrum.spectrum_id)
+            if compton_range is not None:
+                self._programmatic_region = True
+                try:
+                    self.fit_region.setRegion(compton_range)
+                finally:
+                    self._programmatic_region = False
+        self._render()
+
+    def _update_compton_range_label(self, config: _ComptonDatasetConfig) -> None:
+        if config.fit_range is None:
+            self.compton_range_label.setText("Full spectrum (drag the shaded region to limit)")
+        else:
+            low, high = config.fit_range
+            self.compton_range_label.setText(f"{low:.6g} – {high:.6g}")
+
+    def _update_compton_response_label(self) -> None:
+        spectrum = self._current_spectrum()
+        config = (
+            self._compton_configs.get(spectrum.spectrum_id) if spectrum is not None else None
+        )
+        if config is None or not config.responses:
+            self.compton_response_label.setText(
+                "Response: Klein–Nishina single scatter for every line. Use Analysis → "
+                "Load simulated response... for detectors where multiple scattering matters."
+            )
+            return
+        described = "; ".join(
+            f"{energy:g} keV: {response.label}"
+            for energy, response in sorted(config.responses.items())
+        )
+        self.compton_response_label.setText(f"Simulated responses: {described}.")
+
+    def _compton_lines(
+        self, config: _ComptonDatasetConfig, *, with_responses: bool = True,
+    ) -> tuple[ComptonLine, ...]:
+        lines: list[ComptonLine] = []
+        for nuclide in config.nuclides:
+            lines.extend(nuclide_compton_lines(nuclide))
+        for energy in parse_custom_energies(config.custom_energies):
+            lines.append(ComptonLine(energy, label=f"{energy:g} keV (custom)"))
+        unique: dict[float, ComptonLine] = {}
+        for line in lines:
+            key = round(line.energy_kev, 3)
+            if key in unique:
+                continue
+            response = config.responses.get(key) if with_responses else None
+            unique[key] = line.with_response(response) if response is not None else line
+        return tuple(unique.values())
+
+    def _compton_fit_spec(self) -> ComptonEdgeFitSpec:
+        included = [
+            spectrum_id
+            for spectrum_id in self._order
+            if spectrum_id in self._spectra
+            and (config := self._compton_configs.get(spectrum_id)) is not None
+            and config.include
+        ]
+        if not included:
+            current = self._current_id()
+            if current is None:
+                raise ValueError("select a spectrum to fit")
+            self._compton_config(current).include = True
+            included = [current]
+            self._rebuild_compton_datasets()
+        units = {self._spectra[spectrum_id].axis_unit for spectrum_id in included}
+        if len(units) > 1:
+            raise ValueError("jointly fitted spectra must share one x axis (channel or keV)")
+        datasets: list[ComptonEdgeDataset] = []
+        for spectrum_id in included:
+            spectrum = self._spectra[spectrum_id]
+            config = self._compton_configs[spectrum_id]
+            lines = self._compton_lines(config)
+            if not lines:
+                raise ValueError(f"select at least one source or custom line for {spectrum.label}")
+            low, high = config.fit_range if config.fit_range is not None else (None, None)
+            datasets.append(
+                ComptonEdgeDataset(spectrum, lines, low, high, background=config.background)
+            )
+        terms = tuple(
+            cast(ResolutionTermName, name)
+            for name, box in (
+                ("a", self.compton_fit_a),
+                ("b", self.compton_fit_b),
+                ("c", self.compton_fit_c),
+            )
+            if box.isChecked()
+        )
+        gain = self.compton_initial_gain.value()
+        detector = self.compton_dk_combo.currentData()
+        return ComptonEdgeFitSpec(
+            datasets=tuple(datasets),
+            offset_free=self.compton_offset_free.isChecked(),
+            resolution_terms=terms,
+            statistic=cast(FitStatistic, str(self.compton_statistic_combo.currentData())),
+            amplitude_mode=cast(AmplitudeMode, str(self.compton_amplitude_combo.currentData())),
+            initial_gain=gain if gain > 0 else None,
+            initial_offset=0.0,
+            initial_resolution=(
+                self.compton_a.value(),
+                self.compton_b.value(),
+                self.compton_c.value(),
+            ),
+            dietze_klein_detector=int(detector) if detector is not None else None,
+        )
+
+    def _start_compton_fit(self) -> None:
+        if self._compton_thread is not None:
+            return
+        try:
+            spec = self._compton_fit_spec()
+        except (KeyError, ValueError) as exc:
+            self.compton_status.setText(f"Cannot fit Compton edges: {exc}")
+            return
+        thread = QThread(self)
+        worker = ComptonEdgeFitWorker(spec)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.result.connect(self._compton_fit_completed)
+        worker.progress.connect(self._compton_fit_progress)
+        worker.error.connect(self._compton_fit_failed)
+        worker.cancelled.connect(self._compton_fit_cancelled)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(
+            self._compton_fit_thread_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        thread.finished.connect(thread.deleteLater)
+        self._compton_thread = thread
+        self._compton_worker = worker
+        self._pending_compton_spec = spec
+        self.compton_fit_action.setEnabled(False)
+        self.compton_cancel_action.setEnabled(True)
+        self.compton_status.setText(
+            f"Fitting {len(spec.datasets)} dataset(s) with "
+            f"{sum(len(dataset.lines) for dataset in spec.datasets)} line(s)..."
+        )
+        self._set_compton_busy(True)
+        thread.start()
+
+    def _set_compton_busy(self, busy: bool) -> None:
+        """Show the bottom progress bar and a busy cursor while the fit runs.
+
+        BusyCursor (arrow with spinner) rather than WaitCursor: the window stays
+        usable, including Cancel Compton-edge fit. Only this window's cursor changes.
+        """
+        self.workbench_progress.setRange(0, 0)
+        self.workbench_progress.setVisible(busy)
+        if busy:
+            self.setCursor(Qt.CursorShape.BusyCursor)
+            self.workbench_status.setText("Compton-edge fit: starting...")
+        else:
+            self.unsetCursor()
+
+    def _compton_fit_progress(self, update: object) -> None:
+        worker = self._compton_worker
+        if (
+            not isinstance(update, ComptonEdgeFitProgress)
+            or worker is None
+            or worker.stop_requested
+        ):
+            return
+        bar = self.workbench_progress
+        if update.total:
+            bar.setRange(0, update.total)
+            bar.setValue(min(update.done, update.total))
+        else:
+            bar.setRange(0, 0)
+        if update.stage == "prepare":
+            message = "preparing the detector-response model..."
+        elif update.stage == "gain_scan":
+            message = f"scanning the starting gain ({update.done}/{update.total})..."
+        elif update.stage == "optimize":
+            message = f"optimizing, {update.done} evaluation(s)..."
+        else:
+            message = "computing uncertainties and diagnostics..."
+        self.workbench_status.setText(f"Compton-edge fit: {message}")
+
+    def _compton_fit_completed(self, result: object) -> None:
+        if not isinstance(result, ComptonEdgeFitResult):
+            return
+        self._compton_result = result
+        self._compton_spec = self._pending_compton_spec
+        self.compton_status.setText(
+            f"Compton-edge fit complete using {result.statistic}; "
+            f"{result.evaluations} evaluations ({result.evaluation_path} folding)."
+            if result.success
+            else f"Compton-edge fit stopped without convergence: {result.message}"
+        )
+        self._populate_compton_results(result)
+        self.compton_export_action.setEnabled(True)
+        self.compton_copy_action.setEnabled(True)
+        self.compton_calibration_action.setEnabled(True)
+        self._render()
+        self.workbench_status.setText(
+            "Compton-edge fit complete."
+            if result.success
+            else "Compton-edge fit stopped without convergence."
+        )
+
+    def _compton_fit_failed(self, message: str) -> None:
+        self.compton_status.setText(f"Compton-edge fit failed: {message}")
+        self.workbench_status.setText(f"Compton-edge fit failed: {message}")
+        QMessageBox.critical(self, "Compton-Edge Fit Failed", message)
+
+    def _compton_fit_cancelled(self) -> None:
+        self.compton_status.setText("Compton-edge fit cancelled.")
+        self.workbench_status.setText("Compton-edge fit cancelled.")
+
+    def _compton_fit_thread_finished(self) -> None:
+        self._compton_thread = None
+        self._compton_worker = None
+        self._set_compton_busy(False)
+        self.compton_fit_action.setEnabled(self._current_spectrum() is not None)
+        self.compton_cancel_action.setEnabled(False)
+
+    def _cancel_compton_fit(self) -> None:
+        if self._compton_worker is not None:
+            self._compton_worker.stop()
+            self.compton_cancel_action.setEnabled(False)
+            self.compton_status.setText("Cancelling Compton-edge fit...")
+            self.workbench_progress.setRange(0, 0)
+            self.workbench_status.setText("Cancelling Compton-edge fit...")
+
+    def _populate_compton_results(self, result: ComptonEdgeFitResult) -> None:
+        rows = compton_edge_summary_rows(result)
+        self.compton_result_table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            if row.value is None:
+                value = ""
+            elif row.unit == "of maximum":
+                value = f"{row.value:.3f}"
+            elif row.unit == "relative" or row.quantity.endswith(
+                ("σ/E at edge", "FWHM/E at edge", "(FWHM, DK rule)")
+            ):
+                value = f"{100.0 * row.value:+.3g} %" if row.unit == "relative" else (
+                    f"{100.0 * row.value:.4g} %"
+                )
+            else:
+                value = f"{row.value:.8g}"
+            uncertainty = "" if row.stderr is None else f"{row.stderr:.3g}"
+            note = row.unit if not row.note else (
+                f"{row.unit}; {row.note}" if row.unit else row.note
+            )
+            if row.unit in {"of maximum", "relative"}:
+                note = row.note or row.unit
+            for column, text in enumerate((row.quantity, value, uncertainty, note)):
+                item = QTableWidgetItem(text)
+                if column == 3 and text:
+                    item.setToolTip(text)
+                self.compton_result_table.setItem(row_index, column, item)
+        warnings = " ".join(result.warnings) if result.warnings else "No fit warnings."
+        low, high = result.edge_span_kev
+        self.compton_summary.setText(
+            f"Statistic: {result.statistic}; reduced deviance {result.reduced_deviance:.4g} "
+            f"({result.degrees_of_freedom} degrees of freedom); AIC {result.aic:.6g}; "
+            f"BIC {result.bic:.6g}. Edges span {low:.4g}–{high:.4g} keVee; a keVee scale "
+            f"outside that span is an extrapolation. {warnings}"
+        )
+
+    def _render_compton_overlay(self, selected: Spectrum | None) -> bool:
+        result = self._compton_result
+        if result is None or selected is None:
+            return False
+        dataset = next(
+            (item for item in result.datasets if item.spectrum_id == selected.spectrum_id),
+            None,
+        )
+        if dataset is None:
+            return False
+        peak_fit_here = (
+            self._fit_result is not None and self._fit_spectrum_id == selected.spectrum_id
+        )
+        if peak_fit_here and not self._compton_tab_active():
+            return False
+        self.spectrum_plot.plot(
+            dataset.x,
+            dataset.best_fit,
+            pen=pg.mkPen("#d62728", width=2.0),
+            name="Compton-edge model",
+        )
+        for index, (name, values) in enumerate(dataset.components.items()):
+            color = _COMPTON_COLORS[index % len(_COMPTON_COLORS)]
+            style = Qt.PenStyle.DotLine if name == "background" else Qt.PenStyle.SolidLine
+            self.spectrum_plot.plot(
+                dataset.x,
+                values,
+                pen=pg.mkPen(color, width=1.0, style=style),
+                name=name.strip(),
+            )
+        lines = [line for line in result.lines if line.dataset_index == dataset.index]
+        for index, line in enumerate(lines):
+            color = _COMPTON_COLORS[index % len(_COMPTON_COLORS)]
+            marker = pg.InfiniteLine(
+                pos=line.edge_x,
+                angle=90,
+                movable=False,
+                pen=pg.mkPen(color, width=1.5, style=Qt.PenStyle.DashLine),
+                label=f"edge {line.energy_kev:g} keV",
+                labelOpts={
+                    "position": 0.9 - 0.07 * (index % 4),
+                    "color": color,
+                    "fill": (255, 255, 255, 190),
+                    "movable": False,
+                },
+            )
+            error = "" if line.edge_x_stderr is None else f" ± {line.edge_x_stderr:.4g}"
+            marker.setToolTip(
+                f"{line.label}: Compton edge T_max = {line.edge_kev:.4f} keVee\n"
+                f"x = {line.edge_x:.6g}{error}\n"
+                f"σ/E at edge {100 * line.sigma_over_energy:.3g} %, "
+                f"FWHM/E {100 * line.fwhm_over_energy:.3g} %\nResponse: {line.response}"
+            )
+            marker.setZValue(_COMPTON_EDGE_Z)
+            self.spectrum_plot.addItem(marker)
+        self.residual_curve.setData(dataset.x, dataset.residual)
+        return True
+
+    def _forget_compton_spectra(self, spectrum_ids: set[str]) -> None:
+        for spectrum_id in spectrum_ids:
+            self._compton_configs.pop(spectrum_id, None)
+        result = self._compton_result
+        if result is not None and any(
+            dataset.spectrum_id in spectrum_ids for dataset in result.datasets
+        ):
+            self._compton_result = None
+            self._compton_spec = None
+            self.compton_result_table.setRowCount(0)
+            self.compton_summary.setText("No Compton-edge fit result.")
+            for action in (
+                self.compton_export_action,
+                self.compton_copy_action,
+                self.compton_calibration_action,
+            ):
+                action.setEnabled(False)
+
+    def _load_compton_response(self) -> None:
+        spectrum = self._current_spectrum()
+        if spectrum is None:
+            return
+        config = self._compton_config(spectrum.spectrum_id)
+        try:
+            lines = self._compton_lines(config, with_responses=False)
+        except ValueError as exc:
+            self.compton_status.setText(str(exc))
+            return
+        if not lines:
+            QMessageBox.information(
+                self,
+                "Simulated Response",
+                "Select the source lines of the selected spectrum first.",
+            )
+            return
+        labels = [line.label for line in lines]
+        choice, accepted = QInputDialog.getItem(
+            self, "Simulated Response", "Gamma line:", labels, 0, False
+        )
+        if not accepted:
+            return
+        line = lines[labels.index(choice)]
+        folder = str(QSettings().value(settings_keys.ANALYSIS_SPECTRUM_FOLDER, "measurements"))
+        path_text, _ = QFileDialog.getOpenFileName(
+            self,
+            f"Load Simulated Response for {line.label}",
+            folder,
+            "Response tables (*.csv *.CSV *.txt *.tsv);;All files (*)",
+        )
+        if not path_text:
+            return
+        try:
+            response = load_simulated_response(Path(path_text))
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Simulated Response", str(exc))
+            return
+        config.responses[round(line.energy_kev, 3)] = response
+        self._update_compton_response_label()
+        self.compton_status.setText(
+            f"{line.label} now uses {response.label}, up to {response.max_energy_kev:g} keV."
+        )
+
+    def _clear_compton_responses(self) -> None:
+        spectrum = self._current_spectrum()
+        if spectrum is None:
+            return
+        config = self._compton_configs.get(spectrum.spectrum_id)
+        if config is not None:
+            config.responses.clear()
+        self._update_compton_response_label()
+
+    def _send_compton_calibration_points(self) -> None:
+        result = self._compton_result
+        spec = self._compton_spec
+        if result is None or spec is None:
+            return
+        signal = QMetaMethod.fromSignal(self.compton_calibration_requested)
+        if not self.isSignalConnected(signal):
+            # Never report a transfer that nothing receives.
+            QMessageBox.warning(
+                self,
+                "Compton-Edge Calibration",
+                "MCA Energy Calibration is not connected to this workbench, so the "
+                "edges could not be opened there.",
+            )
+            return
+        if any(dataset.spectrum.axis_unit != "channel" for dataset in spec.datasets):
+            QMessageBox.information(
+                self,
+                "Compton-Edge Calibration",
+                "Calibration points need spectra on an MCA channel axis.",
+            )
+            return
+        fingerprints: list[dict[str, FingerprintValue]] = []
+        for dataset in spec.datasets:
+            raw = dataset.spectrum.metadata.get("settings_fingerprint")
+            fingerprint: dict[str, FingerprintValue] = {}
+            if isinstance(raw, dict):
+                fingerprint = {
+                    str(key): value
+                    for key, value in raw.items()
+                    if isinstance(value, bool | int | float | str)
+                }
+            fingerprints.append(fingerprint)
+        if len({json.dumps(item, sort_keys=True) for item in fingerprints}) > 1:
+            QMessageBox.warning(
+                self,
+                "Compton-Edge Calibration",
+                "The fitted spectra were acquired with different MCA energy settings. Fit "
+                "spectra from one configuration before creating calibration points.",
+            )
+            return
+        channels = {dataset.spectrum.metadata.get("channel") for dataset in spec.datasets}
+        channel_value = next(iter(channels)) if len(channels) == 1 else None
+        channel = (
+            channel_value
+            if isinstance(channel_value, int) and not isinstance(channel_value, bool)
+            else None
+        )
+        points = compton_edge_calibration_points(result)
+        low, high = result.edge_span_kev
+        labels = ", ".join(dataset.label for dataset in spec.datasets)
+        transfer = CalibrationPointTransfer(
+            points=points,
+            energy_unit=COMPTON_EDGE_ENERGY_UNIT,
+            source_label=f"Compton-edge fit: {labels}",
+            channel=channel,
+            fingerprint=fingerprints[0],
+            note=(
+                f"Compton edges span {low:.4g}–{high:.4g} keVee; light output outside "
+                "that span is extrapolated."
+            ),
+        )
+        self.compton_calibration_requested.emit(transfer)
+        self.compton_status.setText(
+            f"Opened {len(points)} edge point(s) in keVee in MCA Energy Calibration; review "
+            f"and apply the calibration there. Edges span {low:.4g}–{high:.4g} keVee; "
+            "outside that span the keVee scale is extrapolated."
+        )
+
+    def _export_compton_result(self) -> None:
+        result = self._compton_result
+        spec = self._compton_spec
+        if result is None or spec is None:
+            return
+        folder = str(QSettings().value(settings_keys.ANALYSIS_SPECTRUM_FOLDER, "measurements"))
+        stem = _safe_stem(spec.datasets[0].label)
+        path_text, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Compton-Edge Results",
+            str(Path(folder) / f"{stem}_compton_edges.json"),
+            "JSON (*.json);;CSV (*.csv)",
+        )
+        if not path_text:
+            return
+        path = Path(path_text)
+        if selected_filter.startswith("CSV") and path.suffix.lower() != ".csv":
+            path = path.with_suffix(".csv")
+        elif not path.suffix:
+            path = path.with_suffix(".json")
+        try:
+            export_compton_edge_result(path, spec=spec, result=result)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Compton-Edge Export Failed", str(exc))
+            return
+        self.workbench_status.setText(f"Compton-edge results exported to {path}")
+
+    def _copy_compton_table(self) -> None:
+        table = self.compton_result_table
+        headers = [
+            (header.text() if (header := table.horizontalHeaderItem(column)) else "")
+            for column in range(table.columnCount())
+        ]
+        rows = ["\t".join(headers)]
+        for row in range(table.rowCount()):
+            cells = [
+                (item.text() if (item := table.item(row, column)) else "")
+                for column in range(table.columnCount())
+            ]
+            rows.append("\t".join(cells))
+        QApplication.clipboard().setText("\n".join(rows))
+        self.workbench_status.setText("Compton-edge result table copied to the clipboard.")
+
     def show_workspace(self) -> None:
         self.show()
         self.raise_()
@@ -1675,6 +2679,16 @@ class McaPeakAnalysisDialog(QDialog):
             worker.stop()
         if thread is not None and thread.isRunning() and not thread.wait(5_000):
             log.warning("MCA peak-fit worker did not stop within 5 seconds")
+        compton_worker = self._compton_worker
+        compton_thread = self._compton_thread
+        if compton_worker is not None:
+            compton_worker.stop()
+        if (
+            compton_thread is not None
+            and compton_thread.isRunning()
+            and not compton_thread.wait(5_000)
+        ):
+            log.warning("Compton-edge fit worker did not stop within 5 seconds")
 
     def reject(self) -> None:
         self._stop_fit_sync()

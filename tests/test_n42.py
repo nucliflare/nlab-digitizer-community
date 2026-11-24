@@ -233,3 +233,29 @@ def test_peak_fit_export_contains_n42_peak_results(tmp_path: Path) -> None:
     assert float(peak.findtext(f"{{{N42}}}SpectrumPeakEnergyValue", "0")) == pytest.approx(120)
     assert float(peak.findtext(f"{{{N42}}}SpectrumPeakFWHMValue", "0")) > 0
     assert float(peak.findtext(f"{{{N42}}}SpectrumPeakNetAreaValue", "0")) > 0
+
+
+def test_n42_export_marks_kevee_calibration_with_a_schema_valid_remark(tmp_path: Path) -> None:
+    source = _spectrum()
+    kevee = Spectrum.create(
+        label=source.label,
+        x=source.x,
+        counts=source.counts,
+        source="mca",
+        metadata={**source.metadata, "energy_unit": "keVee"},
+        energy_kev=source.energy_kev,
+    )
+    assert kevee.energy_unit == "keVee"
+    path = tmp_path / "kevee.n42"
+
+    export_n42_spectrum(path, kevee)
+    validate_n42(path)
+
+    calibration = ET.parse(path).getroot().find(f"{{{N42}}}EnergyCalibration")
+    assert calibration is not None
+    remark = calibration.findtext(f"{{{N42}}}Remark")
+    assert remark is not None and "keVee" in remark
+    plain = tmp_path / "kev.n42"
+    export_n42_spectrum(plain, source)
+    calibration = ET.parse(plain).getroot().find(f"{{{N42}}}EnergyCalibration")
+    assert calibration is not None and calibration.find(f"{{{N42}}}Remark") is None

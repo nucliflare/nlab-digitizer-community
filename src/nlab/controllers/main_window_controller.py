@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
 )
 
 from nlab import settings_keys
+from nlab.analysis.energy_calibration import CalibrationPointTransfer
+from nlab.analysis.spectrum import Spectrum
 from nlab.controllers.coincidence_controller import CoincidenceController
 from nlab.controllers.current_monitor_controller import CurrentMonitorController
 from nlab.controllers.external_device_controller import ExternalDeviceController
@@ -1296,7 +1298,28 @@ class MainWindowController:
                 self._mca_controllers,
                 parent=self._window,
             )
+            self._energy_calibration_dialog.compton_fit_requested.connect(
+                self._open_compton_edge_fit
+            )
         self._energy_calibration_dialog.show_workspace()
+
+    def _open_compton_edge_fit(self, spectra: object) -> None:
+        """Open calibration snapshots in the workbench's Compton-edge tab."""
+        if not isinstance(spectra, list):
+            return
+        self.show_mca_peak_analysis()
+        dialog = self._mca_peak_analysis_dialog
+        if dialog is not None:
+            dialog.add_compton_datasets([item for item in spectra if isinstance(item, Spectrum)])
+
+    def _receive_compton_calibration_points(self, transfer: object) -> None:
+        """Hand fitted Compton edges (keVee) to the energy-calibration workspace."""
+        if not isinstance(transfer, CalibrationPointTransfer):
+            return
+        self.show_energy_calibration()
+        dialog = self._energy_calibration_dialog
+        if dialog is not None:
+            dialog.add_calibration_points(transfer)
 
     def _dose_calibration_sources(self) -> list[DoseCalibrationChannelSource]:
         sources: list[DoseCalibrationChannelSource] = []
@@ -1332,14 +1355,23 @@ class MainWindowController:
             )
         self._dose_calibration_dialog.show_workspace()
 
+    def _ensure_mca_peak_analysis_dialog(self) -> McaPeakAnalysisDialog:
+        """Return the one workbench, creating it with its cross-window wiring.
+
+        Every creator goes through here (menu, session replay); a workbench created
+        elsewhere would silently drop Compton-edge calibration transfers.
+        """
+        if self._mca_peak_analysis_dialog is None:
+            dialog = McaPeakAnalysisDialog(self._mca_controllers, parent=self._window)
+            dialog.compton_calibration_requested.connect(
+                self._receive_compton_calibration_points
+            )
+            self._mca_peak_analysis_dialog = dialog
+        return self._mca_peak_analysis_dialog
+
     def show_mca_peak_analysis(self) -> None:
         """Open one modeless peak-analysis workbench for live and saved spectra."""
-        if self._mca_peak_analysis_dialog is None:
-            self._mca_peak_analysis_dialog = McaPeakAnalysisDialog(
-                self._mca_controllers,
-                parent=self._window,
-            )
-        self._mca_peak_analysis_dialog.show_workspace()
+        self._ensure_mca_peak_analysis_dialog().show_workspace()
 
     # ------------------------------------------------------------------
     # Versioned session recording and analysis replay

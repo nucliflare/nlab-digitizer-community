@@ -1,4 +1,4 @@
-"""Pyqtgraph axis that labels raw MCA channel coordinates in keV."""
+"""Pyqtgraph axis that labels raw MCA channel coordinates in keV or keVee."""
 
 from __future__ import annotations
 
@@ -41,11 +41,16 @@ class CalibratedEnergyAxis(pg.AxisItem):  # type: ignore[misc]
             self.setToolTip("No energy calibration is applied.")
         else:
             set_frame_only(self, False)
-            self.setLabel(text="Energy (stale)" if stale else "Energy", units="keV")
+            quantity = calibration.energy_quantity
+            self.setLabel(
+                text=f"{quantity} (stale)" if stale else quantity,
+                units=calibration.energy_unit,
+            )
             self.setToolTip(
                 "Calibration settings no longer match the MCA energy configuration."
                 if stale
-                else f"{calibration.model.capitalize()} MCA energy calibration"
+                else f"{calibration.model.capitalize()} MCA energy calibration "
+                f"({calibration.energy_unit})"
             )
         self.picture = None
         self.update()

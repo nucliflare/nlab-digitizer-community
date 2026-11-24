@@ -114,7 +114,8 @@ covers recording and advanced workflows.
   parameter reference. Press **F1**, then click a control or label for its
   explanation; **Esc** exits help selection.
 - **[Use cases](https://github.com/nucliflare/nlab-digitizer-community/wiki/use_cases):**
-  Find a workflow for calibration, peak analysis, PSD, coincidence, or replay.
+  Find a workflow for calibration (including keVee Compton-edge calibration of
+  organic scintillators), peak analysis, PSD, coincidence, or replay.
 - **[Project wiki](https://github.com/nucliflare/nlab-digitizer-community/wiki):**
   Detailed setup, measurement guides, file formats, troubleshooting, and development.
 - **[Changelog](CHANGELOG.md):** Release history and hardware-validation limitations.

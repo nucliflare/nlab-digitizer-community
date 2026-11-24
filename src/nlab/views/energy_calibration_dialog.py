@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -29,11 +29,14 @@ from PySide6.QtWidgets import (
 )
 
 from nlab import settings_keys
+from nlab.analysis.compton_edge import COMPTON_EDGE_POINT_SOURCE
 from nlab.analysis.energy_calibration import (
     CalibrationModel,
     CalibrationPeakFit,
     CalibrationPoint,
+    CalibrationPointTransfer,
     EnergyCalibration,
+    EnergyUnit,
     FingerprintValue,
     SpectrumSnapshot,
     fit_calibration_peak,
@@ -72,6 +75,7 @@ class _DraftPoint:
     snapshot_id: str | None = None
     peak_fit: CalibrationPeakFit | None = None
     enabled: bool = True
+    locked: bool = False
     line: pg.InfiniteLine | None = None
     centroid_line: pg.InfiniteLine | None = None
     fit_curve: pg.PlotDataItem | None = None
@@ -86,10 +90,14 @@ class _Workspace:
     fit: EnergyCalibration | None = None
     dirty: bool = False
     show_peak_fits: bool = False
+    energy_unit: EnergyUnit = "keV"
 
 
 class EnergyCalibrationDialog(QDialog):
-    """Fit one active channel-to-keV mapping from one or more spectra."""
+    """Fit one active channel-to-keV (or keVee) mapping from one or more spectra."""
+
+    compton_fit_requested = Signal(object)
+    """Emits a list of spectra to fit for Compton edges in the peak-analysis workbench."""
 
     def __init__(
         self,
@@ -221,6 +229,10 @@ class EnergyCalibrationDialog(QDialog):
         header.setSectionResizeMode(_COL_SOURCE, QHeaderView.ResizeMode.Stretch)
         # Compact value columns, but never narrower than their own header:
         # the header's size hint follows the active font and theme padding.
+        # The energy column is sized for its longest (keVee) caption.
+        energy_header = self.table.horizontalHeaderItem(_COL_ENERGY)
+        if energy_header is not None:
+            energy_header.setText("Energy [keVee]")
         for column, width in (
             (_COL_POINT, 32),
             (_COL_LABEL, 36),
@@ -231,6 +243,8 @@ class EnergyCalibrationDialog(QDialog):
             (_COL_ENABLED, 28),
         ):
             self.table.setColumnWidth(column, max(width, header.sectionSizeHint(column)))
+        if energy_header is not None:
+            energy_header.setText("Energy [keV]")
         # Keep every column visible at the dialog's minimum size: the panel is
         # never narrower than the fixed columns plus a usable Spectrum column.
         margins = side_layout.contentsMargins()
@@ -253,6 +267,14 @@ class EnergyCalibrationDialog(QDialog):
         self.add_action = self.menu_bar.command(self.analysis_menu, "Add point")
         self.remove_action = self.menu_bar.command(self.analysis_menu, "Remove selected points")
         self.clear_points_action = self.menu_bar.command(self.analysis_menu, "Clear points")
+        self.compton_action = self.menu_bar.command(
+            self.analysis_menu, "Fit Compton edges in workbench...",
+        )
+        self.compton_action.setToolTip(
+            "For organic scintillators: open the copied spectra in the MCA Peak Analysis "
+            "Workbench and fit Klein–Nishina Compton edges. The edges return here as "
+            "fixed points in keVee."
+        )
         self.analysis_menu.addSeparator()
 
         self.fit_status = QLabel("Add at least two calibration points.", self)
@@ -305,6 +327,7 @@ class EnergyCalibrationDialog(QDialog):
         self.clear_calibration_action.triggered.connect(self._clear_applied)
         self.report_action.triggered.connect(self._download_report)
         self.close_action.triggered.connect(self.reject)
+        self.compton_action.triggered.connect(self._request_compton_fit)
         self.plot.scene().sigMouseClicked.connect(self._plot_clicked)
 
     def _workspace_from_applied(self, calibration: EnergyCalibration | None) -> _Workspace:
@@ -320,10 +343,16 @@ class EnergyCalibrationDialog(QDialog):
                 source=point.source or "Saved calibration",
                 fingerprint=dict(calibration.fingerprint),
                 enabled=point.enabled,
+                locked=point.source.startswith(COMPTON_EDGE_POINT_SOURCE),
             )
             for point in calibration.points
         ]
-        return _Workspace(points=points, model=calibration.model, fit=calibration)
+        return _Workspace(
+            points=points,
+            model=calibration.model,
+            fit=calibration,
+            energy_unit=calibration.energy_unit,
+        )
 
     def _channel(self) -> int | None:
         value = self.channel_combo.currentData()
@@ -340,7 +369,9 @@ class EnergyCalibrationDialog(QDialog):
     def _show_channel(self, *_args: object) -> None:
         workspace = self._workspace()
         enabled = workspace is not None
-        for action in (self.replace_action, self.overlay_action, self.add_action):
+        for action in (
+            self.replace_action, self.overlay_action, self.add_action, self.compton_action,
+        ):
             action.setEnabled(enabled)
         if workspace is None:
             self.plot.clear()
@@ -429,15 +460,25 @@ class EnergyCalibrationDialog(QDialog):
                     pen=pg.mkPen(color, width=1.2),
                     name=f"P{index + 1}",
                 )
+            color = "#7353a6" if point.locked else "#a66f6f"
             line = pg.InfiniteLine(
                 pos=point.seed_channel,
                 angle=90,
-                movable=True,
-                pen=pg.mkPen("#a66f6f", width=1.5, style=Qt.PenStyle.DashLine),
+                movable=not point.locked,
+                pen=pg.mkPen(
+                    color,
+                    width=1.5,
+                    style=Qt.PenStyle.DashDotLine if point.locked else Qt.PenStyle.DashLine,
+                ),
                 hoverPen=pg.mkPen("#c17c7c", width=2),
                 label=f"P{index + 1}",
-                labelOpts={"color": "#a66f6f", "position": 0.95},
+                labelOpts={"color": color, "position": 0.95},
             )
+            if point.locked:
+                line.setToolTip(
+                    "Fixed point from a Compton-edge fit. Refit it in the MCA Peak Analysis "
+                    "Workbench to change its position."
+                )
             line.setBounds((0, 16_383))
             line.sigPositionChanged.connect(
                 lambda moved, point_id=point.point_id: self._line_moved(
@@ -552,6 +593,14 @@ class EnergyCalibrationDialog(QDialog):
         if workspace is None:
             return
         self._building_table = True
+        energy_header = self.table.horizontalHeaderItem(_COL_ENERGY)
+        if energy_header is not None:
+            energy_header.setText(f"Energy [{workspace.energy_unit}]")
+            energy_header.setToolTip(
+                "Electron-equivalent light output (keVee)"
+                if workspace.energy_unit == "keVee"
+                else "Reference photon energy in keV"
+            )
         self.table.setRowCount(len(workspace.points))
         for row, point in enumerate(workspace.points):
             point_item = QTableWidgetItem(f"P{row + 1}")
@@ -561,7 +610,11 @@ class EnergyCalibrationDialog(QDialog):
             source_item = QTableWidgetItem(point.source)
             source_item.setFlags(source_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(row, _COL_SOURCE, source_item)
-            self.table.setItem(row, _COL_SEED, QTableWidgetItem(f"{point.seed_channel:.3f}"))
+            seed_item = QTableWidgetItem(f"{point.seed_channel:.3f}")
+            if point.locked:
+                seed_item.setFlags(seed_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                seed_item.setToolTip("Fixed Compton-edge position")
+            self.table.setItem(row, _COL_SEED, seed_item)
             centroid = QTableWidgetItem(
                 "" if point.peak_fit is None else f"{point.channel:.4f}"
             )
@@ -696,6 +749,7 @@ class EnergyCalibrationDialog(QDialog):
                 self._calibration_points(workspace),
                 model=workspace.model,
                 fingerprint=fingerprint,
+                energy_unit=workspace.energy_unit,
             )
         except ValueError as exc:
             workspace.fit = None
@@ -711,10 +765,12 @@ class EnergyCalibrationDialog(QDialog):
             allow_binning_rescale=True,
         )
         warning = " Settings differ from the source spectra; Apply is disabled." if stale else ""
+        unit = calibration.energy_unit
+        span_note = self._compton_span_note(workspace)
         self.fit_status.setText(
-            f"{calibration.model.capitalize()} fit coefficients [keV]: {coefficient_text}. "
-            f"RMS residual {calibration.rms_residual_kev:.4g} keV; maximum "
-            f"{calibration.max_residual_kev:.4g} keV.{warning}"
+            f"{calibration.model.capitalize()} fit coefficients [{unit}]: {coefficient_text}. "
+            f"RMS residual {calibration.rms_residual_kev:.4g} {unit}; maximum "
+            f"{calibration.max_residual_kev:.4g} {unit}.{warning}{span_note}"
         )
         self.apply_action.setEnabled(not stale)
         self.report_action.setEnabled(True)
@@ -816,6 +872,8 @@ class EnergyCalibrationDialog(QDialog):
         rows = sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True)
         for row in rows:
             del workspace.points[row]
+        if not workspace.points:
+            workspace.energy_unit = "keV"
         if rows:
             workspace.dirty = True
             workspace.show_peak_fits = False
@@ -828,6 +886,7 @@ class EnergyCalibrationDialog(QDialog):
             return
         workspace.points.clear()
         workspace.fit = None
+        workspace.energy_unit = "keV"
         workspace.dirty = True
         workspace.show_peak_fits = False
         self._render_workspace()
@@ -858,8 +917,8 @@ class EnergyCalibrationDialog(QDialog):
         self._render_workspace()
         self._update_centroid_display(workspace)
         self.snapshot_status.setText(
-            f"Applied {workspace.fit.model} energy calibration to MCA "
-            f"{getattr(controller, 'channel_label', f'CH{controller.channel}')}. "
+            f"Applied {workspace.fit.model} energy calibration ({workspace.fit.energy_unit}) "
+            f"to MCA {getattr(controller, 'channel_label', f'CH{controller.channel}')}. "
             "Raw channels were not modified."
         )
 
@@ -943,6 +1002,104 @@ class EnergyCalibrationDialog(QDialog):
             self,
             "Energy Calibration Report Saved",
             f"Report and data files were saved to:\n{bundle.directory}",
+        )
+
+    def add_calibration_points(self, transfer: CalibrationPointTransfer) -> None:
+        """Add externally fitted points, such as Compton edges in keVee, as fixed points.
+
+        Points from an earlier transfer are replaced. Mixing units is refused unless
+        the user agrees to replace the existing points.
+        """
+        if transfer.channel is not None:
+            index = self.channel_combo.findData(transfer.channel)
+            if index >= 0:
+                self.channel_combo.setCurrentIndex(index)
+        workspace = self._workspace()
+        if workspace is None:
+            QMessageBox.information(
+                self,
+                "Energy Calibration",
+                "No MCA channel is available for these calibration points.",
+            )
+            return
+        existing = [point for point in workspace.points if point.energy_kev is not None]
+        if existing and workspace.energy_unit != transfer.energy_unit:
+            answer = QMessageBox.question(
+                self,
+                "Replace Calibration Points?",
+                f"This workspace holds {len(existing)} point(s) in "
+                f"{workspace.energy_unit}. A calibration cannot mix {workspace.energy_unit} "
+                f"and {transfer.energy_unit}. Replace them with {len(transfer.points)} "
+                f"point(s) in {transfer.energy_unit}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            workspace.points.clear()
+        else:
+            workspace.points = [point for point in workspace.points if not point.locked]
+        fingerprint = dict(transfer.fingerprint)
+        for point in transfer.points:
+            workspace.points.append(
+                _DraftPoint(
+                    point_id=uuid4().hex,
+                    seed_channel=point.channel,
+                    channel=point.channel,
+                    energy_kev=point.energy_kev,
+                    label=point.label,
+                    source=point.source or transfer.source_label,
+                    fingerprint=fingerprint,
+                    enabled=point.enabled,
+                    locked=True,
+                )
+            )
+        workspace.energy_unit = transfer.energy_unit
+        workspace.dirty = True
+        workspace.show_peak_fits = False
+        self._render_workspace()
+        self._refit()
+        notes = [transfer.note] if transfer.note else []
+        if not fingerprint:
+            notes.append(
+                "The source spectra carry no MCA settings fingerprint; confirm that they "
+                "match this channel's settings before applying."
+            )
+        notes.append(
+            "Not applied yet: review the fit, then choose Analysis → Apply calibration."
+        )
+        self.snapshot_status.setText(
+            f"Added {len(transfer.points)} fixed point(s) in {transfer.energy_unit} from "
+            f"{transfer.source_label}. " + " ".join(notes)
+        )
+
+    def _compton_span_note(self, workspace: _Workspace) -> str:
+        edges = [
+            point.energy_kev
+            for point in workspace.points
+            if point.enabled
+            and point.energy_kev is not None
+            and point.energy_kev > 0
+            and point.source.startswith(COMPTON_EDGE_POINT_SOURCE)
+        ]
+        if workspace.energy_unit != "keVee" or not edges:
+            return ""
+        return (
+            f" Compton edges span {min(edges):.4g}–{max(edges):.4g} keVee; light output "
+            "outside that span is extrapolated."
+        )
+
+    def _request_compton_fit(self) -> None:
+        workspace = self._workspace()
+        if workspace is None or not workspace.snapshots:
+            QMessageBox.information(
+                self,
+                "Compton-Edge Fit",
+                "Copy at least one spectrum into this workspace first.",
+            )
+            return
+        self.compton_fit_requested.emit(
+            [snapshot.to_spectrum() for snapshot in workspace.snapshots]
         )
 
     def show_workspace(self) -> None:
