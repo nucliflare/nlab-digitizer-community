@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] — 2026-11-24
+
+Help describes the binary file formats of Scope waveform, MCA list-mode and
+Current sum recordings, with example Python readers. The waveform workbench and
+HDF5 conversion now time Scope `.bin` recordings at their true 2 ns per sample;
+earlier versions showed those times four times too long.
+
 ### Added
 
 - **Binary file formats in Help** — **Help → User Guide…** has three new
