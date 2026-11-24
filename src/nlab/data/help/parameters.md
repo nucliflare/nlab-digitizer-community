@@ -17,7 +17,10 @@ shown by each control remain authoritative. Do not copy raw thresholds or
 calibration coefficients between different signal paths.
 
 Start with [Connection](#connection), [Scope](#scope), [MCA](#mca),
-[PSD](#psd), or [offline waveform analysis](#waveform).
+[PSD](#psd), or [offline waveform analysis](#waveform). To read recordings in
+your own code, see the binary formats of [Scope waveforms](#format-waveforms),
+[MCA list mode](#format-listmode) and [Current sums](#format-current), each
+with an example Python reader.
 
 The complete workflow guides and screenshots are also available in the
 [project wiki](https://github.com/nucliflare/nlab-digitizer-community/wiki).
@@ -177,7 +180,8 @@ than silently overwritten. The source is the Scope waveform path, not MCA list m
 Stop and wait for final drain before opening the capture for conversion or
 changing geometry. Partial frames are not appended as complete events. Review
 the final run summary for continuity and hardware faults. Current waveform DMA
-cannot simultaneously own the same Scope buffer.
+cannot simultaneously own the same Scope buffer. The file layout and an example
+reader are in [Scope waveform binary format](#format-waveforms).
 
 ## Acquisition — duration {#duration}
 
@@ -486,6 +490,9 @@ counted in the summary, and a run whose START record is missing or not first is
 reported as incomplete. The hardware loss counter is not reset by Start, so the
 summary counts only records dropped during this run and shows a value carried
 over from an earlier run separately.
+
+The binary file layout and an example reader are in
+[MCA list-mode binary format](#format-listmode).
 
 ## MCA — ROI, counts, and differential view {#mca-roi}
 
@@ -1317,10 +1324,420 @@ calculate particle identity, or repair incomplete records. Partial or changing
 captures are rejected. ROOT conversion produces TTrees for supported event and
 waveform layouts; inspect their branches before writing an analysis macro.
 
+To read the binary files directly instead, see
+[Scope waveform binary format](#format-waveforms),
+[MCA list-mode binary format](#format-listmode) and
+[Current periodic-sum binary format](#format-current).
+
 **References** — ROOT format and the library that writes it.
 
 - Brun, R., Rademakers, F. (1997). ROOT — an object oriented data analysis framework. *Nucl. Instrum. Methods Phys. Res. A* 389, 81–86. doi:10.1016/S0168-9002(97)00048-X
 - Pivarski, J., Schreiner, H., Hollands, A., et al. *Uproot*. Zenodo. doi:10.5281/zenodo.4340632
+
+## Files — Scope waveform binary format {#format-waveforms}
+
+**Record DMA frames** in Scope writes a `.bin` file in NDMA format version 1:
+a 24-byte header followed by waveform frames that all have the same size. All
+values are little-endian. There is no index or trailer, so frame *i* starts at
+byte `24 + i × frame_bytes`. MCA list-mode files share this header; see
+[MCA list-mode binary format](#format-listmode).
+
+**Header** (24 bytes)
+
+| Offset | Type | Field | Meaning |
+| --- | --- | --- | --- |
+| 0 | 4 bytes | magic | `NDMA` |
+| 4 | uint16 | version | 1 |
+| 6 | uint8 | channel | Scope channel, 0 or 1 |
+| 7 | uint8 | reserved | 0 |
+| 8 | float64 | created | Unix time in seconds when recording started, from the computer clock |
+| 16 | uint32 | frame_samples | 16-bit words per frame, including the timestamp |
+| 20 | 4 bytes | padding | 0 |
+
+**Frame** (`frame_bytes = 2 × frame_samples`)
+
+| Offset | Type | Field | Meaning |
+| --- | --- | --- | --- |
+| 0 | uint64 | timestamp | Trigger time in 8 ns ticks of the board counter |
+| 8 | int16 × (frame_samples − 4) | samples | Signed ADC codes, 2 ns apart |
+
+`frame_samples` is the Scope **Frame** length in ADC samples (duration / 2 ns).
+The timestamp replaces the frame's first four captured samples, so each frame
+stores `frame_samples − 4` samples: a 1024-sample frame holds 1020. The
+timestamp marks when the trigger was accepted, not the time of the first stored
+sample. Ticks count from an arbitrary origin, so use differences between
+frames, computed as integers. The `created` time comes from the computer and is
+not synchronized with the tick counter.
+
+The recorder writes only complete frames, so a finished file holds exactly
+`(file size − 24) / frame_bytes` frames. A remainder means the file was cut
+short, for example by an interrupted copy; ignore the incomplete last frame.
+The file stores no trigger level, pretrigger, DAC baseline or other setting:
+keep a **Save Settings...** file with the capture ([Settings](#settings)).
+Periodic frames that the firmware averages over four samples cannot be stored
+in this format, so such a recording is refused.
+
+This reader needs only Python 3 and NumPy. It maps the file instead of loading
+it, so large captures open immediately:
+
+```python
+import os
+import struct
+
+import numpy as np
+
+HEADER = struct.Struct("<4sHBBdI4x")  # 24 bytes, little-endian
+
+
+def read_scope_ndma(path):
+    """Return (header, timestamps, waveforms) of a Scope NDMA v1 file.
+
+    timestamps: uint64 trigger times in 8 ns ticks, one per frame.
+    waveforms: int16 array with one row per frame, samples 2 ns apart.
+    """
+    with open(path, "rb") as f:
+        fields = HEADER.unpack(f.read(HEADER.size))
+    magic, version, channel, _, created, frame_samples = fields
+    if magic != b"NDMA" or version != 1:
+        raise ValueError("not a Scope NDMA version 1 file")
+    if frame_samples <= 4:
+        raise ValueError("no waveform samples (list mode has frame_samples 0)")
+    frame = np.dtype([
+        ("timestamp", "<u8"),
+        ("samples", "<i2", (frame_samples - 4,)),
+    ])
+    count = (os.path.getsize(path) - HEADER.size) // frame.itemsize
+    if count > 0:
+        frames = np.memmap(path, dtype=frame, mode="r",
+                           offset=HEADER.size, shape=(count,))
+    else:
+        frames = np.zeros(0, dtype=frame)
+    header = {"channel": channel, "created_unix_s": created,
+              "frame_samples": frame_samples}
+    return header, frames["timestamp"], frames["samples"]
+```
+
+For example:
+
+```python
+header, ticks, waves = read_scope_ndma("scope.bin")
+print(len(waves), "frames of", waves.shape[1], "samples")
+t_ns = np.arange(waves.shape[1]) * 2.0    # sample times within a frame
+spacing_ns = np.diff(ticks) * 8           # trigger spacing, exact integers
+baseline = waves[:, :16].mean(axis=1)     # assumes 16 samples before pulses
+height = waves.max(axis=1) - baseline     # positive pulses; min() if negative
+```
+
+## Files — MCA list-mode binary format {#format-listmode}
+
+**Record list-mode DMA** in MCA, with **Binary NDMA + YAML** chosen under
+**General Settings → Acquisition files → MCA output**, writes a `.bin` file in
+NDMA format version 2 and three companion files with the same name:
+
+| File | Contents |
+| --- | --- |
+| `name.bin` | 24-byte header, then the event records |
+| `name.json` | Capture check: frame and record counts, record schema, driver loss and fault counters, `continuity_valid`, SHA-256 of the `.bin` |
+| `name.yaml` | Device settings at the start of the run |
+| `name.run.json` | Run summary: duration, records, average rate, `continuity` |
+
+**Header** — the same 24 bytes as a [Scope waveform file](#format-waveforms):
+magic `NDMA`, uint16 version 2, uint8 MCA channel, a reserved byte, float64
+Unix time of the start, and uint32 `frame_samples`, which is 0 here.
+
+**Records** — after the header come whole frames of 1,024 records of 16 bytes
+(16,384 bytes per frame), so the record count is `(file size − 24) / 16` and is
+a multiple of 1,024:
+
+| Offset | Type | Field | Meaning |
+| --- | --- | --- | --- |
+| 0 | uint8 | marker | Flags, see below |
+| 1 | uint8 | zc_offset | Timing offset in whole ADC samples, unsigned |
+| 2 | int16 | zc_estimation | Timing fraction, value / 16384 samples |
+| 4 | uint16 | charge_energy | Charge-comparison (short-gate) energy, raw |
+| 6 | uint16 | trapezoid_energy | Energy from the configured estimator, raw |
+| 8 | uint64 | timestamp | Event time in 8 ns ticks |
+
+Marker bits: `0x02` CFD timing is valid; `0x08` a PSD zero-crossing result is
+present, and then `zc_offset` and `zc_estimation` hold that result in 8 ns
+units instead of a CFD time; `0x40` and `0x80` are logic inputs 1 and 0. Other
+bits have no defined meaning.
+
+The hardware delivers each record as 16 opaque bytes. The field meanings above
+are the decoding profile the application selects for known firmware, named by
+`client_record_schema` in `name.json`. Decode the fields this way only when it
+reads `vdpp-zc-calc-q2.14-v1`; with `unqualified-opaque[16]` the bytes are kept
+but their meaning is not asserted.
+
+**Records that are not events:**
+
+- **START** — the first record of a clean run has timestamp 1 and every other
+  byte zero.
+- **Padding** — when a run stops, the last frame is filled up to 1,024 records
+  with all-zero records. There is no end record.
+- **Earlier runs** — records before START are left over from an earlier run
+  that was not stopped cleanly. The application drops whole frames that come
+  before START. If START is not the first record of its frame, the records
+  before it stay in the file and the run is reported incomplete.
+
+**Timing** — for a record with `0x02` set and `0x08` clear, the CFD event time is
+`8 × timestamp + 2 × (zc_offset + zc_estimation / 16384)` ns. A valid
+crossing has `zc_estimation` from −16384 to 0; treat other values as having no
+fine time, and records without the CFD flag as having only the 8 ns timestamp.
+For exact time differences use integers in units of 1/8192 ns:
+`timestamp × 65536 + zc_offset × 16384 + zc_estimation`. To test a decoder:
+the bytes `02 13 00 f0 34 12 78 56 64 00 00 00 00 00 00 00` decode to marker 2,
+zc_offset 19, zc_estimation −4096, charge_energy 0x1234, trapezoid_energy
+0x5678, timestamp 100 and CFD time 837.5 ns.
+
+**Energies** are raw 16-bit values, not keV. The application's coincidence
+analysis places `trapezoid_energy >> 2` on the 16,384-channel MCA axis, and its
+PSD view uses the ratio `1 − charge_energy / trapezoid_energy`.
+
+**Other list-mode files** — version 1 files from earlier firmware use the same
+16-byte positions, named `short_energy` and `energy` instead of `charge_energy`
+and `trapezoid_energy`, with no frames, START record or `.json` file. HDF5 and
+ROOT recordings store every record, START and padding included, in a dataset or
+TTree named `events` with fields `timestamp`, `long_gate` (trapezoid energy),
+`short_gate` (charge energy), `marker`, `zc_offset` and `zc_estimation`; in
+HDF5 read only the first `committed_events` rows.
+
+This reader needs only Python 3 and NumPy:
+
+```python
+import os
+import struct
+
+import numpy as np
+
+HEADER = struct.Struct("<4sHBBdI4x")  # 24 bytes, little-endian
+FRAME_RECORDS = 1024
+RECORD = np.dtype([
+    ("marker", "u1"),
+    ("zc_offset", "u1"),
+    ("zc_estimation", "<i2"),
+    ("charge_energy", "<u2"),
+    ("trapezoid_energy", "<u2"),
+    ("timestamp", "<u8"),
+])
+
+
+def read_listmode_ndma(path):
+    """Return (header, records) of an MCA list-mode NDMA v2 file."""
+    with open(path, "rb") as f:
+        fields = HEADER.unpack(f.read(HEADER.size))
+    magic, version, channel, _, created, frame_samples = fields
+    if magic != b"NDMA" or version != 2 or frame_samples != 0:
+        raise ValueError("not an MCA list-mode NDMA version 2 file")
+    frame_bytes = FRAME_RECORDS * RECORD.itemsize
+    count = (os.path.getsize(path) - HEADER.size) // frame_bytes
+    count *= FRAME_RECORDS  # whole frames only
+    if count > 0:
+        records = np.memmap(path, dtype=RECORD, mode="r",
+                            offset=HEADER.size, shape=(count,))
+    else:
+        records = np.zeros(0, dtype=RECORD)
+    return {"channel": channel, "created_unix_s": created}, records
+
+
+def events_only(records):
+    """Drop the START record, any records before it, and zero padding."""
+    empty = ((records["marker"] == 0) & (records["zc_offset"] == 0)
+             & (records["zc_estimation"] == 0)
+             & (records["charge_energy"] == 0)
+             & (records["trapezoid_energy"] == 0))
+    keep = ~(empty & (records["timestamp"] == 0))
+    start = np.flatnonzero(empty & (records["timestamp"] == 1))
+    if len(start):
+        keep[:start[0] + 1] = False
+    return records[keep]
+
+
+def cfd_time_ns(events, reference_ticks=None):
+    """CFD event times in ns, NaN where a record has no valid CFD time.
+
+    Times count from reference_ticks (default: the first event), which
+    keeps float64 precision in long runs.
+    """
+    if reference_ticks is None:
+        reference_ticks = events["timestamp"][0] if len(events) else 0
+    ticks = events["timestamp"] - np.uint64(reference_ticks)
+    fine = events["zc_estimation"].astype(np.float64)
+    marker = events["marker"]
+    valid = (((marker & 0x08) == 0) & ((marker & 0x02) != 0)
+             & (fine >= -16384) & (fine <= 0))
+    time_ns = (8.0 * ticks.astype(np.float64)
+               + 2.0 * (events["zc_offset"] + fine / 16384.0))
+    return np.where(valid, time_ns, np.nan)
+```
+
+For example:
+
+```python
+import json
+
+with open("run.json", encoding="utf-8") as f:
+    check = json.load(f)
+print(check["client_record_schema"], "complete:", check["continuity_valid"])
+
+header, records = read_listmode_ndma("run.bin")
+events = events_only(records)
+channel = events["trapezoid_energy"] >> 2          # MCA channel, 0..16383
+spectrum = np.bincount(channel, minlength=16384)
+total = events["trapezoid_energy"].astype(np.float64)
+ratio = 1 - events["charge_energy"] / np.where(total > 0, total, np.nan)
+times = cfd_time_ns(events)
+```
+
+## Files — Current periodic-sum binary format {#format-current}
+
+**Record** in Current **Periodic sums**, with the **Binary (.bin)** format,
+writes an NSUM file: the hardware's 4096-byte sum packets, unchanged, between a
+JSON header and a JSON trailer. All integers are little-endian. NSUM files
+start with `NSUM`, never `NDMA`. **HDF5 (.h5)** recordings hold the same
+packets in a `packets` dataset, plus decoded `timestamps`, `sums` and
+`valid_counts` columns. See [Scope periodic sums](#scope-sums) for the
+measurement itself.
+
+**Container**
+
+| Part | Size | Contents |
+| --- | --- | --- |
+| Preamble | 12 bytes | `NSUM`, uint16 version (1), uint16 reserved (0), uint32 header_bytes |
+| Header | header_bytes | UTF-8 JSON, then zero bytes up to the next multiple of 4096 |
+| Packets | 4096 each | The hardware packets, in order |
+| Trailer | 4096 | 16-byte marker `NSUM-ENDTRAILER` plus a zero byte, uint32 json_bytes, UTF-8 JSON, zero bytes |
+
+The first packet starts where the header, rounded up to a multiple of 4096
+bytes, ends; packet *i* follows at `4096 × i` bytes after it. The trailer is
+written last, after every packet is on disk. If the last 4096-byte block starts
+with the marker it is the trailer, and its `packets` value equals the number of
+packets before it. A file without a trailer was not closed, for example after
+a crash or power loss; its whole packets are still valid. Ignore a partial
+final block.
+
+The header JSON holds `format` (`nlab-scope-sums`), `format_version` (1),
+`container` (`nsum`), `created_utc`, `timestamp_unit`, `sum_unit`,
+`packet_bytes`, `metadata` (channel, IP version, N, gap, clock periods and
+producer identity) and `configuration_yaml` (the saved settings, or empty). The
+trailer JSON holds `complete`, `cleanup_error`, `final_missed_windows`,
+`runtime_metadata` and `packets`.
+
+**Packet** (4096 bytes)
+
+| Offset | Type | Field | Meaning |
+| --- | --- | --- | --- |
+| 0 | uint64 | first_tick | Start of the packet's first window, 8 ns ticks |
+| 8 | 8 bytes | magic | `VDPSUMS1` (IP123) or `VDPSUMS2` (IP124) |
+| 16 | uint32 | n | ADC samples per window, N |
+| 20 | uint16 | gap | Gap between windows, 8 ns clock cycles |
+| 22 | uint16 | count | Valid windows in this packet |
+| 24 | uint32 | sequence | Packet number from 0, modulo 2^32 |
+| 28 | uint32 | missed | Bits 0–30: windows missed since Start, cumulative; bit 31: final packet after Stop |
+| 32 | 4064 bytes | windows | See below |
+
+- **IP124** — up to 508 uint64 sums. Window *i* starts at
+  `first_tick + i × (N/4 + gap)` ticks. Slots after `count` repeat the last sum
+  and must be ignored.
+- **IP123** — up to 254 pairs of uint64 start tick and uint64 sum; the rest is
+  zero.
+
+Only the final packet after Stop can hold fewer windows than the maximum.
+
+**Values** — a sum S adds N offset-binary ADC codes (signed code + 32768), so a
+window's mean signed ADC code is `S / N − 32768`. Each window lasts N × 2 ns,
+and windows start every (N/4 + gap) × 8 ns. A longer step between consecutive
+window timestamps means windows were missed; packets carry no continuity
+guarantee. Timestamps wrap modulo 2^64. Sums are ADC codes: the Current zero
+and scale are not applied ([Current units](#current-calibration)).
+
+This reader needs only Python 3 and NumPy:
+
+```python
+import json
+import os
+import struct
+
+import numpy as np
+
+PACKET = 4096
+PREAMBLE = struct.Struct("<4sHHI")
+TRAILER = struct.Struct("<16sI")
+TRAILER_MARKER = b"NSUM-END" + b"TRAILER\0"
+IP123 = int.from_bytes(b"VDPSUMS1", "little")
+IP124 = int.from_bytes(b"VDPSUMS2", "little")
+PACKET_DTYPE = np.dtype([
+    ("first_tick", "<u8"), ("magic", "<u8"), ("n", "<u4"),
+    ("gap", "<u2"), ("count", "<u2"), ("sequence", "<u4"),
+    ("missed", "<u4"), ("words", "<u8", (508,)),
+])
+
+
+def read_nsum(path):
+    """Return the header, trailer and window columns of an NSUM file.
+
+    The trailer is None when the recording did not close cleanly.
+    """
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        magic, version, _, header_bytes = PREAMBLE.unpack(
+            f.read(PREAMBLE.size))
+        if magic != b"NSUM" or version != 1:
+            raise ValueError("not an NSUM version 1 file")
+        header = json.loads(f.read(header_bytes))
+        offset = -(-(PREAMBLE.size + header_bytes) // PACKET) * PACKET
+        blocks, partial = divmod(max(0, size - offset), PACKET)
+        trailer = None
+        if blocks and not partial:
+            f.seek(offset + (blocks - 1) * PACKET)
+            last = f.read(PACKET)
+            marker, length = TRAILER.unpack_from(last)
+            if marker == TRAILER_MARKER:
+                body = last[TRAILER.size:TRAILER.size + length]
+                trailer = json.loads(body)
+                blocks -= 1
+    packets = np.fromfile(path, dtype=PACKET_DTYPE, count=blocks,
+                          offset=offset)
+    ticks, sums = [], []
+    for p in packets:
+        count = int(p["count"])
+        if p["magic"] == IP124:
+            step = np.uint64(int(p["n"]) // 4 + int(p["gap"]))
+            index = np.arange(count, dtype=np.uint64)
+            ticks.append(p["first_tick"] + index * step)
+            sums.append(p["words"][:count])
+        elif p["magic"] == IP123:
+            pairs = p["words"][:2 * count].reshape(count, 2)
+            ticks.append(pairs[:, 0])
+            sums.append(pairs[:, 1])
+        else:
+            raise ValueError("unknown sum packet type")
+    none = np.zeros(0, dtype=np.uint64)
+    return {
+        "header": header,
+        "trailer": trailer,
+        "samples_per_window": int(packets["n"][0]) if blocks else None,
+        "gap_cycles": int(packets["gap"][0]) if blocks else None,
+        "missed_windows": int(packets["missed"][-1]) & 0x7FFFFFFF
+                          if blocks else 0,
+        "timestamps": np.concatenate(ticks) if ticks else none,
+        "sums": np.concatenate(sums) if sums else none,
+    }
+```
+
+For example:
+
+```python
+capture = read_nsum("current.bin")
+n = capture["samples_per_window"]
+mean_code = capture["sums"] / n - 32768.0       # signed ADC code per window
+ticks = capture["timestamps"]
+t_s = (ticks - ticks[0]) * 8e-9                 # seconds from the first window
+step = n // 4 + capture["gap_cycles"]
+lost = int((np.diff(ticks) // step - 1).sum())  # windows missing in between
+trailer = capture["trailer"]
+complete = trailer is not None and trailer["complete"]
+```
 
 ## Files — reports, CSV, and destinations {#export}
 
@@ -1411,7 +1828,9 @@ beside it. **Binary (.bin)**, the default, stores the packets exactly as receive
 about a third of the size and about ten times cheaper to write, so use it for
 windows shorter than 448 ns. **HDF5 (.h5)** also stores lossless uint64 timestamp
 and sum columns and opens in generic HDF5 tools. A binary file cut off by a crash
-stays readable up to its last whole packet and is reported incomplete. Blank
+stays readable up to its last whole packet and is reported incomplete. The
+binary layout and an example reader are in
+[Current periodic-sum binary format](#format-current). Blank
 filenames generate `chN_current_<timestamp>` with the format's extension in the
 measurement folder from **General Settings** on each **Start**, with a numbered
 suffix if needed to avoid an existing file. Relative names use that folder;

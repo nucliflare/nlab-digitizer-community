@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Binary file formats in Help** — **Help → User Guide…** has three new
+  **Files** topics for writing your own readers: Scope waveform recordings
+  (NDMA version 1), MCA list-mode recordings (NDMA version 2 and its companion
+  files) and Current periodic-sum recordings (NSUM). Each gives the byte layout,
+  units and the records that are not events, with a NumPy reader and an example.
+  The list-mode topic includes a 16-byte test record with its decoded values.
+  Tests run every example against files written by the application.
+
 ## [0.9.4] — 2026-11-23
 
 General Settings lists its groups as categories and can add the start time to

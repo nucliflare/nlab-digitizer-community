@@ -137,7 +137,9 @@ covers recording and advanced workflows.
 
 - **Built-in help:** Open **Help → User Guide…** for the searchable, offline
   parameter reference. Press **F1**, then click a control or label for its
-  explanation; **Esc** exits help selection.
+  explanation; **Esc** exits help selection. Its **Files** topics describe the
+  binary Scope waveform, MCA list-mode and Current sum formats byte by byte,
+  with example Python readers.
 - **[Use cases](https://github.com/nucliflare/nlab-digitizer-community/wiki/use_cases):**
   Find a workflow for calibration, peak analysis, PSD, coincidence, or replay.
 - **[Project wiki](https://github.com/nucliflare/nlab-digitizer-community/wiki):**
