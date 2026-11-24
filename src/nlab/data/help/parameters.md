@@ -1256,17 +1256,31 @@ amplitudes are an approximation; free amplitudes are the reference. The table
 lists g, o, the σ terms and the Dietze–Klein FWHM terms (2.3548 × σ), each edge
 with its uncertainty from cov(g, o), and σ/E and FWHM/E at the edge.
 
-The single-scatter model ignores multiple scattering, which moves the fitted
-edge upward in finite detectors. For single-line spectra, check the measured
-Compton maximum, half-height point, Dietze–Klein resolution estimate and edge
-height. Coincidence measurements place the edge at 0.74–0.82 of the maximum;
-values outside 0.65–0.9 raise a warning. Optionally choose a Dietze–Klein cell
+The single-scatter model ignores multiple scattering, which fills the spectrum
+above the edge and can move the fitted edge upward, more in thicker detectors.
+For single-line spectra, check the measured Compton maximum, half-height point,
+Dietze–Klein resolution estimate (the rough rule ΔL/L ≈ 1.5 (L½ − Lmax)/L½)
+and edge height. Compton-coincidence measurements place the edge at 0.74–0.82
+of the Compton-maximum height; values outside 0.65–0.9 raise a warning. Optionally choose a Dietze–Klein cell
 size for an independent edge estimate. **Load simulated response...** replaces
 one line's shape with a Geant4/OpenGATE histogram (`energy_kev, weight`).
 **Open Compton edges in Energy Calibration...** opens the energy calibration
 ([energy-calibration](#energy-calibration)) with the edges as fixed keVee
 points; review the fit there and choose **Apply calibration** to use it.
 Outside the span of the fitted edges, the keVee scale is extrapolated.
+
+**References** — Compton-electron spectrum, edge location and resolution in
+organic scintillators, light-yield non-proportionality, and simulated responses.
+
+- Klein, O., Nishina, Y. (1929). Über die Streuung von Strahlung durch freie Elektronen nach der neuen relativistischen Quantendynamik von Dirac. *Z. Phys.* 52, 853–868. doi:10.1007/BF01366453
+- Knox, H. H., Miller, T. G. (1972). A technique for determining bias settings for organic scintillators. *Nucl. Instrum. Methods* 101, 519–525. doi:10.1016/0029-554X(72)90040-7
+- Dietze, G. (1979). Energy calibration of NE-213 scintillation counters by γ-rays. *IEEE Trans. Nucl. Sci.* 26, 398–402. doi:10.1109/TNS.1979.4329665
+- Dietze, G., Klein, H. (1982). Gamma-calibration of NE 213 scintillation counters. *Nucl. Instrum. Methods* 193, 549–556. doi:10.1016/0029-554X(82)90249-X
+- Kudomi, N. (1999). Energy calibration of plastic scintillators for low energy electrons by using Compton scatterings of gamma rays. *Nucl. Instrum. Methods Phys. Res. A* 430, 96–99. doi:10.1016/S0168-9002(99)00200-4
+- Siciliano, E. R., Ely, J. H., Kouzes, R. T., et al. (2008). Energy calibration of gamma spectra in plastic scintillators using Compton kinematics. *Nucl. Instrum. Methods Phys. Res. A* 594, 232–243. doi:10.1016/j.nima.2008.06.031
+- Swiderski, Ł., Moszyński, M., Czarnacki, W., et al. (2010). Measurement of Compton edge position in low-Z scintillators. *Radiat. Meas.* 45, 605–607. doi:10.1016/j.radmeas.2009.10.015
+- Swiderski, Ł., Marcinkowski, R., Moszyński, M., et al. (2012). Electron response of some low-Z scintillators in wide energy range. *J. Instrum.* 7, P06011. doi:10.1088/1748-0221/7/06/P06011
+- Mauritzson, N., Fissum, K. G., Perrey, H., et al. (2022). GEANT4-based calibration of an organic liquid scintillator. *Nucl. Instrum. Methods Phys. Res. A* 1023, 165962. doi:10.1016/j.nima.2021.165962
 
 ## Analysis — PSD event readback {#psd-readback}
 

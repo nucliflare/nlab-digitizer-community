@@ -4,15 +4,17 @@ Organic scintillators (EJ-309, EJ-276D, stilbene, organic glass) have almost no
 photoabsorption, so their gamma spectra contain Compton continua without a
 usable photopeak. Their light output is calibrated in electron-equivalent
 energy (keVee) from the Compton edges. Heuristics such as "edge = Compton
-maximum" or "edge = half height" are biased by an amount that depends on the
-resolution (Knox & Miller 1972; Dietze & Klein 1982). This module therefore
-forward-fits the electron spectrum folded with the detector resolution.
+maximum" or "edge = half height" are biased (Knox & Miller 1972), by an amount
+that depends on the resolution and the detector size (Dietze & Klein 1982).
+This module therefore forward-fits the electron spectrum folded with the
+detector resolution.
 
 Physics model
 =============
 For a photon of energy ``E_γ`` with ``α = E_γ / m_e c²`` (``m_e c²`` =
 510.998950 keV) and ``s = T / E_γ``, the kinetic-energy distribution of
-singly scattered Compton electrons is (Klein & Nishina 1929)::
+singly scattered Compton electrons, derived from the Klein–Nishina cross-section
+(Klein & Nishina 1929, eq. 60) with Compton kinematics, is::
 
     dσ/dT ∝ 2 + s² / (α² (1 − s)²) + s / (1 − s) · (s − 2/α),   0 ≤ T ≤ T_max
     T_max = E_γ · 2α / (1 + 2α)                                  (Compton edge)
@@ -30,7 +32,7 @@ spectrum's x units as a Gaussian with centre and width::
 
     μ(T) = g · T + o                           (o may be fixed, normally to 0)
     σ_E/E = sqrt(a² + b²/E + c²/E²)            (a: light collection/position,
-                                                b: photoelectron statistics,
+                                                b: light/photoelectron statistics,
                                                 c: noise, fixed at 0 by default)
     σ_x(T) = g · T · σ_E/E(T)
 
@@ -58,14 +60,16 @@ line amplitudes and background. Joint fits over several edge energies are what
 constrain gain and offset together.
 
 Limitations. Single scattering ignores multiple Compton scattering, which fills
-the region above the edge and biases the fitted edge upward in finite detectors
-(Kudomi 1999; Dietze & Klein 1982). A simulated deposited-energy response
-(e.g. Geant4/OpenGATE) can replace the analytic shape per line (Mauritzson et
-al. 2022). The model-independent shape diagnostics in this module (Compton
-maximum, half height, Dietze–Klein resolution rule, edge height) help to judge
-that bias. Organic-scintillator electron light yield is not exactly linear
-above 500 keV, so a linear keVee fit has a positive energy intercept (Swiderski
-et al. 2012).
+the spectrum above the edge (Dietze & Klein 1982); in simulated plastic slabs it
+moved the fitted edge upward, more in thicker slabs (Kudomi 1999). A simulated
+deposited-energy response (e.g. from Geant4 or OpenGATE) can replace the
+analytic shape per line; Mauritzson et al. (2022) calibrate with smeared Geant4
+responses instead of an analytic edge. The model-independent shape diagnostics
+in this module (Compton maximum, half height, the rough Dietze–Klein resolution
+rule, edge height) help to judge that bias. Organic-scintillator light yield
+per unit electron energy still rises above 500 keV (Swiderski et al. 2012), and
+free linear keVee fits show a positive energy intercept, e.g. 47 ± 3 keV for
+PVT (Siciliano et al. 2008).
 
 References
 ==========
@@ -2109,8 +2113,9 @@ class _ComptonModel:
                 warnings.append(
                     f"Reduced deviance {result.reduced_deviance:.3g} exceeds "
                     f"{REDUCED_DEVIANCE_WARNING:g}. The single-scatter Klein–Nishina model "
-                    "ignores multiple Compton scattering, which fills the region above the edge "
-                    "and biases the fitted edge upward in finite detectors (Kudomi 1999). "
+                    "ignores multiple Compton scattering, which fills the spectrum above the edge "
+                    "and can move the fitted edge upward, more in thicker detectors "
+                    "(Dietze & Klein 1982; Kudomi 1999). "
                     "Consider a simulated detector response for each line."
                 )
             else:

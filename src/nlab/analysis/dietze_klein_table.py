@@ -5,17 +5,21 @@ counters", Nucl. Instrum. Methods 193 (1982) 549-556,
 doi:10.1016/0029-554X(82)90249-X, Table 3 (p. 552) and Table 1 (p. 551).
 
 The values are GRESP Monte Carlo results for BA1-type NE 213 cells, including
-multiple Compton scattering, folded with a Gaussian pulse-height resolution
-``ΔL/L`` (FWHM) at the Compton edge ``L_c``. ``L_max`` is the Compton maximum
-and ``L_1/2`` the half-maximum point on its high side. Only the Cs-137
-(0.662 MeV) and Na-22 annihilation (0.511 MeV) blocks are reproduced here.
+multiple Compton scattering, folded with the pulse-height resolution ``ΔL/L``
+(FWHM) at the Compton edge ``L_c``; Dietze (1979, IEEE Trans. Nucl. Sci. 26,
+398, doi:10.1109/TNS.1979.4329665) describes that folding as Gaussian.
+``L_max`` is the Compton maximum and ``L_1/2`` the half-maximum point on its
+high side. Only the Cs-137 (0.662 MeV) and Na-22 annihilation (0.511 MeV)
+blocks are reproduced here.
 
-Values were transcribed from the published page image. The printed
-Cs-137 / detector 3 column is not monotonic between 10 % and 18 %
-(0.950, 0.949, 0.927); it is reproduced as printed.
+Values were transcribed from the published page image and checked against it
+cell by cell. The printed Cs-137 / detector 3 ``L_max`` column is irregularly
+spaced between 10 % and 18 % (0.950, 0.949, 0.927) and at 14 % exceeds
+detector 4; it is reproduced as printed.
 
-The ratios apply to pulse height measured from zero light output. They are
-indicative for other organic scintillators and detector sizes only.
+The ratios refer to light output ``L = c(E_e − E_0)`` with ``E_0 = 5 keV``,
+i.e. to pulse height measured from zero light output. They are indicative for
+other organic scintillators and detector sizes only.
 """
 
 from __future__ import annotations
