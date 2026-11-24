@@ -40,11 +40,16 @@ if TYPE_CHECKING:
 # inside the fitting functions: they are only needed when a fit runs, not to
 # start the application.
 
+from nlab.analysis._fit_common import FitStatistic as FitStatistic
+from nlab.analysis._fit_common import ResolvedFitStatistic as ResolvedFitStatistic
+from nlab.analysis._fit_common import centred_exponential as _centred_exponential
+from nlab.analysis._fit_common import finite_optional as _finite_optional
+from nlab.analysis._fit_common import readonly as _readonly
+from nlab.analysis._fit_common import resolve_statistic as _resolve_statistic
+from nlab.analysis._fit_common import statistic_residual
 from nlab.analysis.spectrum import Spectrum
 
 BackgroundModel = Literal["none", "constant", "linear", "exponential", "compton", "fermi"]
-FitStatistic = Literal["auto", "poisson", "weighted", "unweighted"]
-ResolvedFitStatistic = Literal["poisson", "weighted", "unweighted"]
 
 
 class PeakFitCancelledError(RuntimeError):
@@ -154,12 +159,7 @@ def fit_spectrum_peaks(
 
     def objective(params: Parameters) -> np.ndarray:
         calculated = np.asarray(model.eval(params=params, x=x), dtype=np.float64)
-        if statistic == "poisson":
-            return _poisson_deviance_residual(y, calculated)
-        if statistic == "weighted":
-            uncertainties = np.sqrt(np.clip(variances, 1.0, None))
-            return (y - calculated) / uncertainties
-        return y - calculated
+        return statistic_residual(statistic, y, calculated, variances)
 
     def iteration_callback(
         _params: Parameters,
@@ -416,15 +416,6 @@ def _background_model(background: BackgroundModel) -> Model | None:
     raise ValueError(f"unsupported background model {background!r}")
 
 
-def _centred_exponential(
-    x: np.ndarray,
-    amplitude: float,
-    rate: float,
-    x_ref: float,
-) -> np.ndarray:
-    return amplitude * np.exp(np.clip(rate * (x - x_ref), -100.0, 100.0))
-
-
 def _compton_step(
     x: np.ndarray,
     amplitude: float,
@@ -449,38 +440,6 @@ def _fermi_step(
     from scipy.special import expit
 
     return np.asarray(amplitude * expit(-(x - center) / width), dtype=np.float64)
-
-
-def _resolve_statistic(
-    spectrum: Spectrum,
-    requested: FitStatistic,
-    counts: np.ndarray,
-) -> ResolvedFitStatistic:
-    if requested == "auto":
-        return "poisson" if spectrum.poisson_counts and np.all(counts >= 0) else "weighted"
-    if requested == "poisson":
-        if not spectrum.poisson_counts or np.any(counts < 0):
-            raise ValueError("Poisson fitting requires an unscaled, non-negative count spectrum")
-        return "poisson"
-    return requested
-
-
-def _poisson_deviance_residual(observed: np.ndarray, calculated: np.ndarray) -> np.ndarray:
-    """Signed square roots of the Poisson likelihood chi-square terms (Baker & Cousins 1984)."""
-    floor = np.finfo(np.float64).tiny
-    expected = np.clip(calculated, floor, None)
-    log_term = np.zeros_like(observed)
-    positive = observed > 0
-    log_term[positive] = observed[positive] * (
-        np.log(observed[positive]) - np.log(expected[positive])
-    )
-    deviance = np.maximum(2.0 * (expected - observed + log_term), 0.0)
-    residual = np.sign(observed - expected) * np.sqrt(deviance)
-    negative_model = calculated < floor
-    if np.any(negative_model):
-        scale = max(float(np.max(np.abs(observed))), 1.0)
-        residual[negative_model] -= (floor - calculated[negative_model]) / scale
-    return np.asarray(residual, dtype=np.float64)
 
 
 def _peak_component(spectrum: Spectrum, params: Parameters, index: int) -> PeakComponent:
@@ -540,16 +499,3 @@ def _fit_warnings(
             if np.isfinite(parameter.max) and abs(parameter.value - parameter.max) <= tolerance:
                 warnings.append(f"{name} reached its upper bound.")
     return tuple(warnings)
-
-
-def _finite_optional(value: float | None) -> float | None:
-    if value is None:
-        return None
-    converted = float(value)
-    return converted if np.isfinite(converted) else None
-
-
-def _readonly(values: np.ndarray) -> np.ndarray:
-    copied = np.asarray(values, dtype=np.float64).copy()
-    copied.setflags(write=False)
-    return copied

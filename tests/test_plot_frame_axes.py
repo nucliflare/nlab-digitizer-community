@@ -40,10 +40,18 @@ def test_energy_axis_shows_values_only_with_a_calibration(qtbot: QtBot) -> None:
 
     calibration = Mock()
     calibration.model = "linear"
+    calibration.energy_unit = "keV"
+    calibration.energy_quantity = "Energy"
     axis.set_calibration(calibration)
     assert axis.style["showValues"]
     assert axis.label.isVisible()
     assert axis.labelUnits == "keV"
+    assert axis.labelText == "Energy"
+    calibration.energy_unit = "keVee"
+    calibration.energy_quantity = "Light output"
+    axis.set_calibration(calibration)
+    assert axis.labelUnits == "keVee"
+    assert axis.labelText == "Light output"
     assert axis.fixedHeight is None  # Sized to its tick labels again.
 
     axis.set_calibration(None)

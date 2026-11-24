@@ -177,6 +177,187 @@ response. Recheck the background model, fit interval, residuals, gain
 stability, and calibration references before using a fitted result
 quantitatively.
 
+## Compton-edge calibration (organic scintillators)
+
+Organic scintillators such as EJ-309, EJ-276D, stilbene and organic glass
+contain mostly hydrogen and carbon. Their gamma spectra show Compton continua
+but no usable photopeak, so their light output is calibrated in
+**electron-equivalent keV (keVee)** from Compton edges. Use the **Compton edge**
+tab of the Peak Analysis Workbench for these detectors. For inorganic detectors
+with photopeaks, use the Gaussian peak fit and the ordinary keV calibration.
+
+### Why a forward fit
+
+Rules such as "the edge is at the Compton maximum" or "the edge is at half the
+maximum height" are biased. The size of the bias depends on the detector
+resolution and size. Prescriptions such as Knox–Miller and Flynn bracket the
+true edge, and they disagree with each other. The workbench therefore fits the
+whole edge region: it folds the Klein–Nishina Compton-electron spectrum with the
+detector resolution and integrates it over each bin.
+
+### Model
+
+For a photon of energy `E_γ`, with `α = E_γ / 510.998950 keV` and `s = T/E_γ`,
+singly scattered Compton electrons have the kinetic-energy distribution
+
+```text
+dσ/dT ∝ 2 + s² / (α² (1 − s)²) + s/(1 − s) · (s − 2/α),   0 ≤ T ≤ T_max
+T_max = E_γ · 2α / (1 + 2α)
+```
+
+The Compton edges `T_max` are 340.67 keV (511 keV), 477.33 keV (661.657 keV),
+963.42 keV (1173.228 keV), 1061.70 keV (1274.537 keV) and 1118.10 keV
+(1332.492 keV). Each electron energy `T` appears in the spectrum at
+`x = g·T + o` with a Gaussian width
+`σ_x = g · T · sqrt(a² + b²/T + c²/T²)`. The term `a` describes light collection
+and position dependence, `b` photoelectron statistics (keV^½), and `c` noise
+(keV, fixed at 0 by default). Dietze & Klein write the same expression for the
+FWHM, `ΔL/L = sqrt(α² + β²/L + γ²/L²)`. The results table reports both
+conventions; each FWHM term is 2.3548 times the corresponding σ term.
+
+The electron-energy grid has 1 keV cells with exact Klein–Nishina cell weights.
+Every Gaussian is integrated over the real bin edges, and the model adds the
+selected background (none, constant, linear or exponential). Raw counts are
+fitted with the Poisson deviance. Several spectra can be fitted **jointly**:
+they share `g`, `o`, `a`, `b` and `c`, and each spectrum keeps its own line
+amplitudes and background. A joint fit of Cs-137 alone and Cs-137 + Co-60 +
+Na-22 (edges at 341, 477, 963, 1062 and 1118 keVee) constrains gain and offset
+together. With a single edge energy, fix the offset at 0. Otherwise gain and
+offset are degenerate and the fit warns about it.
+
+Line amplitudes are free by default. **Linked by emission yield** fixes the
+ratios within one nuclide to the catalogue yields. This is an approximation,
+because the detection efficiency depends on energy. The free mode is the
+reference.
+
+### Workflow
+
+1. Copy the spectra into the workbench. In **Tools → MCA Energy Calibration**,
+   **Analysis → Fit Compton edges in workbench...** opens the copied snapshots
+   directly in the **Compton edge** tab.
+2. In the **Compton edge** tab, check every spectrum that belongs to the joint
+   fit. All of them must come from the same detector and MCA settings.
+3. Select each spectrum in turn. Check its sources (for example Cs-137; or
+   Cs-137, Co-60 and Na-22, where Na-22 includes the 511 keV annihilation
+   line), add custom energies if needed, and choose a background. Drag the
+   shaded region to bracket the edges and some continuum below and above them.
+4. Choose whether the offset is free, which resolution terms are fitted and
+   their starting values, the statistic and the amplitude mode. **Starting
+   gain** is found automatically unless you enter one.
+5. Run **Analysis → Fit Compton edges**. The fit runs in the background and can
+   be cancelled. While it runs, the bar at the bottom of the workbench shows the
+   current stage: a percentage during the starting-gain scan, then a busy
+   indicator with the evaluation count while the optimizer runs, whose length
+   cannot be predicted. The pointer shows a busy cursor over the workbench.
+   The plot shows the total model, the components of every line,
+   a marker at each fitted edge and the residuals.
+6. Review the table: `g` and `o` with uncertainties, `a`, `b` and `c` in both
+   conventions, and, for every line, the edge position with its uncertainty
+   propagated from cov(g, o) and the resolution σ/E and FWHM/E at the edge.
+   Also check the reduced deviance and the warnings. Use **File → Export
+   Compton-edge results...** (JSON or CSV) or **File → Copy Compton-edge
+   table**.
+7. Run **Analysis → Open Compton edges in Energy Calibration...**. The energy
+   calibration workspace opens for the same MCA channel and shows the edges
+   as fixed points in **keVee**. These points are not refitted as Gaussian
+   centroids and cannot be dragged. Nothing is applied yet: review the fit and
+   residuals, then choose **Analysis → Apply calibration** there.
+
+A calibration made from Compton edges is labelled **keVee** in the calibration
+table, the MCA and workbench energy axes, ROI statistics, reports, CSV export
+(`# energy_unit=keVee`) and N42 export (a `Remark` on the energy calibration).
+Calibrations saved by earlier versions have no unit field and still load as keV.
+The keVee scale is constrained only between the lowest and highest fitted
+edges. Outside that span it is an extrapolation. This matters for PSD
+thresholds of 100–300 keVee. The electron light yield of organic scintillators
+also keeps rising above 500 keV, so a linear keVee fit has a positive energy
+intercept (Swiderski et al. 2012).
+
+### Multiple scattering and simulated responses
+
+The analytic shape assumes a single Compton scatter. In detectors of a few
+centimetres, multiple scattering fills the region above the edge. A
+single-scatter fit then places the edge too high and leaves a large reduced
+deviance (Kudomi 1999; Dietze & Klein 1982). For each single-line spectrum
+(for example Cs-137 alone) the workbench therefore also reports
+model-independent shape points:
+
+- the Compton maximum `L_max` and the half-height point `L_½` on its high side,
+  from a lightly smoothed spectrum with the background floor subtracted;
+- the Dietze–Klein resolution estimate `ΔL/L (FWHM) ≈ 1.5 (L_½ − L_max)/L_½`;
+- the **edge height**, the fraction of the Compton maximum at which the fitted
+  edge crosses the measured spectrum. Compton-coincidence measurements on
+  organic detectors give 0.74–0.82 (Swiderski et al. 2010: BC408 0.74–0.78,
+  BC501A 0.78–0.82). Values outside about 0.65–0.9 raise a warning. A
+  single-scatter fit typically gives 0.44–0.56.
+
+If you select a **Dietze–Klein size**, the workbench also interpolates the
+tabulated Monte Carlo ratios `L_max/L_c` and `L_½/L_c` of Dietze & Klein
+(1982), Table 3 (Cs-137 and the Na-22 511 keV line, NE 213 cells 1–4). It
+reports the mean of the two resulting edge estimates next to the fitted edge.
+These ratios are only indicative for other scintillators and detector sizes.
+
+**Analysis → Load simulated response...** replaces the analytic shape of one
+line with a deposited-energy histogram, for example from Geant4 or OpenGATE
+with multiple scattering included (Mauritzson et al. 2022). The file is a CSV
+or TSV with the columns `energy_kev, weight` and bin centres in keV.
+
+### Validation on recorded EJ-309 and EJ-276D sessions
+
+The fitter was compared offline with the recorded showcase sessions (Cs-137,
+and Cs-137 + Co-60 + Na-22; EJ-309 on CH0 and EJ-276D on CH1) and with the
+independent `calibrate()` reference in that dataset's `psd_fom_analysis.py`. The
+comparison used the same raw `trapezoid_energy` windows and 200 bins, free
+amplitudes, an exponential background and the Poisson deviance. This is an
+offline replay of recorded data, not a new hardware measurement.
+
+| Detector | g (raw/keVee) | o (raw) | a | b (keV^½) | reduced deviance |
+|---|---|---|---|---|---|
+| EJ-309, workbench | 20.04 ± 0.30 | −984 ± 147 | 0.0249 | 1.51 | 20.0 |
+| EJ-309, reference | 20.04 ± 0.30 | −988 ± 147 | 0.0245 | 1.52 | 20.0 |
+| EJ-276D, workbench | 25.44 ± 0.15 | −668 ± 72 | 0.0672 | 0.79 | 9.50 |
+| EJ-276D, reference | 25.38 ± 0.05 | −644 ± 26 | 0.0686 | 0.74 | 9.47 |
+
+The EJ-276D difference comes from the discretisation of the Klein–Nishina
+shape. The workbench uses exact 1 keV cell integrals; the reference samples the
+shape at integer keV. With point sampling, the workbench reproduces the
+reference exactly. In both fits, the amplitudes of the close Na-22 1275 keV and
+Co-60 1332 keV edges are nearly degenerate, so this small model change moves
+`g` by 0.2 %. The reference's smaller uncertainties come from inverting an
+unscaled `JᵀJ` with a condition number near 10²¹. Its pseudo-inverse discards
+the amplitude-split direction. The workbench inverts a column-scaled Jacobian
+and keeps it. The high reduced deviances come from the single-scatter model.
+
+The shape diagnostics on the Cs-137 spectra, with the Dietze–Klein ratios of
+detector 2 (Ø5.07 × 5.07 cm NE 213), give:
+
+| Detector | L_max (raw) | L_½ (raw) | DK FWHM | DK edge (raw) | KN joint edge (raw) | KN − DK | DK-edge height | KN-edge height |
+|---|---|---|---|---|---|---|---|---|
+| EJ-309 | 7556 | 8479 | 16.3 % | 8201 | 8583 | +4.7 % | 0.72 | 0.43 |
+| EJ-276D | 10243 | 11587 | 17.4 % | 11175 | 11476 | +2.7 % | 0.75 | 0.55 |
+
+The size of the EJ-276D cell is not documented, so its Dietze–Klein values are
+only indicative. The Compton maximum is broad: `L_max` changes by about ±1 %
+with the smoothing width, while `L_½` is stable to 0.2 %.
+
+### References
+
+- O. Klein, Y. Nishina, Z. Phys. 52 (1929) 853, doi:10.1007/BF01366453
+- H. H. Knox, T. G. Miller, Nucl. Instrum. Methods 101 (1972) 519,
+  doi:10.1016/0029-554X(72)90040-7
+- G. Dietze, IEEE Trans. Nucl. Sci. 26 (1979) 398, doi:10.1109/TNS.1979.4329665
+- G. Dietze, H. Klein, Nucl. Instrum. Methods 193 (1982) 549,
+  doi:10.1016/0029-554X(82)90249-X
+- N. Kudomi, Nucl. Instrum. Methods A 430 (1999) 96,
+  doi:10.1016/S0168-9002(99)00200-4
+- E. R. Siciliano et al., Nucl. Instrum. Methods A 594 (2008) 232,
+  doi:10.1016/j.nima.2008.06.031
+- Ł. Swiderski et al., Radiat. Meas. 45 (2010) 605,
+  doi:10.1016/j.radmeas.2009.10.015
+- Ł. Swiderski et al., JINST 7 (2012) P06011, doi:10.1088/1748-0221/7/06/P06011
+- N. Mauritzson et al., Nucl. Instrum. Methods A 1023 (2022) 165962,
+  doi:10.1016/j.nima.2021.165962
+
 ## Dose calibration logger
 
 Open **Tools -> Dose Calibration Logger...** to record detector response beside

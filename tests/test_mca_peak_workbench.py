@@ -3,24 +3,34 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
+import pyqtgraph as pg
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMainWindow, QMessageBox
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 from pytestqt.qtbot import QtBot
 
 import nlab.views.mca_peak_analysis_dialog as peak_analysis_dialog_module
 from nlab.analysis.energy_calibration import (
     CalibrationPoint,
+    CalibrationPointTransfer,
     EnergyCalibration,
     SpectrumSnapshot,
     fit_energy_calibration,
 )
 from nlab.analysis.spectrum import Spectrum
 from nlab.ui.ui_main_window import Ui_MainWindow
+from nlab.views.energy_calibration_dialog import EnergyCalibrationDialog
 from nlab.views.mca_peak_analysis_dialog import McaPeakAnalysisDialog
 from nlab.views.plot_viewbox import ModifierZoomViewBox
+
+if TYPE_CHECKING:
+    from nlab.analysis.compton_edge import ComptonEdgeFitSpec
+    from nlab.controllers.mca_controller import MCAController
+    from nlab.workers.compton_edge_fit_worker import ComptonEdgeFitWorker
 
 
 @dataclass
@@ -428,3 +438,270 @@ def test_peak_analysis_action_is_in_tools_menu(qtbot: QtBot) -> None:
 
     assert ui.actionMcaPeakAnalysis in ui.menuTools.actions()
     assert ui.actionMcaPeakAnalysis not in ui.menuDeveloper.actions()
+
+
+# ------------------------------------------------- Compton-edge (keVee) workflow
+
+
+def _compton_mix_counts() -> np.ndarray:
+    from nlab.analysis.compton_edge import folded_line_response, nuclide_compton_lines
+
+    edges = np.arange(4001, dtype=np.float64) - 0.5
+    centres = np.arange(4000, dtype=np.float64)
+    expected = 30.0 * np.exp(-centres / 1500.0)
+    for nuclide in ("Cs-137", "Co-60", "Na-22"):
+        for line in nuclide_compton_lines(nuclide):
+            expected = expected + 4.0e5 * folded_line_response(
+                edges, line, gain=3.0, offset=-30.0, resolution=(0.04, 1.2, 0.0)
+            )
+    return np.random.default_rng(5).poisson(np.clip(expected, 0.0, None)).astype(np.uint32)
+
+
+@dataclass
+class _CalibratingFakeMcaController(_FakeMcaController):
+    channel_label: str = "CH0"
+    applied: EnergyCalibration | None = None
+
+    def energy_calibration_fingerprint(self) -> dict[str, int]:
+        return {"binning": self.coincidence_energy_bin}
+
+    def apply_energy_calibration(self, calibration: EnergyCalibration) -> None:
+        self.applied = calibration
+
+
+def _controllers(*controllers: _FakeMcaController) -> list[MCAController]:
+    return cast("list[MCAController]", list(controllers))
+
+
+def _check_compton_sources(dialog: McaPeakAnalysisDialog, nuclides: set[str]) -> None:
+    for row in range(dialog.compton_nuclide_list.count()):
+        item = dialog.compton_nuclide_list.item(row)
+        if item.data(Qt.ItemDataRole.UserRole) in nuclides:
+            item.setCheckState(Qt.CheckState.Checked)
+
+
+def test_compton_edge_tab_fits_in_background_and_overlays_edges(qtbot: QtBot) -> None:
+    from nlab.analysis.compton_edge import ComptonEdgeFitResult
+
+    dialog = McaPeakAnalysisDialog(_controllers(_FakeMcaController(0, _compton_mix_counts())))
+    qtbot.addWidget(dialog)
+    assert dialog.side_tabs.tabText(1) == "Compton edge"
+    assert dialog.compton_fit_action in dialog.analysis_menu.actions()
+    assert dialog.compton_calibration_action in dialog.analysis_menu.actions()
+    assert dialog.compton_export_action in dialog.file_menu.actions()
+    assert not dialog.compton_export_action.isEnabled()
+    dialog.side_tabs.setCurrentWidget(dialog.compton_tab)
+    _check_compton_sources(dialog, {"Cs-137", "Co-60", "Na-22"})
+    dialog.fit_region.setRegion((600.0, 3600.0))
+    spectrum_id = dialog._current_id()
+    assert spectrum_id is not None
+    config = dialog._compton_configs[spectrum_id]
+    assert config.include and config.nuclides == ["Cs-137", "Na-22", "Co-60"]
+    assert config.fit_range == pytest.approx((600.0, 3600.0))
+    assert dialog.compton_dataset_list.item(0).checkState() == Qt.CheckState.Checked
+
+    assert dialog.workbench_progress.isHidden()
+    dialog.compton_fit_action.trigger()
+    assert dialog._compton_thread is not None
+    assert not dialog.workbench_progress.isHidden()
+    assert dialog.cursor().shape() == Qt.CursorShape.BusyCursor
+    qtbot.waitUntil(lambda: dialog._compton_thread is None, timeout=60_000)
+    assert dialog.workbench_progress.isHidden()
+    assert dialog.cursor().shape() == Qt.CursorShape.ArrowCursor
+    assert dialog.workbench_status.text() == "Compton-edge fit complete."
+
+    result = dialog._compton_result
+    assert isinstance(result, ComptonEdgeFitResult)
+    assert result.success
+    assert result.gain == pytest.approx(3.0, rel=0.01)
+    assert dialog.compton_result_table.rowCount() > 10
+    assert dialog.compton_result_table.item(0, 0).text() == "gain g"
+    assert "keVee" in dialog.compton_summary.text()
+    names = [item.name() for item in dialog.spectrum_plot.listDataItems()]
+    assert "Compton-edge model" in names and "Cs-137 661.657 keV" in names
+    markers = [
+        item for item in dialog.spectrum_plot.items
+        if isinstance(item, pg.InfiniteLine) and "edge" in item.label.format
+    ]
+    assert len(markers) == 5
+    assert dialog.compton_export_action.isEnabled()
+    assert dialog.compton_copy_action.isEnabled()
+    dialog.compton_copy_action.trigger()
+    assert QApplication.clipboard().text().startswith("Quantity\tValue")
+    dialog.close_without_prompt()
+
+
+def test_compton_progress_drives_the_bottom_bar_until_cancel(qtbot: QtBot) -> None:
+    from nlab.analysis.compton_edge import ComptonEdgeFitProgress
+
+    dialog = McaPeakAnalysisDialog([])
+    qtbot.addWidget(dialog)
+    worker = SimpleNamespace(stop_requested=False)
+    dialog._compton_worker = cast("ComptonEdgeFitWorker", worker)
+    bar = dialog.workbench_progress
+
+    dialog._compton_fit_progress(ComptonEdgeFitProgress("gain_scan", 40, 160))
+    assert (bar.minimum(), bar.maximum(), bar.value()) == (0, 160, 40)
+    assert "starting gain (40/160)" in dialog.workbench_status.text()
+
+    dialog._compton_fit_progress(ComptonEdgeFitProgress("optimize", 12))
+    assert (bar.minimum(), bar.maximum()) == (0, 0)
+    assert "12 evaluation(s)" in dialog.workbench_status.text()
+
+    # Updates still queued behind a cancel request must not replace its status.
+    worker.stop_requested = True
+    dialog._compton_fit_progress(ComptonEdgeFitProgress("finalize"))
+    assert "12 evaluation(s)" in dialog.workbench_status.text()
+    dialog._compton_worker = None
+    dialog.close_without_prompt()
+
+
+def test_compton_fit_worker_throttles_progress_within_a_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nlab.analysis.compton_edge import ComptonEdgeFitProgress
+    from nlab.workers import compton_edge_fit_worker as worker_module
+
+    times = iter([0.0, 0.01, 0.02, 0.5, 0.51, 0.52, 0.53])
+    monkeypatch.setattr(worker_module, "time", SimpleNamespace(monotonic=lambda: next(times)))
+    worker = worker_module.ComptonEdgeFitWorker(cast("ComptonEdgeFitSpec", None))
+    emitted: list[object] = []
+    worker.progress.connect(emitted.append)
+
+    updates = [
+        ComptonEdgeFitProgress("prepare"),
+        ComptonEdgeFitProgress("gain_scan", 0, 160),
+        ComptonEdgeFitProgress("gain_scan", 1, 160),  # within 100 ms: dropped
+        ComptonEdgeFitProgress("gain_scan", 2, 160),
+        ComptonEdgeFitProgress("gain_scan", 160, 160),  # stage complete: always sent
+        ComptonEdgeFitProgress("optimize", 1),
+        ComptonEdgeFitProgress("optimize", 2),  # within 100 ms: dropped
+    ]
+    for update in updates:
+        worker._report_progress(update)
+
+    assert emitted == [updates[index] for index in (0, 1, 3, 4, 5)]
+    worker.deleteLater()
+
+
+def test_compton_edges_feed_energy_calibration_in_kevee(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _CalibratingFakeMcaController(0, _compton_mix_counts())
+    dialog = McaPeakAnalysisDialog(_controllers(controller))
+    qtbot.addWidget(dialog)
+    dialog.side_tabs.setCurrentWidget(dialog.compton_tab)
+    _check_compton_sources(dialog, {"Cs-137", "Co-60", "Na-22"})
+    dialog.fit_region.setRegion((600.0, 3600.0))
+    dialog.compton_fit_action.trigger()
+    qtbot.waitUntil(lambda: dialog._compton_thread is None, timeout=60_000)
+    result = dialog._compton_result
+    assert result is not None
+    # Nothing listening: refuse instead of reporting that the edges were opened.
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda _parent, _title, text: warnings.append(text)
+    )
+    status_before = dialog.compton_status.text()
+    dialog.compton_calibration_action.trigger()
+    assert warnings and "not connected" in warnings[0]
+    assert dialog.compton_status.text() == status_before
+
+    transfers: list[object] = []
+    dialog.compton_calibration_requested.connect(transfers.append)
+
+    dialog.compton_calibration_action.trigger()
+
+    assert len(transfers) == 1
+    transfer = transfers[0]
+    assert isinstance(transfer, CalibrationPointTransfer)
+    assert transfer.energy_unit == "keVee"
+    assert transfer.channel == 0
+    assert transfer.fingerprint == {"binning": 0}
+    assert len(transfer.points) == 5
+    assert "extrapolated" in dialog.compton_status.text()
+
+    calibration_dialog = EnergyCalibrationDialog(_controllers(controller))
+    qtbot.addWidget(calibration_dialog)
+    workspace = calibration_dialog._workspace()
+    assert workspace is not None
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.Yes
+    )
+    calibration_dialog.add_calibration_points(transfer)
+
+    assert workspace.energy_unit == "keVee"
+    assert all(point.locked and point.snapshot_id is None for point in workspace.points)
+    assert all(point.line is not None and not point.line.movable for point in workspace.points)
+    header = calibration_dialog.table.horizontalHeaderItem(5)
+    assert header is not None and header.text() == "Energy [keVee]"
+    assert workspace.fit is not None and workspace.fit.energy_unit == "keVee"
+    assert "[keVee]" in calibration_dialog.fit_status.text()
+    assert "span" in calibration_dialog.fit_status.text()
+    assert workspace.fit.coefficients_kev[1] == pytest.approx(1.0 / result.gain)
+    assert controller.applied is None
+    assert calibration_dialog.apply_action.isEnabled()
+    assert "Apply calibration" in calibration_dialog.snapshot_status.text()
+    calibration_dialog.apply_action.trigger()
+    assert controller.applied is not None and controller.applied.energy_unit == "keVee"
+
+    calibration_dialog.add_calibration_points(transfer)
+    assert len(workspace.points) == 5
+    calibration_dialog.close_without_prompt()
+    dialog.close_without_prompt()
+
+
+def test_energy_calibration_opens_snapshots_for_compton_fit(qtbot: QtBot) -> None:
+    controller = _CalibratingFakeMcaController(0, _compton_mix_counts())
+    calibration_dialog = EnergyCalibrationDialog(_controllers(controller))
+    qtbot.addWidget(calibration_dialog)
+    requested: list[object] = []
+    calibration_dialog.compton_fit_requested.connect(requested.append)
+
+    calibration_dialog.compton_action.trigger()
+
+    assert len(requested) == 1
+    spectra = requested[0]
+    assert isinstance(spectra, list) and len(spectra) == 1
+    spectrum = spectra[0]
+    assert isinstance(spectrum, Spectrum)
+    assert spectrum.metadata["settings_fingerprint"] == {"binning": 0}
+    workbench = McaPeakAnalysisDialog([])
+    qtbot.addWidget(workbench)
+    workbench.add_compton_datasets(spectra)
+    assert workbench.side_tabs.currentWidget() is workbench.compton_tab
+    assert workbench._compton_configs[spectrum.spectrum_id].include
+    assert workbench.compton_dataset_list.count() == 1
+    workbench.close_without_prompt()
+    calibration_dialog.close_without_prompt()
+
+
+def test_kevee_calibration_labels_spectrum_axes(qtbot: QtBot) -> None:
+    points = (
+        CalibrationPoint(channel=100.0, energy_kev=340.0, source="compton-edge fit"),
+        CalibrationPoint(channel=300.0, energy_kev=1118.0, source="compton-edge fit"),
+    )
+    calibration = fit_energy_calibration(points, energy_unit="keVee")
+    controller = _FakeMcaController(0, _photopeak(), energy_calibration=calibration)
+    dialog = McaPeakAnalysisDialog(_controllers(controller))
+    qtbot.addWidget(dialog)
+    spectrum = dialog._current_spectrum()
+    assert spectrum is not None and spectrum.energy_unit == "keVee"
+    assert dialog.energy_axis.labelText == "Light output"
+    assert dialog.energy_axis.labelUnits == "keVee"
+    dialog.close_without_prompt()
+
+
+def test_compton_tab_controls_resolve_to_compton_help(qtbot: QtBot) -> None:
+    from nlab.help.content import load_topics
+    from nlab.help.context import resolve_context
+
+    dialog = McaPeakAnalysisDialog([])
+    qtbot.addWidget(dialog)
+    controls = (dialog.compton_offset_free, dialog.compton_dk_combo, dialog.compton_result_table)
+    for widget in controls:
+        assert resolve_context(widget).topic == "compton-edge"
+    assert resolve_context(dialog.peak_count).topic == "peak-analysis"
+    assert "compton-edge" in load_topics()
+    dialog.close_without_prompt()

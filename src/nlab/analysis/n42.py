@@ -475,6 +475,13 @@ def _build_document(
     _sub(detector, "RadDetectorDescription", metadata.detector_description)
 
     calibration = ET.SubElement(root, _Q + "EnergyCalibration", {"id": "EnergyCalibration-1"})
+    if spectrum.energy_unit == "keVee":
+        _sub(
+            calibration,
+            "Remark",
+            "Energy values are electron-equivalent light output (keVee) from a "
+            "Compton-edge calibration, not deposited photon energy in keV.",
+        )
     _sub(calibration, calibration_kind, _format_values(calibration_values))
     calibration_date = _calibration_datetime(spectrum)
     if calibration_date:

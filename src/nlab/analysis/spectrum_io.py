@@ -389,6 +389,9 @@ def export_spectrum_csv(path: Path, spectrum: Spectrum) -> None:
         output.write(f"# axis_unit={spectrum.axis_unit}\n")
         output.write(f"# source={spectrum.source}\n")
         output.write(f"# poisson_counts={json.dumps(spectrum.poisson_counts)}\n")
+        if spectrum.energy_unit == "keVee":
+            # The energy_kev column then holds electron-equivalent light output.
+            output.write("# energy_unit=keVee\n")
         output.write(f"# metadata_json={json.dumps(spectrum.metadata, default=str)}\n")
         output.write(f"# history_json={json.dumps(spectrum.history)}\n")
         writer = csv.writer(output)

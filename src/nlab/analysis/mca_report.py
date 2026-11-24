@@ -482,7 +482,7 @@ def _write_peak_pdf(path: Path, request: PeakFitReportRequest, created_utc: str)
     story.append(_peak_model_table(request, styles))
     story.append(PageBreak())
     story.append(Paragraph("Fitted peak results", styles["Heading1"]))
-    story.append(_peak_results_table(request.result, styles))
+    story.append(_peak_results_table(request.result, styles, request.spectrum.energy_unit))
     story.append(Spacer(1, 4 * mm))
     story.append(Paragraph("Fit statistics", styles["Heading2"]))
     story.append(_peak_statistics_table(request.result, styles))
@@ -614,6 +614,16 @@ def _write_calibration_pdf(
         else r"E(c)=a_0+a_1c+a_2c^2"
     )
     story.append(Image(_formula_png(polynomial), width=140 * mm, height=12 * mm))
+    if request.calibration.energy_unit == "keVee":
+        story.append(
+            Paragraph(
+                "This calibration maps channels to electron-equivalent light output "
+                "(keVee). Points from a Compton-edge fit are Klein–Nishina edge positions "
+                "at fixed channels, not Gaussian centroids; outside the span of those edges "
+                "the keVee scale is an extrapolation.",
+                styles["ReportSmall"],
+            )
+        )
     story.append(
         Paragraph(
             f"Each enabled marker seeds a Gaussian-plus-linear-background fit within "
@@ -661,7 +671,9 @@ def _peak_fit_figure(request: PeakFitReportRequest) -> BytesIO:
         positives = request.spectrum.counts[request.spectrum.counts > 0]
         if not positives.size:
             spectrum_axis.set_ylim(1.0, 10.0)
-    unit = "Energy (keV)" if request.spectrum.axis_unit == "keV" else "MCA channel"
+    energy_unit = request.spectrum.energy_unit
+    quantity = "Light output" if energy_unit == "keVee" else "Energy"
+    unit = f"{quantity} ({energy_unit})" if request.spectrum.axis_unit == "keV" else "MCA channel"
     spectrum_axis.set_ylabel("Counts")
     spectrum_axis.grid(alpha=0.2)
     spectrum_axis.legend(loc="best", fontsize=7, ncols=2)
@@ -747,7 +759,8 @@ def _calibration_curve_figure(request: EnergyCalibrationReportRequest) -> BytesI
         label=f"{request.calibration.model.capitalize()} calibration",
     )
     calibration_axis.scatter(channels, energies, color="#c23b22", zorder=3, label="References")
-    calibration_axis.set_ylabel("Energy (keV)")
+    energy_unit = request.calibration.energy_unit
+    calibration_axis.set_ylabel(f"{request.calibration.energy_quantity} ({energy_unit})")
     calibration_axis.grid(alpha=0.2)
     calibration_axis.legend(loc="best", fontsize=8)
     residuals = energies - np.asarray(request.calibration.energy(channels), dtype=np.float64)
@@ -758,7 +771,7 @@ def _calibration_curve_figure(request: EnergyCalibrationReportRequest) -> BytesI
     residual_axis.scatter(channels, residuals, color="#334155", s=18)
     if not np.any(residuals):
         residual_axis.set_ylim(-1.0, 1.0)
-    residual_axis.set(xlabel="Fitted centroid channel", ylabel="Residual (keV)")
+    residual_axis.set(xlabel="Calibration point channel", ylabel=f"Residual ({energy_unit})")
     residual_axis.grid(alpha=0.2)
     return _figure_png(figure)
 
@@ -783,9 +796,11 @@ def _peak_model_table(
 def _peak_results_table(
     result: PeakFitResult,
     styles: Mapping[str, ParagraphStyle],
+    energy_unit: str = "keV",
 ) -> Table:
     rows: list[list[object]] = [
-        ["Peak", "Centre", "Centre SE", "FWHM", "Area", "Energy (keV)", "Resolution (%)"]
+        ["Peak", "Centre", "Centre SE", "FWHM", "Area", f"Energy ({energy_unit})",
+         "Resolution (%)"]
     ]
     for peak in result.peaks:
         rows.append(
@@ -824,8 +839,9 @@ def _calibration_points_table(
     request: EnergyCalibrationReportRequest,
     styles: Mapping[str, ParagraphStyle],
 ) -> Table:
+    unit = request.calibration.energy_unit
     rows: list[list[object]] = [
-        ["Point", "Seed ch.", "Centroid ch.", "Centre SE", "Energy (keV)", "Residual (keV)"]
+        ["Point", "Seed ch.", "Centroid ch.", "Centre SE", f"Energy ({unit})", f"Residual ({unit})"]
     ]
     for index, reported in enumerate(request.points, start=1):
         point = reported.point

@@ -12,6 +12,7 @@ Knoll, G. F. (2010). Radiation Detection and Measurement, 4th ed.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 from uuid import uuid4
@@ -128,6 +129,19 @@ class Spectrum:
             if np.isfinite(live_time) and live_time > 0:
                 return live_time
         return self.elapsed_s
+
+    @property
+    def energy_unit(self) -> Literal["keV", "keVee"]:
+        """Unit of calibrated values: ``keV``, or ``keVee`` for light output.
+
+        The unit comes from the retained energy-calibration metadata (or an
+        explicit ``energy_unit`` metadata value) and defaults to ``keV``.
+        """
+        value = self.metadata.get("energy_unit")
+        nested = self.metadata.get("energy_calibration")
+        if isinstance(nested, Mapping):
+            value = nested.get("energy_unit", value)
+        return "keVee" if value == "keVee" else "keV"
 
     def energy(self, coordinate: float) -> float | None:
         """Return a calibrated energy for a fitted coordinate when available."""
