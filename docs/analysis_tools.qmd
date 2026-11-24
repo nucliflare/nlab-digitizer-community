@@ -282,7 +282,8 @@ and additionally preserve the exact integration gates and processing context.
 The current source path and filename remain visible throughout analysis and
 report generation.
 
-NLab Scope NDMA uses its known 8 ns stored-point period. CoMPASS waveform files
+NLab Scope NDMA stores raw ADC samples, so the workbench uses their known 2 ns
+period (versions up to 0.9.4 assumed 8 ns). CoMPASS waveform files
 do not encode the ADC sample period; verify the operator-entered value for the
 originating digitizer.
 

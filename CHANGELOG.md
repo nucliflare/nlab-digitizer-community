@@ -19,6 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The list-mode topic includes a 16-byte test record with its decoded values.
   Tests run every example against files written by the application.
 
+### Fixed
+
+- **Scope recordings timed at 2 ns per sample** — the waveform workbench and
+  **Convert Binary to HDF5** treated the samples of Scope `.bin` recordings as
+  8 ns apart, but they are raw ADC samples 2 ns apart (500 MSPS); 8 ns is the
+  timestamp tick and the live viewer's point spacing. The workbench time axis,
+  gate positions in ns, cluster-export and report metadata, and the HDF5
+  `time_ns` axis were four times too long, and **Transfer candidate gates to
+  MCA** proposed MCA pretrigger, window and charge-comparison times up to four
+  times too long. Sample values, frame timestamps, PSD ratios, FOM values and
+  gate positions in samples were not affected. Times in ns from Scope `.bin`
+  files analysed with version 0.9.4 or earlier are four times too long; redo any
+  gate transfer to the MCA made from them.
+
 ## [0.9.4] — 2026-11-23
 
 General Settings lists its groups as categories and can add the start time to

@@ -400,6 +400,6 @@ def test_ndma_scope_frames_use_direct_mmap_offsets(tmp_path: Path) -> None:
 
     assert index.format_name == "NLab scope NDMA"
     assert index.frame_count == 3
-    assert index.sample_period_ns == 8.0
+    assert index.sample_period_ns == 2.0
     assert second.timestamp == 22
     np.testing.assert_array_equal(second.samples, [-1, -2, -3, -4])

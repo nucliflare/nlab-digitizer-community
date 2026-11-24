@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import struct
 import threading
 from pathlib import Path
@@ -352,6 +353,9 @@ def test_workbench_file_menu_routes_transfer_and_removes_only_preview_markers(
     qtbot.waitUntil(lambda: workbench._index_thread is None)
     workbench.auto_recalculate.setChecked(False)
     assert workbench.transfer_gates_action.isEnabled()
+    # Scope NDMA stores raw ADC samples 2 ns apart; the field is fixed for it.
+    assert workbench.sample_period.value() == 2.0
+    assert not workbench.sample_period.isEnabled()
     original = workbench._gate_indices()
     items = set(workbench.waveform_plot.items)
     before = controller._mca_controllers[0]._mca.gate_timing()
@@ -364,7 +368,10 @@ def test_workbench_file_menu_routes_transfer_and_removes_only_preview_markers(
         assert dialog.apply_button.isEnabled(), dialog.status.text()
         timing = dialog.proposal.timing
         assert dialog.source.baseline_end == original[1]
-        assert timing.pretrigger_ns == (original[2] - original[1]) * 8
+        assert dialog.source.sample_period_ns == 2.0
+        # The baseline gap in ns, rounded up to the MCA's 8 ns pretrigger step.
+        assert timing.pretrigger_ns == math.ceil((original[2] - original[1]) * 2 / 8) * 8
+        assert timing.frame_ns == math.ceil((original[4] - original[2]) * 2 / 8) * 8
         if not apply_preset:
             return QDialog.DialogCode.Rejected
         dialog.apply_button.click()

@@ -772,6 +772,8 @@ def test_scope_converter_uses_int16_sample_count(tmp_path: Path) -> None:
         assert h5.attrs["total_frames"] == 2
         assert h5.attrs["samples_per_frame"] == 4
         assert h5["waveforms"].shape == (2, 4)
+        # Raw samples are 2 ns apart, not the 8 ns of the timestamp ticks.
+        np.testing.assert_array_equal(h5["time_ns"][:], [0, 2, 4, 6])
 
 
 def test_scope_converter_rejects_partial_frame(tmp_path: Path) -> None:

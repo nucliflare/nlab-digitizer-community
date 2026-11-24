@@ -20,12 +20,20 @@ from nlab.analysis.caen_file import (
     is_caen_header,
     parse_caen_event,
 )
-from nlab.hardware.digitizer.dma import FILE_HEADER_STRUCT, FILE_MAGIC, SCOPE_TIMESTAMP_WORDS
+from nlab.hardware.digitizer.dma import (
+    FILE_HEADER_STRUCT,
+    FILE_MAGIC,
+    SCOPE_ADC_SAMPLE_PERIOD_NS,
+    SCOPE_TIMESTAMP_WORDS,
+)
 from nlab.utils.dma_converter import read_file_header
 
 log = logging.getLogger(__name__)
 
-_NDMA_SCOPE_SAMPLE_PERIOD_NS = 8.0
+# NDMA v1 stores only raw Scope frames: N-4 int16 samples at 2 ns spacing
+# (PetaLinux cde5fe1 iio-hls-api-contract.md, Scope DMA geometry table). The
+# 8 ns values elsewhere are timestamp ticks and live-viewer point averages.
+_NDMA_SCOPE_SAMPLE_PERIOD_NS = float(SCOPE_ADC_SAMPLE_PERIOD_NS)
 
 
 class WaveformIndexCancelledError(RuntimeError):

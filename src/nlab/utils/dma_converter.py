@@ -21,6 +21,7 @@ from nlab.hardware.digitizer.dma import (
     IIO_LM_FRAME_BYTES,
     IIO_LM_FRAME_RECORDS,
     IIO_LM_UNQUALIFIED_SCHEMA,
+    SCOPE_ADC_SAMPLE_PERIOD_NS,
     SCOPE_TIMESTAMP_WORDS,
 )
 from nlab.hardware.digitizer.iio_listmode import (
@@ -270,7 +271,8 @@ def convert_scope(src: Path, dst: Path) -> int:
     frames = np.frombuffer(raw_data[:n_frames * frame_bytes], dtype=frame_dtype)
     timestamps = frames["timestamp"]
     waveforms = frames["samples"]
-    time_ns = np.arange(0, 8 * samples_per_frame, 8)
+    # Raw NDMA v1 samples are 2 ns apart; frame timestamps use 8 ns ticks.
+    time_ns = np.arange(samples_per_frame, dtype=np.int64) * SCOPE_ADC_SAMPLE_PERIOD_NS
 
     with h5py.File(dst, "w") as h5:
         h5.attrs["source_file"] = str(src)

@@ -863,8 +863,8 @@ CAEN sources support ROOT/HDF5, retaining variable-length samples and unconverte
 source timestamps, plus available stored gates, flags and waveform codes with
 validity columns. Scope NDMA cannot losslessly represent CAEN record geometry
 and timestamp semantics, so nlab binary export is available only for NDMA input.
-The saved sample period is the workbench's analysis value; NDMA v1 does not encode
-the actual sampling rate. ROOT/HDF5 are analysis outputs; reopen the native binary
+The saved sample period is the workbench's analysis value: 2 ns for Scope NDMA,
+whose header does not store it. ROOT/HDF5 are analysis outputs; reopen the native binary
 subset for further workbench browsing.
 
 These regions are exploratory geometric cuts, not automatic neutron, gamma,
@@ -879,6 +879,8 @@ sample indices into nanoseconds on the plot.
 
 Use the recorded sample period when available, or the verified acquisition value
 for a format without it. Guessing the period gives incorrect physical gate times.
+Scope `.bin` recordings hold raw ADC samples 2 ns apart, so the field is fixed at
+2 ns for them; it is editable only for formats that do not record it, such as CAEN.
 Stored gate coordinates remain sample indices; not every binary format stores
 the same timestamp or waveform layout.
 
