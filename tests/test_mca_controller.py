@@ -575,6 +575,27 @@ def test_dma_output_and_psd_interception_are_independent(
         assert "file" in label.setText.call_args.args[0]
 
 
+def test_rejected_configuration_stops_list_mode_start_before_file_or_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_factory = Mock()
+    monkeypatch.setattr("nlab.controllers.mca_controller.IIOMcaDmaWorker", worker_factory)
+    chosen = Path("chosen.bin")
+    mca = Mock()
+    mca.validate_configuration.side_effect = ValueError("Pile-ups 1 with a 1424 ns window")
+    controller = _controller(
+        _mca=mca, _mca_dma=Mock(), _dma_filepath=chosen, _generate_filepath=Mock(),
+    )
+
+    with pytest.raises(ValueError, match="Pile-ups 1"):
+        MCAController._start_with_dma(cast(MCAController, controller))
+
+    worker_factory.assert_not_called()
+    controller._generate_filepath.assert_not_called()
+    mca.stop.assert_not_called()
+    assert controller._dma_filepath == chosen  # Kept for the retry.
+
+
 def test_hardware_completion_releases_enable_before_rearming_gui() -> None:
     events: list[str] = []
     mca = Mock()

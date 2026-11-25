@@ -122,6 +122,26 @@ def test_inclusive_windows_pileup_boundary_and_independent_pretrigger():
         validate_parameters(values | {"pileup_window_raw": 85}, complete=True)
 
 
+def test_one_pileup_allows_at_most_a_1024_ns_window():
+    one_pileup = DEFAULT_PARAMETERS | {"pileup_window_raw": 1}
+    validate_parameters(one_pileup | {"frame_samples": 512}, complete=True)  # 127*2=254.
+    with pytest.raises(ValueError, match=r"\(516/4 - 1\) x \(1 \+ 1\) = 256 > 255.*1024 ns"):
+        validate_parameters(one_pileup | {"frame_samples": 516}, complete=True)
+    validate_parameters(DEFAULT_PARAMETERS | {"frame_samples": 4096}, complete=True)
+
+
+def test_list_mode_start_checks_the_complete_hardware_configuration():
+    b = backend(ack="2")
+    mca = MultiChannelAnalyzer(b)
+    mca.validate_configuration()
+    b._pp.attrs["frame_samples"].value = "712"
+    b._pp.attrs["pileup_window_raw"].value = "1"
+    with pytest.raises(ValueError, match="Pile-ups 1 with a 1424 ns window"):
+        mca.validate_configuration()
+    b._pp.attrs["parameter_abi_version"].value = "1"
+    mca.validate_configuration()  # Unknown contracts expose no native snapshot.
+
+
 def test_unversioned_presets_and_fractional_values_are_not_migrated():
     with pytest.raises(ValueError, match="review older"):
         validate_document({"signal": {"frame_ns": 512}})

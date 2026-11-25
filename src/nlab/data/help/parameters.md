@@ -333,6 +333,11 @@ The Pile-ups control sets the hardware interval used to classify a second pulse
 as pile-up. Its hardware interpretation is backend-dependent; use the advertised
 control units and range rather than assuming it is an offline sample count.
 
+The pulse processor counts pile-up extensions in an 8-bit counter, so Pile-ups
+limits the Window length. Start is refused, with or without list-mode DMA, when
+(Window length / 8 ns − 1) × (Pile-ups + 1) exceeds 255. With 1 pile-up the
+window can be at most 1024 ns; with 0 any window length is accepted.
+
 Inspect the pulse-pileup statistic and detector response at the intended rate.
 This hardware setting is not a general software waveform-cleaning algorithm.
 Changing it does not retrospectively remove events from an existing capture.

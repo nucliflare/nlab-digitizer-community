@@ -674,6 +674,18 @@ class MultiChannelAnalyzer:
     def parameter_snapshot(self) -> dict[str, int]:
         return self._b.mca_parameter_snapshot()
 
+    def validate_configuration(self) -> None:
+        """Check the complete native configuration before a list-mode START.
+
+        Fields are written one at a time, so the driver checks cross-field
+        rules only at admission: pulse_processor.enable=1 and list-buffer
+        arming both run pp_validate_config_locked() (vdpp-pulse-processor.c,
+        PetaLinux cde5fe1). Buffer arming reports a violation only as EINVAL;
+        this names the rule before a capture file or reader process exists.
+        """
+        if self.parameter_contract().get("parameter_abi_version") == 2:
+            validate_parameters(self.parameter_snapshot(), complete=True)
+
     def configure_parameters(self, values: dict[str, int]) -> None:
         with self._configuration_lock:
             self._b.configure_mca_parameters(values)

@@ -1607,6 +1607,14 @@ class IIODigitizerBackend(DigitizerBackend):
         # _LM_KERNEL_BUFFER_COUNT). Unlike vdpp_scope, never force one.
         lm_frame.set_kernel_buffers_count(_LM_KERNEL_BUFFER_COUNT)
         self._validate_lm_geometry()
+        # lm_buffer_preenable() (vdpp-lm-frame.c, PetaLinux cde5fe1) runs
+        # vdpp_pulse_validate_config(), the cross-field check enable=1 also
+        # makes, and iio.Buffer() reports its rejection only as EINVAL.
+        # The DMA control context is the reader process's only PP handle.
+        validate_parameters(
+            {name: int(self._mca_dma_pp_attr_get(name)) for name in PARAMETERS},
+            complete=True,
+        )
 
         if bool(int(self._mca_dma_pp_attr_get("list_buffer_active"))):
             raise RuntimeError(
@@ -1638,7 +1646,8 @@ class IIODigitizerBackend(DigitizerBackend):
             raise RuntimeError(
                 f"failed to arm vdpp_lm_frame after selecting {_LM_KERNEL_BUFFER_COUNT} kernel "
                 "blocks and validating the single opaque 16-byte scan with "
-                "1024 records; the target rejected buffer creation"
+                "1024 records; the target rejected buffer creation with "
+                f"errno {exc.errno} ({exc.strerror or exc})"
                 + (f" ({diagnostics})" if diagnostics else "")
             ) from exc
 

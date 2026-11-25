@@ -9,12 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.6] — 2026-11-24
+## [0.9.6] — 2026-11-25
 
 The MCA Peak Analysis Workbench calibrates organic scintillators from their
 Compton edges, and energy calibrations can be labelled keVee. The Compton-edge
 Help topic cites the nine papers its model and diagnostics follow, each checked
 against its full text, including every Dietze & Klein (1982) Table 3 value.
+A list-mode Start that the pile-up setting forbids now says why.
 
 ### Added
 
@@ -39,6 +40,16 @@ against its full text, including every Dietze & Klein (1982) Table 3 value.
   `keVee`). Compton-edge calibrations are labelled keVee on MCA, coincidence and
   workbench axes, in ROI statistics, calibration and peak reports, CSV export and
   N42 export. Saved calibrations without the field still load as keV.
+
+### Fixed
+
+- **List-mode Start names a forbidden pile-up/window combination** — the pulse
+  processor counts pile-up extensions in 8 bits, so with 1 pile-up the window
+  length can be at most 1024 ns. A plain Start already said so; a list-mode Start
+  failed with only "the target rejected buffer creation". It now gives the same
+  reason, with the window and pile-up values and the longest allowed window,
+  before a capture file or reader process is created. Any other buffer rejection
+  reports the driver's errno. The MCA pile-up Help topic describes the limit.
 
 ## [0.9.5] — 2026-11-24
 

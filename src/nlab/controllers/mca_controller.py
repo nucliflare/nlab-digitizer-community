@@ -2520,6 +2520,9 @@ class MCAController(QWidget):
 
         if self._mca_dma is None:
             raise RuntimeError("IIO MCA list-mode DMA is unavailable")
+        # Name a rejected setting combination before the chosen file is
+        # consumed or a reader process starts.
+        self._mca.validate_configuration()
         mode = self._output_mode()
         schema_reader = getattr(self._mca_dma, "qualified_record_schema", None)
         producer_schema = schema_reader() if callable(schema_reader) else None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import hashlib
 import io
 import json
@@ -36,6 +37,7 @@ from nlab.hardware.digitizer.dma import (
     McaEventBuffer,
 )
 from nlab.hardware.digitizer.iio_listmode import cfd_interpolation_samples
+from nlab.hardware.digitizer.mca_parameters import DEFAULT_PARAMETERS
 from nlab.utils.dma_converter import convert_listmode, read_file_header
 from nlab.workers.dma_workers import IIOMcaDmaWorker
 
@@ -302,11 +304,14 @@ def test_histogram_reassembles_four_transport_chunks(monkeypatch: Any) -> None:
         np.testing.assert_array_equal(histogram[index * 4096 : (index + 1) * 4096], index)
 
 
-def test_mca_buffer_arm_stops_then_selects_eight_kernel_blocks(monkeypatch: Any) -> None:
+def _armable_mca_backend(
+    order: list[str], parameters: dict[str, int] | None = None,
+) -> tuple[Any, SimpleNamespace]:
+    """Backend whose list-mode arm reaches iio.Buffer(), and its lm_frame fake."""
+
     def attr(value: int) -> SimpleNamespace:
         return SimpleNamespace(value=str(value))
 
-    order: list[str] = []
     lm_frame = SimpleNamespace(
         attrs={
             "ip_version": attr(121),
@@ -332,6 +337,10 @@ def test_mca_buffer_arm_stops_then_selects_eight_kernel_blocks(monkeypatch: Any)
     lm_frame.set_kernel_buffers_count = set_kernel_buffers_count
     pulse = SimpleNamespace(
         attrs={
+            **{
+                name: attr(value)
+                for name, value in (DEFAULT_PARAMETERS | (parameters or {})).items()
+            },
             "parameter_abi_version": attr(2),
             "parameter_units": SimpleNamespace(value="adc_samples"),
             "parameter_abi_ack": attr(2),
@@ -340,6 +349,21 @@ def test_mca_buffer_arm_stops_then_selects_eight_kernel_blocks(monkeypatch: Any)
             "list_buffer_active": attr(0),
         }
     )
+    backend: Any = object.__new__(IIODigitizerBackend)
+    backend._ch = 0
+    backend._mca_dma_buf = None
+    backend._lm_frame = lm_frame
+    backend._mca_dma_pp = pulse
+    backend._mca_dma_control_lock = threading.RLock()
+    backend._mca_dma_stop_requested = threading.Event()
+    backend._mca_dma_lifecycle_lock = threading.RLock()
+    backend._mca_dma_cancel_timer = None
+    return backend, lm_frame
+
+
+def test_mca_buffer_arm_stops_then_selects_eight_kernel_blocks(monkeypatch: Any) -> None:
+    order: list[str] = []
+    backend, lm_frame = _armable_mca_backend(order)
     fake_buffer = SimpleNamespace(_buffer=object())
 
     def create_buffer(device: Any, records: int, cyclic: bool) -> SimpleNamespace:
@@ -354,20 +378,40 @@ def test_mca_buffer_arm_stops_then_selects_eight_kernel_blocks(monkeypatch: Any)
         return fake_buffer
 
     monkeypatch.setattr(iio, "Buffer", create_buffer)
-    backend = object.__new__(IIODigitizerBackend)
-    backend._ch = 0
-    backend._mca_dma_buf = None
-    backend._lm_frame = lm_frame
-    backend._mca_dma_pp = pulse
-    backend._mca_dma_control_lock = threading.RLock()
-    backend._mca_dma_stop_requested = threading.Event()
-    backend._mca_dma_lifecycle_lock = threading.RLock()
-    backend._mca_dma_cancel_timer = None
 
     backend._create_mca_dma_buffer()
 
     assert order == ["kernel-buffers", "buffer"]
     assert backend._mca_dma_buf is fake_buffer
+
+
+def test_mca_arm_names_rejected_pileup_before_buffer_creation(monkeypatch: Any) -> None:
+    # Live 2026-11-25 readback, ch0: 1424 ns window, one pile-up, CC enabled.
+    # lm_buffer_preenable() rejects it (vdpp_pulse_validate_config) as EINVAL.
+    order: list[str] = []
+    backend, _ = _armable_mca_backend(order, {
+        "frame_samples": 712, "pileup_window_raw": 1,
+        "charge_comparison_enable": 1, "charge_comparison_samples": 196,
+    })
+    create_buffer = Mock()
+    monkeypatch.setattr(iio, "Buffer", create_buffer)
+
+    with pytest.raises(ValueError, match=r"Pile-ups 1 with a 1424 ns window .* = 354 > 255"):
+        backend._create_mca_dma_buffer()
+
+    create_buffer.assert_not_called()
+    assert backend._mca_dma_buf is None
+
+
+def test_mca_arm_failure_reports_driver_errno(monkeypatch: Any) -> None:
+    order: list[str] = []
+    backend, _ = _armable_mca_backend(order)
+    monkeypatch.setattr(
+        iio, "Buffer", Mock(side_effect=OSError(errno.EINVAL, "Invalid argument")),
+    )
+
+    with pytest.raises(RuntimeError, match=r"errno 22 \(Invalid argument\) \(buffer_active=0"):
+        backend._create_mca_dma_buffer()
 
 
 def test_mca_rejects_superseded_five_channel_scan_abi() -> None:

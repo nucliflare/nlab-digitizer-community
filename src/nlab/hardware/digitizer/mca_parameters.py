@@ -134,8 +134,16 @@ def validate_active_configuration(values: Mapping[str, int]) -> None:
         if extent > frame:
             raise ValueError("Trapezoid start plus averaging window must fit the pulse length")
     pileup = values["pileup_window_raw"]
-    if pileup and (frame // 4 - 1) * (pileup + 1) > 255:
-        raise ValueError("Pulse length/pileup combination exceeds the 8-bit pileup counter")
+    # pp_validate_config_locked(): each pile-up extension adds frame/4 - 1
+    # beats to an 8-bit HLS counter.
+    beats = (frame // 4 - 1) * (pileup + 1)
+    if pileup and beats > 255:
+        longest = 4 * (255 // (pileup + 1) + 1)
+        raise ValueError(
+            f"Pile-ups {pileup} with a {2 * frame} ns window ({frame} samples) overflows "
+            f"the 8-bit pile-up counter: ({frame}/4 - 1) x ({pileup} + 1) = {beats} > 255. "
+            f"Use a window of at most {2 * longest} ns or fewer pile-ups."
+        )
 
 
 def validate_document(document: Mapping[str, object]) -> dict[str, int]:
