@@ -37,6 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   above which content aliases. An option, off by default, bridges isolated
   single missing windows by interpolation and counts them. The live Current
   monitor is unchanged. Software analysis; not validated on live hardware.
+- **Waveform spectrum** — the Waveform Analysis Workbench has a **Spectrum** tab
+  beside **PSD** for NLab Scope recordings (2 ns) and CAEN files (at the entered
+  sample period). It averages the noise PSD of all frames (with the event stride
+  and maximum) or of the selected PSD population, over the pretrigger baseline
+  region (baseline noise, with its coarse Δf stated) or the whole frame (pulse
+  plus noise). The mean pulse's energy spectrum, |FFT|² of the baseline-removed
+  mean pulse in dB re its peak, can be shown on a separate right axis to compare
+  where pulse and noise have their power; the two are labelled as different
+  quantities. Software analysis; not validated on live hardware.
 
 ### Fixed
 

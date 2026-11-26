@@ -468,6 +468,19 @@ period (versions up to 0.9.4 assumed 8 ns). CoMPASS waveform files
 do not encode the ADC sample period; verify the operator-entered value for the
 originating digitizer.
 
+The **Spectrum** tab beside **PSD** averages the power spectral density of the
+recorded frames, either all of them (honouring the event stride and maximum) or
+the population selected in the PSD matrix. With the **Pretrigger baseline**
+region it transforms only the blue baseline region, which holds no pulse, so it
+estimates baseline noise in a triggered recording. That region is short, so the
+bins are wide: 64 samples at 2 ns give Δf = 7.8 MHz. **Whole frame** includes the
+pulses and shows pulse plus noise. The optional mean-pulse curve on the right
+axis is |FFT|² of the mean baseline-removed, polarity-normalised pulse, in dB
+relative to its peak: the pulse's energy spectrum. Compare where the pulse and
+the noise have their power when choosing shaping or filters, not the heights of
+the two curves. This is software analysis; it has not yet been validated on
+live hardware.
+
 ## Scope noise spectrum
 
 **View → Scope Noise Spectrum** adds a power-spectrum plot below each live Scope.

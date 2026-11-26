@@ -354,20 +354,30 @@ def find_spurs(
     """Narrow lines more than ``threshold_db_over_median`` above the local floor.
 
     The floor is a running median of ``floor_bins`` bins (odd), wide enough
-    that a line does not lift it. Each contiguous run of bins above the
-    threshold yields one spur at its maximum, refined by three-point
-    parabolic interpolation of the dB values. The DC bin is excluded.
-    Strongest excess first.
+    that a line does not lift it, padded by mirroring interior bins. It
+    excludes DC: detrending empties that bin, and padding the edge with it
+    would make any steep low-frequency slope look like a line. Each contiguous
+    run of bins above the threshold yields one spur at its strongest local
+    maximum (a two-sided peak, so a monotonic edge or the bin next to DC
+    never counts), refined by three-point parabolic interpolation of the dB
+    values. The even-N Nyquist bin is searched as a
+    density (``as_density``); nothing lies beyond it, so it only has to exceed
+    its left neighbour. Strongest excess first.
     """
     from scipy.ndimage import median_filter
 
-    power = spectrum.psd
-    if power.size < 5 or max_count < 1:
+    power = as_density(spectrum.psd, spectrum.n)
+    if power.size < 6 or max_count < 1:
         return []
+    body = power[1:]
     if floor_bins is None:
-        floor_bins = min(63, max(5, (power.size // 16) * 2 + 1))
-    floor_bins = min(floor_bins | 1, power.size - (1 - power.size % 2))
-    floor = median_filter(power, size=floor_bins, mode="nearest")
+        floor_bins = min(63, max(5, (body.size // 16) * 2 + 1))
+    floor_bins = min(floor_bins | 1, body.size - (1 - body.size % 2))
+    floor = np.empty_like(power)
+    floor[0] = power[0]
+    # "mirror" pads with interior bins: repeating an edge bin ("nearest")
+    # would let a line at the Nyquist edge raise its own floor and vanish.
+    floor[1:] = median_filter(body, size=floor_bins, mode="mirror")
     tiny = np.finfo(np.float64).tiny
     level_db = 10.0 * np.log10(np.maximum(power, tiny))
     excess = level_db - 10.0 * np.log10(np.maximum(floor, tiny))
@@ -375,10 +385,17 @@ def find_spurs(
     above[0] = False
     spurs: list[Spur] = []
     edges = np.flatnonzero(np.diff(np.concatenate(([0], above.astype(np.int8), [0]))))
+    last = power.size - 1
     for start, stop in zip(edges[::2], edges[1::2], strict=True):
-        index = int(start + np.argmax(excess[start:stop]))
+        peaks = [
+            k for k in range(max(int(start), 2), int(stop))
+            if power[k] >= power[k - 1] and (k == last or power[k] >= power[k + 1])
+        ]
+        if not peaks:
+            continue
+        index = max(peaks, key=lambda k: float(excess[k]))
         offset = 0.0
-        if 0 < index < power.size - 1:
+        if index < last:
             a, b, c = level_db[index - 1 : index + 2]
             curvature = a - 2.0 * b + c
             if curvature < 0:
@@ -414,13 +431,28 @@ def line_threshold_db(averages: float) -> float:
 
 
 def plotted_bins(n: int) -> slice:
-    """The rfft bins of an N-point spectrum worth plotting.
+    """The rfft bins of an N-point spectrum worth plotting: all but DC.
 
-    Drops DC, which detrending removes and a log axis cannot place, and the
-    Nyquist bin of an even N: the one-sided density does not double it (as in
-    SciPy), so drawn it looks like a spurious 3 dB drop at the right edge.
+    Detrending empties DC, and a log axis cannot place it. The Nyquist bin
+    stays: a fixed even/odd sample pattern (an offset between interleaved
+    samples) is a line exactly there. Plot it through ``as_density``.
     """
-    return slice(1, n // 2) if n % 2 == 0 else slice(1, n // 2 + 1)
+    del n  # Same for every length; kept for a uniform call with as_density.
+    return slice(1, None)
+
+
+def as_density(psd: NDArray[np.float64], n: int) -> NDArray[np.float64]:
+    """Copy of a one-sided PSD whose even-N Nyquist bin is a density like the others.
+
+    The one-sided periodogram (as in SciPy) does not double that bin, which
+    covers half a bin on the one-sided axis, so Parseval holds. Drawn as is,
+    noise drops 3 dB at the right edge. Use this for display and line search
+    only; integrals and exports keep the standard convention.
+    """
+    density = np.array(psd, dtype=np.float64)
+    if n % 2 == 0 and density.size == n // 2 + 1:
+        density[-1] *= 2.0
+    return density
 
 
 def format_frequency(hz: float) -> str:

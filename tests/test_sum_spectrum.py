@@ -269,8 +269,8 @@ def test_dialog_spectrum_tab_reports_runs_limits_and_bridging(
     result = _compute(qtbot, dialog, 256)
     assert dialog.spectrum_stack.currentIndex() == 0
     x, _ = dialog.spectrum_curve.getData()
-    assert x is not None and x.size == 127  # Without DC and the un-doubled Nyquist bin.
-    assert x[-1] < result.fs / 2
+    assert x is not None and x.size == 128  # Without DC; Nyquist drawn as a density.
+    assert x[-1] == pytest.approx(result.fs / 2)
     text = dialog.spectrum_summary.text()
     for part in ("Δf = 122.1 kHz", "8 gapless runs, longest 508", "7 missing in 7 gaps",
                  "Bridging off.", "Parseval", "not validated on live hardware"):

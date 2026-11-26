@@ -45,6 +45,7 @@ from nlab.analysis.waveform_spectrum import (
     SpectrumUnit,
     SpectrumWindow,
     Spur,
+    as_density,
     compensated_psd,
     decimation_factor,
     find_spurs,
@@ -2775,17 +2776,16 @@ class ScopeController(QWidget):
             compensated_psd(result, factor, SCOPE_ADC_SAMPLE_PERIOD_NS)
             if compensated else result.psd
         )
-        values = to_display_units(linear, unit)
-        bins = plotted_bins(result.n)  # Without DC and the un-doubled Nyquist bin.
+        # Drawn as a density: the even-N Nyquist bin doubled, DC omitted.
+        values = to_display_units(as_density(linear, result.n), unit)
+        bins = plotted_bins(result.n)
         frequencies, shown = result.frequencies[bins], values[bins]
         self._spectrum_display = (frequencies, shown)
         if unit != SpectrumUnit.DB:
             shown = np.maximum(shown, np.finfo(np.float64).tiny)
         self._spectrum_curve.setData(frequencies, shown)
         self._update_spectrum_spurs(force=force_spurs, factor=factor, compensated=compensated)
-        spurs = [
-            spur for spur in self._spectrum_spurs if bins.start <= spur.bin < bins.stop
-        ]
+        spurs = self._spectrum_spurs
         if spurs:
             marker_values = values[[spur.bin for spur in spurs]]
             if unit != SpectrumUnit.DB:

@@ -220,6 +220,11 @@ in ADC codes; no converter full scale is assumed, so there is no dBFS scale.
 - **Trigger bias.** Level and edge triggers synchronise frames to pulses, so the
   spectrum includes pulse content. Use the **Periodic** trigger for baseline
   noise. The trigger mode is recorded with the spectrum.
+- **A line at fs/2.** A fixed offset between even and odd samples (for example
+  between interleaved ADC samples) is a line exactly at fs/2, 250 MHz for raw
+  2 ns samples. DMA previews and recordings show it; the viewer's mean4 points
+  cancel it completely (|H| = 0 at 250 MHz). The Nyquist bin is drawn as a
+  density, like every other bin.
 - **Parseval.** The annotation compares the integrated density with the mean
   square of the detrended frames. It is close to 1 for noise; a large departure
   points to a normalisation fault, not to the signal.
@@ -996,6 +1001,41 @@ and maximum events.
 Sparse preview FOM and counts need not match the completed full reconstruction.
 Wait for the final result before exporting or comparing measurements. Disable
 auto-recalculation to adjust markers first and reconstruct manually afterward.
+
+## Waveforms — spectrum {#waveform-spectrum}
+
+The **Spectrum** tab, beside **PSD**, averages the power spectral density of
+recorded frames: NLab Scope recordings at their 2 ns raw period, or CAEN files
+at the **Sample period** you enter. Each frame is one segment of a Welch
+average (mean removed, windowed, linear power). Values are in ADC codes.
+
+- **Frames.** *All frames* reads every **Event stride**-th frame up to
+  **Maximum events**. *Selected PSD population* uses the waveforms inside the
+  current PSD selection region, so noise of one particle class can be
+  compared with another's.
+- **Region.** *Pretrigger baseline* uses the blue baseline region, which holds
+  no pulse, so it estimates baseline noise in a triggered recording. It is
+  short: Δf = 1/(n × period) for n samples, for example 7.8 MHz for 64 samples
+  at 2 ns, so lines closer than that merge. *Whole frame* contains the pulses,
+  so it shows pulse plus noise, not noise.
+- **A line at 250 MHz** (fs/2 at 2 ns) is a fixed offset between even and odd
+  samples. It sits in every frame, also in the baseline, and adds to the
+  baseline RMS; an integral over an odd number of samples carries half of it.
+- **Mean pulse spectrum.** The right axis shows |FFT|² of the mean of the same
+  frames after baseline removal and polarity normalisation, in dB relative to
+  its own peak. It is the pulse's energy spectrum, a different quantity from
+  the noise density: compare where each has its power to choose shaping or
+  filters, not the heights of the two curves.
+
+Frames shorter than the displayed frame, or with non-finite samples, are
+skipped and counted. Lines are marked as in the [Scope spectrum](#scope-spectrum),
+with a threshold that falls as more frames are averaged. This is software
+analysis; it has not been validated on live hardware.
+
+**References** — Spectral estimation and windows.
+
+- Welch, P. D. (1967). The use of fast Fourier transform for the estimation of power spectra: a method based on time averaging over short, modified periodograms. *IEEE Trans. Audio Electroacoust.* AU-15, 70–73. doi:10.1109/TAU.1967.1161901
+- Harris, F. J. (1978). On the use of windows for harmonic analysis with the discrete Fourier transform. *Proc. IEEE* 66, 51–83. doi:10.1109/PROC.1978.10837
 
 ## Waveforms — FOM gate search {#waveform-optimization}
 

@@ -119,6 +119,7 @@ FORM_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
 # Attributes, rather than object names, identify programmatically created controls.
 # Include future optional controls without requiring a feature-branch merge.
 CLASS_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
+    "WaveformSpectrumPanel": ("waveform-spectrum", {}),
     "CurrentCaptureDialog": ("current", {
         name: "current-spectrum" for name in (
             "segment_combo", "resolution_label", "bridge_checkbox", "spectrum_unit_combo",

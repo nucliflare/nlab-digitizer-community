@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,7 @@ from nlab.analysis.waveform_spectrum import (
     find_spurs,
     format_frequency,
     frame_psd,
+    line_threshold_db,
     mean_decimation_response,
     parseval_check,
     to_display_units,
@@ -309,10 +311,45 @@ def test_line_threshold_falls_with_averaging_but_stays_safe() -> None:
     assert excess.max() < line_threshold_db(10)
 
 
-def test_plotted_bins_drop_dc_and_the_even_nyquist_bin() -> None:
-    from nlab.analysis.waveform_spectrum import plotted_bins
+def test_nyquist_bin_is_plotted_as_a_density_and_holds_even_odd_offsets() -> None:
+    from nlab.analysis.waveform_spectrum import as_density, plotted_bins
 
-    even = frame_psd(np.random.default_rng(1).normal(0, 1, 64), PERIOD_NS)
-    shown = even.frequencies[plotted_bins(64)]
-    assert shown[0] == pytest.approx(even.delta_f) and shown[-1] == pytest.approx(31 * even.delta_f)
-    assert plotted_bins(65) == slice(1, 33)
+    assert plotted_bins(64) == slice(1, None) and plotted_bins(65) == slice(1, None)
+    psd = np.ones(33)
+    assert as_density(psd, 64)[-1] == 2 and as_density(psd, 64)[:-1].tolist() == [1] * 32
+    assert as_density(np.ones(33), 65).tolist() == [1] * 33  # Odd N has no Nyquist bin.
+    # White noise: the doubled Nyquist bin matches the density of its neighbours.
+    rng = np.random.default_rng(13)
+    noise = AccumulatedSpectrum(average_count=0)
+    for _ in range(400):
+        noise.add(rng.normal(0, 3, 256), source="t", sample_period_ns=2.0)
+    mean = noise.result("mean")
+    assert mean is not None
+    density = as_density(mean.psd, mean.n)
+    assert density[-1] == pytest.approx(density[2:-1].mean(), rel=0.2)
+    # Interleaved samples with an offset (odd +47, even -47 codes) form a line
+    # exactly at fs/2, which hiding the Nyquist bin would conceal.
+    pattern = np.where(np.arange(1024) % 2, 47.0, -47.0)
+    offset = AccumulatedSpectrum(average_count=0)
+    for _ in range(20):
+        offset.add(rng.normal(0, 3, 1024) + pattern, source="t", sample_period_ns=2.0)
+    lined = offset.result("mean")
+    assert lined is not None
+    spurs = find_spurs(lined, threshold_db_over_median=line_threshold_db(lined.averages))
+    assert spurs[0].bin == 512 and spurs[0].frequency == pytest.approx(250e6)
+    assert tone_amplitude(lined, 250e6) == pytest.approx(47, rel=0.02)
+
+
+def test_a_steep_slope_is_not_a_line_but_a_peak_on_it_is() -> None:
+    # A pulse-like spectrum falls steeply from the lowest bins. Neither the
+    # emptied DC bin nor the monotonic edge may be reported as a line.
+    template = frame_psd(np.random.default_rng(0).normal(0, 1, 1024), PERIOD_NS)
+    k = np.arange(template.psd.size, dtype=float)
+    steep = 1e3 / (1 + (k / 8) ** 4) + 1e-6
+    steep[0] = 1e-12  # Detrending empties DC.
+    slope = replace(template, psd=steep)
+    assert find_spurs(slope, threshold_db_over_median=4) == []
+    lined = steep.copy()
+    lined[300] *= 1e3
+    spurs = find_spurs(replace(template, psd=lined), threshold_db_over_median=4)
+    assert [spur.bin for spur in spurs] == [300]

@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -71,6 +72,10 @@ from nlab.views.waveform_cluster_export_dialog import (
 )
 from nlab.views.waveform_cluster_selection import WaveformClusterSelection
 from nlab.views.waveform_mca_transfer_dialog import McaGateTransferTarget, WaveformMcaTransferDialog
+from nlab.views.waveform_spectrum_panel import (
+    WaveformSpectrumPanel,
+    WaveformSpectrumSource,
+)
 from nlab.views.window_flags import make_tool_window
 from nlab.workers.waveform_average_worker import WaveformAverage, WaveformAverageWorker
 from nlab.workers.waveform_file_worker import WaveformFileIndexWorker
@@ -278,7 +283,11 @@ class WaveformAnalysisDialog(QDialog):
         )
         self.waveform_selection_checkbox.toggled.connect(self.cluster_selection.set_tools_visible)
         self.psd_plot.setMinimumHeight(360)
-        self.plot_splitter.addWidget(self.psd_plot)
+        self.analysis_tabs = QTabWidget(self)
+        self.analysis_tabs.addTab(self.psd_plot, "PSD")
+        self.spectrum_panel = WaveformSpectrumPanel(self._spectrum_source, self)
+        self.analysis_tabs.addTab(self.spectrum_panel, "Spectrum")
+        self.plot_splitter.addWidget(self.analysis_tabs)
         self.plot_splitter.setStretchFactor(0, 1)
         self.plot_splitter.setStretchFactor(1, 3)
         self.plot_splitter.setSizes([220, 520])
@@ -796,6 +805,7 @@ class WaveformAnalysisDialog(QDialog):
         if self._index is None or self.source_combo.currentIndex() < 0:
             return
         self.cluster_selection.invalidate()
+        self.spectrum_panel.clear()
         self._last_psd_result = None
         self._last_report_context = None
         self._update_optimize_button()
@@ -897,6 +907,28 @@ class WaveformAnalysisDialog(QDialog):
         self._average_thread = None
         if thread is not None:
             thread.deleteLater()
+
+    def _spectrum_source(self) -> WaveformSpectrumSource | str:
+        """Workbench state for the Spectrum tab, or why it cannot be computed yet."""
+        if self._index is None or self._frame is None:
+            return "Load a waveform file first."
+        try:
+            settings = self._settings()
+        except ValueError as exc:
+            return f"Adjust the baseline region and gates first: {exc}"
+        selected = self._selected_frame_indices
+        if selected is not None and not self._cluster_context_matches():
+            selected = None  # The PSD selection belongs to other settings.
+        return WaveformSpectrumSource(
+            index=self._index,
+            source_index=self.source_combo.currentIndex(),
+            sample_period_ns=self.sample_period.value(),
+            settings=settings,
+            frame_samples=int(self._frame.samples.size),
+            stride=self.event_stride.value(),
+            maximum_events=self.maximum_events.value(),
+            selected_frames=selected,
+        )
 
     def _cluster_context_matches(self) -> bool:
         context = self._last_report_context
@@ -1753,6 +1785,7 @@ class WaveformAnalysisDialog(QDialog):
         if not self._stop_cluster_export_sync():
             return
         self._stop_average_sync()
+        self.spectrum_panel.clear()
         self._auto_preview_timer.stop()
         self._pending_analysis_kind = None
         self._stop_analysis_sync()
@@ -1845,6 +1878,7 @@ class WaveformAnalysisDialog(QDialog):
         if not self._stop_cluster_export_sync():
             return
         self._stop_average_sync()
+        self.spectrum_panel.stop_sync()
         self._stop_analysis_sync()
         self._stop_optimization_sync()
         self._stop_index_sync()
@@ -1864,6 +1898,7 @@ class WaveformAnalysisDialog(QDialog):
             event.ignore()
             return
         self._stop_average_sync()
+        self.spectrum_panel.stop_sync()
         self._stop_analysis_sync()
         self._stop_optimization_sync()
         self._stop_index_sync()

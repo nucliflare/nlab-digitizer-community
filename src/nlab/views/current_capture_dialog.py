@@ -46,6 +46,7 @@ from nlab.analysis.waveform_spectrum import (
     UNIT_LABELS,
     SpectrumUnit,
     Spur,
+    as_density,
     find_spurs,
     format_frequency,
     line_threshold_db,
@@ -515,20 +516,18 @@ class CurrentCaptureDialog(QDialog):
         self.nyquist_line.show()
         spurs: list[Spur] = []
         if spectrum is not None:
-            values = to_display_units(spectrum.psd, unit)
-            bins = plotted_bins(spectrum.n)  # Without DC and the un-doubled Nyquist bin.
+            # Drawn as a density: the even-N Nyquist bin doubled, DC omitted.
+            values = to_display_units(as_density(spectrum.psd, spectrum.n), unit)
+            bins = plotted_bins(spectrum.n)
             shown = values[bins]
             if unit != SpectrumUnit.DB:
                 shown = np.maximum(shown, np.finfo(np.float64).tiny)
             self.spectrum_curve.setData(spectrum.frequencies[bins], shown)
-            spurs = [
-                spur for spur in find_spurs(
-                    spectrum,
-                    threshold_db_over_median=line_threshold_db(spectrum.averages),
-                    max_count=12,
-                )
-                if bins.start <= spur.bin < bins.stop
-            ] if spectrum.frames >= 2 else []
+            spurs = find_spurs(
+                spectrum,
+                threshold_db_over_median=line_threshold_db(spectrum.averages),
+                max_count=12,
+            ) if spectrum.frames >= 2 else []
             if spurs:
                 marks = values[[spur.bin for spur in spurs]]
                 if unit != SpectrumUnit.DB:
