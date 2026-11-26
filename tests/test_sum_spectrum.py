@@ -23,6 +23,7 @@ from nlab.analysis.waveform_spectrum import (
     SCALLOPING_LOSS_DB,
     SpectrumWindow,
     find_spurs,
+    format_frequency,
     parseval_check,
     tone_amplitude,
 )
@@ -284,6 +285,8 @@ def test_dialog_spectrum_tab_reports_runs_limits_and_bridging(
     assert dialog.spectrum_stack.currentIndex() == 1
     assert "longest gapless run has 508" in dialog.spectrum_message.text()
     assert "Bridging the 7" in dialog.spectrum_summary.text()
+    assert "no spectrum" in dialog.spectrum_lines.title.text()
+    assert dialog.spectrum_lines.table.rowCount() == 0
     assert not dialog.bridge_recompute_button.isHidden()
     assert "Use L = 256" in dialog.shorter_segment_button.text()
 
@@ -297,6 +300,13 @@ def test_dialog_spectrum_tab_reports_runs_limits_and_bridging(
     assert bridged.segment_length == 1024 and dialog.bridge_checkbox.isChecked()
     assert dialog.spectrum_stack.currentIndex() == 0
     assert "Bridged 7 isolated single missing windows" in dialog.spectrum_summary.text()
+    marked, _ = dialog.spectrum_markers.getData()
+    table = dialog.spectrum_lines.table
+    assert marked is not None and table.rowCount() == marked.size >= 1
+    listed = [table.item(row, 0).text() for row in range(table.rowCount())]
+    assert listed == [format_frequency(value) for value in sorted(marked)]
+    assert "Strongest lines" not in dialog.spectrum_summary.text()
+    assert resolve_context(dialog.spectrum_lines.table).topic == "current-spectrum"
     dialog.spectrum_log_checkbox.setChecked(True)
     axis = dialog.spectrum_plot.getPlotItem().getAxis("bottom")
     assert axis._tickLevels is not None and (3.0, "1 kHz") in axis._tickLevels[0]

@@ -124,7 +124,7 @@ CLASS_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
         name: "current-spectrum" for name in (
             "segment_combo", "resolution_label", "bridge_checkbox", "spectrum_unit_combo",
             "spectrum_log_checkbox", "spectrum_button", "spectrum_plot", "response_plot",
-            "spectrum_summary",
+            "spectrum_summary", "spectrum_lines",
         )
     }),
     "PsdEnergyFomDialog": ("psd-energy-fom", {

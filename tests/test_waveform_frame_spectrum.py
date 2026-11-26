@@ -194,6 +194,9 @@ def test_workbench_spectrum_tab_computes_and_explains(qtbot: QtBot, tmp_path: Pa
         assert part in text
     marked, _ = panel.markers.getData()
     assert marked is not None and np.any(np.abs(marked - 25e6) < 4e6)
+    assert panel.lines.table.rowCount() == marked.size
+    assert "Strongest lines" not in text
+    assert resolve_context(panel.lines.table).topic == "waveform-spectrum"
     panel.log_checkbox.setChecked(True)
     log_x, _ = panel.pulse_curve.getData()
     assert log_x is not None and log_x.max() == pytest.approx(math.log10(FS / 2), abs=0.01)

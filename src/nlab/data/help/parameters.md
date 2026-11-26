@@ -1029,7 +1029,8 @@ average (mean removed, windowed, linear power). Values are in ADC codes.
 
 Frames shorter than the displayed frame, or with non-finite samples, are
 skipped and counted. Lines are marked as in the [Scope spectrum](#scope-spectrum),
-with a threshold that falls as more frames are averaged. This is software
+with a threshold that falls as more frames are averaged, and listed in the table
+beside the plot in ascending frequency. This is software
 analysis; it has not been validated on live hardware.
 
 **References** — Spectral estimation and windows.
@@ -1145,8 +1146,9 @@ background; the live Current monitor is not involved.
   for the correlation of overlapping segments, and a Parseval ratio that
   should be close to 1. Triangles mark lines above the running-median floor
   by more than averaged noise could reach: 10 dB for a few segments, falling
-  to 4 dB from about 40 averages. A longer L makes a narrow line stand further
-  above the floor. Values are window means in ADC codes.
+  to 4 dB from about 40 averages. The table beside the plot lists them in
+  ascending frequency with their level and their excess over the floor. A
+  longer L makes a narrow line stand further above the floor. Values are window means in ADC codes.
 
 This is software analysis; it has not been validated on live hardware.
 

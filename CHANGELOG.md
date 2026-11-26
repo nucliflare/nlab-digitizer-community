@@ -33,7 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ripple are visible. Missing windows split the series into gapless runs; Welch
   segments of a chosen length (Hann, 50 % overlap) stay within runs. The summary
   reports Δf, segments, used, discarded and missing windows, and why a finer
-  resolution is unreachable. A plot of the window-mean response marks fs'/2,
+  resolution is unreachable; a table beside the plot lists the marked lines by
+  frequency. A plot of the window-mean response marks fs'/2,
   above which content aliases. An option, off by default, bridges isolated
   single missing windows by interpolation and counts them. The live Current
   monitor is unchanged. Software analysis; not validated on live hardware.
@@ -45,7 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plus noise). The mean pulse's energy spectrum, |FFT|² of the baseline-removed
   mean pulse in dB re its peak, can be shown on a separate right axis to compare
   where pulse and noise have their power; the two are labelled as different
-  quantities. Software analysis; not validated on live hardware.
+  quantities. Marked lines are listed by frequency in a table beside the plot.
+  Software analysis; not validated on live hardware.
 
 ### Fixed
 

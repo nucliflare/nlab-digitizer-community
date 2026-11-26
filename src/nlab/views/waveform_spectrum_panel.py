@@ -42,6 +42,7 @@ from nlab.analysis.waveform_spectrum import (
 from nlab.views import theme
 from nlab.views.frequency_axis import set_frequency_axis
 from nlab.views.plot_viewbox import ModifierZoomViewBox
+from nlab.views.spectrum_lines import SpectrumLinesTable
 from nlab.workers.waveform_spectrum_worker import WaveformSpectrumWorker
 
 _NOT_VALIDATED = "Software analysis; not validated on live hardware."
@@ -161,7 +162,11 @@ class WaveformSpectrumPanel(QWidget):
         self.stack = QStackedWidget(self)
         self.stack.addWidget(self.plot_widget)
         self.stack.addWidget(message_page)
-        layout.addWidget(self.stack, 1)
+        self.lines = SpectrumLinesTable(self)
+        plot_row = QHBoxLayout()
+        plot_row.addWidget(self.stack, 1)
+        plot_row.addWidget(self.lines)
+        layout.addLayout(plot_row, 1)
         self.summary = QLabel(self)
         self.summary.setWordWrap(True)
         self.summary.setTextFormat(Qt.TextFormat.PlainText)
@@ -286,6 +291,7 @@ class WaveformSpectrumPanel(QWidget):
                 else "Load a waveform file, choose frames and region, and press Compute spectrum."
             )
             self.summary.setText("" if result is None else result.message)
+            self.lines.clear()
             return
         self.stack.setCurrentIndex(0)
         # Drawn as a density: the even-N Nyquist bin doubled (an even/odd sample
@@ -297,11 +303,10 @@ class WaveformSpectrumPanel(QWidget):
             shown = np.maximum(shown, np.finfo(np.float64).tiny)
         self.noise_curve.setData(noise.frequencies[bins], shown)
         spurs: list[Spur] = []
+        threshold = line_threshold_db(noise.averages)
         if noise.frames >= 2:
-            spurs = find_spurs(
-                noise, threshold_db_over_median=line_threshold_db(noise.averages),
-                max_count=12,
-            )
+            spurs = find_spurs(noise, threshold_db_over_median=threshold, max_count=20)
+        self.lines.show_lines(spurs, unit, threshold)
         if spurs:
             marks = values[[spur.bin for spur in spurs]]
             if unit != SpectrumUnit.DB:
@@ -322,10 +327,10 @@ class WaveformSpectrumPanel(QWidget):
             self.legend.addItem(self.pulse_curve, "Mean pulse |FFT|² (right, dB re peak)")
             self.pulse_view.enableAutoRange()
         plot.enableAutoRange()
-        self.summary.setText(self._summary(result, spurs, unit))
+        self.summary.setText(self._summary(result))
 
     @staticmethod
-    def _summary(result: FrameSpectrumResult, spurs: list[Spur], unit: SpectrumUnit) -> str:
+    def _summary(result: FrameSpectrumResult) -> str:
         noise = result.noise
         assert noise is not None
         request = result.request
@@ -345,12 +350,5 @@ class WaveformSpectrumPanel(QWidget):
                 "polarity normalisation (rectangular window), in dB re its peak. It is the "
                 "pulse's energy spectrum, not a noise level: compare shapes, not heights."
             )
-        if spurs:
-            lines.append("Strongest lines: " + "; ".join(
-                f"{format_frequency(spur.frequency)} "
-                f"({to_display_units(np.array([spur.level]), unit)[0]:.3g} "
-                f"{UNIT_LABELS[unit]}, +{spur.excess_db:.0f} dB)"
-                for spur in spurs
-            ))
         lines.append(_NOT_VALIDATED)
         return "\n".join(lines)

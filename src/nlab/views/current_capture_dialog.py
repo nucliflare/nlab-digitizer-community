@@ -58,6 +58,7 @@ from nlab.views import theme
 from nlab.views.frequency_axis import set_frequency_axis
 from nlab.views.numeric_controls import keep_enter_in_fields
 from nlab.views.plot_viewbox import ModifierZoomViewBox
+from nlab.views.spectrum_lines import SpectrumLinesTable
 from nlab.views.window_flags import make_tool_window
 from nlab.workers.current_capture_worker import CurrentCaptureWorker
 from nlab.workers.sum_spectrum_worker import SumSpectrumWorker
@@ -356,7 +357,11 @@ class CurrentCaptureDialog(QDialog):
         self.spectrum_stack = QStackedWidget()
         self.spectrum_stack.addWidget(self.spectrum_plot)
         self.spectrum_stack.addWidget(message_page)
-        layout.addWidget(self.spectrum_stack, 3)
+        self.spectrum_lines = SpectrumLinesTable()
+        plot_row = QHBoxLayout()
+        plot_row.addWidget(self.spectrum_stack, 1)
+        plot_row.addWidget(self.spectrum_lines)
+        layout.addLayout(plot_row, 3)
         self.response_plot = pg.PlotWidget(viewBox=ModifierZoomViewBox())
         self.response_plot.setBackground(theme.colors().plot_background)
         self.response_plot.showGrid(x=True, y=True, alpha=0.2)
@@ -502,9 +507,11 @@ class CurrentCaptureDialog(QDialog):
                 "Choose a segment length and press Compute spectrum."
                 if self._info is not None else "Open a capture, then compute its spectrum."
             )
+            self.spectrum_lines.clear()
             return
         if spectrum is None:
             self._show_spectrum_message(result.message, result)
+            self.spectrum_lines.clear("Lines: no spectrum for this segment length.")
         else:
             self.spectrum_stack.setCurrentIndex(0)
         frequencies = np.linspace(0, result.fs, 2001)
@@ -523,21 +530,21 @@ class CurrentCaptureDialog(QDialog):
             if unit != SpectrumUnit.DB:
                 shown = np.maximum(shown, np.finfo(np.float64).tiny)
             self.spectrum_curve.setData(spectrum.frequencies[bins], shown)
+            threshold = line_threshold_db(spectrum.averages)
             spurs = find_spurs(
-                spectrum,
-                threshold_db_over_median=line_threshold_db(spectrum.averages),
-                max_count=12,
+                spectrum, threshold_db_over_median=threshold, max_count=20,
             ) if spectrum.frames >= 2 else []
+            self.spectrum_lines.show_lines(spurs, unit, threshold)
             if spurs:
                 marks = values[[spur.bin for spur in spurs]]
                 if unit != SpectrumUnit.DB:
                     marks = np.maximum(marks, np.finfo(np.float64).tiny)
                 self.spectrum_markers.setData([spur.frequency for spur in spurs], marks)
             self.spectrum_plot.enableAutoRange()
-        self.spectrum_summary.setText(self._spectrum_text(result, spurs, unit))
+        self.spectrum_summary.setText(self._spectrum_text(result))
 
     @staticmethod
-    def _spectrum_text(result: SumSpectrum, spurs: list[Spur], unit: SpectrumUnit) -> str:
+    def _spectrum_text(result: SumSpectrum) -> str:
         nyquist_db = 20 * math.log10(max(result.nyquist_response, 1e-12))
         lines = [
             f"fs' = {format_frequency(result.fs)} (interval {result.interval_ns:g} ns: "
@@ -567,13 +574,6 @@ class CurrentCaptureDialog(QDialog):
             )
         if result.message:
             lines.append(result.message)
-        if spurs:
-            lines.append("Strongest lines: " + "; ".join(
-                f"{format_frequency(spur.frequency)} "
-                f"({to_display_units(np.array([spur.level]), unit)[0]:.3g} "
-                f"{UNIT_LABELS[unit]}, +{spur.excess_db:.0f} dB)"
-                for spur in spurs
-            ))
         lines.append(_NOT_VALIDATED)
         return "\n".join(lines)
 
