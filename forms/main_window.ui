@@ -178,6 +178,7 @@
      <addaction name="separator"/>
      <addaction name="actionScopeDistribution"/>
      <addaction name="actionClearScopeDistribution"/>
+     <addaction name="actionScopeSpectrum"/>
      <addaction name="separator"/>
      <addaction name="actionResetZoom"/>
     <addaction name="actionResetDocks"/>
@@ -233,6 +234,11 @@
   <action name="actionClearScopeDistribution">
    <property name="text"><string>Clear Scope Distribution</string></property>
    <property name="toolTip"><string>Clear accumulated amplitude counts on all Scope channels</string></property>
+  </action>
+  <action name="actionScopeSpectrum">
+   <property name="checkable"><bool>true</bool></property>
+   <property name="text"><string>Scope Noise Spectrum</string></property>
+   <property name="toolTip"><string>Average the power spectrum of received waveforms below each Scope plot; uncheck to pause and hide</string></property>
   </action>
   <action name="actionResetZoom">
    <property name="text"><string>Reset Zoom (All Plots)</string></property>

@@ -9,7 +9,7 @@ from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QAction, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QWidget
 
-from nlab.help.context import HelpContext, resolve_context
+from nlab.help.context import HelpContext, resolve_context_at
 from nlab.views.app_events import application_event_hub
 from nlab.views.help_dialog import HelpDialog
 
@@ -177,7 +177,10 @@ class HelpController(QObject):
                         child = target.childAt(position)
                         if child is not None:
                             target = child
-                        self.open_topic(resolve_context(target), owner=target.window())
+                        self.open_topic(
+                            resolve_context_at(target, event.globalPosition().toPoint()),
+                            owner=target.window(),
+                        )
                     else:
                         self.set_active(False)
             return True

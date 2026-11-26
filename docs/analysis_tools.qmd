@@ -468,6 +468,29 @@ period (versions up to 0.9.4 assumed 8 ns). CoMPASS waveform files
 do not encode the ADC sample period; verify the operator-entered value for the
 originating digitizer.
 
+## Scope noise spectrum
+
+**View → Scope Noise Spectrum** adds a power-spectrum plot below each live Scope.
+It diagnoses the analogue path and the baseline: interference lines,
+high-voltage converter ripple, the noise floor and filter responses. It does not
+measure energy, because pulses at random times add a continuum, not lines. Each
+received frame (viewer, Acquire Frame or DMA preview) is detrended, windowed and
+transformed as one segment of a Welch average. The average is kept in linear
+power, and dB is only a display scale. The one-sided density is in ADC codes:
+codes²/Hz, codes/√Hz or dB re 1 code²/Hz. The annotation reports fs, N, the bin
+spacing Δf = fs/N, the window's equivalent noise bandwidth, the frame count K
+(a noise bin varies by about 1/√K) and a Parseval ratio that should be near 1.
+
+Use the **Periodic** trigger for baseline noise: level and edge triggers
+synchronise frames to pulses, and the plot warns about it. Use the flat-top
+window to read tone amplitudes and Hann for noise floors. Viewer frames are
+mean4 points at 8 ns. Their response is −3.7 dB at the 62.5 MHz Nyquist
+frequency, and content from 62.5 to 125 MHz aliases into the plot. A Scope
+frame is a short segment, so mains and supply ripple (Δf ≥ 61 kHz here) need the
+periodic-sum series instead. Right-click exports the mean, max-hold and min-hold
+spectra to CSV with their acquisition metadata. This is software analysis; it
+has not yet been validated on live hardware.
+
 ## MCA gain-drift diagnostic
 
 Run `examples/mca_gain_drift_diagnostic.py` for a repeatable dual-channel trace

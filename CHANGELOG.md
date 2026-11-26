@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Scope noise spectrum** — **View → Scope Noise Spectrum** averages the
+  one-sided power spectral density of received Scope waveforms (viewer frames,
+  Acquire Frame and DMA previews) in a plot below each Scope, in codes²/Hz,
+  codes/√Hz or dB re 1 code²/Hz. It is a baseline and interference diagnostic,
+  not an energy measurement. Hann, Blackman-Harris, flat-top and rectangular
+  windows; linear (N frames, then hold), exponential, max-hold and min-hold
+  averaging, always in linear power. The annotation gives source, fs, N, Δf,
+  ENBW, frame count and a Parseval check, marks lines 10 dB above the floor and
+  warns that level and edge triggers add pulse content. A new frame length,
+  sample period, source, trigger mode or DAC baseline restarts the average and
+  says why. The mean4 response of 8 ns points can be divided out for display.
+  Right-click exports frequency, mean, max and min to CSV with a metadata
+  header. Hiding pauses it and session replay adds nothing. F1 opens its Help
+  topic. Software analysis; not validated on live hardware.
+
+### Fixed
+
+- **Scope distribution tooltip** — the accumulated distribution's tooltip was a
+  single screen-wide line. It is now a few wrapped lines for the selected mode.
+
 ## [0.9.6] — 2026-11-25
 
 The MCA Peak Analysis Workbench calibrates organic scintillators from their

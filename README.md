@@ -89,6 +89,13 @@ Use **Connection → Connect…** when you want to connect later.
    **Auto Setup**. Check its result, the signal polarity, and trigger settings.
 3. Click **Start** to view waveforms and **Stop** to finish.
 
+To check the baseline for noise and interference lines, select the **Periodic**
+trigger and turn on **View → Scope Noise Spectrum**. It averages the power
+spectrum of the received frames below the Scope plot, in ADC codes. A Scope frame
+is short, so it cannot resolve mains or supply ripple: the finest bin spacing is
+about 61 kHz. This is software analysis that has not yet been validated on live
+hardware.
+
 ### Collect a spectrum with MCA
 
 1. Open **MCA** for the same channel, with **Record list-mode DMA** unchecked.

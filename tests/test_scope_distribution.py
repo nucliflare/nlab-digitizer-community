@@ -584,6 +584,19 @@ def test_histogram_context_menu_opens_with_exclusive_modes_and_channel_clear(qtb
     scope.set_pretrigger_samples.assert_not_called()
 
 
+@pytest.mark.parametrize("mode", list(HistogramMode))
+def test_distribution_tooltip_is_short_and_wrapped(qtbot: QtBot, mode: HistogramMode):
+    # Plot-item tooltips bypass the application's widget-tooltip wrapping.
+    controller, _ = _controller(qtbot)
+    controller.set_scope_distribution_enabled(True)
+    controller.set_scope_distribution_mode(mode)
+    _receive(controller, [100] * 8 + [90, np.nan, 80])
+    lines = controller._distribution_plot.toolTip().splitlines()
+    assert max(len(line) for line in lines) <= 68
+    assert len(lines) <= 9
+    assert "Right-click" in "\n".join(lines)
+
+
 def test_histogram_mode_round_trips_channel_configuration(qtbot: QtBot):
     controller, _ = _controller(qtbot)
     controller.set_scope_distribution_mode(HistogramMode.INTEGRAL)

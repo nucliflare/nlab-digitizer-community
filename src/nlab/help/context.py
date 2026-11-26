@@ -8,8 +8,9 @@ are resolved through their field widgets, not through translated label text.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import (
     QAbstractButton,
     QAbstractSpinBox,
@@ -17,12 +18,16 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDial,
     QFormLayout,
+    QGraphicsView,
     QLabel,
     QLayoutItem,
     QLineEdit,
     QSlider,
     QWidget,
 )
+
+GRAPHICS_HELP_TOPIC_KEY = 0x6E6C6162
+"""``QGraphicsItem.setData`` key naming the help topic of a plot item."""
 
 
 @dataclass(frozen=True)
@@ -46,7 +51,7 @@ FORM_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
         "Start": "scope-run", "Stop": "scope-run", "AcquireFrame": "scope-run",
         "AutoSetup": "scope-auto", "DisplayMode": "display",
         "Persistence": "display", "PersistenceValue": "display", "RefreshRate": "refresh",
-        "Waveform": "scope", "plotWaveform": "scope",
+        "Waveform": "scope", "plotWaveform": "scope", "SpectrumInfo": "scope-spectrum",
     }),
     "MCAView": ("mca", {
         "Polarity": "mca-polarity", "PulsePolarity": "mca-polarity",
@@ -235,6 +240,32 @@ def _description(widget: QWidget) -> tuple[str, str]:
     if not label and isinstance(widget, QAbstractButton):
         label = widget.text()
     return label or widget.objectName(), widget.toolTip()
+
+
+def graphics_help_topic(widget: QWidget, global_point: QPoint) -> str | None:
+    """Topic of the plot item under ``global_point`` in a graphics view, if tagged.
+
+    Plots share one view, so a widget name cannot tell them apart. Items, or
+    their parents, opt in with ``setData(GRAPHICS_HELP_TOPIC_KEY, topic)``.
+    """
+    view = widget if isinstance(widget, QGraphicsView) else widget.parentWidget()
+    if not isinstance(view, QGraphicsView):
+        return None
+    for item in view.items(view.viewport().mapFromGlobal(global_point)):
+        current = item
+        while current is not None:
+            topic = current.data(GRAPHICS_HELP_TOPIC_KEY)
+            if isinstance(topic, str) and topic:
+                return topic
+            current = current.parentItem()
+    return None
+
+
+def resolve_context_at(widget: QWidget, global_point: QPoint) -> HelpContext:
+    """``resolve_context`` refined by a tagged plot item under the pointer."""
+    context = resolve_context(widget)
+    topic = graphics_help_topic(widget, global_point)
+    return replace(context, topic=topic, specific=True) if topic else context
 
 
 def resolve_context(widget: QWidget) -> HelpContext:

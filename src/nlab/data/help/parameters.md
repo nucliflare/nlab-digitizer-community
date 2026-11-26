@@ -183,6 +183,62 @@ the final run summary for continuity and hardware faults. Current waveform DMA
 cannot simultaneously own the same Scope buffer. The file layout and an example
 reader are in [Scope waveform binary format](#format-waveforms).
 
+## Scope — noise spectrum {#scope-spectrum}
+
+**View → Scope Noise Spectrum** shows, below each Scope plot, the power spectral
+density of the waveforms that reach the GUI: live viewer frames, Acquire Frame
+reads and DMA previews. It is a diagnostic of the analogue path and baseline:
+interference lines, high-voltage converter ripple, the noise floor and filter
+responses. It does not measure energy; pulses at random times add a continuum,
+not lines. Hiding the plot pauses averaging, and session replay adds nothing.
+
+Each frame is one segment of a Welch average: it is detrended, windowed and
+transformed, and frames are averaged in linear power. The plot shows the
+one-sided density in codes²/Hz, codes/√Hz or dB re 1 code²/Hz. dB is a display
+scale only: averaging in dB would read about 2.5 dB low for noise. Results are
+in ADC codes; no converter full scale is assumed, so there is no dBFS scale.
+
+- **Resolution.** Δf = fs/N. The longest 8188-point viewer frame at 8 ns gives
+  Δf ≈ 61 kHz, so mains and supply ripple cannot be resolved here; they belong
+  to [Periodic sums](#scope-sums).
+- **Window.** Hann for noise floors; flat-top to read tone amplitudes (within
+  0.01 dB); Blackman-Harris for low leakage; rectangular has the narrowest bins
+  and the most leakage. A tone between bins reads low by up to 1.42 dB (Hann),
+  0.83 dB (Blackman-Harris) or 3.92 dB (rectangular). The annotation's ENBW
+  converts a density into noise power in a band.
+- **Averaging.** Linear averages N frames and then holds; Exponential follows
+  changes over about N frames; Max and Min hold keep per-bin extremes. A noise
+  bin's relative standard deviation is about 1/√K. Changing the frame length,
+  sample period, source (viewer or DMA preview), trigger mode, window,
+  averaging, N or DAC baseline restarts the average, and the annotation says why.
+- **mean4 points.** Viewer frames and Periodic DMA previews are means of four
+  2 ns samples (fs = 125 MHz). Their response falls to |H| = 0.653 (−3.7 dB) at
+  the 62.5 MHz Nyquist frequency, and content between 62.5 and 125 MHz aliases
+  with weak attenuation. **Compensate mean4 response** divides |H|² out for
+  display where |H| ≥ 0.1; it cannot remove aliases, and exported values stay
+  uncompensated.
+- **Trigger bias.** Level and edge triggers synchronise frames to pulses, so the
+  spectrum includes pulse content. Use the **Periodic** trigger for baseline
+  noise. The trigger mode is recorded with the spectrum.
+- **Parseval.** The annotation compares the integrated density with the mean
+  square of the detrended frames. It is close to 1 for noise; a large departure
+  points to a normalisation fault, not to the signal.
+
+The annotation lists source, fs, N, Δf, ENBW, K and the Parseval ratio. The
+cursor reads frequency and level. From two frames on, triangles mark and the
+tooltip lists lines in the mean spectrum more than 10 dB above its
+running-median floor; a single frame's noise would exceed that about once per
+frame. Right-click for window, averaging, N, units, a
+logarithmic frequency axis, Reset and **Export spectrum CSV…** (frequency, mean,
+max and min in codes²/Hz after a commented metadata header). This is software
+analysis; it has not been validated on live hardware.
+
+**References** — Spectral estimation and windows.
+
+- Welch, P. D. (1967). The use of fast Fourier transform for the estimation of power spectra: a method based on time averaging over short, modified periodograms. *IEEE Trans. Audio Electroacoust.* AU-15, 70–73. doi:10.1109/TAU.1967.1161901
+- Harris, F. J. (1978). On the use of windows for harmonic analysis with the discrete Fourier transform. *Proc. IEEE* 66, 51–83. doi:10.1109/PROC.1978.10837
+- Heinzel, G., Rüdiger, A., Schilling, R. (2002). Spectrum and spectral density estimation by the discrete Fourier transform (DFT), including a comprehensive list of window functions and some new flat-top windows. Max-Planck-Institut für Gravitationsphysik, Hannover. hdl:11858/00-001M-0000-0013-557A-5
+
 ## Acquisition — duration {#duration}
 
 Duration is in seconds. **0 means run until stopped**, not a zero-length run.

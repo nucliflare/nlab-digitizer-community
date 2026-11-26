@@ -3,15 +3,18 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from enum import IntEnum
 from pathlib import Path
 from time import monotonic
+from typing import Any
 
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import (
+    QPointF,
     QRectF,
     QSettings,
     Qt,
@@ -22,10 +25,35 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtGui import QAction, QActionGroup, QCursor
-from PySide6.QtWidgets import QFileDialog, QMenu, QSlider, QSpinBox, QWidget
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QLabel,
+    QMenu,
+    QSizePolicy,
+    QSlider,
+    QSpinBox,
+    QWidget,
+)
 
-from nlab import settings_keys
+from nlab import __version__, settings_keys
 from nlab.analysis.scope_distribution import AccumulatedAmplitudeHistogram, HistogramMode
+from nlab.analysis.waveform_spectrum import (
+    UNIT_LABELS,
+    AccumulatedSpectrum,
+    FramePsd,
+    SpectrumAveraging,
+    SpectrumUnit,
+    SpectrumWindow,
+    Spur,
+    compensated_psd,
+    decimation_factor,
+    find_spurs,
+    format_frequency,
+    mean_decimation_response,
+    parseval_check,
+    to_display_units,
+    write_spectrum_csv,
+)
 from nlab.controllers.measurement_series import (
     MeasurementSeries,
     owner_series,
@@ -51,6 +79,7 @@ from nlab.hardware.digitizer.scope import (
     TriggerMode,
     range_spec,
 )
+from nlab.help.context import GRAPHICS_HELP_TOPIC_KEY
 from nlab.ui.ui_scope_view import Ui_ScopeView
 from nlab.utils.recording_paths import (
     available_path,
@@ -70,6 +99,7 @@ from nlab.views.plot_viewbox import (
 from nlab.views.responsive_layout import configure_scope_layout
 from nlab.views.spec_binding import bind_slider, bind_spinbox
 from nlab.views.time_axis import format_duration_ns, time_axis_scale
+from nlab.views.tooltips import wrap_tooltip
 from nlab.workers.dma_workers import IIOScopeDmaWorker
 from nlab.workers.scope_auto_setup_worker import (
     ScopeAutoSetupResult,
@@ -106,6 +136,18 @@ _SCOPE_CONTROL_TOOLTIPS = {
         "Click again to cancel."
     ),
 }
+
+_SPECTRUM_COUNTS = (10, 30, 100, 300, 1000, 0)
+_SPECTRUM_SETTINGS = (
+    "window", "averaging", "average_count", "unit", "log_frequency", "mean4_compensation",
+)
+# Level and edge triggers synchronise frames to pulses (pulse content, not baseline).
+_PULSE_SYNCHRONISED_TRIGGERS = (
+    TriggerMode.ANY_ABOVE, TriggerMode.ANY_BELOW,
+    TriggerMode.RISING_EDGE, TriggerMode.FALLING_EDGE,
+)
+_SPECTRUM_SPUR_INTERVAL_S = 0.5
+_SPECTRUM_NOT_VALIDATED = "Software analysis; not validated on live hardware."
 
 
 class DisplayMode(IntEnum):
@@ -219,6 +261,18 @@ class ScopeController(QWidget):
         self._elapsed_timer.timeout.connect(self._update_elapsed_time)
         self._distribution_enabled = False
         self._amplitude_histogram = AccumulatedAmplitudeHistogram()
+        self._spectrum_enabled = False
+        self._spectrum = AccumulatedSpectrum()
+        self._spectrum_unit = SpectrumUnit.DB
+        self._spectrum_log_frequency = False
+        self._spectrum_compensate = False
+        self._spectrum_display: tuple[np.ndarray, np.ndarray] | None = None
+        self._spectrum_spurs: list[Spur] = []
+        self._spectrum_spurs_at = -np.inf
+        self._spectrum_spurs_frames = 0
+        self._spectrum_info = ""
+        self._spectrum_cursor = ""
+        self._spectrum_log_mode = (False, False)
         self._session_replay_active = False
         self._session_replay_display_mode: int | None = None
         self._replay_hardware_interlocked = False
@@ -421,12 +475,20 @@ class ScopeController(QWidget):
             self.ui.dialPersistence.setValue(int(v))
         if (v := s.value(self._settings_key("refresh_rate"))) is not None:
             self.ui.spinRefreshRate.setValue(int(v))
+        stored = {
+            name: s.value(self._settings_key(f"spectrum_{name}")) for name in _SPECTRUM_SETTINGS
+        }
+        self._apply_spectrum_settings(
+            {name: value for name, value in stored.items() if value is not None}
+        )
 
     def save_display_settings(self) -> None:
         s = QSettings()
         s.setValue(self._settings_key("display_mode"), self.ui.comboDisplayMode.currentIndex())
         s.setValue(self._settings_key("persistence"), self.ui.dialPersistence.value())
         s.setValue(self._settings_key("refresh_rate"), self.ui.spinRefreshRate.value())
+        for name, value in self._spectrum_settings().items():
+            s.setValue(self._settings_key(f"spectrum_{name}"), value)
 
     def configuration_settings(self) -> dict[str, int | bool | str]:
         """Return settings owned by this view rather than by scope hardware."""
@@ -438,6 +500,7 @@ class ScopeController(QWidget):
             "series_runs": self._series.runs(),
             "dma_enabled": self.ui.cbDmaEnable.isChecked(),
             "histogram_mode": self._amplitude_histogram.mode.value,
+            **{f"spectrum_{name}": value for name, value in self._spectrum_settings().items()},
         }
 
     def apply_configuration_settings(self, settings: object) -> None:
@@ -461,6 +524,10 @@ class ScopeController(QWidget):
                 self.set_scope_distribution_mode(HistogramMode(settings["histogram_mode"]))
             except ValueError:
                 log.warning("Ignoring unknown Scope histogram mode %r", settings["histogram_mode"])
+        self._apply_spectrum_settings({
+            name: settings[f"spectrum_{name}"]
+            for name in _SPECTRUM_SETTINGS if f"spectrum_{name}" in settings
+        })
         self.save_display_settings()
 
     def reset_zoom(self) -> None:
@@ -478,6 +545,7 @@ class ScopeController(QWidget):
         if getattr(self, "_session_replay_active", False):
             self.end_session_replay()
         self.clear_scope_distribution()
+        self.clear_scope_spectrum("session replay")
         self._session_replay_active = True
         self._stop_live_for_replay()
         self._session_replay_display_mode = self.ui.comboDisplayMode.currentIndex()
@@ -617,6 +685,7 @@ class ScopeController(QWidget):
             return
         self._session_replay_active = False
         self.clear_scope_distribution()
+        self.clear_scope_spectrum("session replay ended")
         self._restore_controls_after_session_replay()
         self.status.setText(
             "Session replay unloaded; Scope acquisition remains stopped"
@@ -1863,9 +1932,12 @@ class ScopeController(QWidget):
             count=geometry.waveform_samples,
             offset=8,
         )
+        source = f"DMA preview ({geometry.sample_period_ns} ns/sample)"
         self._accumulate_scope_distribution(
-            frame, source=f"DMA preview ({geometry.sample_period_ns} ns/sample)",
-            sample_period_ns=geometry.sample_period_ns,
+            frame, source=source, sample_period_ns=geometry.sample_period_ns,
+        )
+        self._accumulate_scope_spectrum(
+            frame, source=source, sample_period_ns=geometry.sample_period_ns,
         )
         x_time = np.arange(frame.size) * geometry.sample_period_ns
         if self._display_mode == DisplayMode.RAW:
@@ -1965,6 +2037,10 @@ class ScopeController(QWidget):
             y_voltage, source="Scope viewer (8 ns mean4)",
             sample_period_ns=self._VIEWER_POINT_PERIOD_NS,
         )
+        self._accumulate_scope_spectrum(
+            y_voltage, source="Scope viewer (8 ns mean4)",
+            sample_period_ns=self._VIEWER_POINT_PERIOD_NS,
+        )
         expected = self._frame_samples_from_ui() // 4
         if len(y_voltage) < expected:
             self.status.setText(
@@ -1993,6 +2069,7 @@ class ScopeController(QWidget):
         self._scope.set_frame_samples(frame_samples)
         self._reset_persistence_buffer(frame_samples)
         self._update_axis_ranges()
+        self.clear_scope_spectrum("frame duration changed")
         if self._frame_exceeds_viewer_limit():
             self.status.setText(self._viewer_limit_message())
 
@@ -2024,6 +2101,10 @@ class ScopeController(QWidget):
         frame_samples = self._frame_samples_from_ui()
         frame = raw_frame[: frame_samples // 4]
         self._accumulate_scope_distribution(
+            frame, source="Scope viewer (8 ns mean4)",
+            sample_period_ns=self._VIEWER_POINT_PERIOD_NS,
+        )
+        self._accumulate_scope_spectrum(
             frame, source="Scope viewer (8 ns mean4)",
             sample_period_ns=self._VIEWER_POINT_PERIOD_NS,
         )
@@ -2097,6 +2178,7 @@ class ScopeController(QWidget):
     def _setup_graph(self) -> None:
         self._setup_plot_layout()
         self._setup_distribution_plot()
+        self._setup_spectrum_plot()
         self._setup_persistence_layer()
         self._setup_raw_layer()
         self._setup_threshold_line()
@@ -2332,28 +2414,543 @@ class ScopeController(QWidget):
             f"<span style='font-size:8pt'>{histogram.sample_count:,} {entry_unit} / "
             f"{histogram.frame_count:,} frames; skipped {histogram.rejected_frames:,}</span>"
         )
-        self._distribution_plot.setToolTip(
-            f"{histogram.source or 'Live Scope distribution; waiting for waveforms'}. "
-            "Counts received waveform samples, not all hardware events. "
-            "Viewer polling / DMA preview can omit frames. "
-            "Sample/peak display bins span 100 ADC codes at every zoom level. "
-            "Peak mode counts one raw minimum for falling/any-below triggers, "
-            "one maximum otherwise. Integral mode uses the mean of complete "
-            "pretrigger bins and the post-trigger area on the selected side only, "
-            "reported positive in ADC codes·ns (sample-hold sum times native dt). "
-            "Integral axis direction follows the selected pulse polarity in Scope. "
-            "Rectified noise contributes positive area. Missing baselines skip a frame. "
-            f"Integral bin width: {histogram.integral_bin_width:g} ADC codes·ns; "
-            "adjacent bins merge if more range is needed. "
-            "Right-click to change mode, reset zoom or clear this histogram. "
-            "Hover and press L to toggle linear/log counts. "
-            "Log view clips zero-count bins to a 0.5-count plotting boundary. "
-            f"Rejected samples: {histogram.rejected_count:,}; "
-            f"skipped frames: {histogram.rejected_frames:,}. "
-            f"{histogram.last_rejection} "
-            "Hidden: accumulation paused. Replay: no accumulation. "
-            "Use View > Clear Scope Distribution to reset."
+        # A plot item's tooltip bypasses the application's widget-tooltip
+        # wrapping, so keep it short and wrap it here.
+        tooltip = [
+            f"{histogram.source or 'Live Scope distribution; waiting for waveforms'}.",
+            "Received waveforms only; polling and preview omit frames.",
+            {
+                HistogramMode.SAMPLES: "Each display bin spans 100 ADC codes.",
+                HistogramMode.AMPLITUDE: (
+                    "One raw minimum per frame for falling/any-below triggers, "
+                    "otherwise one maximum; bins span 100 ADC codes."
+                ),
+                HistogramMode.INTEGRAL: (
+                    "Pulse-side area beyond the pretrigger mean, ADC codes·ns, bin "
+                    f"{histogram.integral_bin_width:g}. Noise adds area; no baseline skips."
+                ),
+            }[histogram.mode],
+            "Right-click: mode, zoom, clear. Hover and press L: linear/log counts. "
+            "Paused while hidden; session replay adds nothing.",
+        ]
+        if histogram.rejected_count or histogram.rejected_frames:
+            tooltip.append(
+                f"Rejected samples {histogram.rejected_count:,}, skipped frames "
+                f"{histogram.rejected_frames:,}. {histogram.last_rejection}".rstrip()
+            )
+        self._distribution_plot.setToolTip(wrap_tooltip("\n".join(tooltip)))
+
+    # ------------------------------------------------------------------
+    # Noise spectrum (display-only consumer of the same received frames)
+    # ------------------------------------------------------------------
+
+    def _setup_spectrum_plot(self) -> None:
+        layout = self._scope_plot_layout
+        view = HistogramViewBox()
+        self._spectrum_plot = pg.PlotItem(viewBox=view)
+        self._spectrum_plot.setParentItem(layout)
+        show_frame_axes(self._spectrum_plot)
+        self._spectrum_plot.showGrid(x=True, y=True, alpha=0.2)
+        self._spectrum_plot.setLabel("bottom", "Frequency", units="Hz")
+        self._spectrum_curve = pg.PlotDataItem(pen=pg.mkPen("#277da1"))
+        self._spectrum_markers = pg.PlotDataItem(
+            pen=None, symbol="t", symbolSize=9,
+            symbolBrush=pg.mkBrush("#c0563b"), symbolPen=None,
         )
+        self._spectrum_plot.addItem(self._spectrum_curve)
+        self._spectrum_plot.addItem(self._spectrum_markers)
+        self._spectrum_axis_label = pg.LabelItem("", angle=-90)
+        self._spectrum_axis_label.setParentItem(layout)
+        for item in (self._spectrum_plot, self._spectrum_axis_label):
+            item.setData(GRAPHICS_HELP_TOPIC_KEY, "scope-spectrum")
+            item.hide()
+        # A plain wrapping label: a pg.LabelItem pins its layout column to the
+        # text width, which pushed the amplitude distribution off screen.
+        self._spectrum_label = QLabel(self)
+        self._spectrum_label.setObjectName("labelSpectrumInfo")
+        self._spectrum_label.setWordWrap(True)
+        self._spectrum_label.setTextFormat(Qt.TextFormat.RichText)
+        self._spectrum_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum
+        )
+        self._spectrum_label.hide()
+        self.ui.waveformLayout.addWidget(self._spectrum_label)
+        self._setup_spectrum_menu(view)
+        scene = self.ui.plotWaveform.scene()
+        if scene is not None:
+            scene.sigMouseMoved.connect(self._on_spectrum_mouse_moved)
+        self.ui.comboTriggerMode.currentIndexChanged.connect(
+            lambda _index: self.clear_scope_spectrum("trigger mode changed")
+        )
+        self.ui.spinDacValue.valueChanged.connect(
+            lambda _value: self.clear_scope_spectrum("DAC baseline changed")
+        )
+        # Tick labels are measured when painted, so re-align shortly after a
+        # range change rather than before the new labels exist.
+        self._spectrum_axis_timer = QTimer(self)
+        self._spectrum_axis_timer.setSingleShot(True)
+        self._spectrum_axis_timer.setInterval(100)
+        self._spectrum_axis_timer.timeout.connect(self._align_spectrum_axes)
+        for plot in (self._plot_item, self._spectrum_plot):
+            plot.getViewBox().sigYRangeChanged.connect(self._schedule_spectrum_axis_alignment)
+
+    def _schedule_spectrum_axis_alignment(self, *_args: object) -> None:
+        if self._spectrum_enabled:
+            self._spectrum_axis_timer.start()
+
+    def _align_spectrum_axes(self) -> None:
+        """Give both left axes one width so the two data areas line up.
+
+        Each axis otherwise sizes itself to its own tick labels (``-30000``
+        versus ``-15``), offsetting the spectrum from the waveform above it.
+        Hidden, the waveform axis returns to automatic sizing.
+        """
+        main = self._plot_item.getAxis("left")
+        if not self._spectrum_enabled:
+            if main.fixedWidth is not None:
+                main.setWidth(None)
+            return
+        side = self._spectrum_plot.getAxis("left")
+
+        def needed(axis: Any) -> float:
+            # AxisItem._updateWidth without a label: tick text, offset, ticks.
+            style = axis.style
+            return float(axis.textWidth + style["tickTextOffset"][0]
+                         + max(0, style["tickLength"]))
+
+        width = int(np.ceil(max(needed(main), needed(side))))
+        for axis in (main, side):
+            if axis.fixedWidth != width:
+                axis.setWidth(width)
+
+    def _setup_spectrum_menu(self, view: HistogramViewBox) -> None:
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        self._spectrum_menu = menu
+        self._spectrum_actions: dict[tuple[str, object], QAction] = {}
+
+        def choices(
+            title: str, kind: str, handler: Callable[[Any], None],
+            options: tuple[tuple[object, str, str], ...],
+        ) -> None:
+            submenu = menu.addMenu(title)
+            submenu.setToolTipsVisible(True)
+            group = QActionGroup(self)
+            for value, text, tip in options:
+                action = submenu.addAction(text)
+                action.setCheckable(True)
+                action.setToolTip(tip)
+                group.addAction(action)
+                action.triggered.connect(
+                    lambda _checked=False, selected=value: handler(selected)
+                )
+                self._spectrum_actions[(kind, value)] = action
+
+        choices("Window", "window", self.set_scope_spectrum_window, (
+            (SpectrumWindow.HANN, "Hann (noise floor)",
+             "1.5-bin noise bandwidth; a tone between bins reads up to 1.42 dB low."),
+            (SpectrumWindow.BLACKMAN_HARRIS, "Blackman-Harris (low leakage)",
+             "2.0-bin noise bandwidth; up to 0.83 dB low between bins."),
+            (SpectrumWindow.FLATTOP, "Flat-top (tone amplitude)",
+             "Tone amplitude within 0.01 dB; 3.8-bin noise bandwidth."),
+            (SpectrumWindow.BOXCAR, "Rectangular",
+             "Narrowest bins but strong leakage; up to 3.92 dB low between bins."),
+        ))
+        choices("Averaging", "averaging", self.set_scope_spectrum_averaging, (
+            (SpectrumAveraging.LINEAR, "Linear (N frames, then hold)",
+             "Mean of independent frames in linear power; holds after N frames."),
+            (SpectrumAveraging.EXPONENTIAL, "Exponential (α = 1/N)",
+             "Running average in linear power; follows changes over about N frames."),
+            (SpectrumAveraging.MAX_HOLD, "Max hold",
+             "Largest power seen in each bin since the last reset."),
+            (SpectrumAveraging.MIN_HOLD, "Min hold",
+             "Smallest power seen in each bin since the last reset."),
+        ))
+        choices("Frames N", "count", self.set_scope_spectrum_average_count, tuple(
+            (count, f"{count:,}" if count else "Unlimited",
+             "Frames per linear average, or the exponential time constant.")
+            for count in _SPECTRUM_COUNTS
+        ))
+        choices("Units", "unit", self.set_scope_spectrum_unit, tuple(
+            (unit, UNIT_LABELS[unit], "Display only; averaging always uses linear power.")
+            for unit in SpectrumUnit
+        ))
+        self._spectrum_log_action = menu.addAction("Logarithmic frequency axis")
+        self._spectrum_log_action.setCheckable(True)
+        self._spectrum_log_action.toggled.connect(self.set_scope_spectrum_log_frequency)
+        self._spectrum_compensation_action = menu.addAction(
+            "Compensate mean4 response (display only)"
+        )
+        self._spectrum_compensation_action.setCheckable(True)
+        self._spectrum_compensation_action.setToolTip(
+            "Divides out the four-sample mean's |H|² where |H| ≥ 0.1. Aliased content "
+            "from 62.5-125 MHz is not removed. Exported values stay uncompensated."
+        )
+        self._spectrum_compensation_action.toggled.connect(self.set_scope_spectrum_compensation)
+        menu.addSeparator()
+        menu.addAction("Reset spectrum", lambda: self.clear_scope_spectrum("reset"))
+        menu.addAction("Export spectrum CSV…", self.export_scope_spectrum)
+        menu.aboutToShow.connect(self._sync_spectrum_menu)
+        view.set_histogram_menu(menu)
+        self._sync_spectrum_menu()
+
+    def _sync_spectrum_menu(self) -> None:
+        selected = {
+            ("window", self._spectrum.window),
+            ("averaging", self._spectrum.averaging),
+            ("count", self._spectrum.average_count),
+            ("unit", self._spectrum_unit),
+        }
+        for key, action in self._spectrum_actions.items():
+            action.setChecked(key in selected)
+        for action, checked in (
+            (self._spectrum_log_action, self._spectrum_log_frequency),
+            (self._spectrum_compensation_action, self._spectrum_compensate),
+        ):
+            blocked = action.blockSignals(True)
+            action.setChecked(checked)
+            action.blockSignals(blocked)
+
+    def _spectrum_settings(self) -> dict[str, int | bool | str]:
+        return {
+            "window": self._spectrum.window.value,
+            "averaging": self._spectrum.averaging.value,
+            "average_count": self._spectrum.average_count,
+            "unit": self._spectrum_unit.value,
+            "log_frequency": self._spectrum_log_frequency,
+            "mean4_compensation": self._spectrum_compensate,
+        }
+
+    def _apply_spectrum_settings(self, values: object) -> None:
+        """Apply saved spectrum options; skip (and log) any invalid entry."""
+        if not isinstance(values, Mapping):
+            return
+
+        def flag(value: object) -> bool:
+            return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+        appliers: dict[str, Callable[[object], None]] = {
+            "window": lambda value: self._spectrum.set_window(str(value)),
+            "averaging": lambda value: self._spectrum.set_averaging(str(value)),
+            "average_count": lambda value: self._spectrum.set_average_count(int(str(value))),
+            "unit": lambda value: setattr(self, "_spectrum_unit", SpectrumUnit(str(value))),
+            "log_frequency": lambda value: setattr(self, "_spectrum_log_frequency", flag(value)),
+            "mean4_compensation": lambda value: setattr(
+                self, "_spectrum_compensate", flag(value)
+            ),
+        }
+        for name, apply in appliers.items():
+            if name in values:
+                try:
+                    apply(values[name])
+                except (TypeError, ValueError):
+                    log.warning("Ignoring invalid Scope spectrum %s %r", name, values[name])
+        if hasattr(self, "_spectrum_menu"):
+            self._sync_spectrum_menu()
+            self._spectrum_plot.enableAutoRange()
+            self._refresh_scope_spectrum(force_spurs=True)
+
+    def set_scope_spectrum_window(self, window: SpectrumWindow | str) -> None:
+        self._spectrum.set_window(window)
+        self._sync_spectrum_menu()
+        self._refresh_scope_spectrum(force_spurs=True)
+
+    def set_scope_spectrum_averaging(self, averaging: SpectrumAveraging | str) -> None:
+        self._spectrum.set_averaging(averaging)
+        self._sync_spectrum_menu()
+        self._refresh_scope_spectrum(force_spurs=True)
+
+    def set_scope_spectrum_average_count(self, count: int) -> None:
+        self._spectrum.set_average_count(int(count))
+        self._sync_spectrum_menu()
+        self._refresh_scope_spectrum(force_spurs=True)
+
+    def set_scope_spectrum_unit(self, unit: SpectrumUnit | str) -> None:
+        self._spectrum_unit = SpectrumUnit(unit)
+        self._sync_spectrum_menu()
+        self._spectrum_plot.enableAutoRange()
+        self._refresh_scope_spectrum(force_spurs=True)
+
+    def set_scope_spectrum_log_frequency(self, enabled: bool) -> None:
+        self._spectrum_log_frequency = bool(enabled)
+        self._sync_spectrum_menu()
+        self._spectrum_plot.enableAutoRange()
+        self._refresh_scope_spectrum()
+
+    def set_scope_spectrum_compensation(self, enabled: bool) -> None:
+        self._spectrum_compensate = bool(enabled)
+        self._sync_spectrum_menu()
+        self._refresh_scope_spectrum(force_spurs=True)
+
+    def set_scope_spectrum_enabled(self, enabled: bool) -> None:
+        """Show and average received live waveforms' spectra; hiding pauses."""
+        if self._spectrum_enabled == enabled:
+            return
+        self._spectrum_enabled = enabled
+        layout = self._scope_plot_layout
+        items = ((self._spectrum_axis_label, 0), (self._spectrum_plot, 1))
+        grid = layout.layout
+        if enabled:
+            for item, column in items:
+                layout.addItem(item, row=2, col=column)
+                item.show()
+            grid.setRowSpacing(1, grid.verticalSpacing())
+            grid.setRowStretchFactor(0, 3)
+            grid.setRowStretchFactor(2, 2)
+            self._spectrum_label.show()
+            self._refresh_scope_spectrum(force_spurs=True)
+            self._schedule_spectrum_axis_alignment()
+        else:
+            for item, _column in items:
+                layout.removeItem(item)
+                item.setParentItem(layout)
+                item.hide()
+            self._spectrum_label.hide()
+            # An explicit 0 would override the plot's Expanding policy and
+            # collapse it; 1 restores the original share of the free height.
+            # The empty row 2 would otherwise still add its row spacing.
+            grid.setRowStretchFactor(0, 1)
+            grid.setRowStretchFactor(2, 0)
+            grid.setRowSpacing(1, 0)
+            self._spectrum_axis_timer.stop()
+            self._align_spectrum_axes()
+
+    def clear_scope_spectrum(self, reason: str = "cleared") -> None:
+        """Start a new spectrum average on this channel and record why."""
+        self._spectrum.clear(reason)
+        self._spectrum_spurs = []
+        self._spectrum_spurs_at = -np.inf
+        self._spectrum_spurs_frames = 0
+        if hasattr(self, "_spectrum_plot"):
+            self._spectrum_plot.enableAutoRange()
+            self._refresh_scope_spectrum()
+
+    def _spectrum_trigger_mode(self) -> str | None:
+        text = self.ui.comboTriggerMode.currentText()
+        return text or None
+
+    def _accumulate_scope_spectrum(
+        self, samples: np.ndarray, *, source: str, sample_period_ns: float
+    ) -> None:
+        if not self._spectrum_enabled or self._session_replay_active:
+            return
+        if self._waveform_drag is not None or self._pretrigger_line_drag is not None:
+            return
+        rejected = self._spectrum.rejected_frames
+        added = self._spectrum.add(
+            samples, source=source, sample_period_ns=sample_period_ns,
+            trigger_mode=self._spectrum_trigger_mode(),
+        )
+        # Repaint only when the spectrum, or its rejection report, changed.
+        if added or self._spectrum.rejected_frames != rejected:
+            self._refresh_scope_spectrum()
+
+    def _refresh_scope_spectrum(self, *, force_spurs: bool = False) -> None:
+        if not self._spectrum_enabled:
+            return
+        unit = self._spectrum_unit
+        log_mode = (self._spectrum_log_frequency, unit != SpectrumUnit.DB)
+        if log_mode != self._spectrum_log_mode:
+            # setLogMode re-transforms every item; do it only when it changes.
+            self._spectrum_plot.setLogMode(x=log_mode[0], y=log_mode[1])
+            self._spectrum_log_mode = log_mode
+        quantity = "ASD" if unit == SpectrumUnit.ASD else "PSD"
+        self._spectrum_axis_label.setText(f"{quantity} [{UNIT_LABELS[unit]}]")
+        result = self._spectrum.result()
+        if result is None:
+            self._spectrum_curve.clear()
+            self._spectrum_markers.clear()
+            self._spectrum_display = None
+            self._spectrum_spurs = []
+            self._set_spectrum_info(None)
+            self._align_spectrum_axes()
+            return
+        factor = decimation_factor(result.sample_period_ns, SCOPE_ADC_SAMPLE_PERIOD_NS)
+        compensated = self._spectrum_compensate and factor > 1
+        linear = (
+            compensated_psd(result, factor, SCOPE_ADC_SAMPLE_PERIOD_NS)
+            if compensated else result.psd
+        )
+        values = to_display_units(linear, unit)
+        # The detrended DC bin carries no information and has no log position.
+        frequencies, shown = result.frequencies[1:], values[1:]
+        self._spectrum_display = (frequencies, shown)
+        if unit != SpectrumUnit.DB:
+            shown = np.maximum(shown, np.finfo(np.float64).tiny)
+        self._spectrum_curve.setData(frequencies, shown)
+        self._update_spectrum_spurs(force=force_spurs, factor=factor, compensated=compensated)
+        spurs = [spur for spur in self._spectrum_spurs if spur.bin < values.size]
+        if spurs:
+            marker_values = values[[spur.bin for spur in spurs]]
+            if unit != SpectrumUnit.DB:
+                marker_values = np.maximum(marker_values, np.finfo(np.float64).tiny)
+            self._spectrum_markers.setData([spur.frequency for spur in spurs], marker_values)
+        else:
+            self._spectrum_markers.clear()
+        self._set_spectrum_info(result, factor=factor, compensated=compensated, spurs=spurs)
+        self._align_spectrum_axes()
+
+    def _update_spectrum_spurs(self, *, force: bool, factor: int, compensated: bool) -> None:
+        """Search the mean (never max-hold) for lines, at most every 0.5 s.
+
+        A single frame's noise bins are exponentially distributed: one in
+        about a thousand exceeds the median by 10 dB, so lines are only
+        searched from K = 2 (about one in a million). The search also reruns
+        whenever K doubles, so a burst of frames cannot keep a K = 2 result.
+        """
+        frames = self._spectrum.frames
+        if frames < 2:
+            self._spectrum_spurs = []
+            self._spectrum_spurs_frames = 0
+            return
+        now = monotonic()
+        if not (
+            force
+            or now - self._spectrum_spurs_at >= _SPECTRUM_SPUR_INTERVAL_S
+            or frames >= 2 * self._spectrum_spurs_frames
+        ):
+            return
+        mean = self._spectrum.result("mean")
+        if mean is None:
+            return
+        linear = (
+            compensated_psd(mean, factor, SCOPE_ADC_SAMPLE_PERIOD_NS) if compensated else mean.psd
+        )
+        self._spectrum_spurs = find_spurs(replace(mean, psd=linear))
+        self._spectrum_spurs_at = now
+        self._spectrum_spurs_frames = frames
+
+    def _set_spectrum_info(
+        self, result: FramePsd | None, *, factor: int = 1, compensated: bool = False,
+        spurs: list[Spur] | None = None,
+    ) -> None:
+        spectrum = self._spectrum
+        lines: list[str] = []
+        if result is None:
+            lines.append("Noise spectrum — waiting for waveforms")
+        else:
+            limit = (
+                f"/{spectrum.average_count:,}"
+                if spectrum.averaging == SpectrumAveraging.LINEAR and spectrum.average_count
+                else ""
+            )
+            lines.append(
+                f"{spectrum.source} · fs {format_frequency(result.fs)} · N {result.n:,} · "
+                f"Δf {format_frequency(result.delta_f)} · ENBW {format_frequency(result.enbw)} "
+                f"({result.window.value})"
+            )
+            lines.append(
+                f"K {spectrum.frames:,}{limit}{' (complete)' if spectrum.complete else ''} · "
+                f"±{100 * spectrum.relative_std:.1f}% per bin · "
+                f"Parseval {parseval_check(result):.3f} · {spectrum.averaging.value} average"
+            )
+            if factor > 1:
+                nyquist = result.fs / 2
+                response = float(mean_decimation_response(nyquist, factor,
+                                                          SCOPE_ADC_SAMPLE_PERIOD_NS)[()])
+                lines.append(
+                    f"mean{factor} points: |H| = {response:.3f} "
+                    f"({20 * np.log10(response):.1f} dB) at {format_frequency(nyquist)}; "
+                    f"{format_frequency(nyquist)}–{format_frequency(result.fs)} aliases"
+                    f"{' · compensated for display' if compensated else ''}"
+                )
+        trigger = self.ui.comboTriggerMode.currentData()
+        if trigger is not None and int(trigger) in {int(mode) for mode in
+                                                    _PULSE_SYNCHRONISED_TRIGGERS}:
+            lines.append(
+                "<span style='color:#c0563b'>Triggered frames are synchronised to pulses: "
+                "the spectrum includes pulse content. Use Periodic for baseline noise.</span>"
+            )
+        if spectrum.reset_reason and spectrum.reset_reason != "cleared":
+            lines.append(f"Restarted: {spectrum.reset_reason}")
+        if spectrum.last_rejection:
+            lines.append(
+                f"Skipped {spectrum.rejected_frames:,} frame(s): {spectrum.last_rejection}"
+            )
+        self._spectrum_info = "<br>".join(lines)
+        self._update_spectrum_label()
+        # A plot item's tooltip bypasses the application's widget-tooltip
+        # wrapping, so wrap it here; the details live in F1 help.
+        unit = UNIT_LABELS[self._spectrum_unit]
+        tooltip = [
+            "Noise spectrum of received Scope frames, in ADC codes.",
+            "Right-click: window, averaging, units, reset, CSV export. F1: help.",
+            _SPECTRUM_NOT_VALIDATED,
+        ]
+        if spurs:
+            tooltip.append("Strongest lines:")
+            tooltip.extend(
+                f"{format_frequency(spur.frequency)}: "
+                f"{to_display_units(np.array([spur.level]), self._spectrum_unit)[0]:.3g} "
+                f"{unit} (+{spur.excess_db:.0f} dB)"
+                for spur in spurs
+            )
+        self._spectrum_plot.setToolTip(wrap_tooltip("\n".join(tooltip)))
+
+    def _update_spectrum_label(self) -> None:
+        cursor = f"<br>{self._spectrum_cursor}" if self._spectrum_cursor else ""
+        self._spectrum_label.setText(
+            f"<span style='font-size:8pt'>{self._spectrum_info}{cursor}</span>"
+        )
+
+    def _on_spectrum_mouse_moved(self, position: QPointF) -> None:
+        if not self._spectrum_enabled or self._spectrum_display is None:
+            return
+        if not self._spectrum_plot.sceneBoundingRect().contains(position):
+            if self._spectrum_cursor:
+                self._spectrum_cursor = ""
+                self._update_spectrum_label()
+            return
+        frequencies, values = self._spectrum_display
+        if not frequencies.size:
+            return
+        x = self._spectrum_plot.getViewBox().mapSceneToView(position).x()
+        frequency = 10.0**x if self._spectrum_log_frequency else x
+        index = int(np.argmin(np.abs(frequencies - frequency)))
+        self._spectrum_cursor = (
+            f"Cursor: {format_frequency(float(frequencies[index]))}, "
+            f"{values[index]:.4g} {UNIT_LABELS[self._spectrum_unit]}"
+        )
+        self._update_spectrum_label()
+
+    def _spectrum_export_metadata(self, stamp: datetime) -> dict[str, object]:
+        factor = decimation_factor(self._spectrum.sample_period_ns, SCOPE_ADC_SAMPLE_PERIOD_NS)
+        return {
+            "channel": self._channel,
+            "utc_timestamp": stamp.isoformat(timespec="seconds"),
+            "app_version": __version__,
+            "mean_decimation_factor": factor,
+            "mean4_compensation": "not applied to exported values",
+            "reset_reason": self._spectrum.reset_reason or "none",
+            "validation": _SPECTRUM_NOT_VALIDATED,
+        }
+
+    def export_scope_spectrum(self) -> Path | None:
+        """Save frequency, mean, max and min PSD with a metadata header."""
+        if self._spectrum.result("mean") is None:
+            self.status.setText("No Scope spectrum to export yet")
+            return None
+        stamp = datetime.now(UTC)
+        default = (
+            measurement_folder()
+            / f"scope_ch{self._channel}_spectrum_{stamp:%Y%m%d_%H%M%S}.csv"
+        )
+        path_text, _ = QFileDialog.getSaveFileName(
+            self, "Export Scope Spectrum", str(default), "CSV files (*.csv);;All files (*)",
+        )
+        if not path_text:
+            return None
+        path = Path(path_text)
+        if not path.suffix:
+            path = path.with_suffix(".csv")
+        try:
+            write_spectrum_csv(path, self._spectrum, self._spectrum_export_metadata(stamp))
+        except (OSError, ValueError) as exc:
+            log.exception("Scope ch%d: spectrum export to %s failed", self._channel, path)
+            self.status.setText(f"Spectrum export failed: {exc}")
+            return None
+        self.status.setText(f"Scope spectrum saved to {path}")
+        return path
 
     def _setup_persistence_layer(self) -> None:
         self._reset_persistence_buffer(self._frame_samples_from_ui())

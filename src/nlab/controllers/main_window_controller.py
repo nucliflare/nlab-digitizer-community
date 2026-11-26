@@ -1211,6 +1211,11 @@ class MainWindowController:
         for controller in self._scope_controllers:
             controller.clear_scope_distribution()
 
+    def set_scope_spectrum_enabled(self, enabled: bool) -> None:
+        """Show and average noise spectra on every Scope channel; hiding pauses."""
+        for controller in self._scope_controllers:
+            controller.set_scope_spectrum_enabled(enabled)
+
     def set_measurement_series_enabled(self, enabled: bool) -> None:
         """Apply Settings > Enable Series to every Scope, MCA and Current view."""
         for scope_controller in self._scope_controllers:
