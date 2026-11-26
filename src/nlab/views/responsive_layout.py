@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from nlab.ui.ui_current_monitor_view import Ui_CurrentMonitorView
 from nlab.ui.ui_external_device_view import Ui_ExternalDeviceView
 from nlab.ui.ui_global_view import Ui_GlobalView
 from nlab.ui.ui_mca_view import Ui_MCAView
@@ -378,6 +379,20 @@ def configure_scope_layout(view: QWidget, ui: Ui_ScopeView) -> None:
     scroll.setMinimumWidth(300)
     scroll.setMaximumWidth(460)
     ui.plotWaveform.setMinimumSize(320, 240)
+
+
+def configure_current_layout(view: QWidget, ui: Ui_CurrentMonitorView) -> QScrollArea:
+    """Settings and readings in one scrollable column beside the plot, as on Scope."""
+    del view
+    _compact_forms((
+        ui.formAcquisition, ui.formSumTiming, ui.formSumRecording,
+        ui.formCalibration, ui.formReading,
+    ))
+    scroll = _wrap_layout(ui.horizontalLayout, ui.controlLayout, "currentControlScroll")
+    scroll.setMinimumWidth(300)
+    scroll.setMaximumWidth(460)
+    ui.plotCurrent.setMinimumSize(320, 240)
+    return scroll
 
 
 def configure_mca_layout(

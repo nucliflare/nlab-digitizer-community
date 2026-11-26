@@ -63,8 +63,9 @@ absolute path with **Browse…** to save elsewhere. A `.bin`, `.h5` or `.hdf5`
 extension selects that format; other names gain the selected format's
 extension. Missing folders are created in the background. If an explicitly named file already exists, confirm replacement in the
 overwrite dialog or choose **Cancel** to preserve the recording and plot.
-Window means appear in the existing large Current plot, with the latest window
-mean and session statistics above it.
+Window means appear in the Current plot on the right; the **Window means** box
+at the bottom of the settings column shows the latest window mean, the session
+mean and the acquisition statistics.
 
 File creation, data writes, and final flush run on a background writer.
 **Stop and drain** returns control to the GUI while accepted data finishes
@@ -150,8 +151,9 @@ configuration. See the [sum file specification](scope-sum-format.md).
    controls are disabled because IIR polling does not use the Scope DMA path.
 3. Leave **Display unit** set to `raw` unless a calibration for this exact
    channel and analogue path has already been entered.
-4. Press **Start**. The large value is the newest signed IIR code; the
-   plot shows the rolling history, while **Last screen interval** gives its
+4. Press **Start**. **IIR output** in the **Live current** box is the newest
+   signed IIR code in the display unit; the plot on the right shows the rolling
+   history, while **Last screen interval** gives its
    mean, minimum, maximum, and sample count.
 5. Check **Acquisition** for the achieved read rate, median transaction time,
    and age of the newest value. The rate can be lower than the requested 1 kHz,
@@ -263,7 +265,8 @@ copying a scale between them:
 - IIR presents the normalized FPGA input-filter result.
 - DMA presents the Scope waveform code transported by the FPGA.
 
-In DMA mode, the large raw readout is the newest waveform word. The fragment
+In DMA mode, **Raw DMA sample** is the newest waveform word and **DMA waveform**
+shows it in the display unit. The fragment
 summary reports the last, minimum, maximum, and number of samples in that
 fragment. Interval statistics use all accepted samples, not one average value
 per displayed frame.

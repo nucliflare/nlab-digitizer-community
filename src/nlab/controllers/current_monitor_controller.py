@@ -47,6 +47,7 @@ from nlab.views.numeric_controls import (
 )
 from nlab.views.panel_status import PanelStatus
 from nlab.views.plot_viewbox import show_frame_axes, waveform_step_mode
+from nlab.views.responsive_layout import configure_current_layout
 from nlab.views.spec_binding import bind_spinbox
 from nlab.views.time_axis import time_axis_scale
 from nlab.workers.current_monitor_worker import (
@@ -143,6 +144,7 @@ class CurrentMonitorController(QWidget):
 
         self.ui = Ui_CurrentMonitorView()
         self.ui.setupUi(self)
+        configure_current_layout(self, self.ui)
         if self._sum_supported():
             self.ui.comboMode.addItem("Periodic sums")
         self.status = PanelStatus(self, "Monitor stopped.")
@@ -378,6 +380,10 @@ class CurrentMonitorController(QWidget):
         )
         base_label = "DMA waveform" if dma_mode else "IIR output"
         label = "Current" if self._unit() != "raw" else base_label
+        # In sum mode the latest window mean is already the first statistic.
+        self.ui.labelCurrentKey.setText(f"{label}:")
+        self.ui.labelCurrentKey.setVisible(not sum_mode)
+        self.ui.lblCurrent.setVisible(not sum_mode)
         self._plot.setLabel(
             "left", "Window mean" if sum_mode else label,
             units="ADC codes" if sum_mode else self._unit(),
@@ -954,6 +960,7 @@ class CurrentMonitorController(QWidget):
         )
         label = "Current" if self._unit() != "raw" else raw_label
         self._plot.setLabel("left", label, units=self._unit())
+        self.ui.labelCurrentKey.setText(f"{label}:")
         now_ns = time.perf_counter_ns()
         if self.ui.comboMode.currentIndex() == _MODE_SCOPE_DMA:
             accumulator = self._scope_current_accumulator

@@ -55,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   button is gone from the Current tab. **Tools → Current Capture Analysis…**
   opens the same tool for `.bin` and `.h5` sum captures, as before, without
   interrupting live acquisition.
+- **Current tab layout follows Scope and MCA** — acquisition, timing, recording
+  and calibration settings sit in one scrollable column on the left, the live
+  readings are a compact statistics box at the bottom of that column instead of
+  a large readout above the plot, and the plot fills the right side.
 
 ### Fixed
 
