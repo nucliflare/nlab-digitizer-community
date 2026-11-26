@@ -925,6 +925,34 @@ def test_frames_before_the_start_record_are_discarded(tmp_path: Path) -> None:
     assert metadata["continuity_valid"] is True
 
 
+@pytest.mark.parametrize("marker", [0x40, 0x80, 0xC0])
+def test_start_record_carrying_logic_input_markers_is_the_session_start(marker: int) -> None:
+    # Live .128 HW101/SW103025: START arrived as 80 00 .. 00, timestamp 1.
+    stop_event = threading.Event()
+    first = _session_first_frame(1)
+    first["marker"][0] = marker
+    backend = _FakeCarryOverBackend(stop_event, [], [first, _frame(2)])
+    streamer = IIOMcaDmaStreamer(backend, channel=0)
+
+    assert streamer.stream_events(stop_event) == 2 * 1024
+
+    diagnostics = streamer.last_capture_diagnostics
+    assert diagnostics["start_record"] == "first"
+    assert diagnostics["continuity_valid"] is True
+
+
+@pytest.mark.parametrize("marker", [0x01, 0x02, 0x08, 0x82])
+def test_other_marker_bits_do_not_make_a_record_stamped_one_the_start(marker: int) -> None:
+    stop_event = threading.Event()
+    first = _session_first_frame(1)
+    first["marker"][0] = marker
+    backend = _FakeCarryOverBackend(stop_event, [], [first, _frame(2)])
+    streamer = IIOMcaDmaStreamer(backend, channel=0)
+
+    with pytest.raises(RuntimeError, match="no START record"):
+        streamer.stream_events(stop_event)
+
+
 def test_start_record_inside_the_first_frame_invalidates_continuity() -> None:
     stop_event = threading.Event()
     misaligned = _frame(1)
@@ -953,7 +981,32 @@ def test_missing_start_record_keeps_the_frames_and_invalidates_continuity() -> N
 
     batches, _ = events.drain()
     assert len(batches) == 2
-    assert streamer.last_capture_diagnostics["start_record"] == "missing"
+    diagnostics = streamer.last_capture_diagnostics
+    assert diagnostics["start_record"] == "missing"
+    assert diagnostics["first_record_hex"] == bytes(_frame(1)[:1].tobytes()).hex(" ")
+    assert diagnostics["timestamp_one_record"] is None
+
+
+def test_missing_start_record_reports_a_record_stamped_one_with_a_payload() -> None:
+    # Evidence for telling a producer whose START differs from carry-over:
+    # the error names the first record and the first record stamped 1.
+    stop_event = threading.Event()
+    first = _frame(1)
+    first[0] = np.zeros(1, dtype=_LM_EVENT_DTYPE)[0]
+    first["marker"][0] = 0x02
+    first["zc_offset"][0] = 5
+    first["timestamp"][0] = 1
+    backend = _FakeCarryOverBackend(stop_event, [], [first, _frame(2)])
+    streamer = IIOMcaDmaStreamer(backend, channel=0)
+
+    stamped = "02 05 00 00 00 00 00 00 01 00 00 00 00 00 00 00"
+    with pytest.raises(RuntimeError, match=f"timestamp 1: frame 0 record 0: {stamped}"):
+        streamer.stream_events(stop_event)
+
+    diagnostics = streamer.last_capture_diagnostics
+    assert diagnostics["start_record"] == "missing"
+    assert diagnostics["first_record_hex"] == stamped
+    assert diagnostics["timestamp_one_record"] == f"frame 0 record 0: {stamped}"
 
 
 @pytest.mark.parametrize("before,after,loss", [

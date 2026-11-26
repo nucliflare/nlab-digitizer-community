@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **List mode recognises a START record with logic-input markers** — every
+  list-mode and coincidence run on .128 (HW101/SW103025) ended with "no START
+  record arrived in the session's first frames", although START was record 0.
+  The producer sets the logic-input0 marker bit (0x80) on START, and the check
+  required an all-zero marker. It now ignores the logic-input bits 0x40/0x80
+  and nothing else. When START is missing, the error and the session
+  diagnostics now show the first record and the first record with timestamp 1.
+
 - **Coincidence timing fit finds narrow peaks** — the fit used a fixed ±4 ns
   window around the highest bin with a Gaussian sampled at bin centres. A line
   one or two 62.5 ps bins wide, as from a pulse generator on both inputs, was

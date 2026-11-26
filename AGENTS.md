@@ -104,8 +104,8 @@ Additional rules:
   interval, or a timeout ends the drain early.
 - Data left in the cores by an undrained close reaches the next session (X2). Scope
   discards frames that complete before its `enable=1`; list mode discards frames
-  before the session's START record (zero payload, timestamp 1) and fails continuity
-  when START is not record 0. `list_deadtime_raw` survives arm/START (L2): judge loss
+  before the session's START record (zero payload, timestamp 1; its marker can carry
+  the logic-input bits 0x40/0x80) and fails continuity when START is not record 0. `list_deadtime_raw` survives arm/START (L2): judge loss
   against the value read before arm.
 - Remote Scope DMA (`iio_scope_stream.py`) keeps one READBUF queued behind the batch
   being read. At a batch boundary iiod stops draining the four-block kernel queue

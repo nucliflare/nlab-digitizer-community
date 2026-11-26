@@ -235,8 +235,9 @@ def test_listmode_example_decodes_the_driver_test_vector(
     assert cfd_time_q(100, 19, -4096) == 837.5 * 8192
 
 
+@pytest.mark.parametrize("start_marker", [0x00, 0x80])
 def test_listmode_example_drops_records_before_a_late_start(
-    tmp_path: Path, run_example: Callable[[str], dict[str, Any]],
+    tmp_path: Path, run_example: Callable[[str], dict[str, Any]], start_marker: int,
 ) -> None:
     stop_event = threading.Event()
     IIOMcaDmaStreamer(_ListModeFrames(stop_event), channel=0).stream_events(
@@ -245,6 +246,7 @@ def test_listmode_example_drops_records_before_a_late_start(
     example = run_example("format-listmode")
     records = _events(5000)[:6]
     records[2] = np.zeros(1, dtype=IIO_LM_EVENT_DTYPE)[0]
+    records["marker"][2] = start_marker  # 0x80: logic-input0 set, as live on .128
     records["timestamp"][2] = 1
 
     kept = example["events_only"](records)

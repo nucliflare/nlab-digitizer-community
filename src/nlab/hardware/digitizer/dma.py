@@ -25,6 +25,8 @@ import numpy as np
 
 from nlab.hardware.digitizer.iio_listmode import (
     IIO_LM_EVENT_DTYPE,
+    MARKER_INPUT0,
+    MARKER_INPUT1,
     VDPP_ZC_CALC_SCHEMA,
     cfd_interpolation_samples,
 )
@@ -130,7 +132,13 @@ _LM_EVENT_DTYPE = IIO_LM_EVENT_DTYPE
 # over from an earlier session whose tail was not drained (PetaLinux cde5fe1
 # user-api.md "Stream carry-over between sessions", rule 2; confirmed live on
 # .134 and .128). The bytes are the producer's, independent of client schema.
-_LM_START_RECORD = bytes(8) + (1).to_bytes(8, "little")
+# The marker's logic-input bits are metadata, not record identity (PetaLinux
+# coincidence-frontend-contract.md marker table: 0x40 input1, 0x80 input0);
+# the producer stamps them on START too. Live on .128 (HW101/SW103025, both
+# channels, 2026-11-26) START arrived as record 0 reading 80 00 .. 00, then
+# timestamp 1, so the match ignores those two bits and nothing else.
+_LM_START_TIMESTAMP = 1
+_LM_START_IGNORED_MARKER_BITS = MARKER_INPUT0 | MARKER_INPUT1
 # Carry-over is bounded by the external 2048-record FIFO plus in-flight
 # blocks (.134 delivered two stale frames). If no START arrives within this
 # many frames the held frames are kept, not discarded, and flagged.
@@ -153,6 +161,11 @@ class ListModeStartGate:
         # None while searching; record index of START in its frame once found.
         self.start_index: int | None = None
         self.missing = False
+        # Evidence for a missing START: the session's first record, and the
+        # first record stamped 1 whatever its payload. A producer whose START
+        # carries a nonzero payload is told apart from real carry-over by it.
+        self.first_record: bytes | None = None
+        self.timestamp_one: tuple[int, int, bytes] | None = None
 
     @property
     def searching(self) -> bool:
@@ -162,8 +175,18 @@ class ListModeStartGate:
         if not self.searching:
             self._deliver(frame)
             return
+        raw = frame.tobytes()
+        if self.first_record is None:
+            self.first_record = raw[:IIO_LM_RECORD_BYTES]
         index = _start_record_index(frame)
         if index is None:
+            if self.timestamp_one is None:
+                stamped = _timestamp_one_index(raw)
+                if stamped is not None:
+                    offset = stamped * IIO_LM_RECORD_BYTES
+                    self.timestamp_one = (
+                        len(self._held), stamped, raw[offset:offset + IIO_LM_RECORD_BYTES]
+                    )
             self._held.append(frame)
             if len(self._held) >= _LM_START_SEARCH_FRAMES:
                 self.finish()
@@ -191,11 +214,23 @@ class ListModeStartGate:
             state = "misaligned"
         else:
             state = "missing" if self.missing else "none"
-        return {
+        diagnostics: dict[str, object] = {
             "start_record": state,
             "start_record_index": self.start_index,
             "stale_frames_discarded": self.stale_frames,
         }
+        if self.missing:
+            diagnostics["first_record_hex"] = (
+                self.first_record.hex(" ") if self.first_record is not None else None
+            )
+            diagnostics["timestamp_one_record"] = self._timestamp_one_text()
+        return diagnostics
+
+    def _timestamp_one_text(self) -> str | None:
+        if self.timestamp_one is None:
+            return None
+        frame, record, payload = self.timestamp_one
+        return f"frame {frame} record {record}: {payload.hex(' ')}"
 
     def problem(self) -> str | None:
         """Why this session's first records cannot be trusted, if they can't."""
@@ -206,16 +241,29 @@ class ListModeStartGate:
                 "undrained session"
             )
         if self.missing:
+            first = self.first_record.hex(" ") if self.first_record is not None else "none"
+            stamped = self._timestamp_one_text() or "none"
             return (
                 "no START record arrived in the session's first frames; they may "
-                "be left over from an earlier undrained session"
+                "be left over from an earlier undrained session (first record: "
+                f"{first}; first record with timestamp 1: {stamped})"
             )
         return None
 
 
 def _start_record_index(frame: np.ndarray) -> int | None:
-    raw = np.frombuffer(frame.tobytes(), dtype="V16")
-    hits = np.flatnonzero(raw == np.frombuffer(_LM_START_RECORD, dtype="V16")[0])
+    # Each little-endian record is two words: bytes 0-7 (marker in the low
+    # byte, then the payload) and the timestamp.
+    words = np.frombuffer(frame.tobytes(), dtype="<u8").reshape(-1, 2)
+    payload = words[:, 0] & ~np.uint64(_LM_START_IGNORED_MARKER_BITS)
+    hits = np.flatnonzero((payload == 0) & (words[:, 1] == _LM_START_TIMESTAMP))
+    return int(hits[0]) if len(hits) else None
+
+
+def _timestamp_one_index(raw: bytes) -> int | None:
+    """Index of the first record whose timestamp (bytes 8-15) is 1."""
+    timestamps = np.frombuffer(raw, dtype="<u8")[1::2]
+    hits = np.flatnonzero(timestamps == 1)
     return int(hits[0]) if len(hits) else None
 
 

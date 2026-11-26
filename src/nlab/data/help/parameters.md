@@ -1693,7 +1693,8 @@ but their meaning is not asserted.
 **Records that are not events:**
 
 - **START** — the first record of a clean run has timestamp 1 and every other
-  byte zero.
+  byte zero, except that the marker can carry the logic-input bits `0x40` and
+  `0x80` (the state of the external logic inputs).
 - **Padding** — when a run stops, the last frame is filled up to 1,024 records
   with all-zero records. There is no end record.
 - **Earlier runs** — records before START are left over from an earlier run
@@ -1763,12 +1764,14 @@ def read_listmode_ndma(path):
 
 def events_only(records):
     """Drop the START record, any records before it, and zero padding."""
-    empty = ((records["marker"] == 0) & (records["zc_offset"] == 0)
-             & (records["zc_estimation"] == 0)
-             & (records["charge_energy"] == 0)
-             & (records["trapezoid_energy"] == 0))
-    keep = ~(empty & (records["timestamp"] == 0))
-    start = np.flatnonzero(empty & (records["timestamp"] == 1))
+    no_payload = ((records["zc_offset"] == 0)
+                  & (records["zc_estimation"] == 0)
+                  & (records["charge_energy"] == 0)
+                  & (records["trapezoid_energy"] == 0))
+    keep = ~(no_payload & (records["marker"] == 0) & (records["timestamp"] == 0))
+    # START may carry the logic-input marker bits 0x40 and 0x80.
+    start = np.flatnonzero(no_payload & ((records["marker"] & 0x3F) == 0)
+                           & (records["timestamp"] == 1))
     if len(start):
         keep[:start[0] + 1] = False
     return records[keep]
