@@ -418,7 +418,9 @@ def test_timing_fit_is_rendered_and_preserved_in_session_manifest(
 
     assert "FWHM 412 ± 28 ps" in controller.timing_fit_label.text()
     assert "Gaussian-core fit" in controller.timing_fit_label.text()
-    assert len(controller.delay_fit_curve.xData) == 401
+    x, y = controller.delay_fit_curve.xData, controller.delay_fit_curve.yData
+    assert x[0] == -4.0 and x[-1] == 4.0 and np.all(np.diff(x) > 0)
+    assert max(y) == pytest.approx(21.0, rel=1e-3)  # Background plus amplitude.
     assert controller._manifest(status="complete")["timing_fit"] == {
         "center_ns": -0.032,
         "sigma_ns": 0.175,
@@ -430,7 +432,36 @@ def test_timing_fit_is_rendered_and_preserved_in_session_manifest(
         "reduced_chi_square": 0.8,
         "fit_low_ns": -4.0,
         "fit_high_ns": 4.0,
+        "bin_width_ns": 0.0625,
+        "width_resolved": True,
     }
+
+
+def test_sub_bin_timing_fit_reports_an_fwhm_upper_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _make_controller(monkeypatch)
+    fit = CoincidencePeakFit(
+        center_ns=-21.883, sigma_ns=0.02, fwhm_ns=0.047, fwhm_uncertainty_ns=float("nan"),
+        amplitude_per_bin=40_000.0, background_per_bin=2.0, signal_counts=45_000.0,
+        reduced_chi_square=1.2, fit_low_ns=-22.5, fit_high_ns=-21.25, width_resolved=False,
+    )
+    monkeypatch.setattr(coincidence_module, "fit_coincidence_peak", lambda *_args: fit)
+
+    controller._render_timing_fit(
+        SimpleNamespace(delay_counts=np.zeros(10, dtype=np.uint64)),
+        CoincidenceSettings(fine_timing=True),
+    )
+
+    text = controller.timing_fit_label.text()
+    assert "center -21.883 ns" in text
+    assert "FWHM < 74 ps (narrower than the 62.5 ps bins resolve)" in text
+    assert "nan" not in text
+    # A smooth envelope, finely sampled across the sub-bin core, whose height
+    # is the expected count in a centred bin (never above the fitted signal).
+    x, y = controller.delay_fit_curve.xData, controller.delay_fit_curve.yData
+    assert max(y) == pytest.approx(40_002.0, rel=1e-3)
+    assert np.count_nonzero(np.abs(x + 21.883) <= 3 * 0.02) >= 100
 
 
 def test_older_coincidence_settings_without_precision_mode_load_as_coarse(

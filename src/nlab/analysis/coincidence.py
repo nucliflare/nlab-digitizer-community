@@ -36,6 +36,7 @@ import math
 import warnings
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
+from functools import partial
 from heapq import merge
 
 import numpy as np
@@ -63,7 +64,15 @@ DMA_ENERGY_TO_MCA_SHIFT = 2
 COINCIDENCE_MATRIX_BINS = 512
 COINCIDENCE_MATRIX_CHANNELS_PER_BIN = HISTOGRAM_BINS // COINCIDENCE_MATRIX_BINS
 PEAK_FIT_MIN_PAIRS = 100
+# The fit window follows the peak: +/-5 estimated widths, at least +/-8 bins
+# and at most +/-4 ns. A fixed +/-4 ns window let broad structure a few ns
+# away outweigh a peak only one or two 62.5 ps bins wide.
 PEAK_FIT_HALF_WINDOW_NS = 4.0
+PEAK_FIT_WINDOW_WIDTHS = 5.0
+PEAK_FIT_MIN_HALF_BINS = 8
+# A Gaussian narrower than half a bin puts nearly all its counts in one or two
+# bins, so the histogram bounds its width without measuring it.
+RESOLVED_SIGMA_BINS = 0.5
 _GAUSSIAN_FWHM_FACTOR = 2.0 * math.sqrt(2.0 * math.log(2.0))
 
 
@@ -172,6 +181,10 @@ class CoincidencePeakFit:
     The result describes the fitted Gaussian core, not automatically the
     complete detector CTR distribution. ``reduced_chi_square`` exposes broad
     tails or multiple components that make that distinction important.
+    ``amplitude_per_bin`` is the expected count above background in a bin
+    centred on the peak. When ``width_resolved`` is false the Gaussian is
+    narrower than half a bin: the centre is measured, but the FWHM is only
+    bounded by ``fwhm_upper_limit_ns``.
     """
 
     center_ns: float
@@ -184,16 +197,75 @@ class CoincidencePeakFit:
     reduced_chi_square: float
     fit_low_ns: float
     fit_high_ns: float
+    bin_width_ns: float = FINE_BIN_NS
+    width_resolved: bool = True
+
+    @property
+    def fwhm_upper_limit_ns(self) -> float:
+        """Largest FWHM consistent with an unresolved (sub-bin) fit."""
+        return _GAUSSIAN_FWHM_FACTOR * RESOLVED_SIGMA_BINS * self.bin_width_ns
+
+    def envelope_delays(self, points: int = 401) -> np.ndarray:
+        """Delays at which to draw the envelope.
+
+        The fit window evenly, plus sigma/20 steps over +/-6 sigma of the core,
+        so a peak narrower than the window spacing still draws as a Gaussian.
+        """
+        window = np.linspace(self.fit_low_ns, self.fit_high_ns, points)
+        core = np.linspace(
+            self.center_ns - 6.0 * self.sigma_ns, self.center_ns + 6.0 * self.sigma_ns, 241
+        )
+        core = core[(core > self.fit_low_ns) & (core < self.fit_high_ns)]
+        return np.union1d(window, core)
+
+    def envelope(self, delay_ns: np.ndarray) -> np.ndarray:
+        """Gaussian envelope over the background, in counts per bin.
+
+        Its height is the expected count in a bin centred on the peak, so a
+        sub-bin core never rises above the fitted signal; for a resolved peak
+        it equals the usual density times bin width.
+        """
+        values = np.asarray(delay_ns, dtype=np.float64)
+        return self.background_per_bin + self.amplitude_per_bin * np.exp(
+            -0.5 * np.square((values - self.center_ns) / self.sigma_ns)
+        )
 
 
-def _gaussian_with_background(
+def _binned_gaussian_with_background(
     values: np.ndarray,
-    amplitude: float,
+    signal: float,
     center: float,
     sigma: float,
     background: float,
+    *,
+    bin_width: float,
 ) -> np.ndarray:
-    return background + amplitude * np.exp(-0.5 * ((values - center) / sigma) ** 2)
+    """Constant background plus a Gaussian integrated over each bin.
+
+    Sampling the Gaussian at bin centres fails once sigma approaches the bin
+    width; the integral holds for any width and makes ``signal`` the total
+    peak count.
+    """
+    # scipy (~0.3 s) is imported when a fit runs, not at app start.
+    from scipy.special import ndtr
+
+    half = 0.5 * bin_width
+    in_bin = np.asarray(
+        ndtr((values + half - center) / sigma) - ndtr((values - half - center) / sigma),
+        dtype=np.float64,
+    )
+    return background + signal * in_bin
+
+
+def _bins_above_half_maximum(counts: np.ndarray, peak_index: int, baseline: float) -> int:
+    """Contiguous bins around the maximum above half its height over baseline."""
+    half = baseline + 0.5 * (float(counts[peak_index]) - baseline)
+    left = right = peak_index
+    while left > 0 and counts[left - 1] > half:
+        left -= 1
+    while right < len(counts) - 1 and counts[right + 1] > half:
+        right += 1
+    return right - left + 1
 
 
 def fit_coincidence_peak(
@@ -202,11 +274,13 @@ def fit_coincidence_peak(
 ) -> CoincidencePeakFit | None:
     """Fit the dominant fine-timing peak, or return ``None`` if unqualified.
 
-    A constant-background Gaussian is intentionally limited to a local
-    +/-4 ns window. At least 100 total pairs, about 50 fitted signal counts,
-    and a 3-sigma peak-height significance are required. These guards prevent
-    sparse or background-only histograms from being reported as timing
-    resolution measurements.
+    A constant-background Gaussian, integrated over each bin, is fitted in a
+    local window of +/-5 estimated peak widths (at least +/-8 bins, at most
+    +/-4 ns) around the highest bin. At least 100 total pairs, about 50
+    fitted signal counts, and a 3-sigma peak-height significance are
+    required. These guards prevent sparse or background-only histograms from
+    being reported as timing resolution measurements. A peak narrower than
+    half a bin is reported with its centre and an FWHM upper limit.
     """
     if not settings.fine_timing or delay_counts.ndim != 1:
         return None
@@ -218,50 +292,70 @@ def fit_coincidence_peak(
     centers = settings.low_ns + (np.arange(len(counts), dtype=np.float64) + 0.5) * bin_width_ns
     peak_index = int(np.argmax(counts))
     peak_center = float(centers[peak_index])
-    selected = np.abs(centers - peak_center) <= PEAK_FIT_HALF_WINDOW_NS
+    neighbourhood = np.abs(centers - peak_center) <= PEAK_FIT_HALF_WINDOW_NS
+    baseline = float(np.percentile(counts[neighbourhood], 25.0))
+    width_bins = _bins_above_half_maximum(counts, peak_index, baseline)
+    half_window = min(
+        PEAK_FIT_HALF_WINDOW_NS,
+        max(PEAK_FIT_MIN_HALF_BINS, PEAK_FIT_WINDOW_WIDTHS * width_bins) * bin_width_ns,
+    )
+    selected = np.abs(centers - peak_center) <= half_window + 1e-9
     x = centers[selected]
     y = counts[selected]
-    if len(x) < 8 or np.count_nonzero(y) < 5:
+    if len(x) < 8:
         return None
 
     background_guess = float(np.percentile(y, 25.0))
-    amplitude_guess = float(np.max(y) - background_guess)
-    if amplitude_guess <= 0.0:
+    signal_guess = float(np.sum(np.clip(y - background_guess, 0.0, None)))
+    if signal_guess <= 0.0:
         return None
-    sigma_guess = max(0.4, 2.0 * bin_width_ns)
-    lower = (0.0, max(float(x[0]), peak_center - 2.0), bin_width_ns, 0.0)
-    upper = (np.inf, min(float(x[-1]), peak_center + 2.0), PEAK_FIT_HALF_WINDOW_NS, np.inf)
+    sigma_low = 0.05 * bin_width_ns
+    sigma_guess = min(
+        half_window,
+        max(width_bins * bin_width_ns / _GAUSSIAN_FWHM_FACTOR, RESOLVED_SIGMA_BINS * bin_width_ns),
+    )
+    center_span = max(width_bins, 2) * bin_width_ns
+    lower = (0.0, max(float(x[0]), peak_center - center_span), sigma_low, 0.0)
+    upper = (np.inf, min(float(x[-1]), peak_center + center_span), half_window, np.inf)
+    model = partial(_binned_gaussian_with_background, bin_width=bin_width_ns)
     # scipy.optimize (~0.3 s) is imported when a fit runs, not at app start.
     from scipy.optimize import OptimizeWarning, curve_fit
 
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", OptimizeWarning)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", OptimizeWarning)
             parameters, covariance = curve_fit(
-                _gaussian_with_background,
+                model,
                 x,
                 y,
-                p0=(amplitude_guess, peak_center, sigma_guess, background_guess),
+                p0=(signal_guess, peak_center, sigma_guess, background_guess),
                 bounds=(lower, upper),
                 sigma=np.sqrt(np.maximum(y, 1.0)),
                 absolute_sigma=True,
                 maxfev=20_000,
             )
-    except (OptimizeWarning, RuntimeError, TypeError, ValueError):
+    except (RuntimeError, TypeError, ValueError):
         return None
 
-    amplitude, center, sigma, background = map(float, parameters)
+    signal, center, sigma, background = map(float, parameters)
+    if not all(math.isfinite(value) for value in (signal, center, sigma, background)):
+        return None
+    width_resolved = sigma >= RESOLVED_SIGMA_BINS * bin_width_ns
     variance = float(covariance[2, 2])
-    if variance < 0.0 or not all(
-        math.isfinite(value) for value in (amplitude, center, sigma, background, variance)
-    ):
+    covariance_failed = any(issubclass(item.category, OptimizeWarning) for item in caught)
+    if width_resolved and (covariance_failed or not math.isfinite(variance) or variance < 0.0):
+        # A resolved width needs a usable uncertainty; a sub-bin width has a
+        # flat sigma direction, so only its upper limit is reported.
         return None
-    signal_counts = amplitude * sigma * math.sqrt(2.0 * math.pi) / bin_width_ns
-    peak_significance = amplitude / math.sqrt(max(amplitude + background, 1.0))
-    if signal_counts < 50.0 or peak_significance < 3.0:
+    peak_height = signal * float(
+        _binned_gaussian_with_background(np.array([center]), 1.0, center, sigma, 0.0,
+                                         bin_width=bin_width_ns)[0]
+    )
+    peak_significance = peak_height / math.sqrt(max(peak_height + background, 1.0))
+    if signal < 50.0 or peak_significance < 3.0:
         return None
 
-    fitted = _gaussian_with_background(x, amplitude, center, sigma, background)
+    fitted = model(x, signal, center, sigma, background)
     degrees_of_freedom = max(len(y) - 4, 1)
     reduced_chi_square = float(
         np.sum(np.square(y - fitted) / np.maximum(fitted, 1.0)) / degrees_of_freedom
@@ -270,13 +364,17 @@ def fit_coincidence_peak(
         center_ns=center,
         sigma_ns=sigma,
         fwhm_ns=_GAUSSIAN_FWHM_FACTOR * sigma,
-        fwhm_uncertainty_ns=_GAUSSIAN_FWHM_FACTOR * math.sqrt(max(variance, 0.0)),
-        amplitude_per_bin=amplitude,
+        fwhm_uncertainty_ns=(
+            _GAUSSIAN_FWHM_FACTOR * math.sqrt(variance) if width_resolved else math.nan
+        ),
+        amplitude_per_bin=peak_height,
         background_per_bin=background,
-        signal_counts=signal_counts,
+        signal_counts=signal,
         reduced_chi_square=reduced_chi_square,
-        fit_low_ns=float(x[0]),
-        fit_high_ns=float(x[-1]),
+        fit_low_ns=float(x[0]) - 0.5 * bin_width_ns,
+        fit_high_ns=float(x[-1]) + 0.5 * bin_width_ns,
+        bin_width_ns=bin_width_ns,
+        width_resolved=width_resolved,
     )
 
 

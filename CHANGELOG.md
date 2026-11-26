@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Coincidence timing fit finds narrow peaks** — the fit used a fixed ±4 ns
+  window around the highest bin with a Gaussian sampled at bin centres. A line
+  one or two 62.5 ps bins wide, as from a pulse generator on both inputs, was
+  outweighed by broad structure nearby: on .128 the fit reported a 1421 ps
+  hump 1.2 ns away instead of the line. The window now follows the peak width
+  (±5 widths, at least ±8 bins, at most ±4 ns), the Gaussian is integrated over
+  each bin, and a peak narrower than half a bin is reported with its centre
+  and an FWHM upper limit (below about 74 ps). The Gaussian envelope is
+  sampled finely around the core, so a sub-bin peak still shows its shape,
+  and its height is the expected count in a centred bin. Unit-tested on a
+  synthetic copy of the .128 histogram; not yet checked on a live run.
+
 ## [0.9.8] — 2026-11-26
 
 Support for the PetaLinux `03f312d` image on .128: pile-up limits are read

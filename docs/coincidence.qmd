@@ -99,9 +99,16 @@ crossings but never guesses an unwrap. A producer configuration that overflows
 this field is not qualified for fine timing.
 
 With enough pairs and a significant local maximum, the GUI overlays a guarded
-constant-background Gaussian-core fit. It reports centre, FWHM, formal
-uncertainty, fitted signal count, and reduced chi-square. A poor-fit warning or
-a narrow fitted core is not by itself a complete detector CTR result.
+constant-background Gaussian-core fit. The Gaussian is integrated over each
+62.5 ps bin, and the fit window follows the peak: ±5 estimated peak widths
+around the highest bin, at least ±8 bins and at most ±4 ns, so broad structure
+a few nanoseconds away does not outweigh a narrow line. The fitted Gaussian is
+drawn as an envelope sampled finely around its core, with the expected count
+in a bin centred on the peak as its height. It reports centre, FWHM, formal uncertainty, fitted
+signal count, and reduced chi-square. A peak narrower than half a bin, such as
+a pulse generator feeding both inputs, is reported with its centre and an FWHM
+upper limit (below about 74 ps) instead of a fitted width. A poor-fit warning
+or a narrow fitted core is not by itself a complete detector CTR result.
 
 ## Live example: Na-22 511 keV pair
 

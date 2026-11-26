@@ -325,7 +325,9 @@ class CoincidenceController(QWidget):
         plot_layout.addWidget(self.counts_label)
         self.timing_fit_label = QLabel("Timing fit: waiting for CFD data")
         self.timing_fit_label.setToolTip(
-            "A Gaussian core fit is available for qualified CFD fine-timing data."
+            "A Gaussian core fit is available for qualified CFD fine-timing data. "
+            "Its window follows the peak width; a peak narrower than half a "
+            "62.5 ps bin is reported with an FWHM upper limit."
         )
         self.timing_fit_label.setWordWrap(True)
         plot_layout.addWidget(self.timing_fit_label)
@@ -1389,18 +1391,25 @@ class CoincidenceController(QWidget):
             )
             return
 
-        x = np.linspace(fit.fit_low_ns, fit.fit_high_ns, 401)
-        y = fit.background_per_bin + fit.amplitude_per_bin * np.exp(
-            -0.5 * np.square((x - fit.center_ns) / fit.sigma_ns)
-        )
-        self.delay_fit_curve.setData(x, y)
+        # Gaussian envelope sampled finely around the core, so a peak narrower
+        # than a 62.5 ps bin still shows its shape.
+        x = fit.envelope_delays()
+        self.delay_fit_curve.setData(x, fit.envelope(x))
         completeness = "Live provisional" if self._is_live else "Drained"
         quality = "non-Gaussian/poor fit" if fit.reduced_chi_square > 3.0 else "Gaussian-core fit"
+        if fit.width_resolved:
+            width = (
+                f"FWHM {fit.fwhm_ns * 1_000:.0f} ± {fit.fwhm_uncertainty_ns * 1_000:.0f} ps"
+            )
+        else:
+            width = (
+                f"FWHM < {fit.fwhm_upper_limit_ns * 1_000:.0f} ps (narrower than the "
+                f"{fit.bin_width_ns * 1_000:.1f} ps bins resolve)"
+            )
         self.timing_fit_label.setText(
-            f"{completeness} {quality}: center {fit.center_ns:+.3f} ns; "
-            f"FWHM {fit.fwhm_ns * 1_000:.0f} ± "
-            f"{fit.fwhm_uncertainty_ns * 1_000:.0f} ps; fitted signal "
-            f"{fit.signal_counts:.0f} counts; χ²ν={fit.reduced_chi_square:.2f}."
+            f"{completeness} {quality}: center {fit.center_ns:+.3f} ns; {width}; "
+            f"fitted signal {fit.signal_counts:.0f} counts; "
+            f"χ²ν={fit.reduced_chi_square:.2f}."
         )
 
     def configuration_settings(self) -> dict[str, object]:

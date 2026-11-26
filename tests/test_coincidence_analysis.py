@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
+from scipy.special import ndtr
 
 from nlab.analysis.coincidence import (
     COINCIDENCE_MATRIX_CHANNELS_PER_BIN,
     FINE_BIN_NS,
+    PEAK_FIT_MIN_PAIRS,
     CoincidenceAnalyzer,
     CoincidenceSettings,
     fit_coincidence_peak,
@@ -360,12 +364,80 @@ def test_gaussian_peak_fit_reports_sub_nanosecond_fwhm() -> None:
 def test_peak_fit_rejects_sparse_and_coarse_histograms() -> None:
     fine = CoincidenceSettings(fine_timing=True)
     sparse = np.zeros((fine.high_q - fine.low_q) // fine.bin_width_q + 1, dtype=np.uint64)
-    sparse[len(sparse) // 2] = 500
+    sparse[len(sparse) // 2] = PEAK_FIT_MIN_PAIRS - 1
 
     assert fit_coincidence_peak(sparse, fine) is None
     assert (
         fit_coincidence_peak(np.array([0, 200, 0], dtype=np.uint64), CoincidenceSettings()) is None
     )
+
+
+def _fine_centers(settings: CoincidenceSettings) -> np.ndarray:
+    count = (settings.high_q - settings.low_q) // settings.bin_width_q + 1
+    return settings.low_ns + (np.arange(count) + 0.5) * settings.bin_width_ns
+
+
+def _binned_peak(centers: np.ndarray, total: float, center: float, sigma: float) -> np.ndarray:
+    upper = (centers + 0.5 * FINE_BIN_NS - center) / sigma
+    lower = (centers - 0.5 * FINE_BIN_NS - center) / sigma
+    return np.asarray(total * (ndtr(upper) - ndtr(lower)), dtype=np.float64)
+
+
+def test_single_bin_peak_reports_its_centre_and_an_fwhm_upper_limit() -> None:
+    fine = CoincidenceSettings(fine_timing=True)
+    counts = np.zeros(len(_fine_centers(fine)), dtype=np.uint64)
+    counts[len(counts) // 2] = 500
+
+    fit = fit_coincidence_peak(counts, fine)
+
+    assert fit is not None and not fit.width_resolved
+    assert fit.center_ns == pytest.approx(_fine_centers(fine)[len(counts) // 2], abs=0.01)
+    assert fit.signal_counts == pytest.approx(500, rel=0.01)
+    assert fit.fwhm_upper_limit_ns == pytest.approx(2.3548 * 0.5 * FINE_BIN_NS, rel=1e-3)
+    assert math.isnan(fit.fwhm_uncertainty_ns)
+
+
+def test_narrow_peak_is_fitted_beside_broad_structure() -> None:
+    # 2026-11-26 generator run on .128 (fine CFD, +/-48 ns): a line one or two
+    # bins wide at -21.9 ns next to broad humps at -23, -15 and -12 ns. The
+    # fixed +/-4 ns window fitted the -23 ns hump instead (FWHM 1421 ps).
+    settings = CoincidenceSettings(
+        low_q=-48 * TIME_Q_PER_NS, high_q=48 * TIME_Q_PER_NS, fine_timing=True,
+    )
+    centers = _fine_centers(settings)
+    expected = 0.5 + sum(
+        _binned_peak(centers, total, center, fwhm / 2.3548)
+        for total, center, fwhm in ((16_300, -23.06, 1.42), (6_000, -15.0, 0.6),
+                                    (5_000, -12.0, 2.5))
+    )
+    true_center = -21.9 + 0.3 * FINE_BIN_NS
+    expected += _binned_peak(centers, 45_000, true_center, 0.015)
+    counts = np.random.default_rng(3).poisson(expected).astype(np.uint64)
+
+    fit = fit_coincidence_peak(counts, settings)
+
+    assert fit is not None
+    assert fit.center_ns == pytest.approx(true_center, abs=0.005)
+    assert not fit.width_resolved and fit.fwhm_upper_limit_ns < 0.075
+    assert fit.signal_counts == pytest.approx(45_000, rel=0.02)
+    assert -22.7 < fit.fit_low_ns and fit.fit_high_ns < -21.1  # The hump stays outside.
+
+
+def test_peak_about_one_bin_wide_is_resolved_without_bin_centre_bias() -> None:
+    settings = CoincidenceSettings(
+        low_q=-4 * TIME_Q_PER_NS, high_q=4 * TIME_Q_PER_NS, fine_timing=True,
+    )
+    centers = _fine_centers(settings)
+    sigma = 0.8 * FINE_BIN_NS
+    expected = 2.0 + _binned_peak(centers, 20_000, 0.37, sigma)
+    counts = np.random.default_rng(5).poisson(expected).astype(np.uint64)
+
+    fit = fit_coincidence_peak(counts, settings)
+
+    assert fit is not None and fit.width_resolved
+    assert fit.fwhm_ns == pytest.approx(2.3548 * sigma, rel=0.05)
+    assert fit.center_ns == pytest.approx(0.37, abs=0.003)
+    assert fit.reduced_chi_square < 2.0
 
 
 def test_reversed_timestamps_fail_instead_of_producing_false_results() -> None:
