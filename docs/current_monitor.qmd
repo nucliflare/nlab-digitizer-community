@@ -90,7 +90,9 @@ report), so no host setting can avoid the loss. Results depend on the PC and
 on other board traffic; check the coverage shown under **Acquisition**.
 
 Its aggregate data cannot supply
-pulse waveforms, extrema, or noise spectra. The IIR/waveform calibration controls
+pulse waveforms, extrema, or the noise inside a window. The series of window
+means itself does have a spectrum below fs'/2 = 1/(2 × interval); the offline
+browser's **Spectrum** tab computes it (see below). The IIR/waveform calibration controls
 do not apply to this view; physical current conversion requires a qualified
 channel/DC-path calibration.
 
@@ -119,6 +121,22 @@ Read chunk mean, population standard deviation, RMS, extrema, and exposure.
 Adjacent noise is `sqrt(mean(diff(y)**2)/2)` using only consecutive scheduled
 windows. It assumes stationary, uncorrelated window means; signal variations
 also contribute, and noise within a window cannot be recovered from sums.
+The **Spectrum** tab computes the power spectral density of every window mean
+in the capture, in a background thread. One value per interval gives
+fs' = 1/interval (1.95 MHz for 256-sample windows at gap 0), and each value is a
+boxcar of 2N ns: its response, −3.9 dB at fs'/2 at gap 0, is plotted below the
+spectrum with fs'/2 marked, because content above fs'/2 aliases. Missing windows
+split the series into gapless runs, and Welch segments of the chosen **Segment
+length** L (Hann, 50 % overlap) never cross a gap. Δf = fs'/L, so resolving 50 Hz
+lines needs runs of about fs'/10 windows or more. At gap 0 the packet-sealing
+skip limits runs to 508 windows (Δf ≥ fs'/508). **Bridge isolated single missing
+windows** joins runs by interpolating each lone missing window from its
+neighbours. That invents data, so it is off by default and the summary counts
+it. The bridged windows recur once per packet, so a tone far from DC gains side
+lines spaced fs'/508 apart that are not real interference. The summary also reports segments, used and discarded windows, the noise
+uncertainty per bin, a Parseval check, and why a longer L is unreachable. This
+is software analysis; it has not yet been validated on live hardware.
+
 The full connected digitizer configuration is saved before acquisition in new
 GUI recordings. View or export its YAML in **Digitizer configuration**; readback
 does not apply settings to hardware. Older files explicitly report missing

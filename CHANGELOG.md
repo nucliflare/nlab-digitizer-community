@@ -18,13 +18,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not an energy measurement. Hann, Blackman-Harris, flat-top and rectangular
   windows; linear (N frames, then hold), exponential, max-hold and min-hold
   averaging, always in linear power. The annotation gives source, fs, N, Δf,
-  ENBW, frame count and a Parseval check, marks lines 10 dB above the floor and
-  warns that level and edge triggers add pulse content. A new frame length,
+  ENBW, frame count and a Parseval check, marks lines that stand above the
+  noise floor by more than averaged noise could (10 dB for a few frames, 4 dB
+  for long averages) and warns that level and edge triggers add pulse content.
+  A logarithmic frequency axis is labelled in decades (10 Hz, 100 Hz, 1 kHz). A new frame length,
   sample period, source, trigger mode or DAC baseline restarts the average and
   says why. The mean4 response of 8 ns points can be divided out for display.
   Right-click exports frequency, mean, max and min to CSV with a metadata
   header. Hiding pauses it and session replay adds nothing. F1 opens its Help
   topic. Software analysis; not validated on live hardware.
+- **Spectrum of recorded periodic sums** — Current Capture Analysis has a
+  **Spectrum** tab for `.bin` and `.h5` sum captures: the power spectral density
+  of the window means up to fs'/2 = 1/(2 × interval), where mains and supply
+  ripple are visible. Missing windows split the series into gapless runs; Welch
+  segments of a chosen length (Hann, 50 % overlap) stay within runs. The summary
+  reports Δf, segments, used, discarded and missing windows, and why a finer
+  resolution is unreachable. A plot of the window-mean response marks fs'/2,
+  above which content aliases. An option, off by default, bridges isolated
+  single missing windows by interpolation and counts them. The live Current
+  monitor is unchanged. Software analysis; not validated on live hardware.
 
 ### Fixed
 

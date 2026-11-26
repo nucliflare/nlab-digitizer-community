@@ -384,6 +384,25 @@ def _blocks(
                 yield a, selected[:, 0], ys
 
 
+def iter_window_means(
+    info: CurrentCaptureInfo,
+    *,
+    cancelled: Callable[[], bool] = lambda: False,
+) -> Iterator[tuple[int, npt.NDArray[np.uint64], npt.NDArray[np.float64]]]:
+    """Every recorded window mean in order: (first window index, timestamps, means).
+
+    Packets are read in batches and checked as for a browsed chunk: decode,
+    sequence/timestamp continuity and stored columns against the raw packets.
+    Raises CurrentReadCancelledError once ``cancelled`` returns true.
+    """
+    if _fingerprint(info.path) != info.fingerprint:
+        raise ValueError("Capture changed; reopen the finished file")
+    with _open_source(info) as source:
+        yield from _blocks(source, info, 0, info.windows, cancelled)
+    if _fingerprint(info.path) != info.fingerprint:
+        raise ValueError("Capture changed while reading; reopen the finished file")
+
+
 class _MovingAverage:
     """Trailing full-kernel means with O(kernel) memory and O(samples) work.
 

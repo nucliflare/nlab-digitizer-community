@@ -226,9 +226,12 @@ in ADC codes; no converter full scale is assumed, so there is no dBFS scale.
 
 The annotation lists source, fs, N, Δf, ENBW, K and the Parseval ratio. The
 cursor reads frequency and level. From two frames on, triangles mark and the
-tooltip lists lines in the mean spectrum more than 10 dB above its
-running-median floor; a single frame's noise would exceed that about once per
-frame. Right-click for window, averaging, N, units, a
+tooltip lists lines that rise above the mean spectrum's running-median floor by
+more than averaged noise could: 10 dB for a few frames, falling to 4 dB from
+about 40 averages (false marks near one in a million bins). A single frame's
+noise exceeds 10 dB about once per frame, so one frame is never searched.
+Finer bins make a narrow line stand further above the floor. Right-click for
+window, averaging, N, units, a
 logarithmic frequency axis, Reset and **Export spectrum CSV…** (frequency, mean,
 max and min in codes²/Hz after a commented metadata header). This is software
 analysis; it has not been validated on live hardware.
@@ -237,6 +240,7 @@ analysis; it has not been validated on live hardware.
 
 - Welch, P. D. (1967). The use of fast Fourier transform for the estimation of power spectra: a method based on time averaging over short, modified periodograms. *IEEE Trans. Audio Electroacoust.* AU-15, 70–73. doi:10.1109/TAU.1967.1161901
 - Harris, F. J. (1978). On the use of windows for harmonic analysis with the discrete Fourier transform. *Proc. IEEE* 66, 51–83. doi:10.1109/PROC.1978.10837
+- Wilson, E. B., Hilferty, M. M. (1931). The distribution of chi-square. *Proc. Natl. Acad. Sci. USA* 17, 684–688. doi:10.1073/pnas.17.12.684
 - Heinzel, G., Rüdiger, A., Schilling, R. (2002). Spectrum and spectral density estimation by the discrete Fourier transform (DFT), including a comprehensive list of window functions and some new flat-top windows. Max-Planck-Institut für Gravitationsphysik, Hannover. hdl:11858/00-001M-0000-0013-557A-5
 
 ## Acquisition — duration {#duration}
@@ -1065,6 +1069,52 @@ known zero-current condition rather than an active detector signal.
 
 Changing the unit label alone is not a calibration. Validate sensor/front-end
 gain and polarity for the selected IIR or waveform-DMA mode.
+
+## Current — spectrum of recorded window means {#current-spectrum}
+
+The **Spectrum** tab of **Tools → Current Capture Analysis** computes the power
+spectral density of every window mean in a recorded periodic-sum capture (`.bin`
+or `.h5`). The noise inside a window is lost, but the series of window means has
+a valid spectrum from 0 to fs'/2, where fs' = 1/interval and the interval is
+(N/4 + gap) × 8 ns. This is where mains, supply ripple and slow drift become
+visible: a Scope frame cannot resolve them. It reads the whole capture in the
+background; the live Current monitor is not involved.
+
+- **Window response.** Each value is the mean of N samples, a boxcar of 2N ns
+  repeated once per interval (duty 2N ns/interval). At gap 0 its response is
+  −3.9 dB at fs'/2. Content above fs'/2 folds back into the spectrum with the
+  attenuation shown in the lower plot; the dashed line marks fs'/2.
+- **Gapless runs.** Missing windows end a run, and no segment crosses one.
+  Welch segments of **Segment length** L windows (Hann, 50 % overlap) are taken
+  within runs and averaged in linear power. Δf = fs'/L, so resolving 50 Hz
+  (Δf ≈ 10 Hz) needs runs of at least fs'/10 windows. Runs shorter than L and
+  run tails are reported as discarded. If no run is long enough, the summary
+  names the longest run and the finest reachable L.
+- **Packet skips.** At gap 0, IP124 skips one window while sealing each
+  508-window packet, so runs are at most 508 windows long and Δf ≥ fs'/508.
+  **Bridge isolated single missing windows** replaces each single missing window
+  by the mean of its two neighbours, so runs join. This invents data: a tone at
+  f is reproduced times cos(2πf/fs') at a bridged window, which is exact well
+  below fs'/2 and sign-flipped at fs'/2, and each bridged window carries half
+  the noise power of a recorded one (about 0.1 % lower noise level at one
+  window in 508). Because the bridged windows recur once per packet, a tone
+  far from DC gains side lines spaced fs'/508 apart; do not read them as
+  interference. It is off by default; the summary counts bridged windows.
+- **Reading the result.** dB is a display scale; averaging uses linear power.
+  The summary gives the relative standard deviation of a noise bin, corrected
+  for the correlation of overlapping segments, and a Parseval ratio that
+  should be close to 1. Triangles mark lines above the running-median floor
+  by more than averaged noise could reach: 10 dB for a few segments, falling
+  to 4 dB from about 40 averages. A longer L makes a narrow line stand further
+  above the floor. Values are window means in ADC codes.
+
+This is software analysis; it has not been validated on live hardware.
+
+**References** — Spectral estimation and windows.
+
+- Welch, P. D. (1967). The use of fast Fourier transform for the estimation of power spectra: a method based on time averaging over short, modified periodograms. *IEEE Trans. Audio Electroacoust.* AU-15, 70–73. doi:10.1109/TAU.1967.1161901
+- Harris, F. J. (1978). On the use of windows for harmonic analysis with the discrete Fourier transform. *Proc. IEEE* 66, 51–83. doi:10.1109/PROC.1978.10837
+- Wilson, E. B., Hilferty, M. M. (1931). The distribution of chi-square. *Proc. Natl. Acad. Sci. USA* 17, 684–688. doi:10.1073/pnas.17.12.684
 
 ## Coincidence — synchronized two-channel acquisition {#coincidence}
 
@@ -1967,7 +2017,9 @@ GUI captures embed the complete digitizer settings for readback/YAML export
 in its **Digitizer configuration** tab. Adjacent noise is RMS(Δ)/sqrt(2) for
 consecutive windows; it cannot recover within-window ADC noise. An
 incomplete recording remains marked incomplete. The plot cannot recover pulse
-shapes, waveform extrema, or noise spectra. Physical current conversion needs
+shapes, waveform extrema, or the noise inside a window; the series of window
+means does have a spectrum below fs'/2, in the capture browser's
+[Spectrum tab](#current-spectrum). Physical current conversion needs
 qualified channel/DC-path calibration; this view reports ADC codes.
 
 MCA settings use GUI schema 5 and an explicit hardware block with

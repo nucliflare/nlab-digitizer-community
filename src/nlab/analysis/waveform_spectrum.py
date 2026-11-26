@@ -72,6 +72,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from statistics import NormalDist
 
 import numpy as np
 from numpy.typing import NDArray
@@ -186,7 +187,8 @@ class Spur:
 
 
 @lru_cache(maxsize=32)
-def _window_values(window: SpectrumWindow, n: int) -> NDArray[np.float64]:
+def window_values(window: SpectrumWindow, n: int) -> NDArray[np.float64]:
+    """Read-only periodic (DFT-even) window of length ``n``."""
     from scipy.signal import get_window
 
     values = np.asarray(get_window(str(window), n, fftbins=True), dtype=np.float64)
@@ -215,7 +217,8 @@ def _detrended(values: NDArray[np.float64], detrend: Detrend) -> NDArray[np.floa
     return values
 
 
-def _one_sided_factor(n: int) -> NDArray[np.float64]:
+def one_sided_factor(n: int) -> NDArray[np.float64]:
+    """Fold ``|X_k|^2`` of an ``n``-point rfft into a one-sided density: 2, or 1 at DC/Nyquist."""
     factor = np.full(n // 2 + 1, 2.0)
     factor[0] = 1.0
     if n % 2 == 0:
@@ -240,13 +243,13 @@ def frame_psd(
     detrend = Detrend(detrend)
     values = _finite_frame(samples, float(sample_period_ns))
     n = values.size
-    weights = _window_values(window, n)
+    weights = window_values(window, n)
     s1 = float(weights.sum())
     s2 = float(np.dot(weights, weights))
     detrended = _detrended(values, detrend)
     fs = 1e9 / float(sample_period_ns)
     spectrum = np.fft.rfft(detrended * weights)
-    power = (spectrum.real**2 + spectrum.imag**2) * _one_sided_factor(n) / (fs * s2)
+    power = (spectrum.real**2 + spectrum.imag**2) * one_sided_factor(n) / (fs * s2)
     return FramePsd(
         frequencies=np.asarray(np.fft.rfftfreq(n, d=1.0 / fs), dtype=np.float64),
         psd=power,
@@ -389,6 +392,35 @@ def find_spurs(
         ))
     spurs.sort(key=lambda spur: spur.excess_db, reverse=True)
     return spurs[:max_count]
+
+
+def line_threshold_db(averages: float) -> float:
+    """Excess over the median floor that averaged noise alone almost never reaches.
+
+    A noise bin averaged over K independent periodograms is chi-square with
+    2K degrees of freedom, scaled by 1/2K. Its 1 - 1e-6 quantile relative to
+    its median (Wilson-Hilferty approximation) plus 1 dB margin, clamped to
+    4..10 dB: 10 dB for one or two frames, about 6 dB at K = 10 and 4 dB from
+    about K = 40. A fixed 10 dB would hide real lines in long averages.
+
+    Wilson, E. B., Hilferty, M. M. (1931). The distribution of chi-square.
+    Proc. Natl. Acad. Sci. USA 17, 684-688. doi:10.1073/pnas.17.12.684
+    """
+    k = max(1.0, float(averages)) if math.isfinite(averages) else 1.0
+    z = NormalDist().inv_cdf(1 - 1e-6)
+    c = 1.0 / (9.0 * k)
+    ratio = (1 - c + z * math.sqrt(c)) ** 3 / (1 - c) ** 3
+    return min(10.0, max(4.0, 10 * math.log10(ratio) + 1.0))
+
+
+def plotted_bins(n: int) -> slice:
+    """The rfft bins of an N-point spectrum worth plotting.
+
+    Drops DC, which detrending removes and a log axis cannot place, and the
+    Nyquist bin of an even N: the one-sided density does not double it (as in
+    SciPy), so drawn it looks like a spurious 3 dB drop at the right edge.
+    """
+    return slice(1, n // 2) if n % 2 == 0 else slice(1, n // 2 + 1)
 
 
 def format_frequency(hz: float) -> str:

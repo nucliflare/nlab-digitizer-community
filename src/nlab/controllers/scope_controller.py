@@ -49,8 +49,10 @@ from nlab.analysis.waveform_spectrum import (
     decimation_factor,
     find_spurs,
     format_frequency,
+    line_threshold_db,
     mean_decimation_response,
     parseval_check,
+    plotted_bins,
     to_display_units,
     write_spectrum_csv,
 )
@@ -88,6 +90,7 @@ from nlab.utils.recording_paths import (
     unique_recording_path,
 )
 from nlab.views import theme
+from nlab.views.frequency_axis import set_frequency_axis
 from nlab.views.numeric_controls import normalize_numeric_control
 from nlab.views.panel_status import PanelStatus
 from nlab.views.plot_viewbox import (
@@ -2451,7 +2454,7 @@ class ScopeController(QWidget):
         self._spectrum_plot.setParentItem(layout)
         show_frame_axes(self._spectrum_plot)
         self._spectrum_plot.showGrid(x=True, y=True, alpha=0.2)
-        self._spectrum_plot.setLabel("bottom", "Frequency", units="Hz")
+        set_frequency_axis(self._spectrum_plot, log=False)
         self._spectrum_curve = pg.PlotDataItem(pen=pg.mkPen("#277da1"))
         self._spectrum_markers = pg.PlotDataItem(
             pen=None, symbol="t", symbolSize=9,
@@ -2753,6 +2756,7 @@ class ScopeController(QWidget):
         if log_mode != self._spectrum_log_mode:
             # setLogMode re-transforms every item; do it only when it changes.
             self._spectrum_plot.setLogMode(x=log_mode[0], y=log_mode[1])
+            set_frequency_axis(self._spectrum_plot, log=log_mode[0])
             self._spectrum_log_mode = log_mode
         quantity = "ASD" if unit == SpectrumUnit.ASD else "PSD"
         self._spectrum_axis_label.setText(f"{quantity} [{UNIT_LABELS[unit]}]")
@@ -2772,14 +2776,16 @@ class ScopeController(QWidget):
             if compensated else result.psd
         )
         values = to_display_units(linear, unit)
-        # The detrended DC bin carries no information and has no log position.
-        frequencies, shown = result.frequencies[1:], values[1:]
+        bins = plotted_bins(result.n)  # Without DC and the un-doubled Nyquist bin.
+        frequencies, shown = result.frequencies[bins], values[bins]
         self._spectrum_display = (frequencies, shown)
         if unit != SpectrumUnit.DB:
             shown = np.maximum(shown, np.finfo(np.float64).tiny)
         self._spectrum_curve.setData(frequencies, shown)
         self._update_spectrum_spurs(force=force_spurs, factor=factor, compensated=compensated)
-        spurs = [spur for spur in self._spectrum_spurs if spur.bin < values.size]
+        spurs = [
+            spur for spur in self._spectrum_spurs if bins.start <= spur.bin < bins.stop
+        ]
         if spurs:
             marker_values = values[[spur.bin for spur in spurs]]
             if unit != SpectrumUnit.DB:
@@ -2795,8 +2801,10 @@ class ScopeController(QWidget):
 
         A single frame's noise bins are exponentially distributed: one in
         about a thousand exceeds the median by 10 dB, so lines are only
-        searched from K = 2 (about one in a million). The search also reruns
-        whenever K doubles, so a burst of frames cannot keep a K = 2 result.
+        searched from K = 2. The threshold then falls with averaging
+        (``line_threshold_db``: 10 dB to 4 dB), keeping false lines near one
+        in a million bins. The search also reruns whenever K doubles, so a
+        burst of frames cannot keep a K = 2 result.
         """
         frames = self._spectrum.frames
         if frames < 2:
@@ -2816,7 +2824,10 @@ class ScopeController(QWidget):
         linear = (
             compensated_psd(mean, factor, SCOPE_ADC_SAMPLE_PERIOD_NS) if compensated else mean.psd
         )
-        self._spectrum_spurs = find_spurs(replace(mean, psd=linear))
+        self._spectrum_spurs = find_spurs(
+            replace(mean, psd=linear),
+            threshold_db_over_median=line_threshold_db(mean.averages),
+        )
         self._spectrum_spurs_at = now
         self._spectrum_spurs_frames = frames
 

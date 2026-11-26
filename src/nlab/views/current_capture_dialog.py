@@ -12,6 +12,7 @@ from PySide6.QtCore import QLocale, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QStackedWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -33,13 +35,35 @@ from nlab.analysis.current_capture import (
     CurrentCaptureInfo,
     CurrentChunk,
 )
+from nlab.analysis.sum_spectrum import (
+    MAX_SEGMENT_LENGTH,
+    MIN_SEGMENT_LENGTH,
+    SumSpectrum,
+    sum_interval_ns,
+    window_mean_response,
+)
+from nlab.analysis.waveform_spectrum import (
+    UNIT_LABELS,
+    SpectrumUnit,
+    Spur,
+    find_spurs,
+    format_frequency,
+    line_threshold_db,
+    parseval_check,
+    plotted_bins,
+    to_display_units,
+)
 from nlab.views import theme
+from nlab.views.frequency_axis import set_frequency_axis
 from nlab.views.numeric_controls import keep_enter_in_fields
 from nlab.views.plot_viewbox import ModifierZoomViewBox
 from nlab.views.window_flags import make_tool_window
 from nlab.workers.current_capture_worker import CurrentCaptureWorker
+from nlab.workers.sum_spectrum_worker import SumSpectrumWorker
 
 _TITLE = "Current Capture Analysis"
+_DEFAULT_SEGMENT_LENGTH = 256
+_NOT_VALIDATED = "Software analysis; not validated on live hardware."
 
 
 class CurrentCaptureDialog(QDialog):
@@ -53,6 +77,9 @@ class CurrentCaptureDialog(QDialog):
         self._chunk: CurrentChunk | None = None
         self._worker: CurrentCaptureWorker | None = None
         self._generation = 0
+        self._spectrum_worker: SumSpectrumWorker | None = None
+        self._spectrum_generation = 0
+        self._spectrum_result: SumSpectrum | None = None
         root = QVBoxLayout(self)
         menu_bar = QMenuBar(self)
         root.setMenuBar(menu_bar)
@@ -216,6 +243,7 @@ class CurrentCaptureDialog(QDialog):
         note.setWordWrap(True)
         data_layout.addWidget(note)
         self.tabs.addTab(data_page, "Trace and distribution")
+        self.tabs.addTab(self._build_spectrum_page(), "Spectrum")
         config_page = QWidget()
         config_layout = QVBoxLayout(config_page)
         self.configuration_status = QLabel("No capture loaded.")
@@ -254,6 +282,301 @@ class CurrentCaptureDialog(QDialog):
         self.average_checkbox.toggled.connect(self._average_changed)
         self.average_kernel_spin.valueChanged.connect(self._average_changed)
         self._update_navigation()
+
+    # ------------------------------------------------------------------
+    # Spectrum of the window means (whole capture, background thread)
+    # ------------------------------------------------------------------
+
+    def _build_spectrum_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        controls = QHBoxLayout()
+        self.segment_combo = QComboBox()
+        length = MIN_SEGMENT_LENGTH
+        while length <= MAX_SEGMENT_LENGTH:
+            self.segment_combo.addItem(f"{length:,} windows", length)
+            length *= 2
+        self.segment_combo.setCurrentIndex(self.segment_combo.findData(_DEFAULT_SEGMENT_LENGTH))
+        self.segment_combo.setToolTip(
+            "Welch segment length L in windows. Δf = fs'/L, and every segment needs L "
+            "contiguous windows: missing windows end a run."
+        )
+        self.resolution_label = QLabel()
+        self.bridge_checkbox = QCheckBox("Bridge isolated single missing windows")
+        self.bridge_checkbox.setToolTip(
+            "Replace each single missing window by the mean of its neighbours so runs join. "
+            "Invents data: exact far below fs'/2, wrong near it. Off by default; counted."
+        )
+        self.spectrum_unit_combo = QComboBox()
+        for unit in SpectrumUnit:
+            self.spectrum_unit_combo.addItem(UNIT_LABELS[unit], unit.value)
+        self.spectrum_log_checkbox = QCheckBox("Log frequency")
+        self.spectrum_button = QPushButton("Compute spectrum")
+        self.spectrum_button.setEnabled(False)
+        controls.addWidget(QLabel("Segment length:"))
+        controls.addWidget(self.segment_combo)
+        controls.addWidget(self.resolution_label)
+        controls.addWidget(self.bridge_checkbox)
+        controls.addWidget(QLabel("Units:"))
+        controls.addWidget(self.spectrum_unit_combo)
+        controls.addWidget(self.spectrum_log_checkbox)
+        controls.addWidget(self.spectrum_button)
+        controls.addStretch()
+        layout.addLayout(controls)
+        self.spectrum_plot = pg.PlotWidget(viewBox=ModifierZoomViewBox())
+        self.spectrum_plot.setBackground(theme.colors().plot_background)
+        self.spectrum_plot.showGrid(x=True, y=True, alpha=0.2)
+        set_frequency_axis(self.spectrum_plot.getPlotItem(), log=False)
+        self.spectrum_curve = self.spectrum_plot.plot(pen=pg.mkPen("#277da1", width=1))
+        self.spectrum_markers = self.spectrum_plot.plot(
+            pen=None, symbol="t", symbolSize=9,
+            symbolBrush=pg.mkBrush("#c0563b"), symbolPen=None,
+        )
+        # Without a spectrum, explain why and offer the fix instead of empty axes.
+        message_page = QWidget()
+        message_layout = QVBoxLayout(message_page)
+        message_layout.addStretch()
+        self.spectrum_message = QLabel()
+        self.spectrum_message.setWordWrap(True)
+        self.spectrum_message.setTextFormat(Qt.TextFormat.PlainText)
+        self.spectrum_message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        message_layout.addWidget(self.spectrum_message)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        self.bridge_recompute_button = QPushButton("Bridge single gaps and recompute")
+        self.bridge_recompute_button.setToolTip(self.bridge_checkbox.toolTip())
+        self.shorter_segment_button = QPushButton()
+        for button in (self.bridge_recompute_button, self.shorter_segment_button):
+            button.hide()
+            actions.addWidget(button)
+        actions.addStretch()
+        message_layout.addLayout(actions)
+        message_layout.addStretch()
+        self.spectrum_stack = QStackedWidget()
+        self.spectrum_stack.addWidget(self.spectrum_plot)
+        self.spectrum_stack.addWidget(message_page)
+        layout.addWidget(self.spectrum_stack, 3)
+        self.response_plot = pg.PlotWidget(viewBox=ModifierZoomViewBox())
+        self.response_plot.setBackground(theme.colors().plot_background)
+        self.response_plot.showGrid(x=True, y=True, alpha=0.2)
+        self.response_plot.setLabel("bottom", "Frequency", units="Hz")
+        self.response_plot.setLabel("left", "Window-mean |H| [dB]")
+        self.response_plot.setToolTip(
+            "Each value is the mean of W samples (a 2W ns boxcar) once per interval. "
+            "Content above fs'/2 folds back into the spectrum with this attenuation."
+        )
+        self.response_curve = self.response_plot.plot(pen=pg.mkPen("#6c757d", width=1))
+        self.nyquist_line = pg.InfiniteLine(
+            angle=90, movable=False,
+            pen=pg.mkPen("#c0392b", width=1.5, style=Qt.PenStyle.DashLine),
+            label="fs'/2: content above aliases",
+            labelOpts={"position": 0.15, "color": "#c0392b",
+                       "fill": (248, 249, 250, 220)},
+        )
+        self.response_plot.addItem(self.nyquist_line, ignoreBounds=True)
+        self.nyquist_line.hide()
+        layout.addWidget(self.response_plot, 1)
+        self.spectrum_summary = QLabel("Open a capture, then compute its spectrum.")
+        self.spectrum_summary.setWordWrap(True)
+        self.spectrum_summary.setTextFormat(Qt.TextFormat.PlainText)
+        self.spectrum_summary.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(self.spectrum_summary)
+        self.segment_combo.currentIndexChanged.connect(self._update_spectrum_controls)
+        self.spectrum_unit_combo.currentIndexChanged.connect(self._show_spectrum)
+        self.spectrum_log_checkbox.toggled.connect(self._show_spectrum)
+        self.spectrum_button.clicked.connect(self.compute_spectrum)
+        self.bridge_recompute_button.clicked.connect(self._bridge_and_recompute)
+        self.shorter_segment_button.clicked.connect(self._use_reachable_length)
+        self._show_spectrum()
+        return page
+
+    def _bridge_and_recompute(self) -> None:
+        self.bridge_checkbox.setChecked(True)
+        self.compute_spectrum()
+
+    def _use_reachable_length(self) -> None:
+        result = self._spectrum_result
+        length = result.largest_reachable_length if result is not None else None
+        if length is not None:
+            self.segment_combo.setCurrentIndex(self.segment_combo.findData(length))
+            self.compute_spectrum()
+
+    def _show_spectrum_message(self, text: str, result: SumSpectrum | None = None) -> None:
+        """Replace the plot by ``text`` and the actions that would make it computable."""
+        self.spectrum_message.setText(text)
+        bridge = bool(result is not None and result.single_gaps and not result.bridge_single_gaps)
+        length = result.largest_reachable_length if result is not None else None
+        self.bridge_recompute_button.setVisible(bridge)
+        self.shorter_segment_button.setVisible(length is not None)
+        if result is not None and length is not None:
+            self.shorter_segment_button.setText(
+                f"Use L = {length:,} (Δf = {format_frequency(result.fs / length)}) "
+                "and recompute"
+            )
+        self.spectrum_stack.setCurrentIndex(1)
+
+    def _update_spectrum_controls(self, *_args: object) -> None:
+        info = self._info
+        geometry = info.geometry if info is not None else None
+        self.spectrum_button.setEnabled(geometry is not None)
+        if self._spectrum_result is None and self._spectrum_worker is None:
+            self._show_spectrum()  # The capture may have loaded since the last message.
+        if geometry is None:
+            self.resolution_label.setText("")
+            return
+        fs = 1e9 / sum_interval_ns(geometry.frame_samples, geometry.gap_cycles)
+        length = int(self.segment_combo.currentData())
+        self.resolution_label.setText(
+            f"Δf = {format_frequency(fs / length)} (fs' = {format_frequency(fs)})"
+        )
+
+    def compute_spectrum(self) -> None:
+        """Start a whole-capture spectrum; a newer request replaces this one."""
+        if self._info is None:
+            return
+        self._cancel_spectrum()
+        self._spectrum_generation += 1
+        worker = SumSpectrumWorker(
+            self._spectrum_generation,
+            self._info,
+            segment_length=int(self.segment_combo.currentData()),
+            bridge_single_gaps=self.bridge_checkbox.isChecked(),
+        )
+        worker.computed.connect(self._spectrum_computed)
+        worker.failed.connect(self._spectrum_failed)
+        worker.progressed.connect(self._spectrum_progressed)
+        self._spectrum_worker = worker
+        self.spectrum_summary.setText("Reading every window mean in the capture…")
+        if self._spectrum_result is None or self._spectrum_result.spectrum is None:
+            self._show_spectrum_message("Computing the spectrum…")
+        worker.start()
+
+    def _cancel_spectrum(self) -> None:
+        worker = self._spectrum_worker
+        self._spectrum_worker = None
+        if worker is not None:
+            worker.cancel()
+            worker.wait()
+
+    def _spectrum_progressed(self, generation: int, percent: int) -> None:
+        if generation == self._spectrum_generation:
+            self.spectrum_summary.setText(f"Reading every window mean in the capture… {percent}%")
+
+    def _spectrum_failed(self, generation: int, message: str) -> None:
+        if generation == self._spectrum_generation:
+            self._spectrum_result = None
+            self._show_spectrum()
+            self.spectrum_summary.setText(message)
+
+    def _spectrum_computed(self, generation: int, result: SumSpectrum) -> None:
+        if generation == self._spectrum_generation:
+            self._spectrum_result = result
+            self._show_spectrum()
+
+    def _clear_spectrum(self) -> None:
+        self._cancel_spectrum()
+        self._spectrum_generation += 1
+        self._spectrum_result = None
+        self._show_spectrum()
+        self.spectrum_summary.setText("Open a capture, then compute its spectrum.")
+        self._update_spectrum_controls()
+
+    def _show_spectrum(self, *_args: object) -> None:
+        unit = SpectrumUnit(self.spectrum_unit_combo.currentData())
+        log_frequency = self.spectrum_log_checkbox.isChecked()
+        self.spectrum_plot.setLogMode(x=log_frequency, y=unit != SpectrumUnit.DB)
+        set_frequency_axis(self.spectrum_plot.getPlotItem(), log=log_frequency)
+        quantity = "ASD" if unit == SpectrumUnit.ASD else "PSD"
+        self.spectrum_plot.setLabel("left", f"{quantity} of window means [{UNIT_LABELS[unit]}]")
+        result = self._spectrum_result
+        spectrum = result.spectrum if result is not None else None
+        self.spectrum_curve.clear()
+        self.spectrum_markers.clear()
+        if result is None:
+            self.response_curve.clear()
+            self.nyquist_line.hide()
+            self._show_spectrum_message(
+                "Choose a segment length and press Compute spectrum."
+                if self._info is not None else "Open a capture, then compute its spectrum."
+            )
+            return
+        if spectrum is None:
+            self._show_spectrum_message(result.message, result)
+        else:
+            self.spectrum_stack.setCurrentIndex(0)
+        frequencies = np.linspace(0, result.fs, 2001)
+        response = window_mean_response(frequencies, result.window_samples)
+        self.response_curve.setData(
+            frequencies, 20 * np.log10(np.maximum(response, 1e-6))
+        )
+        self.nyquist_line.setValue(result.fs / 2)
+        self.nyquist_line.show()
+        spurs: list[Spur] = []
+        if spectrum is not None:
+            values = to_display_units(spectrum.psd, unit)
+            bins = plotted_bins(spectrum.n)  # Without DC and the un-doubled Nyquist bin.
+            shown = values[bins]
+            if unit != SpectrumUnit.DB:
+                shown = np.maximum(shown, np.finfo(np.float64).tiny)
+            self.spectrum_curve.setData(spectrum.frequencies[bins], shown)
+            spurs = [
+                spur for spur in find_spurs(
+                    spectrum,
+                    threshold_db_over_median=line_threshold_db(spectrum.averages),
+                    max_count=12,
+                )
+                if bins.start <= spur.bin < bins.stop
+            ] if spectrum.frames >= 2 else []
+            if spurs:
+                marks = values[[spur.bin for spur in spurs]]
+                if unit != SpectrumUnit.DB:
+                    marks = np.maximum(marks, np.finfo(np.float64).tiny)
+                self.spectrum_markers.setData([spur.frequency for spur in spurs], marks)
+            self.spectrum_plot.enableAutoRange()
+        self.spectrum_summary.setText(self._spectrum_text(result, spurs, unit))
+
+    @staticmethod
+    def _spectrum_text(result: SumSpectrum, spurs: list[Spur], unit: SpectrumUnit) -> str:
+        nyquist_db = 20 * math.log10(max(result.nyquist_response, 1e-12))
+        lines = [
+            f"fs' = {format_frequency(result.fs)} (interval {result.interval_ns:g} ns: "
+            f"{result.window_samples} samples + gap {result.gap_cycles} cycles) · "
+            f"L = {result.segment_length:,} · Δf = {format_frequency(result.delta_f)} · "
+            "Hann, 50% overlap",
+            f"Window mean = {2 * result.window_samples} ns boxcar, duty "
+            f"{result.duty_cycle:.3f}: |H| = {result.nyquist_response:.3f} "
+            f"({nyquist_db:.1f} dB) at fs'/2; content above fs'/2 aliases.",
+            f"{result.windows:,} recorded windows; {result.missing_windows:,} missing in "
+            f"{result.gaps:,} gaps ({result.single_gaps:,} single); {result.runs:,} gapless "
+            f"runs, longest {result.longest_run:,}.",
+            (
+                f"Bridged {result.bridged_windows:,} isolated single missing windows by "
+                "linear interpolation (invented data; see Help)."
+                if result.bridge_single_gaps else "Bridging off."
+            ),
+        ]
+        spectrum = result.spectrum
+        if spectrum is not None:
+            lines.append(
+                f"{result.segments:,} segments from {result.runs_used:,} runs · "
+                f"{result.used_windows:,} windows used, {result.discarded_windows:,} "
+                f"discarded · ENBW {format_frequency(spectrum.enbw)} · "
+                f"±{100 * spectrum.relative_std:.1f}% per bin · "
+                f"Parseval {parseval_check(spectrum):.3f}"
+            )
+        if result.message:
+            lines.append(result.message)
+        if spurs:
+            lines.append("Strongest lines: " + "; ".join(
+                f"{format_frequency(spur.frequency)} "
+                f"({to_display_units(np.array([spur.level]), unit)[0]:.3g} "
+                f"{UNIT_LABELS[unit]}, +{spur.excess_db:.0f} dB)"
+                for spur in spurs
+            ))
+        lines.append(_NOT_VALIDATED)
+        return "\n".join(lines)
 
     def _set_export_enabled(self, enabled: bool) -> None:
         self.export_button.setEnabled(enabled)
@@ -296,6 +619,7 @@ class CurrentCaptureDialog(QDialog):
         self.configuration_status.setText("Reading capture configuration…")
         self._set_export_enabled(False)
         self._clear_chunk_plots()
+        self._clear_spectrum()
         self.start_spin.blockSignals(True)
         self.start_spin.setValue(0)
         self.start_spin.blockSignals(False)
@@ -347,6 +671,7 @@ class CurrentCaptureDialog(QDialog):
         if generation != self._generation:
             return
         self._info, self._chunk = info, chunk
+        self._update_spectrum_controls()
         self.start_spin.blockSignals(True)
         self.start_spin.setMaximum(max(0, info.duration_us - 0.008))
         self.start_spin.blockSignals(False)
@@ -484,6 +809,8 @@ class CurrentCaptureDialog(QDialog):
 
     def _stop_sync(self) -> None:
         self._generation += 1
+        self._spectrum_generation += 1
+        self._cancel_spectrum()
         worker = self._worker
         if worker is not None:
             worker.stop()

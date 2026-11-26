@@ -292,3 +292,27 @@ def test_csv_export_has_metadata_header_and_four_columns(tmp_path: Path) -> None
     assert (values[:, 3] <= values[:, 1] * (1 + 1e-6)).all()
     with pytest.raises(ValueError):
         write_spectrum_csv(tmp_path / "empty.csv", AccumulatedSpectrum(), {})
+
+
+def test_line_threshold_falls_with_averaging_but_stays_safe() -> None:
+    from nlab.analysis.waveform_spectrum import line_threshold_db
+
+    thresholds = [line_threshold_db(k) for k in (1, 2, 5, 10, 20, 40, 118, 1e6)]
+    assert thresholds[0] == thresholds[1] == 10.0
+    assert all(a >= b for a, b in zip(thresholds, thresholds[1:], strict=False))
+    assert 5.5 < line_threshold_db(10) < 7 and thresholds[-1] == 4.0
+    assert line_threshold_db(math.nan) == 10.0
+    # Simulated averaged noise never crosses it: 2000 bins x 50 trials at K = 10.
+    rng = np.random.default_rng(12)
+    averaged = rng.exponential(1.0, (50, 2000, 10)).mean(axis=2)
+    excess = 10 * np.log10(averaged / np.median(averaged, axis=1, keepdims=True))
+    assert excess.max() < line_threshold_db(10)
+
+
+def test_plotted_bins_drop_dc_and_the_even_nyquist_bin() -> None:
+    from nlab.analysis.waveform_spectrum import plotted_bins
+
+    even = frame_psd(np.random.default_rng(1).normal(0, 1, 64), PERIOD_NS)
+    shown = even.frequencies[plotted_bins(64)]
+    assert shown[0] == pytest.approx(even.delta_f) and shown[-1] == pytest.approx(31 * even.delta_f)
+    assert plotted_bins(65) == slice(1, 33)

@@ -119,6 +119,13 @@ FORM_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
 # Attributes, rather than object names, identify programmatically created controls.
 # Include future optional controls without requiring a feature-branch merge.
 CLASS_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
+    "CurrentCaptureDialog": ("current", {
+        name: "current-spectrum" for name in (
+            "segment_combo", "resolution_label", "bridge_checkbox", "spectrum_unit_combo",
+            "spectrum_log_checkbox", "spectrum_button", "spectrum_plot", "response_plot",
+            "spectrum_summary",
+        )
+    }),
     "PsdEnergyFomDialog": ("psd-energy-fom", {
         "slices_spin": "psd-energy-fom", "spacing_combo": "psd-energy-fom",
         "minimum_spin": "psd-energy-fom", "fit_button": "psd-energy-fom",
