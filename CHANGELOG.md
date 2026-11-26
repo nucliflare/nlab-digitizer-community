@@ -49,6 +49,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quantities. Marked lines are listed by frequency in a table beside the plot.
   Software analysis; not validated on live hardware.
 
+### Changed
+
+- **Recorded Current captures open from the Tools menu** — the **Open capture…**
+  button is gone from the Current tab. **Tools → Current Capture Analysis…**
+  opens the same tool for `.bin` and `.h5` sum captures, as before, without
+  interrupting live acquisition.
+
 ### Fixed
 
 - **Scope distribution tooltip** — the accumulated distribution's tooltip was a

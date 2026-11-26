@@ -305,7 +305,7 @@
   </action>
   <action name="actionOpenScopeSums">
    <property name="text"><string>Current Capture Analysis...</string></property>
-   <property name="toolTip"><string>Browse saved Current chunks, statistics, distribution and digitizer configuration without connecting hardware.</string></property>
+   <property name="toolTip"><string>Open a recorded Current periodic-sum capture (.bin or .h5): trace, statistics, distribution, spectrum and digitizer configuration, without connecting hardware or interrupting live acquisition.</string></property>
   </action>
   <action name="actionOpenWaveformFile">
    <property name="text"><string>Waveform Analysis Workbench...</string></property>

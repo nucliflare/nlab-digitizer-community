@@ -550,7 +550,6 @@ class MainWindowController:
                     auto_start=False,
                     scope_controller=scope_ctrl,
                     scope_current_accumulator=scope_current_accumulator,
-                    capture_viewer=self.show_scope_sums,
                 )
                 self._set_controller_channel_label(current_ctrl, ch_label)
                 self._connect_optional_signal(

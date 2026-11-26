@@ -26,6 +26,7 @@ from nlab.hardware.digitizer.scope_sums import (
     decode_sum_packet,
 )
 from nlab.utils import recording_paths
+from nlab.views.current_capture_dialog import CurrentCaptureDialog
 
 
 def _packet():
@@ -568,37 +569,40 @@ def test_sums_cannot_preempt_scope_and_configuration_failure_restores(qtbot, mon
 
 
 def test_recording_opens_in_dedicated_tool_without_changing_live_plot(qtbot, monkeypatch, tmp_path):
+    # Recorded captures open from Tools > Current Capture Analysis, a separate
+    # window; the Current tab itself has no capture opener.
     device, scope, current, capture = _views(qtbot, monkeypatch)
+    analysis = CurrentCaptureDialog()
+    qtbot.addWidget(analysis)
     try:
+        assert not hasattr(current.ui, "btnOpenSums")
         current.ui.cbRecordSums.setChecked(True)
         path = tmp_path / "sums.h5"
         current.ui.editSumFile.setText(str(path))
         current.start_monitor()
         assert capture.entered.wait(1)
         assert not current.ui.editSumFile.isEnabled()
-        assert current.ui.btnOpenSums.isEnabled()
         previous_path = tmp_path / "previous-capture.h5"
         writer = ScopeSumWriter(previous_path, {"channel": 1})
         writer.append(_packet())
         writer.close(complete=True)
         active_worker = current._sum_worker
-        current.open_sum_capture(previous_path)
-        qtbot.waitUntil(lambda: current._capture_dialog._chunk is not None)
+        analysis.open_path(previous_path)
+        qtbot.waitUntil(lambda: analysis._chunk is not None)
         assert current._is_running()
         assert current._sum_worker is active_worker
         assert not capture.cancelled.is_set()
         current.stop_monitor_sync()
         assert capture.output == path and path.exists()
         current._curve.setData([0, 1], [2, 3])
-        current.open_sum_capture(path)
-        qtbot.waitUntil(lambda: current._capture_dialog._chunk is not None)
-        assert current._capture_dialog._chunk.mean == 7
+        analysis.open_path(path)
+        qtbot.waitUntil(lambda: analysis._chunk is not None and analysis._path == path)
+        qtbot.waitUntil(lambda: analysis._chunk is not None and analysis._chunk.mean == 7)
         assert current._curve.yData[-1] == 3
         assert not current._is_running()
         assert current.ui.btnStart.isEnabled()
     finally:
-        if current._capture_dialog is not None:
-            current._capture_dialog.close_without_prompt()
+        analysis.close_without_prompt()
         _close(device, scope, current)
 
 
@@ -737,20 +741,17 @@ def test_replay_preserves_incomplete_status_without_hardware(qtbot, tmp_path):
     writer = ScopeSumWriter(path, {"channel": 1})
     writer.append(_packet())
     writer.close(complete=False, error="injected incomplete capture")
-    mca = Mock()
-    current = CurrentMonitorController(mca, 0)
-    qtbot.addWidget(current)
+    dialog = CurrentCaptureDialog()  # Tools > Current Capture Analysis: no hardware.
+    qtbot.addWidget(dialog)
     try:
-        current.open_sum_capture(path)
-        dialog = current._capture_dialog
+        dialog.open_path(path)
         qtbot.waitUntil(lambda: dialog._chunk is not None)
         assert dialog._chunk.mean == 7
         assert "Complete=False" in dialog.capture_status.text()
         assert "source channel 1" in dialog.capture_status.text()
         assert "incomplete capture" in dialog.capture_status.text()
-        mca.assert_not_called()
     finally:
-        current.close()
+        dialog.close_without_prompt()
 
 
 def test_mode_change_clears_old_trace_and_sum_settings_remain_saved(qtbot, monkeypatch):

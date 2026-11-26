@@ -1771,7 +1771,6 @@ def test_startup_builds_mca_features_only_for_capable_channels(
         auto_start=False,
         scope_controller=scopes[0],
         scope_current_accumulator=current_accumulator,
-        capture_viewer=controller.show_scope_sums,
     )
     assert controller._current_monitor_controllers == [current_factory.return_value]
     assert controller._current_monitor_controller_by_device == {

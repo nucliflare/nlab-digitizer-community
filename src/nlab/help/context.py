@@ -87,7 +87,7 @@ FORM_TOPICS: dict[str, tuple[str, dict[str, str]]] = {
     }),
     "CurrentMonitorView": ("current", {
         "Mode": "current-mode", "DmaGap": "current-mode",
-        "RecordSums": "scope-sums", "SumFile": "scope-sums", "OpenSums": "scope-sums",
+        "RecordSums": "scope-sums", "SumFile": "scope-sums",
         "SumSamples": "scope-sums", "SumTiming": "scope-sums",
         "Start": "current", "Stop": "current", "ResetScopeDefaults": "current-mode",
         "Time": "duration", "SeriesRuns": "series",

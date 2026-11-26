@@ -98,7 +98,7 @@ channel/DC-path calibration.
 
 Use **Stop and drain** to retain accepted tail windows. After the reader exits,
 the waveform trigger, frame size, pretrigger, and gap are restored; the final plot stays visible. Existing
-sum files (`.bin` or `.h5`) open in a dedicated offline tool using **Open capture…** or
+sum files (`.bin` or `.h5`) open in a dedicated offline tool from
 **Tools > Current Capture Analysis**, without disturbing the live monitor.
 Choose a **View size** in µs; the first chunk loads automatically. Navigate with
 **First / Previous / Next / Last**, or enter a **Start** time in µs. The plot

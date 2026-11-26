@@ -4,7 +4,6 @@ import logging
 import math
 import statistics
 import time
-from collections.abc import Callable
 from enum import Enum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -41,7 +40,6 @@ from nlab.utils.recording_paths import (
 )
 from nlab.utils.sample_history import SampleHistory
 from nlab.views import theme
-from nlab.views.current_capture_dialog import CurrentCaptureDialog
 from nlab.views.numeric_controls import (
     bind_numeric_control,
     nearest_step_value,
@@ -115,12 +113,9 @@ class CurrentMonitorController(QWidget):
         auto_start: bool = False,
         scope_controller: ScopeController | None = None,
         scope_current_accumulator: ScopeCurrentAccumulator | None = None,
-        capture_viewer: Callable[[Path], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self._mca = mca
-        self._capture_viewer = capture_viewer
-        self._capture_dialog: CurrentCaptureDialog | None = None
         self._channel = channel
         self._scope_controller = scope_controller
         self._scope_current_accumulator = scope_current_accumulator
@@ -258,7 +253,6 @@ class CurrentMonitorController(QWidget):
         self.ui.comboUnit.currentTextChanged.connect(self._calibration_changed)
         self.ui.comboMode.currentIndexChanged.connect(self._on_mode_changed)
         self.ui.btnSumFile.clicked.connect(self._choose_sum_output)
-        self.ui.btnOpenSums.clicked.connect(self._choose_sum_capture)
         self.ui.editSumFile.editingFinished.connect(self._on_sum_file_edited)
         self.ui.comboSumFormat.currentIndexChanged.connect(self._on_sum_format_changed)
         self.ui.cbPauseReadbacks.toggled.connect(
@@ -313,7 +307,6 @@ class CurrentMonitorController(QWidget):
             self.ui.cbRecordSums, self.ui.comboSumFormat, self.ui.editSumFile, self.ui.btnSumFile,
         ):
             record_widget.setEnabled(record_enabled)
-        self.ui.btnOpenSums.setEnabled(True)
         self.ui.spinSumSamples.setEnabled(record_enabled)
         self.ui.btnStop.setText(
             "Stop and drain" if self._acquisition is CurrentAcquisition.SUMS else "Stop"
@@ -729,24 +722,6 @@ class CurrentMonitorController(QWidget):
             self.ui.editSumFile.setText(str(output))
             self._select_sum_format(output.suffix)
             self.ui.cbRecordSums.setChecked(True)
-
-    def _choose_sum_capture(self) -> None:
-        filename, _ = QFileDialog.getOpenFileName(
-            self, "Open sum capture", "",
-            "Sum captures (*.bin *.h5 *.hdf5);;All files (*)",
-        )
-        if filename:
-            self.open_sum_capture(Path(filename))
-
-    def open_sum_capture(self, path: Path) -> None:
-        """Open a dedicated offline viewer without disturbing live acquisition."""
-        if self._capture_viewer is not None:
-            self._capture_viewer(path)
-            return
-        if self._capture_dialog is None:
-            self._capture_dialog = CurrentCaptureDialog(self)
-        self._capture_dialog.show_workspace()
-        self._capture_dialog.open_path(path)
 
     def _finish_sum_monitor(self) -> None:
         worker = self._sum_worker
@@ -1375,6 +1350,4 @@ class CurrentMonitorController(QWidget):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self.stop_monitor_sync()
-        if self._capture_dialog is not None:
-            self._capture_dialog.close_without_prompt()
         super().closeEvent(event)
