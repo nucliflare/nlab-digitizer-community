@@ -43,8 +43,8 @@
         </item>
         <item row="3" column="0" colspan="2">
          <layout class="QHBoxLayout" name="layoutRunButtons">
-          <item><widget class="QPushButton" name="btnStart"><property name="text"><string>Start monitor</string></property></widget></item>
-          <item><widget class="QPushButton" name="btnStop"><property name="text"><string>Stop</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+          <item><widget class="QPushButton" name="btnStart"><property name="text"><string>Start monitor</string></property><property name="nlabRole" stdset="0"><string notr="true">start</string></property></widget></item>
+          <item><widget class="QPushButton" name="btnStop"><property name="text"><string>Stop</string></property><property name="enabled"><bool>false</bool></property><property name="nlabRole" stdset="0"><string notr="true">stop</string></property></widget></item>
          </layout>
         </item>
         <item row="4" column="0" colspan="2">

@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record layout, so these exact tags now select the same decoder, still
   labelled source-derived and deployment-unverified. Later tags stay
   unrecognised.
+- **Current Start and Stop colours** — the Current tab's Start and Stop
+  buttons now use the same start and stop colours as Scope and MCA.
 
 ## [0.9.7] — 2026-11-26
 
