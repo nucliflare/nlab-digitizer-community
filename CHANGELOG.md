@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and 255. Start, list-mode DMA arming, loaded settings files and offline
   replay use the reported limits, and the Pile-ups field stops at the driver's
   maximum.
+- **Scope and input filter are paired by `channel_index`** — PetaLinux
+  `03f312d` adds the stable A/B identity to `vdpp_scope` and
+  `vdpp_input_filter`, as the pulse processor and list mode already had. nlab
+  now selects all four per-channel devices by it, in every IIO context, instead
+  of by sorted `iio:deviceN` order, and refuses a partial, duplicate or invalid
+  identity. Images without the attribute keep the sorted order.
 
 ## [0.9.7] — 2026-11-26
 

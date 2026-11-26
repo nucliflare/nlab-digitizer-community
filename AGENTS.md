@@ -57,11 +57,12 @@ task. Check `README.md` and `CHANGELOG.md` for current target-side limitations.
 
 - Do not share one `iio.Context` across GUI, polling, and blocking DMA threads. Each
   background activity needs its own context and device handles.
-- Current pulse-processor and list-mode drivers expose `channel_index`; use it for stable
-  pairing.
-- Scope and input-filter discovery may fall back to sorted `iio:deviceN` order. Sorting
-  is deterministic but does not prove physical channel identity. Verify A/B mapping
-  after firmware or device-tree changes.
+- Scope, input-filter, pulse-processor and list-mode drivers all expose `channel_index`
+  (scope and input filter since PetaLinux `03f312d`); select every per-channel device by
+  it. A partial, duplicate or invalid identity is an error. Sorted `iio:deviceN` order is
+  only the fallback for older images whose drivers lack it on every instance; sorting is
+  deterministic but does not prove physical channel identity, so verify A/B mapping
+  after firmware or device-tree changes on such images.
 - Reduce cross-thread exceptions to scalar error data. Retaining exception tracebacks
   can keep native IIO buffers alive unexpectedly.
 

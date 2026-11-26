@@ -97,8 +97,9 @@ _DAC_DEVICE_NAME = "vdpp_afe_dac"
 # Both device names are literal strings hardcoded once in their driver's
 # probe() (indio_dev->name = "..."), identical across every channel
 # instance -- confirmed from vdpp-pulse-processor.c / vdpp-input-filter.c --
-# Current pulse-processor/lm-frame drivers additionally expose channel_index;
-# _device_for_channel() uses it as the authoritative remote pairing key.
+# All four per-channel drivers (scope and input filter since PetaLinux
+# 03f312d) additionally expose channel_index; _device_for_channel() uses it as
+# the authoritative remote pairing key.
 _PULSE_PROCESSOR_DEVICE_NAME = "vdpp_pulse_processor"
 _INPUT_FILTER_DEVICE_NAME = "vdpp_input_filter"
 _LM_FRAME_DEVICE_NAME = "vdpp_lm_frame"
@@ -265,34 +266,47 @@ def _device_for_channel(
     name: str,
     channel: int,
 ) -> iio.Device | None:
-    """Return a same-name device by stable channel index when available.
+    """Return the same-name device whose ``channel_index`` equals *channel*.
 
-    Current MCA drivers expose ``channel_index`` specifically so remote iiod
-    clients can pair ``vdpp_pulse_processor`` with ``vdpp_lm_frame`` without
-    relying on probe-derived ``iio:deviceN`` identifiers. Older drivers (and
-    the current scope/input-filter drivers) lack that attribute, so retain the
-    deterministic sorted-device fallback for compatibility.
+    All four per-channel cores (``vdpp_scope``, ``vdpp_input_filter``,
+    ``vdpp_pulse_processor``, ``vdpp_lm_frame``) report the read-only DT
+    identity ``channel_index`` (0 = input A, 1 = input B) over iiod; scope and
+    input filter gained it in PetaLinux 03f312d. user-api.md asks clients to
+    reject missing, duplicate or invalid identities rather than pair devices
+    by probe-derived ``iio:deviceN`` IDs. Only when no instance of *name*
+    reports it (an older image) is the deterministic sorted-device order kept;
+    that order does not prove physical channel identity.
     """
     devices = _devices_named(context, name)
     indexed = [device for device in devices if "channel_index" in device.attrs]
-    if indexed:
-        if len(indexed) != len(devices):
+    if not indexed:
+        return devices[channel] if channel < len(devices) else None
+    if len(indexed) != len(devices):
+        raise RuntimeError(
+            f"'{name}' exposes channel_index on only {len(indexed)} of "
+            f"{len(devices)} devices; refusing ambiguous channel pairing"
+        )
+    by_index: dict[int, list[iio.Device]] = {}
+    for device in devices:
+        raw = str(device.attrs["channel_index"].value).strip()
+        if not raw.isdigit():
             raise RuntimeError(
-                f"'{name}' exposes channel_index on only {len(indexed)} of "
-                f"{len(devices)} devices; refusing ambiguous channel pairing"
+                f"'{name}' {getattr(device, 'id', '?')} reports invalid "
+                f"channel_index {raw!r}; refusing ambiguous channel pairing"
             )
-        matches = [
-            device
-            for device in indexed
-            if int(device.attrs["channel_index"].value) == channel
-        ]
-        if len(matches) != 1:
-            raise RuntimeError(
-                f"expected exactly one '{name}' device with channel_index="
-                f"{channel}, found {len(matches)}"
-            )
-        return matches[0]
-    return devices[channel] if channel < len(devices) else None
+        by_index.setdefault(int(raw), []).append(device)
+    duplicated = sorted(index for index, found in by_index.items() if len(found) > 1)
+    if duplicated:
+        raise RuntimeError(
+            f"'{name}' reports duplicate channel_index {duplicated}; "
+            "refusing ambiguous channel pairing"
+        )
+    if channel not in by_index:
+        raise RuntimeError(
+            f"no '{name}' device with channel_index={channel}; "
+            f"found {sorted(by_index)}"
+        )
+    return by_index[channel][0]
 
 
 class _IIOCurrentMonitorClient(CurrentMonitorClient):
@@ -357,10 +371,10 @@ class _IIOCurrentMonitorClient(CurrentMonitorClient):
 class IIODigitizerBackend(DigitizerBackend):
     """Scope/MCA backend for the rewritten IIO device set.
 
-    MCA pulse-processor/list-frame instances are selected by the stable
-    ``channel_index`` exported by current drivers. Same-name device sorting is
-    retained only for older drivers and for scope/input-filter devices, which
-    still expose no authoritative channel key through the remote context.
+    Scope, input-filter, pulse-processor and list-frame instances are selected
+    by the stable ``channel_index`` exported by current drivers. Same-name
+    device sorting is retained only for older images whose drivers expose no
+    authoritative channel key through the remote context.
     """
 
     def __init__(
@@ -399,13 +413,12 @@ class IIODigitizerBackend(DigitizerBackend):
             return
         self._ctx = iio.Context(uri)
 
-        scopes = _devices_named(self._ctx, _SCOPE_DEVICE_NAME)
-        if channel >= len(scopes):
+        scope = _device_for_channel(self._ctx, _SCOPE_DEVICE_NAME, channel)
+        if scope is None:
             raise RuntimeError(
-                f"only {len(scopes)} '{_SCOPE_DEVICE_NAME}' device(s) found at "
-                f"{uri}, channel {channel} out of range"
+                f"no '{_SCOPE_DEVICE_NAME}' device for channel {channel} at {uri}"
             )
-        self._scope = scopes[channel]
+        self._scope = scope
         # Fixed viewer-memory capacity of this Scope IP; read once on first use.
         self._viewer_mem_entries: int | None = None
 
@@ -418,7 +431,8 @@ class IIODigitizerBackend(DigitizerBackend):
         # DAC defaults to vdpp_afe_dac (see module-level comment above
         # _DAC_DEVICE_NAME) -- one device shared by both scope channels,
         # selected by output channel index rather than by device instance
-        # like vdpp_scope. The legacy API defaults to the sorted scope index;
+        # like vdpp_scope. The legacy API defaults to the scope's channel number;
+        # PetaLinux still defers automatic scope-to-DAC association (A11), so
         # this does not prove physical wiring. Keep the application's established
         # mapping; an optional profile can override it for a different deployment.
         # Pass dac_name=None
@@ -508,8 +522,12 @@ class IIODigitizerBackend(DigitizerBackend):
         # traffic can corrupt the other's, regardless of how the dma_enable
         # ownership rules are enforced on top of that.
         self._dma_ctx = iio.Context(uri)
-        dma_scopes = _devices_named(self._dma_ctx, _SCOPE_DEVICE_NAME)
-        self._dma_scope = dma_scopes[channel]
+        dma_scope = _device_for_channel(self._dma_ctx, _SCOPE_DEVICE_NAME, channel)
+        if dma_scope is None:
+            raise RuntimeError(
+                f"no '{_SCOPE_DEVICE_NAME}' device for channel {channel} in the DMA context"
+            )
+        self._dma_scope = dma_scope
         dma_chan = self._dma_scope.find_channel("voltage0")
         if dma_chan is None:
             raise RuntimeError(f"{_SCOPE_DEVICE_NAME} has no voltage0 channel")
@@ -530,16 +548,17 @@ class IIODigitizerBackend(DigitizerBackend):
         # channel (indio_dev->name is the identical literal string
         # "vdpp_pulse_processor"/"vdpp_input_filter" for every instance,
         # confirmed from vdpp-pulse-processor.c's pp_probe() and
-        # vdpp-input-filter.c's vdpp_input_filter_probe()), so channel
-        # Current pulse-processor drivers expose a stable channel_index over
-        # iiod. _device_for_channel() uses it when present and keeps sorted
-        # probe order only as an older-driver fallback.
+        # vdpp-input-filter.c's vdpp_input_filter_probe()). Current drivers
+        # expose a stable channel_index over iiod. _device_for_channel() uses
+        # it when present and keeps sorted probe order only as an
+        # older-driver fallback.
         self._pp = _device_for_channel(
             self._ctx, _PULSE_PROCESSOR_DEVICE_NAME, channel,
         )
 
-        input_filters = _devices_named(self._ctx, _INPUT_FILTER_DEVICE_NAME)
-        self._input_filter = input_filters[channel] if channel < len(input_filters) else None
+        self._input_filter = _device_for_channel(
+            self._ctx, _INPUT_FILTER_DEVICE_NAME, channel,
+        )
         self._input_filter_ch = (
             self._input_filter.find_channel("voltage0") if self._input_filter is not None else None
         )
@@ -3696,14 +3715,14 @@ class IIODigitizerBackend(DigitizerBackend):
         """Write both correction terms through the worker-only IIO context."""
         if self._temperature_correction_ctx is None:
             context = iio.Context(self._uri)
-            filters = _devices_named(context, _INPUT_FILTER_DEVICE_NAME)
-            if self._ch >= len(filters):
+            selected = _device_for_channel(context, _INPUT_FILTER_DEVICE_NAME, self._ch)
+            if selected is None:
                 raise RuntimeError(
                     f"no {_INPUT_FILTER_DEVICE_NAME} device for channel "
                     f"{self._ch} in the temperature-correction context"
                 )
             self._temperature_correction_ctx = context
-            self._temperature_correction_filter = filters[self._ch]
+            self._temperature_correction_filter = selected
         device = self._temperature_correction_filter
         if device is None:
             raise RuntimeError(

@@ -56,10 +56,10 @@ iio_info -u "ip:192.168.10.128:30431"
 ```
 
 Check device names, IP versions, advertised frame geometry, and channel
-identity. Current pulse-processor and list-mode drivers publish
-`channel_index`. Scope and input-filter discovery may fall back to sorted
-`iio:deviceN` order, which is deterministic but does not prove physical A/B
-mapping after a firmware or device-tree change.
+identity. Current scope, input-filter, pulse-processor and list-mode drivers
+publish `channel_index`, and nlab pairs devices by it. Older images without it
+fall back to sorted `iio:deviceN` order, which is deterministic but does not
+prove physical A/B mapping after a firmware or device-tree change.
 
 ## Install from source
 

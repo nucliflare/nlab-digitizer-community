@@ -98,10 +98,12 @@ while acquisition runs.
 
 ## Device discovery
 
-Pulse-processor and list-mode devices use `channel_index` for stable pairing.
-Scope and input-filter discovery may use sorted `iio:deviceN` order as a
-compatibility fallback. Sorting is deterministic but does not establish the
-physical channel; validate mapping after target changes.
+Scope, input-filter, pulse-processor and list-mode devices are paired by
+`channel_index` (scope and input filter report it since PetaLinux `03f312d`).
+A missing, duplicate or invalid identity on a current image refuses the
+connection. Images whose drivers lack the attribute fall back to sorted
+`iio:deviceN` order, which is deterministic but does not establish the physical
+channel; validate mapping after target changes on such images.
 
 ## Important source locations
 
