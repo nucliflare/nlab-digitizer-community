@@ -27,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of by sorted `iio:deviceN` order, and refuses a partial, duplicate or invalid
   identity. Images without the attribute keep the sorted order.
 
+### Fixed
+
+- **Online list mode and coincidence on SW103024/SW103025** — the default
+  list-mode decoder was tied to pulse-processor SW103023 only, so on the
+  current .128 image (SW103025) every list-mode Start except binary recording
+  with PSD off failed with "Unrecognized list-mode producer", including online
+  DMA and coincidence. PetaLinux documents that SW103024 and SW103025 keep the
+  record layout, so these exact tags now select the same decoder, still
+  labelled source-derived and deployment-unverified. Later tags stay
+  unrecognised.
+
 ## [0.9.7] — 2026-11-26
 
 Spectra for noise and interference diagnostics: a live Scope noise spectrum,

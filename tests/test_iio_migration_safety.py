@@ -245,8 +245,16 @@ def test_standard_decoder_needs_no_manual_metadata_and_records_unknown_image(bac
     assert "application default" in identity["decoder_selection"]
     assert "unverified" in identity["decoder_selection"]
     assert IIOMcaDmaStreamer(backend, channel=0).qualified_record_schema() == VDPP_ZC_CALC_SCHEMA
-    backend._pp.attrs["sw_version"].value = "999999"
-    assert "qualified_record_schema" not in backend.mca_producer_identity()
+    # SW103024/SW103025 keep the record layout (PetaLinux 03f312d docs);
+    # neighbouring and later tags are not inferred.
+    for tag in ("103024", "103025"):
+        backend._pp.attrs["sw_version"].value = tag
+        identity = backend.mca_producer_identity()
+        assert identity["qualified_record_schema"] == VDPP_ZC_CALC_SCHEMA
+        assert "unverified" in identity["decoder_selection"]
+    for tag in ("103022", "103026", "999999"):
+        backend._pp.attrs["sw_version"].value = tag
+        assert "qualified_record_schema" not in backend.mca_producer_identity()
     backend._acquisition_profile = AcquisitionProfile(
         dac_output=1, firmware_id="reviewed-image-sha256", record_schema=VDPP_ZC_CALC_SCHEMA)
     identity = backend.mca_producer_identity()

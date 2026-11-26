@@ -116,6 +116,15 @@ _SYNC_TRIGGER_DEVICE_NAME = "vdpp_sync_trigger"
 # One refill remains one unchanged 16 KiB frame. _LM_EVENT_DTYPE is only the
 # application's selected decoder for the currently deployed producer schema;
 # it is not the kernel/IIO transport ABI.
+# Pulse-processor source tags (HW101, LM IP121, ABI2) for which the
+# application default decoder is selected. They share one list-mode record
+# layout per PetaLinux source review: SW103024 only widens the local pile-up
+# counter ("event schema, DMA geometry ... remain", mca-pileup-review-
+# 2026-11-25.md) and SW103025 only changes the PSD EOF branch ("No new record
+# layout", mca-eof-fixed-import-2026-11-26.md, 03f312d). Exact tags only:
+# unknown later tags stay unrecognised, as in the driver's own policy.
+_DEFAULT_DECODER_PULSE_SW_VERSIONS = (103023, 103024, 103025)
+
 _LM_FRAME_RECORDS = 1024
 _LM_RECORD_BYTES = 16
 _LM_FRAME_BYTES = _LM_FRAME_RECORDS * _LM_RECORD_BYTES
@@ -3364,9 +3373,13 @@ class IIODigitizerBackend(DigitizerBackend):
                     "explicit firmware profile; physical qualification unverified"
                 )
         elif (
-            identity["pulse_hw_version"], identity["pulse_sw_version"],
-            identity["ip_version"], identity["parameter_abi_version"], identity["parameter_units"]
-        ) == (101, 103023, 121, 2, "adc_samples"):
+            identity["pulse_hw_version"] == 101
+            and identity["pulse_sw_version"] in _DEFAULT_DECODER_PULSE_SW_VERSIONS
+            and (
+                identity["ip_version"], identity["parameter_abi_version"],
+                identity["parameter_units"],
+            ) == (121, 2, "adc_samples")
+        ):
             # Preserve the pre-migration application default without treating
             # matching register versions as proof of deployed producer packing.
             # The historical selector key is retained for existing consumers.
