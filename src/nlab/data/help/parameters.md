@@ -398,10 +398,21 @@ The Pile-ups control sets the hardware interval used to classify a second pulse
 as pile-up. Its hardware interpretation is backend-dependent; use the advertised
 control units and range rather than assuming it is an offline sample count.
 
-The pulse processor counts pile-up extensions in an 8-bit counter, so Pile-ups
-limits the Window length. Start is refused, with or without list-mode DMA, when
-(Window length / 8 ns − 1) × (Pile-ups + 1) exceeds 255. With 1 pile-up the
-window can be at most 1024 ns; with 0 any window length is accepted.
+The pulse processor counts pile-up extensions in a hardware counter, so the
+driver limits Pile-ups and, through it, the Window length. Start is refused, with
+or without list-mode DMA, when (Window length / 8 ns − 1) × (Pile-ups + 1)
+exceeds the driver's budget, and the Pile-ups field stops at the driver's
+maximum. Both are read from the driver:
+
+| Firmware | Pile-ups maximum (`pileup_window_raw_max`) | Budget (`pileup_nonfinal_beats_max`) | With 1 pile-up |
+|---|---|---|---|
+| HW101 SW103024/SW103025 (16-bit counter) | 31 | 32736 | any window up to 8192 ns |
+| Other builds since PetaLinux `b187253` | 255 | 511 | at most 2048 ns |
+| Older drivers (neither attribute) | 255 | 255 | at most 1024 ns |
+
+On the 16-bit counter the budget admits every window up to 8192 ns at 31
+pile-ups or fewer, so only the Pile-ups maximum applies. With 0 pile-ups any
+window length is accepted.
 
 Inspect the pulse-pileup statistic and detector response at the intended rate.
 This hardware setting is not a general software waveform-cleaning algorithm.

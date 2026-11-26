@@ -588,6 +588,20 @@ class MCAController(QWidget):
 
         log.info("MCA ch%d: channel defaults sent to hardware", self._channel)
 
+    def _pileup_window_maximum(self) -> int:
+        """The driver's pileup_window_raw_max, or the field bound if unknown.
+
+        HW101 SW103024/SW103025 refuse more than 31 pile-ups (PetaLinux
+        03f312d) with ERANGE on the attribute write. Runs during construction,
+        so an unreadable contract keeps the field bound instead of raising.
+        """
+        field_max = int(range_spec(MCA_PARAMETER_SPECS, MCAParam.PILEUP_WINDOW).max_val)
+        try:
+            limit = self._mca.pileup_limits().window_raw_max
+        except ValueError:
+            return field_max
+        return limit if type(limit) is int and 0 < limit <= field_max else field_max
+
     def _load_hardware_state(self) -> None:
         if self._mca.dc_blocker_supported():
             with QSignalBlocker(self._dc_bypass):
@@ -601,6 +615,7 @@ class MCAController(QWidget):
         self.ui.spinFrameSamples.setValue(self._mca.get_frame_samples() * 2)
         self.ui.sliderFrameSamples.setValue(self._mca.get_frame_samples() * 2)
         self.ui.comboBinning.setCurrentIndex(self._mca.get_energy_bin())
+        self.ui.spinPileupWindow.setMaximum(self._pileup_window_maximum())
         self.ui.spinPileupWindow.setValue(self._mca.get_pileup_window())
         self.ui.spinTimeLimit.setValue(self._mca.get_time_limit())
         self.ui.comboTriggerSource.setCurrentIndex(self._mca.get_trg_source())

@@ -7,7 +7,7 @@ from unittest.mock import Mock
 import pytest
 import yaml
 
-from nlab.hardware.digitizer.mca_parameters import DEFAULT_PARAMETERS
+from nlab.hardware.digitizer.mca_parameters import DEFAULT_PARAMETERS, PileupLimits
 from nlab.hardware.digitizer.scope import TriggerMode
 from nlab.utils.settings_io import (
     FORMAT_VERSION,
@@ -222,6 +222,7 @@ def test_nanosecond_settings_survive_yaml_save_and_load(tmp_path: Path) -> None:
 
     target_scope = Mock()
     target_mca = Mock()
+    target_mca.pileup_limits.return_value = PileupLimits()
     target_mca.filters = SimpleNamespace(
         lp=Mock(),
         crrc2=Mock(),
@@ -242,6 +243,7 @@ def test_nanosecond_settings_survive_yaml_save_and_load(tmp_path: Path) -> None:
 def test_apply_channel_hardware_includes_write_only_and_previously_missing_values() -> None:
     scope = Mock()
     mca = Mock()
+    mca.pileup_limits.return_value = PileupLimits()
     mca.filters = SimpleNamespace(
         lp=Mock(),
         crrc2=Mock(),
@@ -304,6 +306,7 @@ def test_mca_settings_keep_fixed_low_pass_inside_reconfiguration(
     low_pass: dict[str, object] | None,
 ) -> None:
     mca = Mock()
+    mca.pileup_limits.return_value = PileupLimits()
     events: list[object] = []
 
     def reconfigure(write) -> None:

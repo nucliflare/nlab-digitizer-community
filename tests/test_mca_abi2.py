@@ -11,10 +11,16 @@ from nlab.hardware.digitizer.backends.iio_backend import IIODigitizerBackend
 from nlab.hardware.digitizer.mca import McaGateTiming, MultiChannelAnalyzer
 from nlab.hardware.digitizer.mca_parameters import (
     DEFAULT_PARAMETERS,
+    PileupLimits,
     validate_document,
     validate_parameters,
 )
 from nlab.hardware.digitizer.offline import create_offline_digitizer
+
+# Driver-reported pile-up limits (vdpp-pulse-processor.c): builds since
+# b187253 without the 16-bit counter, and HW101 SW103024/SW103025 (03f312d).
+B187253 = PileupLimits(window_raw_max=255, nonfinal_beats_max=511)
+SW103025 = PileupLimits(window_raw_max=31, nonfinal_beats_max=32736)
 
 
 def backend(version="2", units="adc_samples", ack="0"):
@@ -130,6 +136,124 @@ def test_one_pileup_allows_at_most_a_1024_ns_window():
     validate_parameters(DEFAULT_PARAMETERS | {"frame_samples": 4096}, complete=True)
 
 
+@pytest.mark.parametrize("frame,pileup,beats", [
+    (1024, 1, None), (1028, 1, 512), (684, 2, None), (688, 2, 513),
+    (32, 72, None), (36, 72, 584), (4096, 0, None),
+])
+def test_reported_pileup_budget_sets_the_window_limit(frame, pileup, beats):
+    # PetaLinux b187253 boundaries: 1024/P1 and 684/P2 admitted, odd 511 included.
+    values = DEFAULT_PARAMETERS | {"frame_samples": frame, "pileup_window_raw": pileup}
+    if beats is None:
+        validate_parameters(values, complete=True, pileup_limits=B187253)
+        return
+    longest = 4 * (511 // (pileup + 1) + 1)
+    with pytest.raises(ValueError, match=rf"= {beats} > 511\. .* {2 * longest} ns"):
+        validate_parameters(values, complete=True, pileup_limits=B187253)
+
+
+def test_contract_reports_the_driver_pileup_budget():
+    b = backend(ack="2")
+    contract = b.mca_parameter_contract()
+    assert contract["pileup_window_raw_max"] == 255
+    assert contract["pileup_nonfinal_beats_max"] == 255
+    one_pileup = DEFAULT_PARAMETERS | {"frame_samples": 1024, "pileup_window_raw": 1}
+    with pytest.raises(ValueError, match=r"= 510 > 255\."):
+        b.prepare_mca_configuration(dict(one_pileup))
+    b._pp.attrs["pileup_nonfinal_beats_max"] = SimpleNamespace(value="511\n")
+    assert MultiChannelAnalyzer(b).pileup_limits() == B187253
+    b.prepare_mca_configuration(dict(one_pileup))
+    with pytest.raises(ValueError, match=r"= 512 > 511\."):
+        b.prepare_mca_configuration(one_pileup | {"frame_samples": 1028})
+    b._pp.attrs["pileup_nonfinal_beats_max"].value = "0"  # Not an "unlimited" sentinel.
+    contract = b.mca_parameter_contract()
+    assert not contract["supported"] and "pileup_nonfinal_beats_max" in contract["reason"]
+
+
+def test_sw103025_limits_pileups_to_31_and_admits_every_window():
+    # 32736 = 1023 * 32: at P <= 31 even the longest 4096-sample frame fits.
+    longest = DEFAULT_PARAMETERS | {"frame_samples": 4096}
+    validate_parameters(longest | {"pileup_window_raw": 31}, complete=True,
+                        pileup_limits=SW103025)
+    validate_parameters(longest | {"pileup_window_raw": 1}, complete=True,
+                        pileup_limits=SW103025)
+    with pytest.raises(ValueError, match=r"Pile-ups 32 exceeds this driver's maximum of 31"):
+        validate_parameters(DEFAULT_PARAMETERS | {"pileup_window_raw": 32}, complete=True,
+                            pileup_limits=SW103025)
+    # A single write is refused too; the driver answers ERANGE.
+    with pytest.raises(ValueError, match="maximum of 31"):
+        validate_parameters({"pileup_window_raw": 32}, pileup_limits=SW103025)
+    validate_parameters({"pileup_window_raw": 32})  # Older drivers allow 255.
+
+
+@pytest.mark.parametrize("window,budget", [("0", "32736"), ("31", "0"), ("256", "32736")])
+def test_invalid_reported_pileup_limits_refuse_the_contract(window, budget):
+    b = backend(ack="2")
+    b._pp.attrs["pileup_window_raw_max"] = SimpleNamespace(value=window)
+    b._pp.attrs["pileup_nonfinal_beats_max"] = SimpleNamespace(value=budget)
+    contract = b.mca_parameter_contract()
+    assert not contract["supported"] and "pileup_" in contract["reason"]
+
+
+def test_contract_reports_the_sw103025_limits():
+    b = backend(ack="2")
+    b._pp.attrs["pileup_window_raw_max"] = SimpleNamespace(value="31\n")
+    b._pp.attrs["pileup_nonfinal_beats_max"] = SimpleNamespace(value="32736\n")
+    contract = b.mca_parameter_contract()
+    assert (contract["pileup_window_raw_max"], contract["pileup_nonfinal_beats_max"]) == (31, 32736)
+    assert MultiChannelAnalyzer(b).pileup_limits() == SW103025
+    b.prepare_mca_configuration(
+        DEFAULT_PARAMETERS | {"frame_samples": 4096, "pileup_window_raw": 31}
+    )
+    with pytest.raises(ValueError, match="maximum of 31"):
+        b.prepare_mca_configuration(DEFAULT_PARAMETERS | {"pileup_window_raw": 32})
+
+
+def test_pileup_field_maximum_follows_the_driver(qtbot, monkeypatch):
+    mca = create_offline_digitizer(0).mca
+    monkeypatch.setattr(mca, "pileup_limits", lambda: SW103025)
+    controller = MCAController(mca, channel=0)
+    qtbot.addWidget(controller)
+    assert controller.ui.spinPileupWindow.maximum() == 31
+    monkeypatch.setattr(mca, "pileup_limits", Mock(side_effect=ValueError("unreadable")))
+    controller._load_hardware_state()  # Construction-time readback never raises.
+    assert controller.ui.spinPileupWindow.maximum() == 255
+
+
+def test_settings_documents_use_the_connected_driver_budget():
+    from nlab.utils.settings_io import apply_channel_hardware
+
+    b = backend(ack="2")
+    scope = Mock()
+
+    def apply(frame):
+        apply_channel_hardware(scope, MultiChannelAnalyzer(b), None, {"mca": {
+            "parameter_abi_version": 2, "parameter_units": "adc_samples",
+            "parameters": DEFAULT_PARAMETERS | {"frame_samples": frame, "pileup_window_raw": 1},
+        }})
+
+    with pytest.raises(ValueError, match=r"= 510 > 255\."):
+        apply(1024)
+    b._pp.attrs["pileup_nonfinal_beats_max"] = SimpleNamespace(value="511")
+    with pytest.raises(ValueError, match=r"= 512 > 511\."):
+        apply(1028)
+    assert not scope.mock_calls
+
+
+def test_offline_replay_accepts_the_current_driver_pileup_budget():
+    mca = create_offline_digitizer(0).mca
+    mca.prepare_configuration(
+        DEFAULT_PARAMETERS | {"frame_samples": 1024, "pileup_window_raw": 1}
+    )
+    # Sessions from SW103025 (P <= 31, any window) and from builds without
+    # the 16-bit counter (P up to 255, short windows) both load.
+    mca.prepare_configuration(
+        DEFAULT_PARAMETERS | {"frame_samples": 4096, "pileup_window_raw": 31}
+    )
+    mca.prepare_configuration(
+        DEFAULT_PARAMETERS | {"frame_samples": 128, "pileup_window_raw": 200}
+    )
+
+
 def test_list_mode_start_checks_the_complete_hardware_configuration():
     b = backend(ack="2")
     mca = MultiChannelAnalyzer(b)
@@ -137,6 +261,11 @@ def test_list_mode_start_checks_the_complete_hardware_configuration():
     b._pp.attrs["frame_samples"].value = "712"
     b._pp.attrs["pileup_window_raw"].value = "1"
     with pytest.raises(ValueError, match="Pile-ups 1 with a 1424 ns window"):
+        mca.validate_configuration()
+    b._pp.attrs["pileup_nonfinal_beats_max"] = SimpleNamespace(value="511")
+    mca.validate_configuration()
+    b._pp.attrs["frame_samples"].value = "1028"
+    with pytest.raises(ValueError, match="Pile-ups 1 with a 2056 ns window"):
         mca.validate_configuration()
     b._pp.attrs["parameter_abi_version"].value = "1"
     mca.validate_configuration()  # Unknown contracts expose no native snapshot.

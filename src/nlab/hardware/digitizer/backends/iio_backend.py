@@ -25,7 +25,12 @@ from ..device_information import DigitizerInformation, collect_device_informatio
 from ..dma import ScopeDmaGeometry
 from ..iio_listmode import IIO_LM_EVENT_DTYPE, VDPP_ZC_CALC_SCHEMA
 from ..iio_scope_stream import IiodScopeStream
-from ..mca_parameters import PARAMETERS, validate_parameters
+from ..mca_parameters import (
+    LEGACY_PILEUP_LIMITS,
+    PARAMETERS,
+    PileupLimits,
+    validate_parameters,
+)
 from ..scope_sums import ScopeSumGeometry
 from .base import DigitizerBackend
 
@@ -1295,7 +1300,11 @@ class IIODigitizerBackend(DigitizerBackend):
                     if name == "psd_zero_crossing_mode":
                         self._validate_psd_mode(int(value))
                 if name == "enable" and value == "1":
-                    validate_parameters(self.mca_parameter_snapshot(), complete=True)
+                    validate_parameters(
+                        self.mca_parameter_snapshot(),
+                        complete=True,
+                        pileup_limits=self._pileup_limits(self._pp),
+                    )
                     self._validate_psd_mode(int(self._pp_attr_get("psd_zero_crossing_mode")))
                 if name in PARAMETERS or (name == "enable" and value == "1"):
                     self._assert_mca_idle(self._pp)
@@ -1611,9 +1620,12 @@ class IIODigitizerBackend(DigitizerBackend):
         # vdpp_pulse_validate_config(), the cross-field check enable=1 also
         # makes, and iio.Buffer() reports its rejection only as EINVAL.
         # The DMA control context is the reader process's only PP handle.
+        with self._mca_dma_control_lock:
+            limits = self._pileup_limits(self._require_mca_dma_pp())
         validate_parameters(
             {name: int(self._mca_dma_pp_attr_get(name)) for name in PARAMETERS},
             complete=True,
+            pileup_limits=limits,
         )
 
         if bool(int(self._mca_dma_pp_attr_get("list_buffer_active"))):
@@ -3184,10 +3196,35 @@ class IIODigitizerBackend(DigitizerBackend):
         try:
             version = int(pp.attrs["parameter_abi_version"].value)
             units = str(pp.attrs["parameter_units"].value).strip()
+            limits = self._pileup_limits(pp)
         except (KeyError, ValueError, OSError) as exc:
             return {"supported": False, "reason": f"Cannot discover MCA ABI: {exc}"}
         return {"supported": version == 2 and units == "adc_samples",
-                "parameter_abi_version": version, "parameter_units": units}
+                "parameter_abi_version": version, "parameter_units": units,
+                "pileup_window_raw_max": limits.window_raw_max,
+                "pileup_nonfinal_beats_max": limits.nonfinal_beats_max}
+
+    @staticmethod
+    def _pileup_limits(pp: iio.Device | None) -> PileupLimits:
+        """Pile-up limits that pp_validate_config_locked() enforces.
+
+        PetaLinux reports them as read-only pileup_window_raw_max and
+        pileup_nonfinal_beats_max, readable without acknowledgement: 31 and
+        32736 on HW101 SW103024/SW103025 (03f312d), 255 and 511 on other
+        builds since b187253. Older ABI-v2 drivers lack both and enforce 255
+        and 255. Without a pulse processor the older limits apply; ABI
+        discovery refuses such a channel anyway.
+        """
+        if pp is None:
+            return LEGACY_PILEUP_LIMITS
+        window, budget = (
+            int(pp.attrs[name].value) if name in pp.attrs else default
+            for name, default in (
+                ("pileup_window_raw_max", LEGACY_PILEUP_LIMITS.window_raw_max),
+                ("pileup_nonfinal_beats_max", LEGACY_PILEUP_LIMITS.nonfinal_beats_max),
+            )
+        )
+        return PileupLimits(window_raw_max=window, nonfinal_beats_max=budget)
 
     @property
     def mca_configuration_lock(self) -> threading.RLock:
@@ -3214,7 +3251,11 @@ class IIODigitizerBackend(DigitizerBackend):
             raise RuntimeError("MCA requires ABI2/adc_samples and an explicit idle acknowledgement")
 
     def prepare_mca_configuration(self, values: dict[str, int]) -> None:
-        validate_parameters(values, complete=True)
+        validate_parameters(
+            values,
+            complete=True,
+            pileup_limits=self._pileup_limits(self._pp),
+        )
         self._validate_psd_mode(values["psd_zero_crossing_mode"])
         with self.mca_configuration_lock:
             pp = self._pp

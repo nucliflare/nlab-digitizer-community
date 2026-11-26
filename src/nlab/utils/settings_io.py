@@ -254,7 +254,7 @@ def _apply_time_ns(
 
 
 def _apply_mca(mca: MultiChannelAnalyzer, settings: Mapping[str, Any]) -> None:
-    values = validate_document(settings)
+    values = validate_document(settings, pileup_limits=mca.pileup_limits())
     optional = _mapping(settings, "optional_parameters")
     if optional:
         if set(optional) != {"crrc2_1cdelay_raw"}:
@@ -349,7 +349,10 @@ def apply_channel_hardware(
     """Apply one channel's hardware values; missing keys are ignored."""
     # Reject unidentified MCA semantics before writing any other hardware.
     if mca is not None and isinstance(settings.get("mca"), Mapping):
-        parameters = validate_document(_mapping(settings, "mca"))
+        parameters = validate_document(
+            _mapping(settings, "mca"),
+            pileup_limits=mca.pileup_limits(),
+        )
         if (parameters["psd_zero_crossing_mode"] == 2
                 and 2 not in mca.filters.psd_zc.available_modes()):
             raise ValueError("PSD mode 2 is not advertised by this driver")

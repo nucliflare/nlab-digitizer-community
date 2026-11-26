@@ -34,6 +34,7 @@ Fallu-Labruyere, A., Tan, H., Hennig, W., Warburton, W. K. (2007). Time
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 PARAMETER_ABI_VERSION = 2
 PARAMETER_UNITS = "adc_samples"
@@ -70,6 +71,43 @@ PARAMETERS: dict[str, tuple[int, int, int]] = {
     "psd_window_high_samples": (0, 32764, 4),
 }
 
+
+
+@dataclass(frozen=True)
+class PileupLimits:
+    """Pile-up admission limits of one pulse-processor driver.
+
+    pp_validate_config_locked() (PetaLinux 03f312d) admits
+    ``pileup_window_raw`` only up to ``window_raw_max`` and, when it is
+    nonzero, only while ``(frame_samples/4 - 1) * (pileup_window_raw + 1)``
+    fits ``nonfinal_beats_max`` non-final processing beats. Drivers report both
+    as read-only ``pileup_window_raw_max`` and ``pileup_nonfinal_beats_max``:
+    31 and 32736 on HW101 SW103024/SW103025 (16-bit local counter), 255 and
+    511 on other builds since b187253. Older ABI-v2 drivers report neither and
+    enforce 255 and 255, the defaults. A budget is not a raw counter maximum,
+    and zero is not an "unlimited" sentinel.
+    """
+
+    window_raw_max: int = 255
+    nonfinal_beats_max: int = 255
+
+    def __post_init__(self) -> None:
+        field_max = PARAMETERS["pileup_window_raw"][1]
+        for name, value in (
+            ("pileup_window_raw_max", self.window_raw_max),
+            ("pileup_nonfinal_beats_max", self.nonfinal_beats_max),
+        ):
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"MCA {name} must be a positive integer; got {value!r}")
+        if self.window_raw_max > field_max:
+            raise ValueError(
+                f"MCA pileup_window_raw_max {self.window_raw_max} exceeds the "
+                f"{field_max} field maximum"
+            )
+
+
+LEGACY_PILEUP_LIMITS = PileupLimits()
+
 # Explicit, disabled-algorithm startup configuration, not a detector calibration.
 DEFAULT_PARAMETERS = {name: bounds[0] for name, bounds in PARAMETERS.items()}
 DEFAULT_PARAMETERS.update(
@@ -93,7 +131,29 @@ DEFAULT_PARAMETERS.update(
 )
 
 
-def validate_parameters(values: Mapping[str, object], *, complete: bool = False) -> dict[str, int]:
+def contract_pileup_limits(contract: Mapping[str, object]) -> PileupLimits:
+    """Pile-up admission limits a backend's parameter contract reports."""
+
+    def reported(name: str, default: int) -> int:
+        value = contract.get(name, default)
+        if type(value) is not int:
+            raise ValueError(f"MCA {name} must be a positive integer; got {value!r}")
+        return value
+
+    return PileupLimits(
+        window_raw_max=reported("pileup_window_raw_max", LEGACY_PILEUP_LIMITS.window_raw_max),
+        nonfinal_beats_max=reported(
+            "pileup_nonfinal_beats_max", LEGACY_PILEUP_LIMITS.nonfinal_beats_max
+        ),
+    )
+
+
+def validate_parameters(
+    values: Mapping[str, object],
+    *,
+    complete: bool = False,
+    pileup_limits: PileupLimits = LEGACY_PILEUP_LIMITS,
+) -> dict[str, int]:
     result: dict[str, int] = {}
     for name, value in values.items():
         if name not in PARAMETERS:
@@ -102,16 +162,30 @@ def validate_parameters(values: Mapping[str, object], *, complete: bool = False)
         if type(value) is not int or not lo <= value <= hi or (value - lo) % step:
             raise ValueError(f"{name}: expected integer {lo}..{hi}, step {step}; got {value!r}")
         result[name] = value
+    if result.get("pileup_window_raw", 0) > pileup_limits.window_raw_max:
+        # The driver refuses the attribute write itself with ERANGE.
+        raise ValueError(
+            f"Pile-ups {result['pileup_window_raw']} exceeds this driver's maximum of "
+            f"{pileup_limits.window_raw_max} (pileup_window_raw_max)."
+        )
     if complete:
         missing = set(PARAMETERS) - set(result)
         if missing:
             raise ValueError(f"Incomplete MCA configuration: {sorted(missing)}")
-        validate_active_configuration(result)
+        validate_active_configuration(result, pileup_limits=pileup_limits)
     return result
 
 
-def validate_active_configuration(values: Mapping[str, int]) -> None:
-    """Mirror kernel admission, without claiming downstream STOP completion."""
+def validate_active_configuration(
+    values: Mapping[str, int],
+    *,
+    pileup_limits: PileupLimits = LEGACY_PILEUP_LIMITS,
+) -> None:
+    """Mirror kernel admission, without claiming downstream STOP completion.
+
+    Pass the connected driver's ``pileup_limits``; the default is the limits
+    of drivers that do not report them.
+    """
     frame = values["frame_samples"]
     for prefix, enable in (("cfd", "cfd_enable"), ("psd", "psd_zero_crossing_enable")):
         if values[enable]:
@@ -134,19 +208,29 @@ def validate_active_configuration(values: Mapping[str, int]) -> None:
         if extent > frame:
             raise ValueError("Trapezoid start plus averaging window must fit the pulse length")
     pileup = values["pileup_window_raw"]
-    # pp_validate_config_locked(): each pile-up extension adds frame/4 - 1
-    # beats to an 8-bit HLS counter.
-    beats = (frame // 4 - 1) * (pileup + 1)
-    if pileup and beats > 255:
-        longest = 4 * (255 // (pileup + 1) + 1)
+    if pileup > pileup_limits.window_raw_max:
         raise ValueError(
-            f"Pile-ups {pileup} with a {2 * frame} ns window ({frame} samples) overflows "
-            f"the 8-bit pile-up counter: ({frame}/4 - 1) x ({pileup} + 1) = {beats} > 255. "
-            f"Use a window of at most {2 * longest} ns or fewer pile-ups."
+            f"Pile-ups {pileup} exceeds this driver's maximum of "
+            f"{pileup_limits.window_raw_max} (pileup_window_raw_max)."
+        )
+    budget = pileup_limits.nonfinal_beats_max
+    # pp_validate_config_locked(): each pile-up extension adds frame/4 - 1
+    # beats, and the HLS pile-up counter must not wrap before the frame ends.
+    beats = (frame // 4 - 1) * (pileup + 1)
+    if pileup and beats > budget:
+        longest = 4 * (budget // (pileup + 1) + 1)
+        raise ValueError(
+            f"Pile-ups {pileup} with a {2 * frame} ns window ({frame} samples) exceeds "
+            f"the driver's pile-up limit: ({frame}/4 - 1) x ({pileup} + 1) = {beats} > "
+            f"{budget}. Use a window of at most {2 * longest} ns or fewer pile-ups."
         )
 
 
-def validate_document(document: Mapping[str, object]) -> dict[str, int]:
+def validate_document(
+    document: Mapping[str, object],
+    *,
+    pileup_limits: PileupLimits = LEGACY_PILEUP_LIMITS,
+) -> dict[str, int]:
     if (
         type(document.get("parameter_abi_version")) is not int
         or document["parameter_abi_version"] != 2
@@ -159,4 +243,4 @@ def validate_document(document: Mapping[str, object]) -> dict[str, int]:
     values = document.get("parameters")
     if not isinstance(values, dict) or not values:
         raise ValueError("MCA settings require a nonempty parameters mapping")
-    return validate_parameters(values, complete=True)
+    return validate_parameters(values, complete=True, pileup_limits=pileup_limits)

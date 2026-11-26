@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Pile-up limits come from the driver** — nlab no longer assumes the oldest
+  limit of 255 non-final beats. It reads `pileup_window_raw_max` and
+  `pileup_nonfinal_beats_max` from the pulse processor. On HW101 SW103024 and
+  SW103025 (PetaLinux `03f312d`, now on .128) Pile-ups stops at 31 and every
+  window up to 8192 ns is accepted; on other builds since `b187253` one pile-up
+  allows up to 2048 ns (was 1024 ns). Drivers without the attributes keep 255
+  and 255. Start, list-mode DMA arming, loaded settings files and offline
+  replay use the reported limits, and the Pile-ups field stops at the driver's
+  maximum.
+
 ## [0.9.7] — 2026-11-26
 
 Spectra for noise and interference diagnostics: a live Scope noise spectrum,

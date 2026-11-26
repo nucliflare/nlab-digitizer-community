@@ -19,11 +19,20 @@ from nlab.hardware.digitizer.backends.base import DigitizerBackend, IDSBackend
 from nlab.hardware.digitizer.digitizer import Digitizer
 from nlab.hardware.digitizer.dma import IIOMcaDmaStreamer
 from nlab.hardware.digitizer.mca import MCA_DEBUG_SIGNAL_SELECTORS
-from nlab.hardware.digitizer.mca_parameters import DEFAULT_PARAMETERS, validate_parameters
+from nlab.hardware.digitizer.mca_parameters import (
+    DEFAULT_PARAMETERS,
+    PileupLimits,
+    validate_parameters,
+)
 
 if TYPE_CHECKING:
     from nlab.hardware.digitizer.diagnostics import GlobalDiagnosticReading
 
+
+# Replayed sessions come from real drivers. Admit what any of them admits:
+# 255 pile-ups (builds without the 16-bit counter) and the 32736-beat budget
+# of HW101 SW103024/SW103025 (PetaLinux 03f312d), so their settings load.
+_PILEUP_LIMITS = PileupLimits(window_raw_max=255, nonfinal_beats_max=32736)
 
 _MCA_ALIASES = {
     "external_trigger_enable": "ext_trig_enable",
@@ -86,10 +95,12 @@ class _OfflineDigitizerBackend:
         self._values["acquisition_profile"] = AcquisitionProfile.from_mapping(values).to_dict()
 
     def mca_parameter_contract(self) -> dict[str, object]:
-        return {"supported": True, "parameter_abi_version": 2, "parameter_units": "adc_samples"}
+        return {"supported": True, "parameter_abi_version": 2, "parameter_units": "adc_samples",
+                "pileup_window_raw_max": _PILEUP_LIMITS.window_raw_max,
+                "pileup_nonfinal_beats_max": _PILEUP_LIMITS.nonfinal_beats_max}
 
     def prepare_mca_configuration(self, values: dict[str, int]) -> None:
-        validate_parameters(values, complete=True)
+        validate_parameters(values, complete=True, pileup_limits=_PILEUP_LIMITS)
 
     def mca_parameter_snapshot(self) -> dict[str, int]:
         result = {}

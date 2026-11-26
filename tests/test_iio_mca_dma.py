@@ -387,7 +387,8 @@ def test_mca_buffer_arm_stops_then_selects_eight_kernel_blocks(monkeypatch: Any)
 
 def test_mca_arm_names_rejected_pileup_before_buffer_creation(monkeypatch: Any) -> None:
     # Live 2026-11-25 readback, ch0: 1424 ns window, one pile-up, CC enabled.
-    # lm_buffer_preenable() rejects it (vdpp_pulse_validate_config) as EINVAL.
+    # A driver without pileup_nonfinal_beats_max (PetaLinux cde5fe1) rejects it
+    # in lm_buffer_preenable() (vdpp_pulse_validate_config) as EINVAL.
     order: list[str] = []
     backend, _ = _armable_mca_backend(order, {
         "frame_samples": 712, "pileup_window_raw": 1,
@@ -401,6 +402,36 @@ def test_mca_arm_names_rejected_pileup_before_buffer_creation(monkeypatch: Any) 
 
     create_buffer.assert_not_called()
     assert backend._mca_dma_buf is None
+
+
+def test_mca_arm_uses_the_pileup_budget_the_driver_reports(monkeypatch: Any) -> None:
+    # PetaLinux b187253 reports 511; the ch1 case (2048 ns, one pile-up, CC
+    # and CFD) arms, and the next window step is still refused before arming.
+    order: list[str] = []
+    case = {
+        "frame_samples": 1024, "pileup_window_raw": 1, "pileup_nonfinal_beats_max": 511,
+        "charge_comparison_enable": 1, "charge_comparison_samples": 196, "cfd_enable": 1,
+    }
+    backend, lm_frame = _armable_mca_backend(order, case)
+    fake_buffer = SimpleNamespace(_buffer=object())
+
+    def allocate(*_args: Any) -> SimpleNamespace:
+        lm_frame.attrs["kernel_buffer_blocks"].value = str(_LM_KERNEL_BUFFER_COUNT)
+        return fake_buffer
+
+    create_buffer = Mock(side_effect=allocate)
+    monkeypatch.setattr(iio, "Buffer", create_buffer)
+
+    backend._create_mca_dma_buffer()
+
+    create_buffer.assert_called_once_with(lm_frame, 1024, False)
+    assert backend._mca_dma_buf is fake_buffer
+
+    backend, _ = _armable_mca_backend(order, case | {"frame_samples": 1028})
+    create_buffer.reset_mock()
+    with pytest.raises(ValueError, match=r"Pile-ups 1 with a 2056 ns window .* = 512 > 511"):
+        backend._create_mca_dma_buffer()
+    create_buffer.assert_not_called()
 
 
 def test_mca_arm_failure_reports_driver_errno(monkeypatch: Any) -> None:

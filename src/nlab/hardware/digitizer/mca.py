@@ -10,7 +10,12 @@ import numpy as np
 
 from .backends.base import MCABackend
 from .current_monitor import CurrentMonitorClient
-from .mca_parameters import DEFAULT_PARAMETERS, validate_parameters
+from .mca_parameters import (
+    DEFAULT_PARAMETERS,
+    PileupLimits,
+    contract_pileup_limits,
+    validate_parameters,
+)
 from .scope import ListSpec, ParameterSpec, RangeSpec
 
 # ---------------------------------------------------------------------------
@@ -585,13 +590,14 @@ class MultiChannelAnalyzer:
         with self._configuration_lock:
             if self.get_global_enable() or self.dma_active():
                 raise RuntimeError("Stop MCA acquisition and close list-mode DMA before transfer")
-            if self.parameter_contract().get("parameter_abi_version") == 2:
+            contract = self.parameter_contract()
+            if contract.get("parameter_abi_version") == 2:
                 validate_parameters(self.parameter_snapshot() | {
                     "pretrigger_samples": timing.pretrigger_ns // 2,
                     "frame_samples": timing.frame_ns // 2,
                     "charge_comparison_samples": timing.cc_time_ns // 2,
                     "charge_comparison_enable": int(timing.cc_enabled),
-                }, complete=True)
+                }, complete=True, pileup_limits=contract_pileup_limits(contract))
             self.set_pretrigger_samples(timing.pretrigger_ns // 2)
             self.set_frame_samples(timing.frame_ns // 2)
             self.filters.charge_comparison.set_time(timing.cc_time_ns // 2)
@@ -654,6 +660,10 @@ class MultiChannelAnalyzer:
         reader = getattr(self._b, "mca_parameter_contract", None)
         return reader() if reader is not None else {}
 
+    def pileup_limits(self) -> PileupLimits:
+        """Pile-up limits of the connected driver (255 and 255 if unreported)."""
+        return contract_pileup_limits(self.parameter_contract())
+
     def ensure_stopped(self) -> None:
         """Check for uncertain STOP without asserting final-data completion."""
         getattr(self._b, "ensure_mca_stopped", lambda: None)()
@@ -666,7 +676,10 @@ class MultiChannelAnalyzer:
 
     def prepare_configuration(self, values: dict[str, int] | None = None) -> None:
         candidate = dict(DEFAULT_PARAMETERS if values is None else values)
-        validate_parameters(candidate, complete=True)
+        validate_parameters(
+            candidate, complete=True,
+            pileup_limits=self.pileup_limits(),
+        )
         prepare = getattr(self._b, "prepare_mca_configuration", None)
         if prepare is not None:
             prepare(candidate)
@@ -683,8 +696,12 @@ class MultiChannelAnalyzer:
         PetaLinux cde5fe1). Buffer arming reports a violation only as EINVAL;
         this names the rule before a capture file or reader process exists.
         """
-        if self.parameter_contract().get("parameter_abi_version") == 2:
-            validate_parameters(self.parameter_snapshot(), complete=True)
+        contract = self.parameter_contract()
+        if contract.get("parameter_abi_version") == 2:
+            validate_parameters(
+                self.parameter_snapshot(), complete=True,
+                pileup_limits=contract_pileup_limits(contract),
+            )
 
     def configure_parameters(self, values: dict[str, int]) -> None:
         with self._configuration_lock:

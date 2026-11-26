@@ -113,8 +113,12 @@ class MCABackend(ABC):
         return {}
 
     def prepare_mca_configuration(self, values: dict[str, int]) -> None:
-        from ..mca_parameters import validate_parameters
-        validate_parameters(values, complete=True)
+        from ..mca_parameters import contract_pileup_limits, validate_parameters
+        validate_parameters(
+            values,
+            complete=True,
+            pileup_limits=contract_pileup_limits(self.mca_parameter_contract()),
+        )
 
     def mca_parameter_snapshot(self) -> dict[str, int]:
         raise NotImplementedError("Backend does not expose native ABI2 settings")
