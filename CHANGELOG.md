@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] — 2026-11-26
+
+Spectra for noise and interference diagnostics: a live Scope noise spectrum,
+the spectrum of recorded periodic sums in Current Capture Analysis, and a
+Spectrum tab in the Waveform Analysis Workbench, each listing the lines that
+stand above the noise floor. The Current tab now follows the Scope and MCA
+layout, and Scope explains before arming why a Periodic DMA recording cannot
+be stored.
+
 ### Added
 
 - **Scope noise spectrum** — **View → Scope Noise Spectrum** averages the
@@ -21,9 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ENBW, frame count and a Parseval check, marks lines that stand above the
   noise floor by more than averaged noise could (10 dB for a few frames, 4 dB
   for long averages) and warns that level and edge triggers add pulse content.
-  A logarithmic frequency axis is labelled in decades (10 Hz, 100 Hz, 1 kHz). A new frame length,
-  sample period, source, trigger mode or DAC baseline restarts the average and
-  says why. The mean4 response of 8 ns points can be divided out for display.
+  A logarithmic frequency axis is labelled in decades (10 Hz, 100 Hz, 1 kHz).
+  A new frame length, sample period, source, trigger mode or DAC baseline
+  restarts the average and says why. The mean4 response of 8 ns points can be
+  divided out for display.
   Right-click exports frequency, mean, max and min to CSV with a metadata
   header. Hiding pauses it and session replay adds nothing. F1 opens its Help
   topic. Software analysis; not validated on live hardware.
