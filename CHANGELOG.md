@@ -64,6 +64,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Scope distribution tooltip** — the accumulated distribution's tooltip was a
   single screen-wide line. It is now a few wrapped lines for the selected mode.
+- **Scope DMA recording in Periodic mode is refused with the reason** — IP122+
+  Periodic DMA delivers 4-sample means (8 ns) with alignment padding, which
+  NDMA v1 files cannot store. Start used to launch the reader process, which
+  then failed with "IIO scope DMA streaming failed". Scope now reads the
+  advertised layout before arming, keeps DMA off and says to select Any above,
+  Any below or an edge trigger to record raw 2 ns frames. Current's online DMA,
+  which writes no file, is unchanged.
 
 ## [0.9.6] — 2026-11-25
 

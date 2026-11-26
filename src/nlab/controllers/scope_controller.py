@@ -1572,6 +1572,9 @@ class ScopeController(QWidget):
                 "Stop Current periodic sums and select a waveform trigger to use Scope."
             )
             return
+        if self._refuse_unrecordable_dma():
+            self.ui.btnStart.setChecked(False)
+            return
         self._raw_curve.cancelDrag()
         self._cancel_pretrigger_line_drag()
         if self._waveform_pending_status is not None:
@@ -1601,6 +1604,49 @@ class ScopeController(QWidget):
             self._start_with_dma()
         else:
             self._start_polling_only()
+
+    def _refuse_unrecordable_dma(self) -> bool:
+        """Refuse a DMA recording whose advertised layout NDMA v1 cannot hold.
+
+        On IP122+ the Periodic trigger transports 4-sample means with alignment
+        padding (``vdpp-scope-format.h``, PetaLinux 6fd2877, unchanged in
+        03f312d). ``stream_to_file()`` rejects that layout for NDMA v1, but only
+        after the reader process has been started, so the operator saw a failed
+        DMA start instead of the reason. Current's online DMA has no file and is
+        not affected.
+        """
+        if (
+            not self.ui.cbDmaEnable.isChecked()
+            or self._scope_dma is None
+            or self._dma_online_current
+        ):
+            return False
+        try:
+            geometry = self._scope_dma.capture_geometry()
+        except Exception:
+            # Only an early explanation: a failed check never blocks Start, and
+            # the DMA worker reads and reports the geometry itself.
+            log.debug("Scope ch%d: DMA layout pre-check skipped", self._channel, exc_info=True)
+            return False
+        if geometry.ndma_v1_compatible:
+            return False
+        if geometry.sample_decimation > 1:
+            reason = (
+                f"DMA frames in this trigger mode are {geometry.sample_decimation}-sample "
+                f"means ({geometry.sample_period_ns} ns per point)"
+            )
+        else:
+            reason = "DMA frames in this trigger mode carry alignment padding"
+        self.status.setText(
+            f"Cannot record: {reason}, which NDMA v1 files cannot store. Select Any "
+            f"above, Any below or an edge trigger to record raw "
+            f"{self._SAMPLE_PERIOD_NS} ns frames."
+        )
+        log.info(
+            "Scope ch%d: DMA recording refused before arming; advertised layout %s",
+            self._channel, geometry,
+        )
+        return True
 
     def _start_polling_only(self) -> None:
         self._scope.start()

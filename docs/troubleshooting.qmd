@@ -115,7 +115,9 @@ is deliberately not attempted.
 The advertised periodic transport can be decimated and alignment-padded. Scope
 NDMA v1 cannot describe those fields, so online Current DMA supports the layout
 but file capture rejects it. This is a file-format limit, not a reason to alter
-the driver scan mask.
+the driver scan mask. Scope refuses such a recording at **Start**, before DMA is
+armed, and gives the reason in the status line. Select **Any above**, **Any
+below** or an edge trigger to record raw 2 ns frames.
 
 ## Current values look wrong
 
