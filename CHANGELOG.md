@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.8] — 2026-11-26
+
+Support for the PetaLinux `03f312d` image on .128: pile-up limits are read
+from the driver (up to 31 pile-ups with any window on SW103024/SW103025),
+Scope and input filter are paired by `channel_index`, and online list mode
+and coincidence start again on SW103024/SW103025. The Current tab's Start and
+Stop use the standard colours.
+
 ### Changed
 
 - **Pile-up limits come from the driver** — nlab no longer assumes the oldest
