@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import pyqtgraph as pg
 import pytest
-from PySide6.QtCore import QEvent, QPoint
+from PySide6.QtCore import QEvent, QObject, QPoint
 from PySide6.QtGui import QHelpEvent
-from PySide6.QtWidgets import QApplication, QLineEdit, QSpinBox, QTabBar, QWidget
+from PySide6.QtWidgets import QApplication, QLineEdit, QSpinBox, QStyle, QTabBar, QWidget
 from pytestqt.qtbot import QtBot
 
 from nlab.help.context import resolve_context
@@ -128,6 +129,72 @@ def test_tooltips_qt_already_shows_well_are_left_to_qt(
     # Not consumed: Qt's own QWidget::event then shows the text as it is.
     assert not tooltips._show_wrapped_tooltip(widget, _help_event(widget, QPoint(2, 2)))
     assert shown == []
+
+
+def _plot_delay() -> tooltips._PlotTooltipDelay:
+    install_tooltip_wrapping()
+    application = QApplication.instance()
+    assert application is not None
+    delay = application.findChild(QObject, "nlabPlotTooltipDelay")
+    assert isinstance(delay, tooltips._PlotTooltipDelay)
+    return delay
+
+
+def _plot_in_container(qtbot: QtBot) -> tuple[QWidget, pg.PlotWidget]:
+    container = QWidget()
+    qtbot.addWidget(container)
+    container.setToolTip("Container. " + _LONG_TIP)
+    plot = pg.PlotWidget(container)
+    plot.setToolTip(_LONG_TIP)
+    return container, plot
+
+
+@pytest.mark.parametrize("rests", [True, False])
+def test_plot_tooltips_wait_twice_the_qt_delay_while_the_cursor_rests(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, rests: bool,
+) -> None:
+    delay = _plot_delay()
+    shown = _shown_tooltips(monkeypatch)
+    _container, plot = _plot_in_container(qtbot)
+
+    # Qt's event after its own delay is held, and the copies Qt passes to
+    # the plot and its container do not show their tooltips meanwhile.
+    assert not _hover(plot.viewport())  # ignored: Qt starts no follow-up delay
+    assert shown == []
+    assert delay.pending
+    wake_ms = plot.style().styleHint(QStyle.StyleHint.SH_ToolTip_WakeUpDelay, None, plot)
+    assert delay._timer.interval() == wake_ms * (tooltips.PLOT_TOOLTIP_DELAY_FACTOR - 1)
+
+    monkeypatch.setattr(tooltips, "_pointer_rests_on", lambda _widget, _pos: rests)
+    delay._timer.stop()
+    delay._release()
+
+    # Released through the plot as Qt would deliver it; a moved cursor waits
+    # for Qt's next event instead.
+    assert shown == ([wrap_tooltip(_LONG_TIP)] if rests else [])
+
+
+def test_clicks_wheel_and_keys_drop_a_held_plot_tooltip(qtbot: QtBot) -> None:
+    delay = _plot_delay()
+    _container, plot = _plot_in_container(qtbot)
+    for kind in (QEvent.Type.MouseButtonPress, QEvent.Type.Wheel, QEvent.Type.KeyPress):
+        _hover(plot.viewport())
+        assert delay.pending
+        assert not delay.handle(plot.viewport(), QEvent(kind))
+        assert not delay.pending
+
+
+def test_other_widgets_show_their_tooltips_without_the_plot_delay(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delay = _plot_delay()
+    shown = _shown_tooltips(monkeypatch)
+    container, _plot = _plot_in_container(qtbot)
+
+    _hover(container)
+
+    assert shown == [wrap_tooltip("Container. " + _LONG_TIP)]
+    assert not delay.pending
 
 
 def test_tab_bars_keep_their_per_tab_tooltips(

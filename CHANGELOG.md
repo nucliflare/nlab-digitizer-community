@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Plot tooltips wait twice as long** — a cursor resting on a plot brought up
+  its explanation over the data after Qt's usual delay (700 ms by default).
+  Plots now wait twice Qt's delay, and only while the cursor stays still;
+  a click, wheel turn or key press drops the pending tooltip. Buttons and
+  other controls keep Qt's delay.
+
 ### Fixed
 
 - **List mode recognises a START record with logic-input markers** — every
