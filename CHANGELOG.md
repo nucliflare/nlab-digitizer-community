@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.9] — 2026-11-27
+
+List mode and coincidence on .128 (SW103025) no longer end with a false
+"no START record" continuity error, the coincidence timing fit finds the
+narrow line of a pulse generator, and plot tooltips wait twice as long
+before covering the data.
+
 ### Changed
 
 - **Plot tooltips wait twice as long** — a cursor resting on a plot brought up
